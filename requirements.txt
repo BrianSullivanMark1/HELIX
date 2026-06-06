@@ -1,0 +1,8 @@
+PyQt6>=6.7
+# Optional: free neural text-to-speech for the Xpert voice. The app falls back to the
+# built-in OS voice if this is not installed.
+edge-tts>=6.1
+# Optional: local, private speech-to-text for the Xpert two-way voice assistant (§23). The
+# push-to-talk mic still records without it, but transcription needs this; the app shows an
+# install hint and you can type to HELIX instead until it's installed. Audio never leaves the machine.
+faster-whisper>=1.0
