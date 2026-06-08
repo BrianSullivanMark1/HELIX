@@ -41,7 +41,7 @@ from helix.investment.autopilot import (
     render_rebalance_plan,
     render_roster_review,
 )
-from helix.investment.backtest import gather_backtest
+from helix.investment.backtest import gather_backtest, gather_risk_control_backtest
 from helix.investment.cli import add_investment_subparser
 from helix.investment.planner import build_briefing, render_briefing
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks
@@ -147,6 +147,10 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--days", type=int, default=180, help="Look-back window in days")
     backtest.add_argument("--cadence-days", type=int, default=7, help="Rebalance every N days")
     backtest.add_argument("--cash-buffer", type=float, default=10.0, help="%% of equity kept in cash")
+    backtest.add_argument(
+        "--down-markets", action="store_true",
+        help="Also A/B the §35 risk controls (drawdown brake + regime filter) on 2022/2020 down markets",
+    )
     backtest.add_argument(
         "--max-positions", type=int, default=0,
         help="Test a specific top-N concentration (0 = sweep 0/50/25/10 to find the best N)",
@@ -431,6 +435,13 @@ def handle_backtest(args: argparse.Namespace, memory: SQLiteMemory) -> int:
         cash_buffer_pct=args.cash_buffer / 100.0, max_positions_sweep=sweep,
     )
     print(report)
+    if getattr(args, "down_markets", False):
+        risk_report, _sections = gather_risk_control_backtest(
+            memory, client, cash_buffer_pct=args.cash_buffer / 100.0,
+            rebalance_every_days=args.cadence_days,
+        )
+        print()
+        print(risk_report)
     return 0
 
 

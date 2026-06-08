@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import array
+import logging
 import math
 import os
 import re
@@ -120,6 +121,7 @@ from helix.investment.autopilot import (
     benchmark_series,
     build_rebalance_plan,
     composite_factor_scores,
+    discover_market_candidates,
     equity_series_from_rows,
     execute_rebalance,
     generate_rating_scorecard,
@@ -132,6 +134,7 @@ from helix.investment.autopilot import (
     parse_portfolio_history,
     parse_stock_bars,
     portfolio_snapshot,
+    refresh_scorecard_feedback,
     screen_candidates,
     SCREEN_PROFILES,
     tradable_symbols,
@@ -150,6 +153,7 @@ from helix.brokers.alpaca import (
 )
 from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
+from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
 from helix.investment.planner import build_briefing, render_briefing
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks, task_status
@@ -164,6 +168,8 @@ from helix.home.notify import (
     send_reminder,
 )
 
+
+_LOG = logging.getLogger(LOGGER_NAME)
 
 DEFAULT_EMERGENCY_MONTHS = 6
 DEFAULT_PRIMARY_GOAL = "Build long-term wealth"
@@ -217,6 +223,11 @@ SMS_AUTO_HOURS_SETTING = "sms_auto_hours"                  # how often (hours)
 INVEST_PRINCIPAL_SETTING = "invest_principal"  # protected base for house-money special funding (§21)
 INVEST_CASH_BUFFER_SETTING = "invest_cash_buffer_pct"
 INVEST_AUTO_INTERVAL_SETTING = "invest_auto_interval"
+INVEST_LAST_CYCLE_OK_SETTING = "invest_last_cycle_ok"  # heartbeat: timestamp of the last successful auto cycle (§39)
+INVEST_AUTO_RUNNING_SETTING = "invest_auto_running"  # persisted RUNNING state so a relaunch can resume paper trading (§39)
+INVEST_DISCOVERY_OFFSET_SETTING = "invest_discovery_offset"  # rotating scan position over the tradeable market (§40)
+DISCOVERY_SCAN_LIMIT = 400   # tradeable names scanned per roster review (bounded; rotates over cycles)
+DISCOVERY_TOP_N = 25         # data-ranked candidates handed to the model to judge (§40)
 AUTO_INTERVALS = {
     "15 minutes": 900000,
     "1 hour": 3600000,
@@ -371,6 +382,9 @@ def spawn_worker(registry: set, work, done) -> None:
 
 
 def run_qt_app(memory: SQLiteMemory) -> int:
+    log = setup_logging()
+    install_crash_guard(log)  # an unhandled slot error logs + keeps the app alive, not abort (§39)
+    log.info("HELIX desktop starting")
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("HELIX")
     apply_hud_style(app)
@@ -381,6 +395,7 @@ def run_qt_app(memory: SQLiteMemory) -> int:
     window.show()
     exit_code = app.exec()
     QThreadPool.globalInstance().waitForDone(3000)
+    log.info("HELIX desktop exited (code %s)", exit_code)
     return exit_code
 
 
@@ -3219,6 +3234,9 @@ class InvestTab(QWidget):
         self.portfolio_timer.timeout.connect(self._auto_refresh_portfolio)
         self.portfolio_timer.start(60000)
 
+        # Always-on (§39): if we were auto-investing before a restart/relaunch, resume it (paper only).
+        QTimer.singleShot(1200, self._maybe_resume_auto)
+
         chart_header = QHBoxLayout()
         chart_header.addStretch(1)
         chart_header.addWidget(QLabel("Range"))
@@ -3704,6 +3722,29 @@ class InvestTab(QWidget):
         except Exception:
             return {}, {}
 
+    def _discover_seed_candidates(self, client) -> list:
+        """Data-breadth discovery (§40): surface candidate tickers from the BROAD tradeable market by
+        market data (momentum + low-vol + liquidity), beyond what the model would name from memory.
+        Scans a bounded, rotating slice each review (fills over cycles → respects rate limits + the free
+        feed) and hands the top names to the roster review for the model to judge. Best-effort: returns
+        [] on any failure so discovery never blocks a rotation."""
+        try:
+            pool = sorted(self.memory.get_tradable_universe())
+            if not pool:
+                return []
+            exclude = {str(s).strip().upper() for s in self.stock_symbols}
+            offset = int(self.settings.get(INVEST_DISCOVERY_OFFSET_SETTING, 0) or 0) % len(pool)
+            window = pool[offset:offset + DISCOVERY_SCAN_LIMIT]
+            if len(window) < DISCOVERY_SCAN_LIMIT and len(pool) > DISCOVERY_SCAN_LIMIT:
+                window += pool[: DISCOVERY_SCAN_LIMIT - len(window)]  # wrap around the market
+            self.research_step.emit(f"Screening the market for new candidates ({len(window)} names)...")
+            seeds = discover_market_candidates(client, window, exclude=exclude, top_n=DISCOVERY_TOP_N)
+            self.settings.set(INVEST_DISCOVERY_OFFSET_SETTING, str((offset + DISCOVERY_SCAN_LIMIT) % len(pool)))
+            return seeds
+        except Exception as exc:  # noqa: BLE001 — never block a rotation on the screener
+            self.research_issue.emit(f"Market screener failed (using model picks): {exc}")
+            return []
+
     def _make_screen_fn(self, client, profile: str):
         """Build a §37 quality/liquidity screen for a sleeve ('core'/'special'/'daytrade'): given
         candidate symbols, fetch their recent daily bars (liquidity) + cached SEC fundamentals
@@ -3767,9 +3808,11 @@ class InvestTab(QWidget):
         )
 
     def _performance_review(self, client, holdings_pl: dict) -> str:
-        """The feedback-loop digest fed to every research prompt (§17): HELIX's realized record + how
-        its current picks are doing (forward returns from live P&L) + the account vs the S&P 500 over
-        ~30 days. The vs-S&P part is two free Alpaca reads; everything is best-effort."""
+        """The feedback-loop digest fed to every research prompt (§17): a §38 scorecard calibration
+        line (the model's own forward returns by confidence vs the S&P, daily-cached) + HELIX's
+        realized record + how its current picks are doing (forward returns from live P&L) + the
+        account vs the S&P 500 over ~30 days. The vs-S&P part is two free Alpaca reads; everything is
+        best-effort."""
         equity_review = ""
         try:
             history = parse_portfolio_history(client.get_portfolio_history("1M", "1D"))
@@ -3787,7 +3830,14 @@ class InvestTab(QWidget):
                     )
         except Exception:
             equity_review = ""
-        return performance_digest(self.memory, holdings_pl=holdings_pl, equity_review=equity_review)
+        scorecard = ""
+        try:
+            scorecard = refresh_scorecard_feedback(self.memory, client, self.settings)
+        except Exception:
+            scorecard = ""
+        return performance_digest(
+            self.memory, holdings_pl=holdings_pl, equity_review=equity_review, scorecard=scorecard
+        )
 
     def start(self) -> None:
         if not (self.settings.get(ALPACA_API_KEY_SETTING) and self.settings.get(ALPACA_SECRET_KEY_SETTING)):
@@ -3825,6 +3875,26 @@ class InvestTab(QWidget):
         self._set_running(False)
         self.update_status()
 
+    def _maybe_resume_auto(self) -> None:
+        """Always-on (§39): if auto-investing was ON when HELIX last went down, resume it on launch —
+        PAPER only, no confirmation dialog (mirrors voice_start). LIVE never auto-resumes; the
+        real-money gate stays manual. This is what makes the crash supervisor actually resume trading
+        (the soft crash guard already preserves state by keeping the process alive)."""
+        if self._running or not self.settings.get(INVEST_AUTO_RUNNING_SETTING):
+            return
+        if self.is_real():
+            self.status.setText("Auto-investing was ON (LIVE) before restart — press START to resume.")
+            _LOG.info("not auto-resuming LIVE trading on launch; manual START required")
+            return
+        if not (self.settings.get(ALPACA_API_KEY_SETTING) and self.settings.get(ALPACA_SECRET_KEY_SETTING)):
+            return
+        if not self.stock_symbols:
+            return
+        _LOG.info("resuming paper auto-investing after restart")
+        self._set_running(True)
+        self.update_status()
+        self._auto_tick()
+
     def voice_start(self) -> bool:
         """Start auto-investing WITHOUT the GUI confirmation dialog. The Xpert voice layer applies
         its own spoken confirmation gate (live real-money needs an explicit 'yes'), so a second
@@ -3848,6 +3918,8 @@ class InvestTab(QWidget):
         self._running = running
         self.start_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
+        # Persist so the always-on supervisor can resume paper trading after a hard-crash relaunch (§39).
+        self.settings.set(INVEST_AUTO_RUNNING_SETTING, "1" if running else "")
 
     def _interval_ms(self) -> int:
         return AUTO_INTERVALS.get(self.interval.currentText(), 900000)
@@ -3893,17 +3965,24 @@ class InvestTab(QWidget):
     def _auto_tick(self) -> None:
         if self._cycle_busy:
             return
-        self._cycle_busy = True
-        self.research_issue_label.setVisible(False)  # fresh per cycle; re-shown if research fails again
-        symbols = list(self.stock_symbols)
-        is_real = self.is_real()
-        special_pct = self.special_position.value()
-        daytrade_pct = self.daytrade_position.value()
-        self.status.setText("RUNNING: researching and trading...")
-        self._busy(True)
-        spawn_worker(
-            self._workers, lambda: self._run_cycle(symbols, is_real, special_pct, daytrade_pct), self._cycle_done
-        )
+        try:
+            self._cycle_busy = True
+            self.research_issue_label.setVisible(False)  # fresh per cycle; re-shown if research fails again
+            symbols = list(self.stock_symbols)
+            is_real = self.is_real()
+            special_pct = self.special_position.value()
+            daytrade_pct = self.daytrade_position.value()
+            self.status.setText("RUNNING: researching and trading...")
+            self._busy(True)
+            _LOG.info("auto cycle starting (%d symbols, %s)", len(symbols), "real" if is_real else "paper")
+            spawn_worker(
+                self._workers, lambda: self._run_cycle(symbols, is_real, special_pct, daytrade_pct), self._cycle_done
+            )
+        except Exception:  # never let a launch error wedge the loop (busy stuck True / no reschedule)
+            _LOG.exception("auto cycle failed to launch; rescheduling")
+            self._cycle_busy = False
+            self._busy(False)
+            self._schedule_next(self._interval_ms())
 
     def _run_cycle(self, symbols: list, is_real: bool, special_pct: float = 0.0, daytrade_pct: float = 0.0) -> dict:
         client = AlpacaClient.from_settings(self.settings)
@@ -3999,6 +4078,7 @@ class InvestTab(QWidget):
                 progress_fn=self.research_step.emit,
                 tradable=tradable,
                 screen_fn=self._make_screen_fn(client, "core"),  # §37: S&P-caliber liquidity + quality
+                seed_fn=lambda: self._discover_seed_candidates(client),  # §40: data-breadth discovery
             )
             self.research_step.emit("Scouting new moonshot stocks...")
             try:  # scout Special Stocks (holdings_pl lets rotation protect winners), even on the open path
@@ -4177,7 +4257,8 @@ class InvestTab(QWidget):
                 self.settings, self.memory, symbols, holdings, research_fn, review_days=roster_days,
                 market_context_fn=lambda syms: self._fetch_market_context(client, syms),
                 on_issue=self.research_issue.emit, progress_fn=self.research_step.emit,
-                tradable=tradable, screen_fn=self._make_screen_fn(client, "core"), force=True,
+                tradable=tradable, screen_fn=self._make_screen_fn(client, "core"),
+                seed_fn=lambda: self._discover_seed_candidates(client), force=True,
             )
         except Exception as exc:  # noqa: BLE001
             self.research_issue.emit(f"Roster review failed: {exc}")
@@ -4219,26 +4300,39 @@ class InvestTab(QWidget):
         self.refresh_portfolio(quiet=True)
 
     def _cycle_done(self, ok: bool, payload) -> None:
+        # Self-healing (§39): whatever happens below, the busy flag is cleared and the next cycle is
+        # re-armed in `finally` — a permanently-running trader must never be left wedged by a display
+        # error. (A failed _run_cycle is already caught by spawn_worker and arrives here as ok=False.)
         self._cycle_busy = False
         self._busy(False)
-        self._update_research_eta()  # a cycle may have refreshed the research timestamps
-        if not ok:
-            label = "Cycle error" if isinstance(payload, AlpacaError) else "Research failed"
-            self.status.setText(f"{label}: {payload}")
-            self._schedule_next(self._interval_ms())
-            return
-        if payload.get("market_closed"):
-            self.status.setText("RUNNING: market closed — waiting for the next open (no trades, no AI cost).")
-            self._schedule_next(int(payload.get("retry_ms") or MARKET_CLOSED_RETRY_MS))
-            self.refresh_portfolio()
-            return
-        new_roster = payload.get("new_roster")
-        if new_roster:
-            self.stock_symbols = new_roster
-            self._update_universe_label()
-        self.status.setText(f"RUNNING: {payload['status']} Next review in {self.interval.currentText()}.")
-        self._schedule_next(self._interval_ms())
-        self.refresh_portfolio()
+        next_ms = self._interval_ms()
+        try:
+            self._update_research_eta()  # a cycle may have refreshed the research timestamps
+            if not ok:
+                label = "Cycle error" if isinstance(payload, AlpacaError) else "Research failed"
+                self.status.setText(f"{label}: {payload}")
+                _LOG.warning("auto cycle failed: %s", payload)
+            elif payload.get("market_closed"):
+                next_ms = int(payload.get("retry_ms") or MARKET_CLOSED_RETRY_MS)
+                self.status.setText("RUNNING: market closed — waiting for the next open (no trades, no AI cost).")
+                self.refresh_portfolio()
+            else:
+                new_roster = payload.get("new_roster")
+                if new_roster:
+                    self.stock_symbols = new_roster
+                    self._update_universe_label()
+                self.status.setText(f"RUNNING: {payload['status']} Next review in {self.interval.currentText()}.")
+                self.settings.set(INVEST_LAST_CYCLE_OK_SETTING, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                _LOG.info("auto cycle ok: %s", payload.get("status", ""))
+                self.refresh_portfolio()
+        except Exception:  # a UI/display error must never stop the trading loop
+            _LOG.exception("cycle_done handler error (loop continues)")
+            try:
+                self.status.setText("RUNNING: recovered from a display error; continuing.")
+            except Exception:
+                pass
+        finally:
+            self._schedule_next(next_ms)
 
     def update_cost_label(self) -> None:
         summary = self.memory.ai_usage_summary()

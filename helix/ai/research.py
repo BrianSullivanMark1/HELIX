@@ -264,11 +264,14 @@ Rules:
 
 
 def build_roster_discovery_prompt(
-    weak_incumbents: list, n_candidates: int, performance: str = "", market_context: str = ""
+    weak_incumbents: list, n_candidates: int, performance: str = "", market_context: str = "",
+    seed_candidates: list | None = None,
 ) -> str:
-    """Propose + score NEW candidate tickers to replace the weakest roster names (§20, chunked path).
+    """Propose/score NEW candidate tickers to replace the weakest roster names (§20, chunked path).
     `weak_incumbents` = [(symbol, score), …] anchors the 0-100 scale to the actual rotation targets so
-    candidates rank head-to-head. Returns the {incumbents,candidates} shape (incumbents empty here)."""
+    candidates rank head-to-head. When `seed_candidates` is given (a market-data screener's picks, §40),
+    the model JUDGES those data-surfaced names instead of brainstorming from memory — discovery driven
+    by the market's data, not training recall. Returns the {incumbents,candidates} shape."""
     weak_text = ", ".join(f"{symbol} ({score:.0f})" for symbol, score in weak_incumbents) if weak_incumbents else "(none)"
     track = f"\nYour realized track record so far: {performance}. Favor the kinds of names that have worked.\n" if performance else ""
     market_block = (
@@ -280,17 +283,36 @@ def build_roster_discovery_prompt(
         if market_context
         else "You reason from training knowledge, not live data; flag where live prices or news should be checked."
     )
+    seed_block = ""
+    if seed_candidates:
+        seed_text = ", ".join(str(s).strip().upper() for s in seed_candidates if str(s).strip())
+        seed_block = (
+            "\nA market-data screener surfaced these NEW, already-liquid candidates from the BROAD market "
+            "(ranked on momentum + low volatility + liquidity — names you might not surface from memory). "
+            "Your job is to JUDGE them, not brainstorm from scratch:\n"
+            f"{seed_text}\n"
+        )
+        propose = (
+            "JUDGE the screener's candidates above: keep only the genuinely STRONGER long-term holdings "
+            "(durable, high-quality compounders), and discard the rest. You MAY add a few of your own if "
+            f"clearly better — up to {n_candidates} candidates total."
+        )
+    else:
+        propose = (
+            f"Propose up to {n_candidates} NEW, real, liquid, US-listed tickers — NOT in the weak list "
+            "above — that you believe are clearly STRONGER long-term holdings."
+        )
     return f"""
 You are HELIX's portfolio universe manager hunting for BETTER stocks for a LONG-TERM, grow-the-account
 book — durable, high-quality compounders (real moats, strong economics, healthy balance sheets), not
 hype. The goal is to rotate out weak holdings for clearly stronger ones.
-{track}{market_block}
+{track}{market_block}{seed_block}
 These are the roster's WEAKEST current names, with their 0-100 scores — the rotation targets:
 {weak_text}
 
-Propose up to {n_candidates} NEW, real, liquid, US-listed tickers — NOT in the weak list above — that
-you believe are clearly STRONGER long-term holdings. Score EACH on the SAME 0-100 scale shown above so
-they rank head-to-head against those weak names (100 = best). Only propose names you'd genuinely swap in.
+{propose}
+Score every candidate on the SAME 0-100 scale shown above so they rank head-to-head against those weak
+names (100 = best). Only include names you'd genuinely swap in.
 
 Return ONLY a JSON object — no prose, no markdown fences — in exactly this shape:
 {{"incumbents": [], "candidates": [{{"symbol": "TICKER", "score": 0-100, "rationale": "one short sentence"}}]}}

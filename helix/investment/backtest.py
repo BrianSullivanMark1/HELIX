@@ -24,12 +24,19 @@ import bisect
 import json
 import statistics
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import sqrt
 from typing import Any, Callable
 
-from helix.investment.autopilot import bars_to_dated_closes, build_rebalance_plan, composite_factor_scores
-from helix.investment.market_data import factor_signals, volatility_signals
+from helix.investment.autopilot import (
+    bars_to_dated_closes,
+    build_rebalance_plan,
+    composite_factor_scores,
+    DEFAULT_DEFENSIVE_CASH_BUFFER_PCT,
+    DEFAULT_DRAWDOWN_BRAKE_PCT,
+    RiskControls,
+)
+from helix.investment.market_data import factor_signals, regime_risk_off, volatility_signals
 
 
 @dataclass(frozen=True)
@@ -133,17 +140,23 @@ def run_backtest(
     max_positions: int = 0,
     vol_adjust: bool = False,
     factor_overlay: bool = False,
+    start_day: str | None = None,
+    risk_controls: bool = False,
+    regime_window: int = 200,
 ) -> BacktestResult:
     """Replay daily bars through `build_rebalance_plan`, marking to market daily and rebalancing on
     the cadence. Returns a `BacktestResult`. PURE — no network, no Claude (ratings are stubbed)."""
     book = _PriceBook(closes_by_symbol)
     all_dates = sorted({day for series in closes_by_symbol.values() for day, _c in series})
+    # Pre-`start_day` closes stay in the book (for the trailing regime MA + momentum) but the SIMULATED
+    # window is [start_day, end] — so a down-market window is measured cleanly, not from the warm-up.
+    sim_dates = [d for d in all_dates if d >= start_day] if start_day else all_dates
     empty = BacktestResult(
-        label, all_dates[0] if all_dates else "", all_dates[-1] if all_dates else "", 0.0,
+        label, sim_dates[0] if sim_dates else "", sim_dates[-1] if sim_dates else "", 0.0,
         start_equity, start_equity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, None, None,
         len(ratings or {}), 0, 0, [],
     )
-    if len(all_dates) < 2:
+    if len(sim_dates) < 2:
         return empty
 
     research_fn = _cached_research_fn(ratings)
@@ -153,8 +166,9 @@ def run_backtest(
     curve: list[tuple[str, float]] = []
     last_rebalance: str | None = None
     n_rebalances = n_trades = 0
+    peak = float(start_equity)  # high-water equity for the drawdown brake (§35), tracked over the sim
 
-    for day in all_dates:
+    for day in sim_dates:
         holdings_value: dict[str, float] = {}
         for symbol, qty in shares.items():
             if qty <= 0:
@@ -164,6 +178,8 @@ def run_backtest(
                 holdings_value[symbol] = qty * price
         equity = cash + sum(holdings_value.values())
         curve.append((day, round(equity, 2)))
+        if equity > peak:
+            peak = equity
 
         due = last_rebalance is None or (
             datetime.strptime(day, "%Y-%m-%d") - datetime.strptime(last_rebalance, "%Y-%m-%d")
@@ -185,11 +201,22 @@ def run_backtest(
                 fscores = composite_factor_scores(momentum, None, vols)  # ranks + overlay use the composite
             elif max_positions:
                 fscores = momentum
+        # §35 down-market guards (drawdown brake + regime filter): both work by raising the cash buffer
+        # when in drawdown / risk-off, so this is the A/B that says whether they help when prices fall.
+        risk = None
+        if risk_controls:
+            spy_trailing = [c for d, c in closes_by_symbol.get(benchmark, []) if d <= day]
+            risk = RiskControls(
+                equity_peak=peak,
+                drawdown_brake_pct=DEFAULT_DRAWDOWN_BRAKE_PCT,
+                defensive_cash_buffer_pct=DEFAULT_DEFENSIVE_CASH_BUFFER_PCT,
+                risk_off=regime_risk_off(spy_trailing, window=regime_window),
+            )
         plan = build_rebalance_plan(
             equity, cash, holdings_value, watchlist, research_fn,
             max_position_pct=1.0, max_positions=max_positions, factor_scores=fscores,
             factor_overlay=factor_overlay, volatilities=vols, vol_adjust=vol_adjust,
-            cash_buffer_pct=cash_buffer_pct, preset=preset,
+            cash_buffer_pct=cash_buffer_pct, preset=preset, risk=risk,
             memory=None, rating_max_age_days=0.0, min_trade_usd=min_trade_usd,
         )
         for action in plan.actions:
@@ -373,3 +400,102 @@ def gather_backtest(
     header = (f"{len(ratings)} buy-rated names, rebalanced every {rebalance_every_days}d, "
               f"{cash_buffer_pct * 100:.0f}% cash buffer.")
     return render_backtest(results, header=header), results
+
+
+# Down markets to stress the §35 guards on (label, start, end). 2022 is the cleanest modern bear;
+# 2020 is the fast crash — both subject to whatever history the free Alpaca/IEX feed actually returns.
+DOWN_MARKET_WINDOWS: tuple[tuple[str, str, str], ...] = (
+    ("2022 bear market", "2022-01-01", "2022-12-31"),
+    ("2020 COVID crash", "2020-02-01", "2020-06-30"),
+)
+
+
+def gather_risk_control_backtest(
+    memory: Any, client: Any, *, windows: tuple = DOWN_MARKET_WINDOWS,
+    start_equity: float = 100000.0, cash_buffer_pct: float = 0.10, rebalance_every_days: int = 7,
+) -> tuple[str, list]:
+    """#5 / §35: do the down-market guards actually help when the market FALLS? For each down window,
+    replay the current buy basket twice over the SAME prices — guards OFF vs ON — and compare drawdown
+    / Sharpe / return. The on-vs-off gap is the clean read; the absolute level is look-ahead- AND
+    survivorship-biased (today's names on past prices). Only the two cash-raising guards (drawdown brake
+    + regime filter) are exercised — stop-loss / sector-cap / diversification need cost-basis / a sector
+    map absent in replay. Edge orchestrator (only the Alpaca bars fetch touches the network)."""
+    rows = memory.list_stock_rationale()
+    ratings = {
+        str(r["symbol"]).upper(): {"action": r["action"], "confidence": r.get("confidence", "low"),
+                                   "rationale": r.get("rationale", "")}
+        for r in rows
+        if r.get("action") == "buy" and r.get("symbol")
+    }
+    if not ratings:
+        return ("HELIX RISK-CONTROL BACKTEST\n\nNo buy-rated names yet - run a cycle first.", [])
+    symbols = sorted(ratings) + ["SPY"]
+    sections: list[tuple[str, list[BacktestResult]]] = []
+    for label, start, end in windows:
+        warmup = (datetime.strptime(start, "%Y-%m-%d") - timedelta(days=330)).strftime("%Y-%m-%d")
+        try:
+            bars = client.get_bars_multi(symbols, timeframe="1Day", start=warmup)
+        except Exception as exc:  # noqa: BLE001 — best-effort per window
+            sections.append((f"{label} (fetch failed: {exc})", []))
+            continue
+        closes_by_symbol = {}
+        for symbol, sym_bars in (bars or {}).items():
+            dated = [(d, c) for d, c in bars_to_dated_closes(sym_bars) if d <= end]
+            if dated:
+                closes_by_symbol[str(symbol).upper()] = dated
+        common = dict(
+            closes_by_symbol=closes_by_symbol, ratings=ratings, start_equity=start_equity,
+            cash_buffer_pct=cash_buffer_pct, rebalance_every_days=rebalance_every_days,
+            preset="Aggressive", start_day=start,
+        )
+        off = run_backtest(label="guards OFF", risk_controls=False, **common)
+        on = run_backtest(label="guards ON", risk_controls=True, **common)
+        sections.append((label, [off, on]))
+    return render_risk_control_backtest(sections), sections
+
+
+def render_risk_control_backtest(sections: list) -> str:
+    """Render the down-market guards A/B (§35) — one block per window, with an on-vs-off verdict."""
+    lines = ["HELIX RISK-CONTROL BACKTEST - do the down-market guards help when the market FALLS? (§35)"]
+    lines.append("Guards: drawdown brake (raise cash >15% off the peak) + regime filter (SPY below its")
+    lines.append("200-day trend). A/B over the SAME basket/prices - trust the on-vs-off gap, not the level.")
+    lines.append("")
+    any_data = False
+    for label, results in sections:
+        lines.append(f"== {label} ==")
+        results = [r for r in results if r]
+        first = results[0] if results else None
+        # A window with ~zero volatility means the free feed returned little/no real history for it
+        # (Alpaca IEX daily doesn't reach far back) — say so plainly rather than show a flat 0% row.
+        if first is None or len(results) < 2 or first.annualized_vol_pct < 1.0:
+            lines.append("  (insufficient real price history for this window on the free feed)")
+            lines.append("")
+            continue
+        any_data = True
+        lines.append(f"  {first.start_date} -> {first.end_date} ({first.years:.2f}y), {first.n_names} names")
+        lines.append(f"  {'LEG':<12}{'RETURN':>9}{'VOL':>8}{'SHARPE':>8}{'MAXDD':>8}{'vs SPY':>9}")
+        for r in results:
+            spy = "n/a" if r.benchmark_return_pct is None else f"{r.benchmark_return_pct:+.1f}%"
+            lines.append(f"  {r.label:<12}{r.total_return_pct:>+8.1f}%{r.annualized_vol_pct:>7.1f}%"
+                         f"{r.sharpe:>8.2f}{r.max_drawdown_pct:>7.1f}%{spy:>9}")
+        off, on = results[0], results[1]
+        d_dd = on.max_drawdown_pct - off.max_drawdown_pct   # negative = guards reduced drawdown
+        d_ret = on.total_return_pct - off.total_return_pct
+        d_shp = on.sharpe - off.sharpe
+        if d_dd < 0 and d_shp >= 0:
+            verdict = "Helped - less drawdown at no Sharpe cost."
+        elif d_dd < 0:
+            verdict = "Reduced drawdown but cost Sharpe (the insurance trade-off)."
+        else:
+            verdict = "Did NOT reduce drawdown on this window."
+        lines.append(f"  -> guards: {d_dd:+.1f} pts max drawdown, {d_shp:+.2f} Sharpe, {d_ret:+.1f} pts "
+                     f"return. {verdict}")
+        lines.append("")
+    if not any_data:
+        lines.append("No window had enough free-feed history (Alpaca IEX daily may not reach 2020/2022).")
+        lines.append("")
+    lines.append("Honest scope: only the cash-raising guards (drawdown brake + regime filter) run here;")
+    lines.append("stop-loss / sector-cap / diversification need cost-basis / a sector map absent in replay.")
+    lines.append("Today's picks on past prices = look-ahead + survivorship bias. Idealized, gross. Paper,")
+    lines.append("simulated. Not financial advice.")
+    return "\n".join(lines)

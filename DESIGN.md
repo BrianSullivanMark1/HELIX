@@ -414,9 +414,11 @@ These are real, current limitations — keep this list honest.
   discovered name (core/Special/Day-trade) is now validated against Alpaca's real tradeable asset list**
   (§36) **and a per-sleeve quality/liquidity screen** (§37: price + dollar volume, plus margins/leverage
   for the core) — so a discovery must be real, buyable, *and* liquid/quality enough for its sleeve.
-  Remaining gap: candidate *generation* still draws on **Claude's knowledge + live price/news** (the
-  screens filter, they don't generate), and the liquidity figure is **IEX-feed-scaled** (the free feed
-  is ~2-5% of consolidated volume), so exact market-cap / true volume would need the paid SIP feed.
+  **Generation is now data-driven too (§40):** a market screener ranks the **whole ~7,000-name
+  tradeable universe** by momentum + low-vol + liquidity and feeds the top names into the roster
+  discovery for the model to judge — so HELIX finds names beyond Claude's memory, not just filters its
+  guesses. Remaining limit: the liquidity figure is **IEX-feed-scaled** (the free feed is ~2-5% of
+  consolidated volume), so exact market-cap / true volume would still need the paid SIP feed.
 - **API is read-only** and single-purpose (briefing + watchlist).
 - **No automated tests** and **no packaging** (`pyproject.toml`/`setup.py`); `requirements.txt`
   lists only PyQt6.
@@ -747,9 +749,12 @@ returns + net-of-index) and sharpens as more trades close, but it's a soft nudge
 **Per-pick forward returns over time — SHIPPED (§28).** The **prediction scorecard** now snapshots
 every rating to the append-only `rating_outcomes` log and scores its realized forward return at
 1w/1m/3m, **bucketed by confidence and net of the S&P** — the measurement foundation this loop was
-missing (it had been calibrating partly on rebalance-trim noise). It is read-only today (the honest
-scoreboard); feeding its hit-rate-by-confidence *back* into the prompts, and per-sleeve breakdowns,
-are the natural next step.
+missing (it had been calibrating partly on rebalance-trim noise). **Feeding it back into the prompts —
+SHIPPED (§38).** The scorecard's matured buy-conviction buckets (net of the S&P) are now distilled into
+a calibration line that **leads** the feedback digest, so every research prompt learns whether its own
+high-conviction calls have actually beaten the index. This is the *plumbing*; its effect is a forward
+bet — the buckets are empty/immature today, so the line stays silent until they mature (weeks), then
+activates automatically. Per-sleeve breakdowns remain a next step.
 
 **Still ahead** (roadmap step 3+): two-stage deep memos, adversarial/ensemble research, and
 event-driven triggers — each measured against the §28 scorecard.
@@ -763,9 +768,13 @@ to prove the approach first.
 
 **Run it:** `python main.py` (desktop UI; opens on **Home**). CLI subcommands: `brief`, `run`,
 `api`, `invest`, `rebalance`, `autopilot`, `roster`, `scorecard`, `backtest`, `investment …`.
+For **always-on** use (Brian's chosen model — leave it running, not OS-scheduled), launch via
+`python scripts/run_helix.py` (the supervisor relaunches the app if it hard-crashes); run
+`scripts/install_autostart.ps1` once to start it at login (§39). Package a standalone Windows app (no
+Python needed, for the living-room tablet) with `python build.py` → `dist\HELIX\HELIX.exe` (§41).
 
 **Verify changes without a visible window:**
-- Byte-compile: `python -m compileall -q helix main.py`.
+- Byte-compile: `python -m compileall -q helix main.py scripts`.
 - Import: `python -c "import helix.interfaces.qt_app"`.
 - Build a tab offscreen: set `QT_QPA_PLATFORM=offscreen`, make a `QApplication([])`, **keep a
   reference** to the widget (`w = InvestmentTab(m); it = w.invest_tab` — a bare
@@ -778,12 +787,15 @@ live DB while the app is running (lock contention).
 
 **Gotchas:**
 - The running app holds the code from launch time — **restart to see edits**.
+- Unattended safety (§39): an unhandled error in a UI callback is **logged to `data/helix.log`** and
+  the app stays alive (a custom `sys.excepthook`, not PyQt's aborting default); the trading cycle
+  self-heals (always reschedules the next run).
 - Long network calls (Alpaca/Claude) run off-thread via `spawn_worker` (QThreadPool); only touch
   widgets in the main-thread callback.
 - The console renders em-dashes (—) as `�`; it's fine in the app/voice.
 - Keys are one pair; the fake/real toggle only swaps the Alpaca endpoint, so live needs live keys saved.
 
-**Current state (2026-06-05):**
+**Current state (2026-06-06):**
 - **Investment** — live: auto-rebalances a ~100-stock universe (Alpaca paper), Claude rates
   buy/watch/skip, sizing/caps + drift-band trims, sells with reasons, **self-calibration loop**
   feeding realized results back into the rating prompt; rating prompt targets **long-term growth**.
@@ -813,6 +825,11 @@ live DB while the app is running (lock contention).
 - **Home** — editable Action/Item/Frequency task list (reminders + ordering still to come).
 - **Enterprise** — v1 (§26): a Claude-summarized digest of recent **git work** across your projects +
   **Slack** mentions/DMs. Read-only, off-thread; Chase/banking deferred.
+- **Reliability (§38–§39, 2026-06-06)** — the scorecard now **feeds back into the rating prompts**
+  (close-the-loop, §38; silent until it matures, then self-calibrates); the **always-on app is
+  hardened** (crash guard → `data/helix.log`, self-healing cycle, `scripts/run_helix.py` relaunch +
+  **paper auto-resume** on launch); and the §35 risk controls are now **backtested on a down market**
+  (§29 `--down-markets`: 2022 max drawdown 17.1%→13.8%).
 
 **Likely next steps:** the **Xpert two-way voice assistant + action layer shipped** (§23–§24),
 including a hands-free **"HELIX" wake word** and mic/speaker device pickers (works with the Bluetooth
@@ -821,8 +838,10 @@ from anywhere, and applying roster swaps by voice; the **account's return vs the
 into the research prompts** (§17 feedback loop) — remaining there is feeding it into the **Xpert
 opinion/voice** context too, and tracking each pick's forward return *over time* (not just the current
 snapshot); Home reminders + one-tap ordering; the **HELIX 100** now
-self-curates (auto-rotation shipped, §20) — remaining there is a screener/news connector for genuine
-discovery (§10) and Task Scheduler for guaranteed unattended cadence; a real-money path only after a
+self-curates (auto-rotation shipped, §20) — and a **market-data screener now discovers names beyond the
+model's memory** (§40, scanning the ~7,000-name tradeable universe); for unattended uptime HELIX now
+runs **always-on** with a crash guard + relaunch
+supervisor (§39, superseding the earlier Task Scheduler suggestion); a real-money path only after a
 solid paper track record.
 
 ---
@@ -928,6 +947,11 @@ margin-gated 1-for-1 swaps with a turnover cap · roster = `invest_tickers` · *
 auto-applies** on a calendar cadence (the user chose fully self-curating — no approval step; the
 editable stocks table was removed); manual `roster --apply` still available · paper-first.
 
+**Discovery is now data-driven (§40, 2026-06-06):** the roster review is **seeded by a market-data
+screener** that scans a bounded, rotating slice of the full ~7,000-name tradeable universe (momentum +
+low-vol + liquidity) and hands the model real candidates to judge — generation by the market's data,
+not the model's memory.
+
 **Headless test:** `python main.py roster --ai mock` (verified — proposes swaps; dry-run by default).
 
 **Caveat (universe split):** `roster` curates `invest_tickers` — the **GUI** trading loop's basket, so
@@ -950,7 +974,8 @@ universe scored **478/478 with rationales, no truncation, 0 issues** (10 chunks 
 min off-thread), producing 7 sensible margin-clearing swaps (e.g. AAL 18→BRK.B 88, PARA 22→NVO 84,
 F 28→CSGP 80) — weak cyclicals/media rotated for quality compounders. Plus 12 hermetic checks.
 
-**Still to come:** a screener/news connector for discovery beyond Claude's training knowledge (§10);
+**Still to come:** a **news/event** connector to complement the market-data screener (§40 now handles
+discovery beyond Claude's training knowledge);
 wiring `roster` into Windows Task Scheduler for guaranteed unattended cadence (the GUI timer only
 fires while the app is open, though the persisted timestamp means it still rotates on the next
 session after a quarter elapses).
@@ -1435,8 +1460,9 @@ low-conviction and the index, at 1w / 1m / 3m?*
 **Honest scope.** Forward returns are **gross** of spreads/taxes; the scorecard is **empty today and
 fills in over weeks** as ratings age past each horizon (that is the point of building it first). It
 measures *ratings*, not the *traded book* (sizing/exits are what the Build-2 backtest harness will
-score). It is a measurement, not yet an optimizer — but it is the scoreboard every later change must
-prove itself against.
+score). It now also **feeds back into the rating prompts** (§38, the closed loop) — though it remains a
+soft prompt-level signal, not a numerical optimizer, and the scoreboard every later change must prove
+itself against.
 
 **Decisions locked:** append-only `rating_outcomes` (never overwritten) · snapshot on every genuine
 re-rate, piggybacking the existing cadence · **price-free snapshots, returns reconstructed from daily
@@ -1510,6 +1536,18 @@ the render/verdict, the not-enough-data path, and `gather_backtest` with stub me
 watch-rated names); a **real-data run against the paper account** (208 buy-rated names, ~6 months:
 conviction +26.4% / Sharpe 4.1 vs equal +24.2% / Sharpe 4.0 vs SPY +8.2% — conviction added ~2.2 pts,
 metrics in a sane range, with the look-ahead caveat noted). Compiles + imports clean.
+
+**Down-market risk-control A/B (§35, 2026-06-06).** `run_backtest` also takes a bounded `start_day`
+window + a `risk_controls` flag, and `gather_risk_control_backtest` (CLI: **`backtest --down-markets`**)
+replays the current buy basket twice — guards OFF vs ON — over the **2022 bear** and **2020 crash**,
+computing the regime filter (SPY vs its 200‑day trend) and the drawdown peak per rebalance date. The
+on‑vs‑off gap is the clean read (same basket/prices); the absolute level keeps the look‑ahead +
+survivorship bias. **Real‑data finding:** in 2022 the guards cut max drawdown **17.1%→13.8%** at a small
+Sharpe cost; 2020 daily history isn't on the free IEX feed, so that window is flagged "insufficient"
+rather than shown as a flat 0%. Only the cash‑raising guards are exercised (stop‑loss / sector‑cap /
+diversification need cost‑basis / a sector map absent in replay). Verified by a hermetic test (synthetic
+falling market: guards cut drawdown 43%→35% and preserved more capital; the degenerate‑window label)
+plus the live 2022/2020 run.
 
 ---
 
@@ -1812,8 +1850,8 @@ in downturns**, so they can **lag a sharp recovery** — that's the deliberate c
 down. The **stop‑loss supersedes** the old §13 "stay the course / rebalancing buys the dip" rule **for
 deep (−25%) losers only** — a catastrophe brake, not a tight stop. SIC is coarser than GICS, so a few
 tail names may land in a rough bucket; the curated map covers the high‑weight names precisely. **GUI‑only**
-(same scope as the other live wiring). They can't be meaningfully backtested on the current bull window
-(none trigger) — they prove their worth in a downturn.
+(same scope as the other live wiring). On a **down**‑market backtest (§29 `--down-markets`) the
+cash‑raising guards behave as designed — see "Next" below.
 
 **Decisions locked:** five controls, **default on** (protective) · conservative thresholds (catastrophe/
 prudence guards, not hair‑triggers) · bundled in `RiskControls`, pure helpers + edge assembly · sector
@@ -1830,8 +1868,10 @@ top‑5 cap to 20 names); a **live end‑to‑end run** (real SPY regime, equity
 
 **Next:** **SEC‑SIC sector enrichment is now SHIPPED** (above — the cap covers ~the whole universe
 automatically). UI‑tunable thresholds were **declined** by the user (HELIX should "think under the
-hood," not add knobs). Remaining: backtest the drawdown/regime controls on a *down*‑market window
-(where they actually fire), and refine the SIC→sector buckets over time.
+hood," not add knobs). **Down‑market backtest — SHIPPED** (§29 `backtest --down-markets`): on the real
+**2022 bear** the cash‑raising guards (drawdown brake + regime filter) cut max drawdown **~17.1%→13.8%**
+at a small Sharpe cost (the insurance trade‑off) — they do what they're for; 2020 isn't on the free
+feed. Remaining: refine the SIC→sector buckets over time.
 
 ## 36. Real-market screener — every discovered name is an actual, buyable ticker
 
@@ -1932,6 +1972,190 @@ special + roster discovery paths); a **live run** that exposed and fixed the IEX
 
 **Next:** exact **market‑cap** (shares × price) and **consolidated** volume would need shares‑outstanding
 + the SIP feed — the step from "real, buyable, liquid" to a precise size/quality screen.
+
+## 38. Close the loop — scorecard feedback into the rating prompts
+
+> **Status: v1 SHIPPED (paper) — plumbing live, effect pending maturation.** The §28 scorecard
+> measured pick quality but never reached the model. This wires that measurement back into the rating
+> prompts so HELIX self-calibrates its confidence — automatically, with **no new UI knob** (Brian's
+> "think under the hood" preference). It is an **input-quality** change, the kind the scorecard itself
+> will judge — not another deterministic re-weighting lever.
+
+**The gap it closes.** The §17 feedback loop fed prompts the realized closed-trade record — which §28
+showed is ~95% rebalance-trim noise. The scorecard already scores every rating's forward return,
+bucketed by confidence, net of the S&P (1w/1m/3m), but it was **read-only**. So HELIX scored its own
+conviction and never acted on it.
+
+**The design (one chokepoint, full reuse).**
+- `scorecard_feedback(summary, *, min_n=SCORECARD_FEEDBACK_MIN_N)` (pure, `autopilot.py`) distills the
+  scorecard `summary` dict into one calibration line. Only **buy** buckets with at least `min_n`
+  (= **8**) *matured* outcomes are trusted; below that it stays silent (no calibrating on noise). It
+  reports the **longest** qualifying horizon first (3m > 1m > 1w — a long-term strategy shouldn't tune
+  on a one-week blip), up to two, and **names the horizon**. It **reuses `_conviction_verdict`** (the
+  same function the rendered scorecard uses) so the prompt and the report can never drift apart.
+  Returns `""` when nothing has matured enough — today's state.
+- `refresh_scorecard_feedback(memory, client, settings, *, today=None)` (`autopilot.py`) sources the
+  line, **daily-cached** in settings (`invest_scorecard_feedback` + `…_date`, compared by date string,
+  following the `invest_last_*` convention). The full-universe bar fetch runs at most once/day; every
+  other cycle reads the cached line for free. **Best-effort:** any failure (keys/network/closed)
+  returns the cached line or `""` and never raises into the trading cycle.
+- `performance_digest(…, scorecard="")` places the scorecard clause **first** (lead with the
+  high-signal measurement; the noisier realized-sell record follows). The GUI's `_performance_review`
+  (the single point that builds the `track` string for **all** research paths) sources `scorecard=` —
+  so core / special / day-trade / roster prompts all get it from one change. No `research.py` edit, no
+  schema change, no new control.
+
+**Honest scope.** This ships the **mechanism**, proven deterministically. Its **real-world effect is a
+forward bet**: the scorecard is empty/immature today (3,518 snapshots, 0 matured as of 2026-06-06), so
+the line injects nothing until outcomes age past a horizon (weeks), then turns on by itself. The
+backtest can't judge it (it stubs ratings), so the **§28 scorecard itself is the judge** over time.
+
+**Deferred:** CLI parity (`rebalance`/`autopilot` still use the `performance_digest` fallback without
+the scorecard line) — the GUI is the live loop Brian runs permanently; the same helper can be wired
+into the CLI later. Per-sleeve (special/day-trade) calibration lines are a natural extension.
+
+**Decisions locked:** distill in a pure fn reusing `_conviction_verdict` · gate buy buckets at
+min_n=8 matured · longest qualifying horizon first, up to two, horizon named · daily settings cache,
+date-string keyed · scorecard clause **leads** the digest · best-effort, never sinks a cycle · no UI
+knob · GUI-first (CLI deferred) · paper-first, not financial advice.
+
+**Verified (2026-06-06):** hermetic distiller/digest/cache test (28 checks, temp/fake objects, no live
+DB — the min_n gate, longest-horizon-first selection, sign handling, empty-state silence, no
+non-traded-label leak, agreement with `_conviction_verdict`, the lead ordering, and the cache's
+fetch-once / no-refetch-same-day / raise-safe / no-snapshot-no-fetch invariants); `compileall` +
+`import helix.interfaces.qt_app` clean; offscreen `InvestmentTab` smoke (builds on a copy of the DB);
+`python main.py scorecard` unchanged (confirms the shared engine + the honest empty state today).
+
+## 39. Always-on reliability — keep the permanently-running app alive and diagnosable
+
+> **Status: SHIPPED (paper).** Brian runs HELIX as a **permanently-open desktop app** rather than via
+> OS schedulers (the QTimer cadence does the scheduling once it's up). So "ready to use unattended"
+> means the app must survive an unexpected error, recover its loop, leave a trail, and come back after
+> a crash or reboot — without new knobs.
+
+**Why it was needed.** PyQt6 **aborts the whole process** (qFatal) on an unhandled exception in a slot
+*unless* `sys.excepthook` is replaced. A permanently-running trader can't be one stray UI-callback
+error away from silently dying. The per-cycle path was already resilient (a failed `_run_cycle` is
+caught by `spawn_worker` and `_cycle_done` reschedules), but a main-thread display error could still
+take the app down or leave the loop wedged, and there was **no log** to diagnose an unattended issue.
+
+**What shipped (`helix/core/reliability.py` + the GUI entry/cycle, `scripts/`).**
+- **Crash guard** — `install_crash_guard()` replaces `sys.excepthook` so any unhandled exception is
+  **logged and the app keeps running** (KeyboardInterrupt still exits). Installed in `run_qt_app`
+  before the event loop. The single most important always-on safeguard.
+- **Rotating log** — `setup_logging()` writes `data/helix.log` (1 MB × 3, stdlib `RotatingFileHandler`,
+  git-ignored). Startup/exit, each auto cycle (start / ok / failed), and any caught crash are logged,
+  so an unattended run is diagnosable after the fact. Best-effort: a log failure never stops the app.
+- **Self-healing cycle** — `_cycle_done` clears the busy flag and **re-arms the next cycle in a
+  `finally`**, so a display error mid-handler can never wedge the loop; `_auto_tick` guards its launch
+  the same way. A **heartbeat** (`invest_last_cycle_ok`) records the last good cycle.
+- **Relaunch supervisor** — `scripts/run_helix.py` runs the app and **relaunches it on a hard crash**
+  (segfault / OOM / interpreter death), with exponential backoff that resets after a healthy run; a
+  clean exit (closing the window) stops it. Pure `next_action()` policy, unit-tested; dependency-free.
+- **Launch at login** — `scripts/install_autostart.ps1` (opt-in, run once) drops a Startup-folder
+  shortcut pointing at the supervisor — **not** Task Scheduler; it just auto-opens the app, matching
+  the always-on model. Remove via `shell:startup`.
+- **Auto-resume trading** — the RUNNING state is persisted (`invest_auto_running`); on launch
+  `_maybe_resume_auto` resumes auto-investing if it was on — **PAPER only, no dialog** (mirrors
+  voice_start). LIVE never auto-resumes (the real-money gate stays manual). This is what makes a
+  hard-crash relaunch actually pick trading back up instead of coming back STOPPED (the soft crash
+  guard already preserves state by keeping the process alive). Pressing STOP clears the flag.
+
+**Honest scope / the laptop-sleep caveat.** This is a laptop: HELIX **does not trade while the machine
+is asleep** (QTimers pause). On wake the market-aligned loop re-checks the next open and resumes, but a
+machine asleep at 9:30 AM ET won't trade at that open. For true always-on, set Windows power to **never
+sleep on AC**. The supervisor covers process crashes, not the OS being suspended.
+
+**Decisions locked:** permanently-on app, not OS-scheduled cadence (supersedes the Task Scheduler
+notes in §14/§22 for the trading loop) · custom `sys.excepthook` keeps the app alive + logs · rotating
+`data/helix.log` · cycle self-heals in `finally` + heartbeat · external dependency-free supervisor for
+hard crashes · auto-start via a Startup shortcut, opt-in · **auto-resume paper trading on launch; LIVE
+stays manual** · no new UI knob · paper-first.
+
+**Verified (2026-06-06):** hermetic test (12 checks — logging setup idempotent + writes the file; the
+crash guard installs, logs, keeps alive, and routes KeyboardInterrupt to the default hook; and the
+supervisor's relaunch / backoff / reset policy); `compileall` (incl. `scripts/`) + `import
+helix.interfaces.qt_app` clean; offscreen `InvestmentTab` smoke builds with the new wiring.
+
+## 40. Data-breadth discovery — find stocks beyond what the model knows
+
+> **Status: SHIPPED (paper).** Discovery used to be bounded by Claude's memory: the roster review asked
+> the model to *brainstorm* candidates, and the data only *filtered* them (§36/§37). This adds a
+> market-data screener that *generates* candidates from the **whole tradeable market** (~7,000 names),
+> so HELIX can surface names the model would never name — Brian's "scan wide" thesis, made data-driven.
+
+**The gap it closes.** `build_roster_discovery_prompt` had the model propose new tickers from training
+recall; §36/§37 then validated/filtered them. So a name the model didn't think of was invisible, no
+matter how strong its data.
+
+**The design (reuse + one injection point).**
+- **Pure screener** — `screen_market_candidates(bars_by_symbol, *, exclude, top_n, min_price,
+  min_dollar_volume, quality, min_bars)` (`autopilot.py`): a liquidity gate (last price + avg daily
+  dollar volume) drops penny / illiquid names, then it ranks the rest by the existing **composite
+  factor** (`composite_factor_scores`: momentum via `factor_signals` + low-vol via `volatility_signals`
+  + optional SEC quality) and returns the top-N. Pure — bars injected — so it finds names by data, not
+  memory, and is testable without a network.
+- **Edge** — `discover_market_candidates(client, pool, …)`: fetches daily bars for `pool` in batches (a
+  failed batch is skipped, not fatal) and screens them. Best-effort; only the bars fetch hits the network.
+- **Bounded, rotating scan** — the GUI's `_discover_seed_candidates` pulls the full tradeable list
+  (`memory.get_tradable_universe()`, ~7,000 names, §36), scans a **rotating `DISCOVERY_SCAN_LIMIT` (400)
+  slice** per review (persisted `invest_discovery_offset` wraps over the market across cycles), excludes
+  current holdings, and returns the top `DISCOVERY_TOP_N` (25). This respects rate limits + the free
+  feed and fills the market over time — the same "scan a slice each cycle" pattern as the fundamentals /
+  sector enrichment.
+- **The model still judges.** Candidates flow in via `seed_fn` → `maybe_rotate_roster` (invoked **only
+  when a review is actually due**, so no wasted fetch on a skipped cycle) → `build_roster_review` →
+  `build_roster_discovery_prompt(seed_candidates=…)`, where the model **scores the data-surfaced names
+  head-to-head** against the weakest incumbents, and the §36/§37 screens still gate the result. So
+  generation is data-driven; vetting stays AI + screens.
+
+**Honest scope.** Liquidity/volume are **IEX-feed-scaled** (~2-5% of consolidated volume), so the
+liquidity gate is approximate and true market-cap / volume still needs the paid SIP feed. The scan is
+**bounded** (400/review, rotating), so full-market coverage accrues over several reviews, not in one
+pass. SEC quality is only applied to names whose fundamentals are already cached; pure newcomers rank on
+momentum + low-vol + liquidity until their fundamentals fill in. The model + the §36/§37 screens remain
+the final gate — the screener widens the funnel, it doesn't auto-buy.
+
+**Decisions locked:** screener *generates*, model + screens *vet* · pure ranker reuses
+`composite_factor_scores` · bounded rotating slice of the real tradeable universe (fills over cycles) ·
+`seed_fn` invoked only when a review runs (no wasted fetch) · no new UI knob · paper-first.
+
+**Verified (2026-06-06):** hermetic test (13 checks — the liquidity gate, exclude/SPY/min-bars
+filtering, composite ranking order, top_n, batching + failed-batch resilience, and the seeded prompt); a
+**live spot-check** (scanned a slice of the real **7,021-name** universe → real liquid candidates); an
+offscreen `InvestmentTab` smoke; compile + import clean. CLI parity (`rebalance`/`autopilot` headless)
+is a follow-up; the GUI is the live loop.
+
+## 41. Packaging — a standalone HELIX.exe for the tablet
+
+> **Status: SHIPPED (paper).** A `build.py` at the repo root packages HELIX into a standalone Windows
+> executable (PyInstaller) so it runs on a wall-mounted living-room **Windows tablet** with no Python
+> install — Brian's "mount it and use it during the day" setup.
+
+**Build.** `python build.py` → `dist\HELIX\HELIX.exe` (PyInstaller `--onedir --windowed`). Flags:
+`--with-voice` also bundles the Xpert STT/TTS stack (faster-whisper / edge-tts — heavy, native deps);
+`--console` keeps a console to debug a first build; `--dry-run` prints the command only. The default is
+a **lean dashboard build** — the voice deps are imported lazily (`helix/ai/transcribe.py`,
+`speech.py`), so excluding them keeps the bundle small + reliable and the app still launches (voice
+simply inactive). Build on Windows (PyInstaller emits a same-OS binary); `pip install pyinstaller` first.
+
+**Frozen data dir.** `config._default_root()` returns the folder **next to the .exe** when `sys.frozen`
+(else the repo root) — so `data\` (the SQLite DB + the plaintext keys) lives beside `HELIX.exe`,
+persistent and editable, not trapped inside the bundle. On first launch the exe creates an empty
+`data\`; copy your `data\helix_settings.json` (Alpaca + Claude keys) and `data\helix.db` into
+`dist\HELIX\data\` to carry over the account + history.
+
+**Deploy to the tablet.** Copy the whole `dist\HELIX\` folder over, drop your `data\` in, double-click
+`HELIX.exe` (or point `scripts\install_autostart.ps1` at it for launch-at-login + the §39 supervisor).
+Press START once → paper trading auto-resumes on every later launch (§39). `dist\`, `build\`, `*.spec`
+are git-ignored.
+
+**Honest scope.** Windows only — PyQt6 can't run on iPad/Android (there a packaged exe isn't possible;
+remote into the always-on PC instead). The bundle is large (Qt), larger with `--with-voice`;
+faster-whisper downloads its model on first voice use (needs internet). Keys travel in **plaintext**
+inside `data\` — treat the tablet as a trusted device. **Verified (2026-06-06):** the frozen-vs-dev
+root resolution is unit-tested, both `--dry-run` commands are correct, and `compileall` + import are
+clean; a real lean `--onedir` build was run to confirm packaging (see the session log).
 
 ---
 

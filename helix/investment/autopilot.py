@@ -18,7 +18,7 @@ from helix.ai.research import (
     parse_special_research_json,
 )
 from helix.brokers.alpaca import AlpacaError
-from helix.investment.market_data import liquidity_metrics
+from helix.investment.market_data import factor_signals, liquidity_metrics, volatility_signals
 
 # Relative weighting used to size buys when the posture is "Aggressive". Deliberately steep (8:3:1,
 # not 3:2:1) so capital concentrates in the highest-conviction names instead of spreading evenly —
@@ -697,6 +697,74 @@ def apply_sector_cap(targets: dict, sectors: dict | None, cap_usd: float) -> dic
             for s in names:
                 out[s] = round(out[s] * scale, 2)
     return out
+
+
+def screen_market_candidates(
+    bars_by_symbol: dict[str, Any],
+    *,
+    exclude: set | None = None,
+    top_n: int = 30,
+    min_price: float = 5.0,
+    min_dollar_volume: float = 5_000_000.0,
+    quality: dict[str, float] | None = None,
+    min_bars: int = 30,
+) -> list[str]:
+    """Data-driven candidate generator (#3 / §40): rank a broad set of tickers by a market-data
+    composite (momentum + low-vol + optional SEC quality) and return the top_n LIQUID names not in
+    `exclude`. A liquidity gate (last price + average daily dollar volume) drops penny / illiquid names
+    BEFORE ranking so the composite isn't spent on untradeable noise. PURE — daily bars are injected —
+    so it finds names by the market's data, not the model's memory, and is testable without a network."""
+    skip = {str(s).strip().upper() for s in (exclude or set())} | {"SPY"}
+    closes_by_symbol: dict[str, list[float]] = {}
+    for symbol, bars in (bars_by_symbol or {}).items():
+        sym = str(symbol).strip().upper()
+        if sym in skip:
+            continue
+        price, dollar_volume = liquidity_metrics(bars)
+        if price < min_price or dollar_volume < min_dollar_volume:
+            continue  # §37-style liquidity floor: real, tradeable size only
+        closes = [close for _day, close in bars_to_dated_closes(bars)]
+        if len(closes) >= min_bars:
+            closes_by_symbol[sym] = closes
+    if not closes_by_symbol:
+        return []
+    momentum = factor_signals(closes_by_symbol, min_bars=min_bars)
+    vols = volatility_signals(closes_by_symbol, min_bars=min_bars)
+    qual = {s: quality[s] for s in closes_by_symbol if s in quality} if quality else None
+    composite = composite_factor_scores(momentum, qual, vols)  # 0-1 percentile blend (§33)
+    ranked = sorted(composite.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
+    return [sym for sym, _score in ranked[: max(0, top_n)]]
+
+
+def discover_market_candidates(
+    client: Any,
+    pool: list,
+    *,
+    exclude: set | None = None,
+    top_n: int = 30,
+    batch_size: int = 200,
+    start: str | None = None,
+    quality: dict[str, float] | None = None,
+) -> list[str]:
+    """Edge for data-breadth discovery (#3 / §40): fetch daily bars for `pool` (a bounded slice of the
+    real tradeable market) in batches, then return the top_n data-ranked liquid candidates via
+    `screen_market_candidates`. Best-effort and bounded — the caller passes a capped, rotating slice to
+    respect rate limits + the free feed; a failed batch is skipped, not fatal. Only the bars fetch
+    touches the network. Returns [] on no data."""
+    names = [str(s).strip().upper() for s in (pool or []) if str(s).strip()]
+    if not names:
+        return []
+    start = start or (datetime.now() - timedelta(days=160)).strftime("%Y-%m-%d")  # ~5mo of daily bars
+    bars_by_symbol: dict[str, Any] = {}
+    for i in range(0, len(names), max(1, batch_size)):
+        batch = names[i:i + max(1, batch_size)]
+        try:
+            bars = client.get_bars_multi(batch, timeframe="1Day", start=start)
+        except Exception:  # noqa: BLE001 — skip a failed batch, keep the rest
+            continue
+        if bars:
+            bars_by_symbol.update(bars)
+    return screen_market_candidates(bars_by_symbol, exclude=exclude, top_n=top_n, quality=quality)
 
 
 def build_rebalance_plan(
@@ -1583,6 +1651,72 @@ def generate_rating_scorecard(
     return build_rating_scorecard(snapshots, closes_by_symbol, spy_closes, asof=asof, header=header)
 
 
+# Close-the-loop (§38): minimum MATURED outcomes a (action, confidence) bucket needs before its
+# forward record is trusted enough to feed back into the rating prompt. Below this we stay silent
+# rather than calibrate on noise — the whole point of the §28 scorecard. Baked default, not a UI knob.
+SCORECARD_FEEDBACK_MIN_N = 8
+# Daily cache for the distilled calibration line (the scorecard fetch is a full-universe bar pull).
+INVEST_SCORECARD_FEEDBACK_SETTING = "invest_scorecard_feedback"
+INVEST_SCORECARD_FEEDBACK_DATE_SETTING = "invest_scorecard_feedback_date"
+
+
+def scorecard_feedback(summary: dict[str, Any], *, min_n: int = SCORECARD_FEEDBACK_MIN_N) -> str:
+    """Distill the §28 scorecard summary into one calibration line for the research prompts (§38).
+
+    Closes the loop: tells the model how its OWN buy-conviction has actually performed, net of the
+    S&P 500, so it can calibrate confidence. Only buy buckets with at least `min_n` MATURED outcomes
+    are trusted (below that we stay silent rather than learn from noise). Reports the LONGEST
+    qualifying horizon first (3m > 1m > 1w — a months-to-years strategy shouldn't calibrate on a
+    one-week blip), up to two, and names the horizon so even an early 1w-only signal reads honestly.
+    Reuses `_conviction_verdict` so the prompt and the rendered scorecard never tell different
+    stories. Returns '' when nothing has matured enough yet (today's empty state injects nothing)."""
+    lines: list[str] = []
+    for label, _days in reversed(RATING_HORIZONS):  # longest horizon first
+        rows = summary.get(label, {})
+        gated = {
+            key: stats
+            for key, stats in rows.items()
+            if key[0] == "buy" and stats.get("n", 0) >= min_n
+        }
+        verdict = _conviction_verdict(gated)
+        if not verdict:
+            continue
+        high = gated[("buy", "high")]  # present whenever the verdict is non-empty
+        lines.append(f"at {label}, {verdict} (buy/high n={high['n']}, hit {high['hit_rate']:.0f}%)")
+        if len(lines) >= 2:
+            break
+    if not lines:
+        return ""
+    return (
+        "Calibration (your own forward returns by confidence, net of the S&P 500): "
+        + "; ".join(lines)
+        + ". Use this to calibrate confidence — reserve 'high' for setups like the ones that have "
+        "actually beaten the index."
+    )
+
+
+def refresh_scorecard_feedback(memory: Any, client: Any, settings: Any, *, today: str | None = None) -> str:
+    """The daily-cached scorecard calibration line for the feedback loop (§38). Best-effort.
+
+    The scorecard scores against a full-universe daily-bar pull, so we distill it at most once per
+    day and cache the text in settings (keyed by date STRING — comparing `(now - last).days` is an
+    off-by-a-day trap). The `performance` string is only consumed by research calls, so once/day is
+    ample freshness. Any failure (keys missing, network, market closed) returns the cached line — or
+    '' — and never raises into the trading cycle. `today` is injectable for tests."""
+    today_str = today or datetime.now().strftime("%Y-%m-%d")
+    cached = settings.get(INVEST_SCORECARD_FEEDBACK_SETTING, "") or ""
+    if settings.get(INVEST_SCORECARD_FEEDBACK_DATE_SETTING, "") == today_str:
+        return cached  # already computed today — no fetch
+    try:
+        _report, summary = generate_rating_scorecard(memory, client)
+        line = scorecard_feedback(summary)
+        settings.set(INVEST_SCORECARD_FEEDBACK_SETTING, line)
+        settings.set(INVEST_SCORECARD_FEEDBACK_DATE_SETTING, today_str)
+        return line
+    except Exception:  # noqa: BLE001 — feedback must never sink a trading cycle
+        return cached
+
+
 # --------------------------------------------------------------------------- #
 # The "HELIX 100" — a self-curating universe. Discover + score candidates,
 # rank them against incumbents, and rotate laggards out for stronger names.
@@ -1635,12 +1769,18 @@ def _track_record(memory: Any) -> str:
     return ""
 
 
-def performance_digest(memory: Any, holdings_pl: dict | None = None, equity_review: str = "") -> str:
-    """The §17 feedback-loop summary the research prompts learn from, combining three signals (each
-    optional): the **realized** closed-trade record (hit rate / avg return / P&L), how **current picks**
-    are doing (forward returns straight from live position P&L — which bets are working), and how the
-    account is doing **vs the S&P** (`equity_review`). Returns '' if there's nothing to say."""
+def performance_digest(
+    memory: Any, holdings_pl: dict | None = None, equity_review: str = "", scorecard: str = ""
+) -> str:
+    """The §17 feedback-loop summary the research prompts learn from, combining four signals (each
+    optional). Ordered best-signal-first: the **scorecard calibration** line (§38 — the model's own
+    forward returns by confidence, net of the S&P; the highest-quality signal, so it LEADS), then the
+    **realized** closed-trade record (hit rate / avg return / P&L — noisier, ~95% rebalance-trim per
+    §28), how **current picks** are doing (forward returns straight from live position P&L), and how
+    the account is doing **vs the S&P** (`equity_review`). Returns '' if there's nothing to say."""
     parts: list[str] = []
+    if scorecard:
+        parts.append(scorecard.strip())
     realized = _track_record(memory)
     if realized:
         parts.append(f"Realized (closed trades): {realized}.")
@@ -1682,6 +1822,7 @@ def build_roster_review(
     progress_fn: Callable[[str], None] | None = None,
     tradable: set | None = None,
     screen_fn: Callable[[list], set] | None = None,
+    seed_candidates: list | None = None,
 ) -> RosterReview:
     """Score the roster + discovered candidates, then propose margin-gated 1-for-1 rotations.
 
@@ -1728,7 +1869,10 @@ def build_roster_review(
     if progress_fn is not None:
         progress_fn("Discovering stronger candidates for the universe...")
     disc_context = market_context_fn([s for s, _score in weak_anchor]) if market_context_fn is not None else ""
-    raw = research_fn(build_roster_discovery_prompt(weak_anchor, n_candidates, performance, disc_context)) or ""
+    raw = research_fn(
+        build_roster_discovery_prompt(weak_anchor, n_candidates, performance, disc_context,
+                                      seed_candidates=seed_candidates)
+    ) or ""
     parsed = parse_roster_review_json(raw)
     if not parsed.get("candidates") and on_issue is not None:
         on_issue(_research_issue("Roster candidate discovery", raw))
@@ -1838,9 +1982,14 @@ def maybe_rotate_roster(
     progress_fn: Callable[[str], None] | None = None,
     tradable: set | None = None,
     screen_fn: Callable[[list], set] | None = None,
+    seed_fn: Callable[[], list] | None = None,
     force: bool = False,
 ) -> tuple:
     """Self-curating universe: run a HELIX 100 roster review if one is due, persist the result.
+
+    `seed_fn` (data-breadth discovery, §40) is invoked ONLY when a review actually runs — it returns
+    market-screener candidates for the model to judge — so the bounded bars scan never fires on a
+    cadence-skipped cycle.
 
     Returns (symbols, reviewed, swaps). Cadence is calendar-based via a persisted timestamp, so it
     works even when the app runs only intermittently. The first call just stamps a baseline (no
@@ -1862,11 +2011,17 @@ def maybe_rotate_roster(
     if not force and last_dt is not None and (now - last_dt).days < review_days:
         return symbols, False, 0
 
+    seeds = None
+    if seed_fn is not None:
+        try:
+            seeds = seed_fn()  # data-breadth discovery (§40) — only fetched when a review actually runs
+        except Exception:  # noqa: BLE001 — discovery is best-effort; fall back to model brainstorming
+            seeds = None
     review = build_roster_review(
         symbols, holdings, research_fn,
         max_swaps=max_swaps, min_margin=min_margin, n_candidates=n_candidates, memory=memory,
         market_context_fn=market_context_fn, chunk_size=chunk_size, on_issue=on_issue, progress_fn=progress_fn,
-        tradable=tradable, screen_fn=screen_fn,
+        tradable=tradable, screen_fn=screen_fn, seed_candidates=seeds,
     )
     settings.set(LAST_ROSTER_REVIEW_SETTING, now.strftime("%Y-%m-%d"))
     if review.swaps:
