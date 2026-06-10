@@ -336,7 +336,8 @@ def handle_rebalance(args: argparse.Namespace, memory: SQLiteMemory) -> int:
         return 1
 
     print()
-    for action, outcome in execute_rebalance(plan.actions, client, memory, mode_label="paper", holdings_pl=holdings_pl):
+    for action, outcome in execute_rebalance(plan.actions, client, memory, mode_label="paper", holdings_pl=holdings_pl,
+                                             nonfractionable=memory.get_nonfractionable_symbols()):
         print(f"{action.side.upper()} {action.symbol}: {outcome}")
     return 0
 
@@ -565,7 +566,8 @@ def _autopilot_cycle(args: argparse.Namespace, memory: SQLiteMemory, settings: A
         print(f"Equity ${total_equity:,.0f}: on target, no trades.")
         return
 
-    results = execute_rebalance(plan.actions, client, memory, mode_label=mode_label, holdings_pl=holdings_pl)
+    results = execute_rebalance(plan.actions, client, memory, mode_label=mode_label, holdings_pl=holdings_pl,
+                                nonfractionable=memory.get_nonfractionable_symbols())
     placed = sum(1 for _action, outcome in results if not outcome.startswith("FAILED"))
     print(f"Equity ${total_equity:,.0f}: {placed}/{len(results)} order(s) placed.")
     for action, outcome in results:

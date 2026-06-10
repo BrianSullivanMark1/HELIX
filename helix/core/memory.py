@@ -121,7 +121,8 @@ class SQLiteMemory:
                 );
 
                 CREATE TABLE IF NOT EXISTS market_assets (
-                    symbol TEXT PRIMARY KEY
+                    symbol TEXT PRIMARY KEY,
+                    fractionable INTEGER NOT NULL DEFAULT 1
                 );
                 """
             )
@@ -131,6 +132,7 @@ class SQLiteMemory:
         additions = [
             ("sell_log", "return_pct", "REAL"),
             ("sell_log", "realized_pl", "REAL"),
+            ("market_assets", "fractionable", "INTEGER NOT NULL DEFAULT 1"),  # §42 whole-share support
         ]
         with self.connect() as connection:
             for table, column, col_type in additions:
@@ -568,20 +570,43 @@ class SQLiteMemory:
             )
         return len(rows)
 
-    def replace_market_assets(self, symbols) -> int:
-        """Replace the cached real-market universe (§36) with the current tradeable Alpaca asset set —
-        a full snapshot (clear + insert), refreshed on a weekly cadence. Returns the count stored."""
-        unique = sorted({str(s).strip().upper() for s in (symbols or []) if str(s).strip()})
+    def replace_market_assets(self, assets) -> int:
+        """Replace the cached real-market universe (§36/§42) with the current tradeable Alpaca set — a
+        full snapshot (clear + insert), refreshed weekly. Accepts (symbol, fractionable) pairs OR bare
+        symbols (treated fractionable). Records `fractionable` so the order path knows which names need
+        WHOLE-share orders. Returns the count stored."""
+        rows: dict[str, int] = {}
+        for item in assets or []:
+            if isinstance(item, (tuple, list)) and item:
+                symbol = str(item[0]).strip().upper()
+                frac = 0 if (len(item) > 1 and not item[1]) else 1
+            else:
+                symbol, frac = str(item).strip().upper(), 1
+            if symbol:
+                rows[symbol] = frac
         with self.connect() as connection:
             connection.execute("DELETE FROM market_assets")
-            connection.executemany("INSERT OR IGNORE INTO market_assets (symbol) VALUES (?)", [(s,) for s in unique])
-        return len(unique)
+            connection.executemany(
+                "INSERT OR IGNORE INTO market_assets (symbol, fractionable) VALUES (?, ?)",
+                sorted(rows.items()),
+            )
+        return len(rows)
 
     def get_tradable_universe(self) -> set[str]:
         """The cached set of real, tradeable tickers (§36) — discovered names are validated against it."""
         with self.connect() as connection:
             rows = connection.execute("SELECT symbol FROM market_assets").fetchall()
         return {row["symbol"] for row in rows}
+
+    def get_nonfractionable_symbols(self) -> set[str]:
+        """Universe symbols that are NOT fractionable (§42) — these need WHOLE-share orders, not the
+        notional dollar orders HELIX uses for fractionable names."""
+        try:
+            with self.connect() as connection:
+                rows = connection.execute("SELECT symbol FROM market_assets WHERE fractionable = 0").fetchall()
+            return {row["symbol"] for row in rows}
+        except Exception:
+            return set()
 
     def get_sectors(self, symbols: list[str] | None = None) -> dict[str, str]:
         """Cached SEC sectors {SYMBOL: sector}, optionally limited to `symbols`."""

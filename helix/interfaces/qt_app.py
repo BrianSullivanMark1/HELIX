@@ -99,6 +99,8 @@ from helix.core.config import load_config
 from helix.investment.autopilot import (
     DAYTRADE_SETTING,
     DEFAULT_DAYTRADE_ALLOCATION_PCT,
+    DEFAULT_INDEX_ALLOCATION_PCT,
+    DEFAULT_INDEX_SYMBOL,
     DEFAULT_DAYTRADE_RESEARCH_DAYS,
     DEFAULT_CORE_STOP_LOSS_PCT,
     DEFAULT_DEFENSIVE_CASH_BUFFER_PCT,
@@ -137,6 +139,7 @@ from helix.investment.autopilot import (
     refresh_scorecard_feedback,
     screen_candidates,
     SCREEN_PROFILES,
+    tradable_assets,
     tradable_symbols,
 )
 from helix.investment.market_data import build_market_context, factor_signals, regime_risk_off, volatility_signals
@@ -192,6 +195,9 @@ INVEST_MODE_PRACTICE = "Practice (paper money)"
 INVEST_MODE_REAL = "Real (live money)"
 INVEST_SPECIAL_ALLOCATION_SETTING = "invest_special_allocation_pct"
 INVEST_DAYTRADE_ALLOCATION_SETTING = "invest_daytrade_allocation_pct"  # day-trade sleeve % (§27)
+INVEST_INDEX_ALLOCATION_SETTING = "invest_index_allocation_pct"  # index-core sleeve % (§42)
+INVEST_INDEX_SYMBOL_SETTING = "invest_index_symbol"             # the index ETF to hold (default VOO)
+INVEST_CORE_SATELLITE_APPLIED_SETTING = "invest_core_satellite_applied"  # one-time core-satellite mix migration
 INVEST_SPECIAL_FUNDING_SETTING = "invest_special_funding"  # "house" (profits only) | "always" (deploy the % from day one)
 INVEST_AI_RESEARCH_SETTING = "invest_ai_research"          # on = refresh research on cadence (Claude $); off = trade off cached only
 INVEST_CORE_RATING_DAYS_SETTING = "invest_core_rating_days"  # re-rate the HELIX 500 every N days (default 7)
@@ -2917,6 +2923,8 @@ class InvestTab(QWidget):
         self.interval.setCurrentText(self.settings.get(INVEST_AUTO_INTERVAL_SETTING, "1 day"))
         self.interval.currentTextChanged.connect(self.on_interval_changed)
 
+        # Adopt the core-satellite mix once (§42) BEFORE the sleeve sliders read their values below.
+        self._apply_core_satellite_default()
         self.special_position = percent_box(
             float(self.settings.get(INVEST_SPECIAL_ALLOCATION_SETTING, DEFAULT_SPECIAL_ALLOCATION_PCT * 100))
         )
@@ -2931,6 +2939,15 @@ class InvestTab(QWidget):
         )
         self.daytrade_position.editingFinished.connect(
             lambda: self.settings.set(INVEST_DAYTRADE_ALLOCATION_SETTING, self.daytrade_position.value())
+        )
+
+        # Index core % (§42, core-satellite): hold a broad index ETF (VOO) at this %, carved off the top
+        # like the speculative sleeves. The book tracks the market by default; the AI sleeves are satellites.
+        self.index_position = percent_box(
+            float(self.settings.get(INVEST_INDEX_ALLOCATION_SETTING, DEFAULT_INDEX_ALLOCATION_PCT * 100))
+        )
+        self.index_position.editingFinished.connect(
+            lambda: self.settings.set(INVEST_INDEX_ALLOCATION_SETTING, self.index_position.value())
         )
 
         # How the Special Stocks sleeve is funded (§21): house-money (only profits above your starting
@@ -3161,6 +3178,7 @@ class InvestTab(QWidget):
         # Keep the core / special / day-trade split labels in sync with the % controls, live.
         self.special_position.valueChanged.connect(lambda _v: self._update_sleeve_labels())
         self.daytrade_position.valueChanged.connect(lambda _v: self._update_sleeve_labels())
+        self.index_position.valueChanged.connect(lambda _v: self._update_sleeve_labels())
         self._update_sleeve_labels()
         self.positions_table = self._make_positions_table()
         self.positions_table.setMinimumHeight(240)
@@ -3338,12 +3356,25 @@ class InvestTab(QWidget):
         core_days = int(self.settings.get(INVEST_CORE_RATING_DAYS_SETTING, DEFAULT_RATING_MAX_AGE_DAYS) or DEFAULT_RATING_MAX_AGE_DAYS)
         return min(stamps) + timedelta(days=core_days)
 
+    def _apply_core_satellite_default(self) -> None:
+        """One-time (§42): move an existing account to the core-satellite mix — an index core plus
+        LIGHTER speculative sleeves — instead of the old all-equity speculative weights. Sets the mix
+        once (flag-guarded) so the account de-risks on upgrade; fully adjustable in Settings afterward."""
+        if self.settings.get(INVEST_CORE_SATELLITE_APPLIED_SETTING):
+            return
+        self.settings.set(INVEST_INDEX_ALLOCATION_SETTING, DEFAULT_INDEX_ALLOCATION_PCT * 100)
+        self.settings.set(INVEST_SPECIAL_ALLOCATION_SETTING, DEFAULT_SPECIAL_ALLOCATION_PCT * 100)
+        self.settings.set(INVEST_DAYTRADE_ALLOCATION_SETTING, DEFAULT_DAYTRADE_ALLOCATION_PCT * 100)
+        self.settings.set(INVEST_INDEX_SYMBOL_SETTING, DEFAULT_INDEX_SYMBOL)
+        self.settings.set(INVEST_CORE_SATELLITE_APPLIED_SETTING, "1")
+
     def _update_sleeve_labels(self) -> None:
-        """Keep the Assets headings (Core / Special / Day-trade split) in sync with the % controls."""
+        """Keep the Assets headings (Index / Core / Special / Day-trade split) in sync with the % controls."""
         special = self.special_position.value()
         daytrade = self.daytrade_position.value()
-        core = max(0.0, 100.0 - special - daytrade)
-        self.core_label.setText(f"Core — HELIX 500 (the safer ~{core:.0f}%)")
+        index = self.index_position.value()
+        core = max(0.0, 100.0 - special - daytrade - index)
+        self.core_label.setText(f"Core — HELIX 500 (~{core:.0f}%, + index {index:.0f}%)")
         self.special_heading.setText(f"Special Stocks — higher-risk sleeve (the ~{special:.0f}%)")
         self.daytrade_heading.setText(f"Day-trade — short-term momentum (the ~{daytrade:.0f}%)")
 
@@ -3443,38 +3474,40 @@ class InvestTab(QWidget):
         adv.setVerticalSpacing(12)
         adv.setContentsMargins(0, 0, 0, 0)
         adv.addWidget(_header("Sleeves — how the money is split:"), 0, 0, 1, 3)
-        adv.addWidget(QLabel("Special stocks %"), 1, 0); adv.addWidget(self.special_position, 1, 1)
-        adv.addWidget(QLabel("Day-trade %"), 2, 0); adv.addWidget(self.daytrade_position, 2, 1)
-        adv.addWidget(QLabel("Special funding"), 3, 0); adv.addWidget(self.special_funding, 3, 1)
-        adv.addWidget(_header("AI research — cost & depth:"), 4, 0, 1, 3)
-        adv.addWidget(self.ai_research_check, 5, 0, 1, 3)
-        adv.addWidget(QLabel("Research effort"), 6, 0); adv.addWidget(self.research_tokens, 6, 1, 1, 2)
-        adv.addWidget(_header("Research cadence — how often Claude re-runs (uses tokens):"), 7, 0, 1, 3)
-        adv.addWidget(QLabel("Re-rate core stocks"), 8, 0); adv.addWidget(self.core_days, 8, 1)
-        adv.addWidget(QLabel("Scout special stocks"), 9, 0); adv.addWidget(self.special_days, 9, 1)
-        adv.addWidget(QLabel("Scout day-trade stocks"), 10, 0); adv.addWidget(self.daytrade_days, 10, 1)
-        adv.addWidget(QLabel("Review the roster"), 11, 0); adv.addWidget(self.roster_days, 11, 1)
-        adv.addWidget(_header("Concentration — how many ideas to hold (§30):"), 12, 0, 1, 3)
-        adv.addWidget(QLabel("Max core positions"), 13, 0); adv.addWidget(self.max_positions, 13, 1)
-        adv.addWidget(self.vol_adjust_check, 14, 0, 1, 3)
-        adv.addWidget(self.factor_overlay_check, 15, 0, 1, 3)
-        adv.addWidget(self.adversarial_check, 16, 0, 1, 3)
-        adv.addWidget(_header("Fundamentals — weigh the numbers, not just price/news (§32):"), 17, 0, 1, 3)
-        adv.addWidget(self.fundamentals_check, 18, 0, 1, 3)
-        adv.addWidget(QLabel("Refresh fundamentals"), 19, 0); adv.addWidget(self.fundamentals_days, 19, 1)
-        adv.addWidget(_header("Risk controls — keep one bet/crash/blow-up from sinking you (§35):"), 20, 0, 1, 3)
-        adv.addWidget(self.sector_cap_check, 21, 0, 1, 3)
-        adv.addWidget(self.drawdown_brake_check, 22, 0, 1, 3)
-        adv.addWidget(self.regime_check, 23, 0, 1, 3)
-        adv.addWidget(self.stop_loss_check, 24, 0, 1, 3)
-        adv.addWidget(self.diversify_check, 25, 0, 1, 3)
+        adv.addWidget(QLabel("Index core % (VOO)"), 1, 0); adv.addWidget(self.index_position, 1, 1)
+        adv.addWidget(QLabel("Special stocks %"), 2, 0); adv.addWidget(self.special_position, 2, 1)
+        adv.addWidget(QLabel("Day-trade %"), 3, 0); adv.addWidget(self.daytrade_position, 3, 1)
+        adv.addWidget(QLabel("Special funding"), 4, 0); adv.addWidget(self.special_funding, 4, 1)
+        adv.addWidget(_header("AI research — cost & depth:"), 5, 0, 1, 3)
+        adv.addWidget(self.ai_research_check, 6, 0, 1, 3)
+        adv.addWidget(QLabel("Research effort"), 7, 0); adv.addWidget(self.research_tokens, 7, 1, 1, 2)
+        adv.addWidget(_header("Research cadence — how often Claude re-runs (uses tokens):"), 8, 0, 1, 3)
+        adv.addWidget(QLabel("Re-rate core stocks"), 9, 0); adv.addWidget(self.core_days, 9, 1)
+        adv.addWidget(QLabel("Scout special stocks"), 10, 0); adv.addWidget(self.special_days, 10, 1)
+        adv.addWidget(QLabel("Scout day-trade stocks"), 11, 0); adv.addWidget(self.daytrade_days, 11, 1)
+        adv.addWidget(QLabel("Review the roster"), 12, 0); adv.addWidget(self.roster_days, 12, 1)
+        adv.addWidget(_header("Concentration — how many ideas to hold (§30):"), 13, 0, 1, 3)
+        adv.addWidget(QLabel("Max core positions"), 14, 0); adv.addWidget(self.max_positions, 14, 1)
+        adv.addWidget(self.vol_adjust_check, 15, 0, 1, 3)
+        adv.addWidget(self.factor_overlay_check, 16, 0, 1, 3)
+        adv.addWidget(self.adversarial_check, 17, 0, 1, 3)
+        adv.addWidget(_header("Fundamentals — weigh the numbers, not just price/news (§32):"), 18, 0, 1, 3)
+        adv.addWidget(self.fundamentals_check, 19, 0, 1, 3)
+        adv.addWidget(QLabel("Refresh fundamentals"), 20, 0); adv.addWidget(self.fundamentals_days, 20, 1)
+        adv.addWidget(_header("Risk controls — keep one bet/crash/blow-up from sinking you (§35):"), 21, 0, 1, 3)
+        adv.addWidget(self.sector_cap_check, 22, 0, 1, 3)
+        adv.addWidget(self.drawdown_brake_check, 23, 0, 1, 3)
+        adv.addWidget(self.regime_check, 24, 0, 1, 3)
+        adv.addWidget(self.stop_loss_check, 25, 0, 1, 3)
+        adv.addWidget(self.diversify_check, 26, 0, 1, 3)
         note = QLabel(
-            "Settings save as you change them. Special funding — House money only buys speculative names "
-            "from profit above your starting balance; Always invests the full % from day one (riskier)."
+            "Settings save as you change them. Index core — a VOO position so the book tracks the market; "
+            "the AI sleeves are satellites trying to beat it. Special funding — House money only buys "
+            "speculative names from profit above your starting balance; Always invests the full % (riskier)."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#6fb3c0;")
-        adv.addWidget(note, 26, 0, 1, 3)
+        adv.addWidget(note, 27, 0, 1, 3)
         self.advanced_box.setVisible(False)
         self.advanced_toggle.toggled.connect(self.advanced_box.setVisible)
         body.addWidget(self.advanced_box)
@@ -3691,7 +3724,7 @@ class InvestTab(QWidget):
                 pass
         try:
             self.research_step.emit("Refreshing the tradeable market list...")
-            universe = tradable_symbols(client.get_assets())
+            universe = tradable_assets(client.get_assets(), require_fractionable=False)  # §42: all tradable names
             if universe:
                 self.memory.replace_market_assets(universe)
                 self.settings.set(LAST_ASSETS_FETCH_SETTING, datetime.now().strftime("%Y-%m-%d"))
@@ -4165,6 +4198,8 @@ class InvestTab(QWidget):
             special_principal=special_principal,
             daytrade_symbols=daytrade_symbols,
             daytrade_allocation_pct=max(0.0, daytrade_pct) / 100.0,
+            index_symbol=self.settings.get(INVEST_INDEX_SYMBOL_SETTING, DEFAULT_INDEX_SYMBOL),
+            index_allocation_pct=max(0.0, float(self.settings.get(INVEST_INDEX_ALLOCATION_SETTING, DEFAULT_INDEX_ALLOCATION_PCT * 100) or 0.0)) / 100.0,
             holdings_pl=holdings_pl,
             market_context_fn=lambda syms: self._fetch_market_context(client, syms),
             on_issue=self.research_issue.emit,
@@ -4173,7 +4208,8 @@ class InvestTab(QWidget):
         )
         mode_label = "live" if is_real else "paper"
         self.research_step.emit("Placing orders...")
-        results = execute_rebalance(plan.actions, client, self.memory, mode_label=mode_label, holdings_pl=holdings_pl)
+        results = execute_rebalance(plan.actions, client, self.memory, mode_label=mode_label, holdings_pl=holdings_pl,
+                                    nonfractionable=self.memory.get_nonfractionable_symbols())
         placed = sum(1 for _action, outcome in results if not outcome.startswith("FAILED"))
         status = f"placed {placed}/{len(results)} order(s)."
         if rotated:

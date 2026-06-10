@@ -830,6 +830,11 @@ live DB while the app is running (lock contention).
   hardened** (crash guard → `data/helix.log`, self-healing cycle, `scripts/run_helix.py` relaunch +
   **paper auto-resume** on launch); and the §35 risk controls are now **backtested on a down market**
   (§29 `--down-markets`: 2022 max drawdown 17.1%→13.8%).
+- **Core-satellite + full market (§42, 2026-06-06)** — after a live paper run showed the book trailing
+  the S&P on a high-beta speculative tilt: an **index core** (VOO 40%) + lighter speculative sleeves
+  (one-time migration) so the book tracks the market and the AI is the satellite; and the tradable
+  universe expands from ~7,000 fractionable names to **all ~12,722** via whole-share orders for the
+  non-fractionable ones.
 
 **Likely next steps:** the **Xpert two-way voice assistant + action layer shipped** (§23–§24),
 including a hands-free **"HELIX" wake word** and mic/speaker device pickers (works with the Bluetooth
@@ -2156,6 +2161,62 @@ faster-whisper downloads its model on first voice use (needs internet). Keys tra
 inside `data\` — treat the tablet as a trusted device. **Verified (2026-06-06):** the frozen-vs-dev
 root resolution is unit-tested, both `--dry-run` commands are correct, and `compileall` + import are
 clean; a real lean `--onedir` build was run to confirm packaging (see the session log).
+
+## 42. Core-satellite + the whole tradable market (de-risk + breadth)
+
+> **Status: SHIPPED (paper).** Two paired changes after a live paper run showed the book trailing the
+> S&P with a high-beta speculative tilt and a universe limited to fractionable names: **(a)** an **index
+> core** + **lighter speculative** sleeves so the book tracks the market by default and the AI is the
+> satellite; **(b)** expand the tradable universe from ~7,000 fractionable names to **all ~12,722
+> tradable names** via **whole-share orders** for the non-fractionable ones.
+
+**Why (measured, 2026-06).** A ~12-day paper run: account −2.4% vs S&P +1.9%. The drawdown came from
+the **speculative sleeves** — the top positions were high-beta names (MSTR, ASTS, QBTS, RKLB, ARKK)
+sized ~15–20× the core's ~$235 slices, so a handful of moonshots drove the whole swing. And only big
+names appeared in Special/Day-trade partly because the universe was filtered to **fractionable** names
+(7,044 of 12,722 tradable) — the fractionable requirement alone dropped ~5,700 mostly smaller names.
+
+**Core-satellite (the engine).** `build_rebalance_plan` gains `index_symbol` + `index_allocation_pct`:
+an index ETF (default **VOO 40%**) is carved off the top like the other sleeves and held at a fixed
+target (set AFTER, so exempt from, the sector cap — it *is* the market). The AI **Core** gets what's
+left after Index + Special + Day-trade + the cash buffer. The new default mix is **Index 40 / Core ~35 /
+Special 10 / Day-trade 5 / cash 10** (down from Special 20 / Day-trade 10, and from the user's saved
+30/20) — a one-time, flag-guarded migration (`_apply_core_satellite_default`) moves an existing account
+onto it on the next launch; the **Index core %** slider (Settings → Sleeves) tunes it. VOO is
+fractionable, so the normal notional path fills it — no order-path risk.
+
+**The whole tradable market (universe + order path).** The asset cache now stores `fractionable` per
+symbol (`tradable_assets` → `replace_market_assets`; the fetch drops `require_fractionable`), so
+`get_tradable_universe()` returns all **12,722** names and `get_nonfractionable_symbols()` flags the
+~5,700 whole-share-only ones. `execute_rebalance` routes by fractionability: **fractionable → the
+original notional dollar order (unchanged)**; **non-fractionable BUY → a WHOLE-share `qty` order**
+(priced from recent daily bars, skipped if the dollar amount can't afford even one share);
+**non-fractionable SELL → `close_position`** (full exit, or a percentage trim via `DELETE
+/v2/positions/{symbol}`). So the ~5,700 smaller names the fractionable filter used to drop are now
+tradeable — cheap ones fit even the core's small slices; pricier ones land in the larger sleeves.
+
+**Safety / gradualness.** The fractionable path is **byte-for-byte unchanged**, and with no
+`nonfractionable` set `execute_rebalance` behaves exactly as before. Non-fractionable handling only
+activates once the weekly asset refresh re-populates the universe (expanded + flagged) AND a
+non-fractionable name actually enters a sleeve — so the change rolls in gradually, never retroactively
+disrupting current holdings. Live-mode gating and "one failure never aborts the batch" are preserved.
+
+**Honest scope.** The index core is the surest lever (captures the market, caps the downside of bad
+picks); the lighter speculative + broader universe are bets the §28 scorecard still judges. Whole-share
+fills round a non-fractionable name's size DOWN to whole shares (skipped if unaffordable). Liquidity is
+still IEX-feed-scaled (§37). Paper-first; not financial advice.
+
+**Decisions locked:** index core = a fixed-target ETF sleeve (VOO 40% default), carved off the top,
+sector-cap-exempt · lighter speculative defaults (Special 10 / Day-trade 5), one-time migration,
+slider-adjustable · universe = ALL tradable names (fractionable flag stored) · non-fractionable buy →
+whole shares (skip if < 1 share), sell → close-position · fractionable path unchanged, gradual rollout ·
+paper-first.
+
+**Verified (2026-06-06):** hermetic engine test (index target carved at the right $, core reduced,
+sleeves+buffer sum, off when pct=0 — 8 checks); hermetic order-path test with a stub broker (frac
+notional unchanged, non-frac whole-share buy = 80, skip-if-<1-share / no-price, full-exit + 25%-trim
+close-position, failed-order resilience, no-nonfrac back-compat — 10 checks); a **live spot-check** (the
+universe expands to **12,722** names, **5,678** flagged non-fractionable); compile + import clean.
 
 ---
 

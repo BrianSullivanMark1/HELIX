@@ -215,6 +215,19 @@ class AlpacaClient:
         response = self._request("POST", "/v2/orders", body=payload)
         return response if isinstance(response, dict) else {}
 
+    def close_position(self, symbol: str, *, percentage: float | None = None) -> dict[str, Any]:
+        """Close (or partially close) a position via DELETE /v2/positions/{symbol} (§42). Used to SELL
+        NON-FRACTIONABLE names, which can't take a notional sell — Alpaca liquidates whole shares. With
+        `percentage` (0-100) it trims that share of the position; without it, it closes the whole position."""
+        symbol = symbol.strip().upper()
+        if not symbol:
+            raise AlpacaError("Symbol is required to close a position.")
+        query = None
+        if percentage is not None:
+            query = {"percentage": str(round(max(0.0, min(100.0, float(percentage))), 2))}
+        response = self._request("DELETE", f"/v2/positions/{symbol}", query=query)
+        return response if isinstance(response, dict) else {}
+
     def _request(
         self,
         method: str,

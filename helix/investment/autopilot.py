@@ -40,7 +40,7 @@ DEFAULT_ROSTER_REVIEW_DAYS = 90  # quarterly — low turnover (§20)
 # Special Stocks (§21): a high-risk satellite sleeve, separate from the HELIX 100 core.
 SPECIAL_SETTING = "invest_special_stocks"
 LAST_SPECIAL_RESEARCH_SETTING = "invest_last_special_research"
-DEFAULT_SPECIAL_ALLOCATION_PCT = 0.20   # share of the account in the speculative sleeve (user-set)
+DEFAULT_SPECIAL_ALLOCATION_PCT = 0.10   # share of the account in the speculative sleeve (lighter default, §42)
 DEFAULT_SPECIAL_MAX_POSITION_PCT = 0.05  # hard cap per speculative name (a moonshot can't sink you)
 DEFAULT_SPECIAL_RESEARCH_DAYS = 1        # re-scout nightly (events move fast), during market-closed idle time
 DEFAULT_SPECIAL_MAX_NAMES = 12           # buy-and-hold sleeve size cap (accumulate the best, hold them)
@@ -49,12 +49,18 @@ DEFAULT_SPECIAL_MAX_NAMES = 12           # buy-and-hold sleeve size cap (accumul
 # exited on a take-profit / stop-loss / rotate-off (NOT buy-and-hold like Special). High risk, small.
 DAYTRADE_SETTING = "invest_daytrade_stocks"
 LAST_DAYTRADE_RESEARCH_SETTING = "invest_last_daytrade_research"
-DEFAULT_DAYTRADE_ALLOCATION_PCT = 0.10   # share of the account in the day-trade sleeve (user-set)
+DEFAULT_DAYTRADE_ALLOCATION_PCT = 0.05   # share of the account in the day-trade sleeve (lighter default, §42)
 DEFAULT_DAYTRADE_MAX_POSITION_PCT = 0.05 # hard cap per day-trade name
 DEFAULT_DAYTRADE_RESEARCH_DAYS = 1       # scout fresh momentum every day (setups move fast)
 DEFAULT_DAYTRADE_MAX_NAMES = 8           # how many momentum names to hold at once
 DAYTRADE_TAKE_PROFIT_PCT = 0.15          # exit a winner once it is up ~15%
 DAYTRADE_STOP_LOSS_PCT = -0.08           # cut a loser once it is down ~8%
+
+# Index core (§42, core-satellite): hold a broad index ETF at a fixed % so the book tracks the market by
+# default and the AI sleeves become satellites trying to beat it. Default 40%, paired with the lighter
+# speculative sleeves above so ~half the book simply tracks the market (cuts the high-beta drawdown).
+DEFAULT_INDEX_ALLOCATION_PCT = 0.40
+DEFAULT_INDEX_SYMBOL = "VOO"
 
 # Research token budget (§10/§25). The max_tokens ceiling on each Claude research call. Rating
 # ~100 names with live-data rationales runs ~3k-4.5k output tokens — right at the old 4096 cap,
@@ -190,6 +196,27 @@ def tradable_symbols(assets: list, *, require_fractionable: bool = True) -> set[
         if symbol:
             out.add(symbol)
     return out
+
+
+def tradable_assets(assets: list, *, require_fractionable: bool = False) -> list[tuple[str, bool]]:
+    """Like `tradable_symbols`, but returns (symbol, fractionable) pairs (§42) so the cache can record
+    which names need WHOLE-share orders. Same filters (active, tradable, major exchange); fractionable
+    is NOT required by default — expanding the universe to whole-share-only names too. Pure."""
+    out: dict[str, bool] = {}
+    for asset in assets or []:
+        if not isinstance(asset, dict):
+            continue
+        if not asset.get("tradable") or str(asset.get("status", "")).lower() != "active":
+            continue
+        if asset.get("exchange") not in MAJOR_EXCHANGES:
+            continue
+        frac = bool(asset.get("fractionable"))
+        if require_fractionable and not frac:
+            continue
+        symbol = str(asset.get("symbol", "")).strip().upper()
+        if symbol:
+            out[symbol] = frac
+    return sorted(out.items())
 
 
 def normalize_roster(raw: Any) -> list[str]:
@@ -796,6 +823,8 @@ def build_rebalance_plan(
     daytrade_symbols: list | None = None,
     daytrade_allocation_pct: float = 0.0,
     daytrade_max_position_pct: float = DEFAULT_DAYTRADE_MAX_POSITION_PCT,
+    index_symbol: str = "",
+    index_allocation_pct: float = 0.0,
     holdings_pl: dict | None = None,
     market_context_fn: Callable[[list], str] | None = None,
     on_issue: Callable[[str], None] | None = None,
@@ -891,7 +920,13 @@ def build_rebalance_plan(
     daytrade_set = set(normalize_roster(daytrade_symbols)) - roster_symbols - special_set
     daytrade_budget = base * max(0.0, daytrade_allocation_pct) if daytrade_set else 0.0
 
-    core_investable = max(0.0, investable - special_budget - daytrade_budget)
+    # Index core (§42, core-satellite): hold a broad index ETF at a fixed % so the book captures the
+    # market by default and the AI sleeves are satellites trying to beat it. Carved off the top like the
+    # other sleeves; it's a plain fractionable ETF, so the normal notional path fills it.
+    index_symbol = str(index_symbol or "").strip().upper()
+    index_budget = base * max(0.0, index_allocation_pct) if index_symbol else 0.0
+
+    core_investable = max(0.0, investable - special_budget - daytrade_budget - index_budget)
 
     buy_symbols = [
         symbol
@@ -947,6 +982,11 @@ def build_rebalance_plan(
     # one big macro bet. Applies to the core sleeve; unmapped names are exempt; freed budget -> cash.
     if risk.sectors and risk.sector_cap_pct > 0:
         targets = apply_sector_cap(targets, risk.sectors, base * risk.sector_cap_pct)
+
+    # Index core (§42): a fixed market-tracking hold, set AFTER the sector cap (it IS the market, so it's
+    # exempt) and distinct from the rated core — the engine buys/sells it toward its budget like any target.
+    if index_symbol and index_budget > 0:
+        targets[index_symbol] = round(index_budget, 2)
 
     # Special sleeve (§21) — BUY-AND-HOLD: hold what we already own (no trim, no exit) so a winner can
     # run like NVIDIA, and use whatever budget is left to open small new positions in fresh picks.
@@ -1068,32 +1108,68 @@ def execute_rebalance(
     memory: Any,
     mode_label: str = "paper",
     holdings_pl: dict | None = None,
+    nonfractionable: set | None = None,
 ) -> list[tuple[RebalanceAction, str]]:
-    """Submit each action as a market/day notional order and log it. One failure never aborts the batch."""
+    """Submit each action and log it. One failure never aborts the batch.
+
+    Fractionable names use a notional DOLLAR order (the original, unchanged path). NON-fractionable
+    names (§42) can't take notional, so a BUY becomes a WHOLE-share qty order (priced from recent bars,
+    skipped if the dollar amount can't afford even one share) and a SELL becomes a close-position (full
+    exit, or a percentage trim) — letting HELIX trade the whole-share-only names the fractionable filter
+    used to drop. With no `nonfractionable` set, behavior is identical to before."""
     entry_type = "live_trade" if mode_label == "live" else "paper_trade"
+    nonfrac = {str(s).strip().upper() for s in (nonfractionable or set())}
     results: list[tuple[RebalanceAction, str]] = []
+
+    # Price the non-fractionable BUYS once (whole-share sizing needs a price). Best-effort.
+    prices: dict[str, float] = {}
+    nf_buys = [a.symbol for a in actions if a.side == "buy" and a.amount_usd > 0 and a.symbol in nonfrac]
+    if nf_buys:
+        try:
+            start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            for symbol, bars in (alpaca_client.get_bars_multi(nf_buys, timeframe="1Day", start=start) or {}).items():
+                closes = bars_to_dated_closes(bars)
+                if closes:
+                    prices[str(symbol).strip().upper()] = closes[-1][1]
+        except Exception:  # noqa: BLE001 — no price -> those buys simply skip
+            prices = {}
+
     for action in actions:
         if action.amount_usd <= 0:
             continue
+        symbol = action.symbol
+        is_nf = symbol in nonfrac
         try:
-            order = alpaca_client.submit_order(
-                symbol=action.symbol,
-                side=action.side,
-                notional=action.amount_usd,
-            )
+            if is_nf and action.side == "buy":
+                price = prices.get(symbol, 0.0)
+                qty = int(action.amount_usd // price) if price > 0 else 0
+                if qty < 1:
+                    results.append((action, f"skipped: {symbol} is whole-share-only and ${action.amount_usd:,.0f} < 1 share"))
+                    continue
+                order = alpaca_client.submit_order(symbol=symbol, side="buy", qty=qty)
+                filled_usd = qty * price
+            elif is_nf and action.side == "sell":
+                if action.target_usd <= 0 or action.current_usd <= 0:
+                    order = alpaca_client.close_position(symbol)  # full exit (sell all whole shares)
+                else:
+                    order = alpaca_client.close_position(symbol, percentage=100.0 * action.amount_usd / action.current_usd)
+                filled_usd = action.amount_usd
+            else:  # fractionable — the original notional dollar path, unchanged
+                order = alpaca_client.submit_order(symbol=symbol, side=action.side, notional=action.amount_usd)
+                filled_usd = action.amount_usd
             status = order.get("status", "submitted")
             order_id = order.get("id", "unknown")
-            outcome = f"{action.side} ${action.amount_usd:,.2f} -> {status}"
+            outcome = f"{action.side} ${filled_usd:,.2f} -> {status}"
             memory.add_journal_entry(
                 entry_type=entry_type,
-                title=f"{mode_label.title()} {action.side} {action.symbol}",
+                title=f"{mode_label.title()} {action.side} {symbol}",
                 body="\n".join(
                     [
                         f"Order ID: {order_id}",
                         f"Status: {status}",
-                        f"Symbol: {action.symbol}",
+                        f"Symbol: {symbol}",
                         f"Side: {action.side}",
-                        f"Notional: {action.amount_usd:.2f}",
+                        f"Amount: {filled_usd:.2f}{' (whole shares)' if is_nf else ' (notional)'}",
                         f"Reason: {action.reason}",
                         f"Confidence: {action.confidence}",
                         f"Rationale: {action.rationale}",
@@ -1102,17 +1178,15 @@ def execute_rebalance(
                 ),
             )
             if action.side == "sell":
-                pl = (holdings_pl or {}).get(action.symbol)
+                pl = (holdings_pl or {}).get(symbol)
                 return_pct = realized_pl = None
                 if pl:
                     market_value = float(pl.get("market_value", 0.0) or 0.0)
                     return_pct = float(pl.get("unrealized_plpc", 0.0) or 0.0) * 100.0
                     if market_value:
-                        realized_pl = float(pl.get("unrealized_pl", 0.0) or 0.0) * (action.amount_usd / market_value)
+                        realized_pl = float(pl.get("unrealized_pl", 0.0) or 0.0) * (filled_usd / market_value)
                 try:
-                    memory.record_sell(
-                        action.symbol, action.reason, action.rationale, action.amount_usd, return_pct, realized_pl
-                    )
+                    memory.record_sell(symbol, action.reason, action.rationale, filled_usd, return_pct, realized_pl)
                 except Exception:
                     pass
         except AlpacaError as error:
