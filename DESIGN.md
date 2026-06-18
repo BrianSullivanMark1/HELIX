@@ -123,6 +123,14 @@ Entry point. Delegates straight to `helix.interfaces.cli:main`.
 | `slack.py` | `SlackClient` — a read-only `urllib` client over the Slack Web API (mirrors `AlpacaClient`): `auth_test`, `list_conversations`, `conversations_history`, `users_info`. `gather_slack_digest()` assembles a bounded "needs attention" digest (mentions / DMs / busy channels); `format_slack_digest()` renders it. `SLACK_TOKEN_SETTING`, `SLACK_USER_SCOPES`. No posting (read-only). |
 | `gitwork.py` | Pure, local git-history reader (`subprocess` `git log`, **never** pull/fetch/mutate): `repo_summary()` / `gather_git_digest()` parse recent commits + line churn per repo; `format_git_digest()` renders it; `parse_repos()`, `ENTERPRISE_REPOS_SETTING`. |
 
+### `helix/selfdev/` — the self-improvement loop (HELIX builds HELIX)
+| File | Responsibility |
+|------|----------------|
+| `coder.py` | Runs **Opus 4.8** to edit HELIX's own code. `resolve_claude_cli()` finds the desktop `claude.exe` (newest under `%APPDATA%\Claude\claude-code\`); `run_coding_task()` makes a `selfdev/*` branch, runs `claude -p` headless (authenticated by HELIX's Anthropic key via `ANTHROPIC_API_KEY` — the interactive desktop login does **not** carry into a subprocess), commits the edit to the branch, then switches the tree **back to the deployed branch** so a restart can't load unapproved code. Returns a `CoderResult` (branch, commit, diff, summary, cost). |
+| `gitops.py` | Stdlib git **write** ops scoped to throwaway `selfdev/*` branches (branch / stage / diff / commit / `merge_to` main with `--no-ff`). `main` is never modified without explicit approval; deleting a branch discards the work. Mirrors `gitwork.py`'s `_git` style but **raises** `GitError` on failure (writes are never silent). |
+
+**Status:** `coder` + `gitops` built and **proven live** (Opus 4.8 edited the repo on a branch, reversibly, `main` untouched). Inert until wired in. **Planned next:** crash/voice triggers, a smoke-check, email (reply Yes/No/free-text) + voice approval, safe merge + restart, an Xpert `request_improvement` tool, and an Enterprise-tab panel.
+
 ### `helix/interfaces/` — the three front ends
 | File | Responsibility |
 |------|----------------|
