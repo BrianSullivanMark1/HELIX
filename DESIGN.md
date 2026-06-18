@@ -138,10 +138,11 @@ Entry point. Delegates straight to `helix.interfaces.cli:main`.
 ### `helix/vision/` — HELIX's eyes (the first embodied faculty of X)
 | File | Responsibility |
 |------|----------------|
-| `camera.py` | Capture one frame as JPEG via **OpenCV** (Windows `CAP_DSHOW`, warmup frames). Optional/guarded dep (`is_available()`); verified to coexist with Qt's QApplication. |
-| `analyze.py` | `describe_image()` → **Claude vision** (`ClaudeClient.vision()`): prompts for **tool** ID + how-to, **person** description for awareness (appearance only — no identity/web lookup), or **general**. Records AI usage. |
+| `camera.py` | Capture one JPEG via **OpenCV** from a **USB index or a stream URL** (RTSP/HTTP), plus a **named-camera registry** (add/list/remove/`capture_named`) — the "eyes" around the house (fridge, laundry, door…). Optional/guarded dep; coexists with Qt. |
+| `analyze.py` | `describe_image()` and `inventory_image()` → **Claude vision** (`ClaudeClient.vision()`): tool ID + how-to, person description for awareness (appearance only — no identity/web lookup), general look, or an **item list** for inventory. Records AI usage. |
+| `inventory.py` | Per-location store (settings) of the latest items seen at each camera — for "what's in the fridge?" and (later) low-stock → reorder. |
 
-Surfaced via the Xpert **`look`** tool (focus tool/person/general) — just ask and HELIX looks. Verified live against the webcam. OpenCV is an optional, guarded dependency (like edge-tts/faster-whisper). **Planned next:** always-on door/security monitoring, local known/unknown face recognition, and (privacy-gated) online profiling; then hardware I/O (`helix/devices/`).
+Surfaced via Xpert tools — **`look`** (tool/person/general) and **`add_camera` / `list_cameras` / `scan_inventory` / `get_inventory`** for the household eyes. Verified live. OpenCV is an optional, guarded dependency (like edge-tts/faster-whisper). **Planned next:** always-on door/security monitoring, local known/unknown face recognition, low-stock → reorder, and (privacy-gated) online profiling; then hardware I/O (`helix/devices/`).
 
 ### `helix/interfaces/` — the three front ends
 | File | Responsibility |
