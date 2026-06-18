@@ -66,7 +66,7 @@ from helix.ai.mock import (
     generate_mock_research,
 )
 from helix.ai.speech import synthesize_speech
-from helix.ai.transcribe import is_available as stt_available, transcribe
+from helix.ai.transcribe import is_available as stt_available, is_ready as stt_ready, prewarm as prewarm_stt, transcribe
 from helix.ai.actions import (
     ActionContext,
     ActionRouter,
@@ -391,6 +391,14 @@ def run_qt_app(memory: SQLiteMemory) -> int:
     log = setup_logging()
     install_crash_guard(log)  # an unhandled slot error logs + keeps the app alive, not abort (§39)
     log.info("HELIX desktop starting")
+    # Speech-to-text MUST initialize its native runtime BEFORE QApplication exists. Constructing the
+    # ctranslate2 (faster-whisper) model after Qt is up segfaults the process — a native Qt<->ctranslate2
+    # OpenMP/runtime conflict that hard-crashed the app the instant the wake word fired its first
+    # transcription (§23). Loading it first, then letting Qt load on top, avoids the conflict.
+    # Best-effort and off the UI's critical path: voice degrades gracefully (is_ready() gates it) if absent.
+    if stt_available():
+        log.info("preparing speech-to-text model (pre-Qt, avoids the ctranslate2/Qt crash)...")
+        log.info("speech-to-text %s", "ready" if prewarm_stt() else "unavailable")
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("HELIX")
     apply_hud_style(app)
@@ -1218,6 +1226,12 @@ class XpertTab(QWidget):
                 )
                 self.handsfree_check.setChecked(False)
                 return
+            if not stt_ready():  # model didn't pre-load before Qt — loading it now would crash (§23)
+                self._append_transcript(
+                    "HELIX", "The voice model didn't load at startup, sir — restart HELIX to enable hands-free."
+                )
+                self.handsfree_check.setChecked(False)
+                return
             if not self._claude_ready():
                 self._append_transcript("HELIX", "Save a Claude key first, sir - Learning, Claude.")
                 self.handsfree_check.setChecked(False)
@@ -1389,6 +1403,11 @@ class XpertTab(QWidget):
             self._append_transcript(
                 "HELIX",
                 "Voice needs faster-whisper, sir: pip install faster-whisper. You can type meanwhile.",
+            )
+            return
+        if not stt_ready():  # model didn't pre-load before Qt — loading it now would crash (§23)
+            self._append_transcript(
+                "HELIX", "The voice model didn't load at startup, sir — restart HELIX, then talk. Type meanwhile."
             )
             return
         if not self.mic.start():

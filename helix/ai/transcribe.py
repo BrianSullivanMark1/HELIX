@@ -59,3 +59,26 @@ def transcribe(audio_path: str, model_size: str = DEFAULT_STT_MODEL, language: s
     segments, _info = model.transcribe(audio_path, language=language, beam_size=1)
     text = " ".join(segment.text for segment in segments).strip()
     return text
+
+
+def is_ready(model_size: str = DEFAULT_STT_MODEL) -> bool:
+    """True if the model is already loaded in-process, so transcribe() will NOT construct it now."""
+    return model_size in _MODELS
+
+
+def prewarm(model_size: str = DEFAULT_STT_MODEL) -> bool:
+    """Load + cache the STT model now and report whether it is ready. Never raises.
+
+    Call this from the desktop entry point BEFORE constructing QApplication. On Windows, building the
+    ctranslate2 model AFTER Qt's QApplication has initialized triggers a native access-violation crash
+    (a Qt <-> ctranslate2 OpenMP/runtime conflict) — it hard-killed the app the instant the wake word
+    fired its first transcription (§23). Initializing ctranslate2's native runtime first, then letting
+    Qt load on top, avoids the conflict. Best-effort: returns False if faster-whisper isn't installed
+    or the model can't be built, so the caller can disable voice instead of risking a crashing load."""
+    if not is_available():
+        return False
+    try:
+        _get_model(model_size)
+        return True
+    except Exception:
+        return False
