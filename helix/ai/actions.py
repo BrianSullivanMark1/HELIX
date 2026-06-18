@@ -16,6 +16,7 @@ from helix.investment.autopilot import (
     normalize_roster,
     portfolio_snapshot,
 )
+from helix.selfdev import coder
 
 # --------------------------------------------------------------------------- #
 # Tool schemas — the spoken commands HELIX can act on. Each maps to a real engine/memory call in
@@ -164,6 +165,27 @@ XPERT_TOOLS: list[dict[str, Any]] = [
             "a few seconds. Use when the user asks to scout/find moonshots or speculative bets."
         ),
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "improve_helix",
+        "description": (
+            "Change HELIX's OWN code with the Opus 4.8 coding agent — add a feature, fix a bug, or "
+            "improve the app or yourself. Use whenever the user asks you to build, add, change, fix, or "
+            "improve something about HELIX, this app, the program, or yourself (e.g. 'add a dark mode "
+            "toggle', 'fix the Home screen', 'make yourself able to X'). The change is drafted on a "
+            "separate review branch and is NOT applied to the running app, so it is safe — but it takes "
+            "a couple of minutes and uses the Claude subscription. Pass the user's request as the task."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "A clear description of the change to make, in the user's words plus any useful detail.",
+                }
+            },
+            "required": ["task"],
+        },
     },
 ]
 
@@ -489,6 +511,24 @@ class ActionRouter:
         return ToolOutcome(
             f"{verb} the speculative sleeve — {shown}. Each is sized small and bought only from "
             "house money above your protected principal."
+        )
+
+    # -- self-improvement (HELIX edits its own code) ------------------------- #
+
+    def _tool_improve_helix(self, tool_input: dict) -> ToolOutcome:
+        task = str(tool_input.get("task", "")).strip()
+        if not task:
+            return ToolOutcome("Tell me what to build, change, or fix in HELIX, sir.")
+        result = coder.run_coding_task(task)
+        if not result.ok:
+            return ToolOutcome(f"I couldn't draft that change, sir: {result.error}")
+        files = ", ".join(result.changed_files[:8]) + ("…" if len(result.changed_files) > 8 else "")
+        cost = f" (about ${result.cost_usd:.2f})" if result.cost_usd else ""
+        summary = (result.summary or "").strip()
+        return ToolOutcome(
+            f"Done, sir — I drafted that on review branch {result.branch}{cost}. {summary} "
+            f"Files changed: {files or 'none'}. It's committed to a branch for your review and is NOT "
+            "applied to the running app yet — approving and merging it is the next step."
         )
 
 
