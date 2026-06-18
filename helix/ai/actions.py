@@ -17,6 +17,7 @@ from helix.investment.autopilot import (
     portfolio_snapshot,
 )
 from helix.selfdev import coder, engine, mailer, triggers
+from helix.vision import analyze as vision_analyze, camera as vision_camera
 
 # --------------------------------------------------------------------------- #
 # Tool schemas — the spoken commands HELIX can act on. Each maps to a real engine/memory call in
@@ -221,6 +222,26 @@ XPERT_TOOLS: list[dict[str, Any]] = [
             "crashes, bugs, or errors, or says 'fix what broke'."
         ),
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "look",
+        "description": (
+            "Look through the camera and describe what you see — HELIX's eyes, connected to the "
+            "conversation. Use focus 'tool' when the user holds something up and asks what it is or how "
+            "to use it; 'person' when asked who is at the door or to describe someone; 'general' for "
+            "'what do you see'. Captures one frame from the connected camera and analyzes it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "focus": {
+                    "type": "string",
+                    "enum": ["tool", "person", "general"],
+                    "description": "Identify/explain a tool, describe a person, or take a general look.",
+                },
+                "question": {"type": "string", "description": "Optional specific question about what's in view."},
+            },
+        },
     },
 ]
 
@@ -590,6 +611,22 @@ class ActionRouter:
         return ToolOutcome(
             f"Drafted {len(drafted)} crash fix(es) for review ({branches}). Say 'ship it' to approve, sir."
         )
+
+    # -- vision (HELIX's eyes) ----------------------------------------------- #
+
+    def _tool_look(self, tool_input: dict) -> ToolOutcome:
+        focus = str(tool_input.get("focus", "general")).lower().strip() or "general"
+        question = str(tool_input.get("question", "")).strip()
+        if not vision_camera.is_available():
+            return ToolOutcome("I don't have a camera available, sir — install opencv-python and connect a camera.")
+        try:
+            frame = vision_camera.capture_jpeg()
+        except vision_camera.CameraError as error:
+            return ToolOutcome(f"I couldn't get a camera image, sir: {error}")
+        try:
+            return ToolOutcome(vision_analyze.describe_image(frame, focus=focus, question=question, memory=self.ctx.memory))
+        except Exception as error:
+            return ToolOutcome(f"I couldn't analyze the image, sir: {error}")
 
 
 # --------------------------------------------------------------------------- #
