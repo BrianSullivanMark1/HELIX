@@ -29,6 +29,8 @@ DEFAULT_CODER_MODEL = "claude-opus-4-8"   # Opus 4.8 — the coding brain, at Br
 CODER_TIMEOUT_SECONDS = 1800              # a real coding task can take a few minutes
 CLAUDE_CLI_OVERRIDE_ENV = "HELIX_CLAUDE_CLI"
 CLAUDE_API_KEY_SETTING = "claude_api_key"  # mirrors the rest of HELIX (DESIGN.md §5)
+CLAUDE_OAUTH_TOKEN_SETTING = "claude_code_oauth_token"  # subscription auth from `claude setup-token`
+CLAUDE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
 
 def _version_key(name: str) -> tuple:
@@ -36,22 +38,36 @@ def _version_key(name: str) -> tuple:
     return tuple(int(n) for n in nums) if nums else (0,)
 
 
+def _claude_search_bases() -> list[Path]:
+    """Directories that may hold <version>/claude.exe. The desktop app is MSIX-packaged, so its files
+    appear at %APPDATA%\\Claude\\claude-code inside the package sandbox but at the real
+    %LOCALAPPDATA%\\Packages\\Claude_*\\LocalCache\\Roaming\\Claude\\claude-code from a normal process
+    (which is how HELIX runs). We check both so resolution works in either context."""
+    bases: list[Path] = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        bases.append(Path(appdata) / "Claude" / "claude-code")
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        bases.extend((Path(local) / "Packages").glob("Claude_*/LocalCache/Roaming/Claude/claude-code"))
+    return bases
+
+
 def resolve_claude_cli() -> str | None:
     """Locate the Claude Code CLI executable.
 
-    Order: the HELIX_CLAUDE_CLI override -> the newest `claude.exe` the Claude desktop app installs
-    under %APPDATA%\\Claude\\claude-code\\<version>\\ -> `claude` on PATH. None if nothing is found.
+    Order: the HELIX_CLAUDE_CLI override -> the newest `claude.exe` from the desktop app's install
+    dirs (sandbox + real MSIX paths, see `_claude_search_bases`) -> `claude` on PATH. None if missing.
     """
     override = os.environ.get(CLAUDE_CLI_OVERRIDE_ENV)
     if override and Path(override).exists():
         return override
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        base = Path(appdata) / "Claude" / "claude-code"
+    candidates: list[Path] = []
+    for base in _claude_search_bases():
         if base.is_dir():
-            candidates = [p for p in base.glob("*/claude.exe") if p.is_file()]
-            if candidates:
-                return str(max(candidates, key=lambda p: _version_key(p.parent.name)))
+            candidates.extend(p for p in base.glob("*/claude.exe") if p.is_file())
+    if candidates:
+        return str(max(candidates, key=lambda p: _version_key(p.parent.name)))
     return shutil.which("claude")
 
 
@@ -64,6 +80,22 @@ def resolve_api_key(explicit: str | None = None) -> str | None:
         return env
     try:
         return AppSettings().get(CLAUDE_API_KEY_SETTING) or None
+    except Exception:
+        return None
+
+
+def resolve_oauth_token(explicit: str | None = None) -> str | None:
+    """Subscription auth: arg -> CLAUDE_CODE_OAUTH_TOKEN env -> saved setting (from `claude setup-token`).
+
+    Preferred over the API key so self-coding bills the Claude subscription (e.g. the Enterprise plan's
+    large limit window), not the per-token API console."""
+    if explicit:
+        return explicit
+    env = os.environ.get(CLAUDE_OAUTH_TOKEN_ENV)
+    if env:
+        return env
+    try:
+        return AppSettings().get(CLAUDE_OAUTH_TOKEN_SETTING) or None
     except Exception:
         return None
 
@@ -147,6 +179,7 @@ def run_coding_task(
     *,
     repo_dir: str | None = None,
     api_key: str | None = None,
+    oauth_token: str | None = None,
     model: str = DEFAULT_CODER_MODEL,
     branch: str | None = None,
     timeout: int = CODER_TIMEOUT_SECONDS,
@@ -173,9 +206,10 @@ def run_coding_task(
     cli = cli_path or resolve_claude_cli()
     if not cli:
         return CoderResult(False, task, error="Claude Code CLI not found (set HELIX_CLAUDE_CLI).")
-    key = resolve_api_key(api_key)
-    if not key:
-        return CoderResult(False, task, error="No Anthropic API key (save one in Learning -> Claude).")
+    token = resolve_oauth_token(oauth_token)   # subscription auth (preferred)
+    key = resolve_api_key(api_key)             # API-console auth (fallback)
+    if not token and not key:
+        return CoderResult(False, task, error="No Claude auth: run `claude setup-token`, or save an Anthropic API key.")
     if not gitops.is_clean(repo):
         return CoderResult(False, task, error="Working tree has uncommitted changes; commit or stash first.")
 
@@ -196,7 +230,11 @@ def run_coding_task(
         return CoderResult(False, task, base=base, summary=summary, cost_usd=cost, error=message)
 
     env = dict(os.environ)
-    env["ANTHROPIC_API_KEY"] = key
+    if token:
+        env[CLAUDE_OAUTH_TOKEN_ENV] = token
+        env.pop("ANTHROPIC_API_KEY", None)  # prefer the subscription token; don't let an API key override it
+    else:
+        env["ANTHROPIC_API_KEY"] = key
     cmd = [cli, "-p", build_coder_prompt(task), "--output-format", "json",
            "--model", model, "--permission-mode", "acceptEdits"]
     step("Opus 4.8 is working on the change...")
