@@ -181,11 +181,13 @@ All commands run through `python main.py <command>`.
   while the app is open — only when something is actually due (§22). (The old "Suggest ways to save
   time & money" Claude button was removed — that's a question you now just ask the Xpert assistant.)
   **Planned:** smart grocery reorder (one-tap, not autonomous spend).
-- **Enterprise** → `EnterpriseTab`: a **work command center** (§26). A **Refresh and summarize** button
-  pulls recent **git commits** across your configured project folders (read-only `git log`, never a
-  pull) and your **Slack** mentions/DMs/active channels, then Claude writes a glance-able "state of your
-  enterprise" briefing (work shipped · needs your attention · bottom line). ⚙ Settings holds the Slack
-  user token + the project repo paths (both git-ignored). Off-thread; read-only.
+- **Enterprise** → `EnterpriseTab`: a **work command center** (§26) led by **self-improvements awaiting
+  approval** — each pending change (from the §selfdev loop) shows with **View / Approve & merge / Reject**
+  (approve runs the smoke-check + merge off-thread), plus a **Check for crashes** button. Below that, a
+  **Refresh and summarize** button pulls recent **git commits** across your project folders (read-only
+  `git log`, never a pull) and your **Slack** mentions/DMs, then Claude writes a **terse three-line**
+  digest (Shipped · Needs you · Next). ⚙ Settings holds the Slack user token + the project repo paths
+  (both git-ignored). Off-thread.
 - **Learning** → `LearningTab`: a **Streams** table of the three pillars (Home, Enterprise,
   Investment); each row's **Open** button shows a `PillarDialog` — Investment = the **stored pick
   logic** read from the `stock_rationale` table (Symbol / Action / Conf / Why / Updated), captured
