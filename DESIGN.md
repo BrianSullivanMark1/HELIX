@@ -135,6 +135,14 @@ Entry point. Delegates straight to `helix.interfaces.cli:main`.
 
 **Status:** built + proven live, voice- AND email-driven end to end. **Triggers:** spoken/typed (`improve_helix` = "HELIX, build X"), or a **logged crash** (auto-drafts a fix, deduped). **Approve** by voice (`approve_change` = "ship it" / `reject_change` / `list_pending_changes` / `fix_recent_crashes`) or by **email reply** (Yes/No to the diff HELIX emails you). **On approval:** smoke-check (isolated worktree) → merge → **auto-restart** when trading is idle (the supervisor relaunches). **Auth:** the Claude **subscription** token (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`) is preferred over the API key. **Planned next:** an Enterprise-tab panel for pending changes; then the vision/hardware faculties.
 
+### `helix/vision/` — HELIX's eyes (the first embodied faculty of X)
+| File | Responsibility |
+|------|----------------|
+| `camera.py` | Capture one frame as JPEG via **OpenCV** (Windows `CAP_DSHOW`, warmup frames). Optional/guarded dep (`is_available()`); verified to coexist with Qt's QApplication. |
+| `analyze.py` | `describe_image()` → **Claude vision** (`ClaudeClient.vision()`): prompts for **tool** ID + how-to, **person** description for awareness (appearance only — no identity/web lookup), or **general**. Records AI usage. |
+
+Surfaced via the Xpert **`look`** tool (focus tool/person/general) — just ask and HELIX looks. Verified live against the webcam. OpenCV is an optional, guarded dependency (like edge-tts/faster-whisper). **Planned next:** always-on door/security monitoring, local known/unknown face recognition, and (privacy-gated) online profiling; then hardware I/O (`helix/devices/`).
+
 ### `helix/interfaces/` — the three front ends
 | File | Responsibility |
 |------|----------------|
