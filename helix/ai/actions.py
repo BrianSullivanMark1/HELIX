@@ -16,7 +16,7 @@ from helix.investment.autopilot import (
     normalize_roster,
     portfolio_snapshot,
 )
-from helix.selfdev import coder, engine, triggers
+from helix.selfdev import coder, engine, mailer, triggers
 
 # --------------------------------------------------------------------------- #
 # Tool schemas — the spoken commands HELIX can act on. Each maps to a real engine/memory call in
@@ -557,7 +557,8 @@ class ActionRouter:
         result = coder.run_coding_task(task)
         if not result.ok:
             return ToolOutcome(f"I couldn't draft that change, sir: {result.error}")
-        engine.record_pending(self.ctx.settings, result)
+        rec = engine.record_pending(self.ctx.settings, result)
+        mailer.notify_drafted(self.ctx.settings, rec)  # best-effort email; no-op if not configured
         files = ", ".join(result.changed_files[:8]) + ("…" if len(result.changed_files) > 8 else "")
         cost = f" (about ${result.cost_usd:.2f})" if result.cost_usd else ""
         summary = (result.summary or "").strip()

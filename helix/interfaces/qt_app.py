@@ -157,7 +157,7 @@ from helix.brokers.alpaca import (
 from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
-from helix.selfdev import restart as selfdev_restart, triggers as selfdev_triggers
+from helix.selfdev import mailer as selfdev_mailer, restart as selfdev_restart, triggers as selfdev_triggers
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
 from helix.investment.planner import build_briefing, render_briefing
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks, task_status
@@ -456,6 +456,11 @@ class HelixMainWindow(QMainWindow):
         self._crash_timer = QTimer(self)
         self._crash_timer.timeout.connect(self._check_crashes)
         self._crash_timer.start(6 * 3600 * 1000)
+        # Email approval (§selfdev): poll for Brian's Yes/No replies, off-thread, every 3 min.
+        self._email_busy = False
+        self._email_timer = QTimer(self)
+        self._email_timer.timeout.connect(self._poll_email)
+        self._email_timer.start(180000)
 
     def refresh_all(self) -> None:
         self.xpert_tab.refresh()
@@ -498,6 +503,19 @@ class HelixMainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Drafted {len(payload)} crash fix(es) — ask Xpert to review and approve", 10000
             )
+
+    def _poll_email(self) -> None:
+        """Off-thread: apply any Yes/No email replies to pending self-improvements."""
+        if self._email_busy or not selfdev_mailer.is_configured(self.settings):
+            return
+        self._email_busy = True
+        spawn_worker(self._sd_workers, lambda: selfdev_mailer.poll_replies(self.settings), self._email_done)
+
+    def _email_done(self, ok: bool, payload) -> None:
+        self._email_busy = False
+        if ok and payload:
+            applied = ", ".join(f"{a['action']} {a['branch']}" for a in payload)
+            self.statusBar().showMessage(f"Email approval applied: {applied}", 10000)
 
 
 class DashboardTab(QWidget):

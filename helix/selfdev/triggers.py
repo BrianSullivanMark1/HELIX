@@ -13,7 +13,7 @@ import re
 from typing import Any, Callable
 
 from helix.core.config import load_config
-from helix.selfdev import coder, engine
+from helix.selfdev import coder, engine, mailer
 
 SELFDEV_HANDLED_CRASHES_SETTING = "selfdev_handled_crashes"
 SELFDEV_AUTOFIX_SETTING = "selfdev_autofix_crashes"  # default on; set False to disable auto crash-fixing
@@ -78,7 +78,8 @@ def maybe_fix_crashes(
         )
         result = run(task, repo_dir=repo_dir)
         if result and getattr(result, "ok", False):
-            engine.record_pending(settings, result)
+            rec = engine.record_pending(settings, result)
+            mailer.notify_drafted(settings, rec)  # best-effort; no-op if email isn't configured
             drafted.append({"signature": sig, "branch": result.branch, "summary": result.summary})
     settings.set(SELFDEV_HANDLED_CRASHES_SETTING, sorted(handled))
     return drafted
