@@ -17,7 +17,7 @@ from helix.investment.autopilot import (
     portfolio_snapshot,
 )
 from helix.selfdev import coder, engine, mailer, triggers
-from helix.vision import analyze as vision_analyze, camera as vision_camera
+from helix.vision import analyze as vision_analyze, camera as vision_camera, inventory as vision_inventory
 
 # --------------------------------------------------------------------------- #
 # Tool schemas — the spoken commands HELIX can act on. Each maps to a real engine/memory call in
@@ -241,6 +241,52 @@ XPERT_TOOLS: list[dict[str, Any]] = [
                 },
                 "question": {"type": "string", "description": "Optional specific question about what's in view."},
             },
+        },
+    },
+    {
+        "name": "list_cameras",
+        "description": "List the cameras set up around the house (HELIX's eyes). Use when the user asks what cameras exist or which areas HELIX can see.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "add_camera",
+        "description": (
+            "Register a camera by name and source so HELIX can see that area. Source is a USB index "
+            "(like '0') or a stream URL (rtsp://… or http://… from a phone IP-cam or a network camera). "
+            "Use when the user wants to add or set up a camera, e.g. 'add a fridge camera at rtsp://…'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "A short location name, e.g. fridge, laundry, garage."},
+                "source": {"type": "string", "description": "USB index (e.g. 0) or a stream URL (rtsp/http)."},
+            },
+            "required": ["name", "source"],
+        },
+    },
+    {
+        "name": "scan_inventory",
+        "description": (
+            "Take a fresh look through a named camera and list what's there, saving it as that area's "
+            "inventory. Use when the user asks to scan/check/look in an area, e.g. 'scan the fridge', "
+            "'what's in the fridge', 'check the laundry'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"location": {"type": "string", "description": "The camera/area name, e.g. fridge."}},
+            "required": ["location"],
+        },
+    },
+    {
+        "name": "get_inventory",
+        "description": (
+            "Report the LAST saved inventory for an area without taking a new picture. Use when the user "
+            "wants the known contents without a fresh scan, or what was there last time."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"location": {"type": "string", "description": "The area name, e.g. fridge."}},
+            "required": ["location"],
         },
     },
 ]
@@ -627,6 +673,53 @@ class ActionRouter:
             return ToolOutcome(vision_analyze.describe_image(frame, focus=focus, question=question, memory=self.ctx.memory))
         except Exception as error:
             return ToolOutcome(f"I couldn't analyze the image, sir: {error}")
+
+    def _tool_list_cameras(self, _input: dict) -> ToolOutcome:
+        cams = vision_camera.list_cameras(self.ctx.settings)
+        if not cams:
+            return ToolOutcome("No cameras are set up yet, sir. Add one with a name and a source.")
+        return ToolOutcome("Cameras: " + ", ".join(c["name"] for c in cams) + ".")
+
+    def _tool_add_camera(self, tool_input: dict) -> ToolOutcome:
+        name = str(tool_input.get("name", "")).strip()
+        source = str(tool_input.get("source", "")).strip()
+        if not name or not source:
+            return ToolOutcome("I need a name and a source — a USB number like 0, or a stream URL, sir.")
+        vision_camera.add_camera(self.ctx.settings, name, source)
+        return ToolOutcome(f"Added the {name} camera, sir.")
+
+    def _tool_scan_inventory(self, tool_input: dict) -> ToolOutcome:
+        location = str(tool_input.get("location", "")).strip()
+        if not location:
+            return ToolOutcome("Which area should I scan, sir?")
+        if not vision_camera.is_available():
+            return ToolOutcome("No camera library available, sir — install opencv-python.")
+        if vision_camera.get_camera(self.ctx.settings, location) is None:
+            cams = ", ".join(c["name"] for c in vision_camera.list_cameras(self.ctx.settings)) or "none yet"
+            return ToolOutcome(f"I have no '{location}' camera, sir. Cameras: {cams}. Add one first.")
+        try:
+            frame = vision_camera.capture_named(self.ctx.settings, location)
+        except vision_camera.CameraError as error:
+            return ToolOutcome(f"I couldn't reach the {location} camera, sir: {error}")
+        try:
+            result = vision_analyze.inventory_image(frame, location=location, memory=self.ctx.memory)
+        except Exception as error:
+            return ToolOutcome(f"I couldn't analyze the {location}, sir: {error}")
+        vision_inventory.store(self.ctx.settings, location, result)
+        items = result.get("items") or []
+        if not items:
+            return ToolOutcome(f"I scanned the {location} but couldn't make out distinct items, sir.")
+        return ToolOutcome(f"{location.capitalize()}: " + ", ".join(items) + ".")
+
+    def _tool_get_inventory(self, tool_input: dict) -> ToolOutcome:
+        location = str(tool_input.get("location", "")).strip()
+        rec = vision_inventory.get(self.ctx.settings, location) if location else None
+        if not rec:
+            locs = ", ".join(vision_inventory.all_locations(self.ctx.settings)) or "nothing scanned yet"
+            return ToolOutcome(f"I have no saved inventory for '{location}', sir. Scanned areas: {locs}.")
+        items = rec.get("items") or []
+        body = ", ".join(items) if items else "nothing recorded"
+        return ToolOutcome(f"Last {location} scan ({rec.get('updated_at', '')}): {body}.")
 
 
 # --------------------------------------------------------------------------- #

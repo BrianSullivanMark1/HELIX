@@ -8,6 +8,8 @@ heavier "online profiling" is a separate, privacy-gated feature for later.
 from __future__ import annotations
 
 import base64
+import json
+import re
 from typing import Any
 
 from helix.ai.claude import DEFAULT_CLAUDE_MODEL, ClaudeClient, ClaudeConfig, estimate_cost
@@ -61,3 +63,51 @@ def describe_image(
         except Exception:
             pass
     return text
+
+
+INVENTORY_PROMPT = (
+    "You are HELIX looking through a camera at {location}. List the distinct items you can identify. "
+    "Respond with STRICT JSON only, no markdown: "
+    '{{"items": ["item one", "item two"], "summary": "one short spoken sentence naming the main things"}}. '
+    "Use short common names (e.g. milk, eggs, ketchup). Include only what you can actually see."
+)
+
+
+def _parse_inventory(raw: str) -> dict:
+    text = (raw or "").strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            obj = json.loads(match.group(0))
+            items = [str(x).strip() for x in (obj.get("items") or []) if str(x).strip()]
+            return {"items": items, "summary": str(obj.get("summary") or "").strip()}
+        except json.JSONDecodeError:
+            pass
+    return {"items": [], "summary": text[:200]}
+
+
+def inventory_image(
+    image_jpeg: bytes,
+    location: str = "the area",
+    *,
+    client: ClaudeClient | None = None,
+    model: str = DEFAULT_CLAUDE_MODEL,
+    memory: Any | None = None,
+) -> dict:
+    """Identify the items visible in a frame. Returns {"items": [...], "summary": "..."}."""
+    client = client or ClaudeClient(ClaudeConfig(model=model))
+    image_b64 = base64.b64encode(image_jpeg).decode("ascii")
+    raw = client.vision(
+        INVENTORY_PROMPT.format(location=location), image_b64, media_type="image/jpeg",
+        max_tokens=600, model=model,
+    )
+    usage = client.last_usage or {}
+    if memory is not None:
+        try:
+            in_tok = int(usage.get("input_tokens", 0) or 0)
+            out_tok = int(usage.get("output_tokens", 0) or 0)
+            if in_tok or out_tok:
+                memory.record_ai_usage(model, in_tok, out_tok, estimate_cost(model, in_tok, out_tok))
+        except Exception:
+            pass
+    return _parse_inventory(raw)
