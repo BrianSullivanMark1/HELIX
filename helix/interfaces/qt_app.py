@@ -157,6 +157,7 @@ from helix.brokers.alpaca import (
 from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
+from helix.selfdev import restart as selfdev_restart
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
 from helix.investment.planner import build_briefing, render_briefing
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks, task_status
@@ -441,12 +442,36 @@ class HelixMainWindow(QMainWindow):
 
         self.refresh_all()
 
+        # Self-improvement background beat (§selfdev): apply a pending restart on a safe tick.
+        self.settings = AppSettings()
+        selfdev_restart.clear_restart(self.settings)  # consume any flag from the session that just restarted
+        self._selfdev_timer = QTimer(self)
+        self._selfdev_timer.timeout.connect(self._selfdev_tick)
+        self._selfdev_timer.start(60000)  # every 60s
+
     def refresh_all(self) -> None:
         self.xpert_tab.refresh()
         self.learning_tab.refresh()
         self.investment_tab.refresh()
         self.enterprise_tab.refresh()
         self.statusBar().showMessage("HELIX memory synced", 3000)
+
+    def _auto_trading(self) -> bool:
+        """True while the Investment auto-loop is running — used to defer a restart so we never
+        interrupt a live trade cycle."""
+        try:
+            return bool(getattr(self.investment_tab.invest_tab, "_running", False))
+        except Exception:
+            return False
+
+    def _selfdev_tick(self) -> None:
+        """Background self-improvement beat. Applies a pending restart when it's safe (not mid-trade)."""
+        try:
+            if selfdev_restart.restart_pending(self.settings) and not self._auto_trading():
+                self.statusBar().showMessage("Restarting to apply a self-improvement…", 5000)
+                QApplication.exit(selfdev_restart.RESTART_EXIT_CODE)
+        except Exception:
+            pass
 
 
 class DashboardTab(QWidget):

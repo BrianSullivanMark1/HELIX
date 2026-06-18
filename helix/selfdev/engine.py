@@ -131,7 +131,13 @@ def approve(settings: Any, *, pending_id: str | None = None, into: str = "main",
     except gitops.GitError as exc:
         return ApprovalResult(False, f"Merge failed: {exc}")
     _set_status(settings, branch, "merged")
-    return ApprovalResult(True, f"Merged {branch} into {into}. Restart HELIX to load it.", merged_commit=merged)
+    if into == "main":
+        from helix.selfdev import restart
+        restart.request_restart(settings)  # the running app restarts on a safe tick to load it
+        message = f"Merged {branch} into {into}. HELIX will restart to load it."
+    else:
+        message = f"Merged {branch} into {into}."
+    return ApprovalResult(True, message, merged_commit=merged)
 
 
 def reject(settings: Any, *, pending_id: str | None = None, repo: str | None = None) -> ApprovalResult:

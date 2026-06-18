@@ -23,16 +23,20 @@ LOG = REPO_ROOT / "data" / "helix.log"
 MIN_BACKOFF = 5            # seconds before the first relaunch after a crash
 MAX_BACKOFF = 300          # cap the backoff at 5 minutes
 HEALTHY_RUN_SECONDS = 120  # a session at least this long is "healthy" -> reset the backoff
+RESTART_EXIT_CODE = 42     # a DELIBERATE self-restart (e.g. after a self-improvement merge), not a crash
 
 
 def next_action(exit_code: int, ran_seconds: float, backoff: int) -> tuple[bool, int, int]:
     """Pure relaunch policy. Returns (stop, sleep_seconds, next_backoff).
 
-    Clean exit (0) -> stop. A crash relaunches after `backoff`s — reset to MIN first if the crashed
-    session had been running healthily — then the backoff doubles, capped at MAX. Pure so the policy
-    is unit-testable without spawning processes."""
+    Clean exit (0) -> stop. RESTART_EXIT_CODE -> relaunch immediately (a deliberate restart, no
+    backoff). Any other non-zero exit is a crash -> relaunch after `backoff`s (reset to MIN first if
+    the crashed session had been running healthily), then double the backoff, capped at MAX. Pure so
+    the policy is unit-testable without spawning processes."""
     if exit_code == 0:
         return True, 0, backoff
+    if exit_code == RESTART_EXIT_CODE:
+        return False, 0, MIN_BACKOFF
     sleep_seconds = MIN_BACKOFF if ran_seconds >= HEALTHY_RUN_SECONDS else backoff
     return False, sleep_seconds, min(sleep_seconds * 2, MAX_BACKOFF)
 
@@ -63,7 +67,8 @@ def main() -> int:
         if stop:
             _log("HELIX exited cleanly; supervisor stopping")
             return 0
-        _log(f"HELIX crashed (exit {code}) after {ran:.0f}s; relaunching in {sleep_seconds}s")
+        kind = "restart requested" if code == RESTART_EXIT_CODE else f"crashed (exit {code})"
+        _log(f"HELIX {kind} after {ran:.0f}s; relaunching in {sleep_seconds}s")
         try:
             time.sleep(sleep_seconds)
         except KeyboardInterrupt:
