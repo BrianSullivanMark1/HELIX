@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHeaderView,
@@ -157,7 +158,7 @@ from helix.brokers.alpaca import (
 from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
-from helix.selfdev import mailer as selfdev_mailer, restart as selfdev_restart, triggers as selfdev_triggers
+from helix.selfdev import engine as selfdev_engine, mailer as selfdev_mailer, restart as selfdev_restart, triggers as selfdev_triggers
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
 from helix.investment.planner import build_briefing, render_briefing
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks, task_status
@@ -1759,11 +1760,28 @@ class EnterpriseTab(QWidget):
         self.status_signal.connect(self.status.setText)
         layout.addWidget(self.status)
 
-        brief_box = QGroupBox("State of your enterprise (AI summary)")
+        # Self-improvements awaiting approval — the headline of this tab.
+        pending_box = QGroupBox("Self-improvements awaiting approval")
+        pending_outer = QVBoxLayout(pending_box)
+        pend_top = QHBoxLayout()
+        self.pending_hint = QLabel("")
+        self.pending_hint.setStyleSheet("color:#6fb3c0;")
+        self.crash_button = QPushButton("Check for crashes")
+        self.crash_button.clicked.connect(self._check_crashes_clicked)
+        pend_top.addWidget(self.pending_hint)
+        pend_top.addStretch(1)
+        pend_top.addWidget(self.crash_button)
+        pending_outer.addLayout(pend_top)
+        self.pending_container = QVBoxLayout()
+        pending_outer.addLayout(self.pending_container)
+        layout.addWidget(pending_box)
+
+        brief_box = QGroupBox("At a glance")
         brief_layout = QVBoxLayout(brief_box)
         self.briefing = QTextEdit()
         self.briefing.setReadOnly(True)
-        self.briefing.setMinimumHeight(170)
+        self.briefing.setMinimumHeight(96)
+        self.briefing.setMaximumHeight(120)
         brief_layout.addWidget(self.briefing)
         layout.addWidget(brief_box)
 
@@ -1943,6 +1961,117 @@ class EnterpriseTab(QWidget):
 
     def refresh(self) -> None:
         self._show_config_hint()
+        self._render_pending()
+
+    # --- self-improvements awaiting approval --------------------------------- #
+
+    def _clear_layout(self, lay) -> None:
+        while lay.count():
+            item = lay.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+            elif item.layout() is not None:
+                self._clear_layout(item.layout())
+
+    def _render_pending(self) -> None:
+        self._clear_layout(self.pending_container)
+        try:
+            items = selfdev_engine.list_pending(self.settings)
+        except Exception:
+            items = []
+        self.pending_hint.setText(
+            f"{len(items)} waiting for your OK" if items else "Nothing waiting — all caught up."
+        )
+        for rec in items:
+            frame = QFrame()
+            frame.setStyleSheet(
+                "QFrame{border:1px solid #16323b;border-radius:8px;} QPushButton{padding:4px 12px;}"
+            )
+            fl = QVBoxLayout(frame)
+            fl.setContentsMargins(12, 10, 12, 10)
+            task = QLabel((rec.get("task") or "(change)").strip())
+            task.setWordWrap(True)
+            task.setStyleSheet("font-weight:700;border:none;")
+            files = rec.get("files") or []
+            sub = (rec.get("summary") or "").strip()
+            sub = sub[:157] + "…" if len(sub) > 160 else sub
+            meta = QLabel(sub + (f"   ·   {len(files)} file(s)" if files else ""))
+            meta.setWordWrap(True)
+            meta.setStyleSheet("color:#6fb3c0;border:none;")
+            btns = QHBoxLayout()
+            view = QPushButton("View")
+            view.clicked.connect(lambda _=False, r=rec: self._view_pending(r))
+            reject = QPushButton("✗ Reject")
+            reject.clicked.connect(lambda _=False, b=rec.get("branch"): self._reject(b))
+            approve = QPushButton("✓ Approve & merge")
+            approve.clicked.connect(lambda _=False, b=rec.get("branch"): self._approve(b))
+            btns.addWidget(view)
+            btns.addStretch(1)
+            btns.addWidget(reject)
+            btns.addWidget(approve)
+            fl.addWidget(task)
+            fl.addWidget(meta)
+            fl.addLayout(btns)
+            self.pending_container.addWidget(frame)
+
+    def _view_pending(self, rec: dict) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Proposed change")
+        v = QVBoxLayout(dialog)
+        body = QTextEdit()
+        body.setReadOnly(True)
+        body.setPlainText(
+            f"Task:\n{rec.get('task', '')}\n\nWhat changed:\n{rec.get('summary', '')}\n\n"
+            f"Files / diffstat:\n{rec.get('diffstat') or chr(10).join(rec.get('files', []))}\n\n"
+            f"Branch: {rec.get('branch', '')}"
+        )
+        v.addWidget(body)
+        close = QPushButton("Close")
+        close.clicked.connect(dialog.accept)
+        v.addWidget(close, alignment=Qt.AlignmentFlag.AlignRight)
+        dialog.resize(680, 460)
+        dialog.exec()
+
+    def _pending_busy(self, busy: bool, message: str = "") -> None:
+        self.progress.setVisible(busy)
+        self.crash_button.setEnabled(not busy)
+        if message:
+            self.status.setText(message)
+
+    def _approve(self, branch: str) -> None:
+        if not branch:
+            return
+        self._pending_busy(True, f"Smoke-checking and merging {branch}…")
+        spawn_worker(self._workers, lambda: selfdev_engine.approve(self.settings, pending_id=branch), self._pending_done)
+
+    def _reject(self, branch: str) -> None:
+        if not branch:
+            return
+        self._pending_busy(True, f"Rejecting {branch}…")
+        spawn_worker(self._workers, lambda: selfdev_engine.reject(self.settings, pending_id=branch), self._pending_done)
+
+    def _check_crashes_clicked(self) -> None:
+        self._pending_busy(True, "Checking the log for crashes and drafting fixes…")
+        spawn_worker(self._workers, lambda: selfdev_triggers.maybe_fix_crashes(self.settings), self._crashes_drafted)
+
+    def _crashes_drafted(self, ok: bool, payload) -> None:
+        self._pending_busy(False)
+        if ok and payload:
+            self.status.setText(f"Drafted {len(payload)} crash fix(es) — review below.")
+        elif ok:
+            self.status.setText("No new crashes to fix.")
+        else:
+            self.status.setText(f"Crash check failed: {payload}")
+        self._render_pending()
+
+    def _pending_done(self, ok: bool, payload) -> None:
+        self._pending_busy(False)
+        if ok and hasattr(payload, "message"):
+            self.status.setText(payload.message)
+        elif not ok:
+            self.status.setText(f"Error: {payload}")
+        self._render_pending()
 
 
 class PlaceholderTab(QWidget):

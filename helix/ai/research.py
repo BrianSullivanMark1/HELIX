@@ -785,19 +785,12 @@ RECENT CODE WORK:
 SLACK ACTIVITY:
 {slack_block}
 
-Write a SHORT update in plain spoken English, the way a sharp assistant would tell them in passing.
+Write EXACTLY three short lines, each one plain sentence (it may be read aloud, so no markdown, emoji,
+bullets, asterisks, hashes, or slashes — plain words only). Use these exact line labels:
 
-Hard rules:
-- This may be read OUT LOUD, so use absolutely no symbols, markdown, bullet points, asterisks, hashes,
-  slashes, arrows, dashes-as-bullets, or emoji. Write plain whole sentences only.
-- Keep it brief: two or three short paragraphs, a handful of sentences in total. No lists, no headings.
+Shipped: the one or two most important things they actually got done recently, in human terms.
+Needs you: who is waiting in Slack and what about, naming names. If Slack is not connected, say "Slack not connected".
+Next: the single most useful thing to do next.
 
-Cover, in this order, as flowing sentences:
-1. What they actually got done recently in human terms (the features and fixes, not a commit list), and
-   which project was busiest.
-2. Who is waiting on a reply in Slack and what about, naming the people and the gist in a sentence or
-   two. If Slack is not connected, say that in a few words and move on.
-3. One closing sentence on overall momentum and the single most useful thing to do next.
-
-Be warm, concrete, and short. When you mention a Slack channel, say its name as plain words.
+Keep every line under about twenty words. Be concrete. Output only those three lines, nothing else.
 """.strip()
