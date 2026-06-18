@@ -66,7 +66,7 @@ from helix.ai.mock import (
     generate_mock_research,
 )
 from helix.ai.speech import synthesize_speech
-from helix.ai.transcribe import is_available as stt_available, is_ready as stt_ready, prewarm as prewarm_stt, transcribe
+from helix.ai.transcribe import is_available as stt_available, is_ready as stt_ready, transcribe
 from helix.ai.actions import (
     ActionContext,
     ActionRouter,
@@ -391,14 +391,13 @@ def run_qt_app(memory: SQLiteMemory) -> int:
     log = setup_logging()
     install_crash_guard(log)  # an unhandled slot error logs + keeps the app alive, not abort (§39)
     log.info("HELIX desktop starting")
-    # Speech-to-text MUST initialize its native runtime BEFORE QApplication exists. Constructing the
-    # ctranslate2 (faster-whisper) model after Qt is up segfaults the process — a native Qt<->ctranslate2
-    # OpenMP/runtime conflict that hard-crashed the app the instant the wake word fired its first
-    # transcription (§23). Loading it first, then letting Qt load on top, avoids the conflict.
-    # Best-effort and off the UI's critical path: voice degrades gracefully (is_ready() gates it) if absent.
-    if stt_available():
-        log.info("preparing speech-to-text model (pre-Qt, avoids the ctranslate2/Qt crash)...")
-        log.info("speech-to-text %s", "ready" if prewarm_stt() else "unavailable")
+    # Speech-to-text is pre-warmed in main.py BEFORE PyQt6 is imported — building the ctranslate2 model
+    # after Qt's native libs are loaded segfaults the process, and a bare `import PyQt6` is enough to
+    # trip it (§23). By the time we get here PyQt6 is already imported, so we must NOT load the model
+    # now — we only report readiness. If the pre-warm was skipped (e.g. under a debugger that imports Qt
+    # before main.py), is_ready() is False and the voice paths (push-to-talk + hands-free) disable
+    # themselves rather than attempt a crashing post-Qt load.
+    log.info("speech-to-text %s", "ready" if stt_ready() else "unavailable (voice disabled this run)")
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("HELIX")
     apply_hud_style(app)
