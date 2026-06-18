@@ -17,7 +17,7 @@ from helix.investment.autopilot import (
     portfolio_snapshot,
 )
 from helix.selfdev import coder, engine, mailer, triggers
-from helix.vision import analyze as vision_analyze, camera as vision_camera, inventory as vision_inventory
+from helix.vision import analyze as vision_analyze, camera as vision_camera
 
 # --------------------------------------------------------------------------- #
 # Tool schemas — the spoken commands HELIX can act on. Each maps to a real engine/memory call in
@@ -226,67 +226,51 @@ XPERT_TOOLS: list[dict[str, Any]] = [
     {
         "name": "look",
         "description": (
-            "Look through the camera and describe what you see — HELIX's eyes, connected to the "
-            "conversation. Use focus 'tool' when the user holds something up and asks what it is or how "
-            "to use it; 'person' when asked who is at the door or to describe someone; 'general' for "
-            "'what do you see'. Captures one frame from the connected camera and analyzes it."
+            "Look through a camera (one of HELIX's eyes) and answer a question about what you see. Use "
+            "for anything visual: 'what is this tool', 'who's at the door', 'what's in the fridge', 'is "
+            "the garage light on'. Captures one frame and analyzes it."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "focus": {
-                    "type": "string",
-                    "enum": ["tool", "person", "general"],
-                    "description": "Identify/explain a tool, describe a person, or take a general look.",
-                },
-                "question": {"type": "string", "description": "Optional specific question about what's in view."},
+                "camera": {"type": "string", "description": "Which camera/area to look through, e.g. fridge. Omit for the default camera."},
+                "question": {"type": "string", "description": "What to find out about the view. Omit for a general description."},
+            },
+        },
+    },
+    {
+        "name": "look_around",
+        "description": (
+            "Look through ALL of HELIX's cameras and answer a question across the whole house — e.g. "
+            "'check the house', 'is anyone home', 'where did I leave my keys', 'what's running low'. "
+            "Captures every registered camera and reports per area."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "What to look for across every camera. Omit for a general look."},
             },
         },
     },
     {
         "name": "list_cameras",
-        "description": "List the cameras set up around the house (HELIX's eyes). Use when the user asks what cameras exist or which areas HELIX can see.",
+        "description": "List HELIX's cameras (its eyes around the house). Use when asked what cameras exist or which areas HELIX can see.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "add_camera",
         "description": (
-            "Register a camera by name and source so HELIX can see that area. Source is a USB index "
+            "Register a camera by name and source so HELIX gains an eye there. Source is a USB index "
             "(like '0') or a stream URL (rtsp://… or http://… from a phone IP-cam or a network camera). "
             "Use when the user wants to add or set up a camera, e.g. 'add a fridge camera at rtsp://…'."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "A short location name, e.g. fridge, laundry, garage."},
+                "name": {"type": "string", "description": "A short location name, e.g. fridge, laundry, garage, door."},
                 "source": {"type": "string", "description": "USB index (e.g. 0) or a stream URL (rtsp/http)."},
             },
             "required": ["name", "source"],
-        },
-    },
-    {
-        "name": "scan_inventory",
-        "description": (
-            "Take a fresh look through a named camera and list what's there, saving it as that area's "
-            "inventory. Use when the user asks to scan/check/look in an area, e.g. 'scan the fridge', "
-            "'what's in the fridge', 'check the laundry'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {"location": {"type": "string", "description": "The camera/area name, e.g. fridge."}},
-            "required": ["location"],
-        },
-    },
-    {
-        "name": "get_inventory",
-        "description": (
-            "Report the LAST saved inventory for an area without taking a new picture. Use when the user "
-            "wants the known contents without a fresh scan, or what was there last time."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {"location": {"type": "string", "description": "The area name, e.g. fridge."}},
-            "required": ["location"],
         },
     },
 ]
@@ -661,18 +645,42 @@ class ActionRouter:
     # -- vision (HELIX's eyes) ----------------------------------------------- #
 
     def _tool_look(self, tool_input: dict) -> ToolOutcome:
-        focus = str(tool_input.get("focus", "general")).lower().strip() or "general"
-        question = str(tool_input.get("question", "")).strip()
         if not vision_camera.is_available():
             return ToolOutcome("I don't have a camera available, sir — install opencv-python and connect a camera.")
+        camera = str(tool_input.get("camera", "")).strip()
+        question = str(tool_input.get("question", "")).strip()
         try:
-            frame = vision_camera.capture_jpeg()
+            if camera and vision_camera.get_camera(self.ctx.settings, camera) is not None:
+                frame = vision_camera.capture_named(self.ctx.settings, camera)
+            else:
+                cams = vision_camera.list_cameras(self.ctx.settings)  # default eye: first camera, else the webcam
+                source = cams[0]["source"] if cams else vision_camera.DEFAULT_CAMERA_INDEX
+                frame = vision_camera.capture_jpeg(source)
         except vision_camera.CameraError as error:
             return ToolOutcome(f"I couldn't get a camera image, sir: {error}")
         try:
-            return ToolOutcome(vision_analyze.describe_image(frame, focus=focus, question=question, memory=self.ctx.memory))
+            answer = vision_analyze.describe_image(frame, question=question, memory=self.ctx.memory)
         except Exception as error:
             return ToolOutcome(f"I couldn't analyze the image, sir: {error}")
+        return ToolOutcome((f"{camera.capitalize()}: " if camera else "") + answer)
+
+    def _tool_look_around(self, tool_input: dict) -> ToolOutcome:
+        if not vision_camera.is_available():
+            return ToolOutcome("I don't have a camera available, sir — install opencv-python.")
+        question = str(tool_input.get("question", "")).strip()
+        cams = vision_camera.list_cameras(self.ctx.settings)
+        if not cams:
+            return ToolOutcome("No cameras are set up yet, sir — add some eyes around the house first.")
+        lines = []
+        for cam in cams[:8]:  # cap so a big install doesn't run away on cost/time
+            name = cam.get("name", "camera")
+            try:
+                frame = vision_camera.capture_jpeg(cam.get("source", vision_camera.DEFAULT_CAMERA_INDEX))
+                answer = vision_analyze.describe_image(frame, question=question, memory=self.ctx.memory, max_tokens=300)
+            except Exception as error:
+                answer = f"(couldn't reach this camera: {error})"
+            lines.append(f"{name}: {answer}")
+        return ToolOutcome("\n".join(lines))
 
     def _tool_list_cameras(self, _input: dict) -> ToolOutcome:
         cams = vision_camera.list_cameras(self.ctx.settings)
@@ -687,39 +695,6 @@ class ActionRouter:
             return ToolOutcome("I need a name and a source — a USB number like 0, or a stream URL, sir.")
         vision_camera.add_camera(self.ctx.settings, name, source)
         return ToolOutcome(f"Added the {name} camera, sir.")
-
-    def _tool_scan_inventory(self, tool_input: dict) -> ToolOutcome:
-        location = str(tool_input.get("location", "")).strip()
-        if not location:
-            return ToolOutcome("Which area should I scan, sir?")
-        if not vision_camera.is_available():
-            return ToolOutcome("No camera library available, sir — install opencv-python.")
-        if vision_camera.get_camera(self.ctx.settings, location) is None:
-            cams = ", ".join(c["name"] for c in vision_camera.list_cameras(self.ctx.settings)) or "none yet"
-            return ToolOutcome(f"I have no '{location}' camera, sir. Cameras: {cams}. Add one first.")
-        try:
-            frame = vision_camera.capture_named(self.ctx.settings, location)
-        except vision_camera.CameraError as error:
-            return ToolOutcome(f"I couldn't reach the {location} camera, sir: {error}")
-        try:
-            result = vision_analyze.inventory_image(frame, location=location, memory=self.ctx.memory)
-        except Exception as error:
-            return ToolOutcome(f"I couldn't analyze the {location}, sir: {error}")
-        vision_inventory.store(self.ctx.settings, location, result)
-        items = result.get("items") or []
-        if not items:
-            return ToolOutcome(f"I scanned the {location} but couldn't make out distinct items, sir.")
-        return ToolOutcome(f"{location.capitalize()}: " + ", ".join(items) + ".")
-
-    def _tool_get_inventory(self, tool_input: dict) -> ToolOutcome:
-        location = str(tool_input.get("location", "")).strip()
-        rec = vision_inventory.get(self.ctx.settings, location) if location else None
-        if not rec:
-            locs = ", ".join(vision_inventory.all_locations(self.ctx.settings)) or "nothing scanned yet"
-            return ToolOutcome(f"I have no saved inventory for '{location}', sir. Scanned areas: {locs}.")
-        items = rec.get("items") or []
-        body = ", ".join(items) if items else "nothing recorded"
-        return ToolOutcome(f"Last {location} scan ({rec.get('updated_at', '')}): {body}.")
 
 
 # --------------------------------------------------------------------------- #
