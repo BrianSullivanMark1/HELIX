@@ -124,3 +124,14 @@ def merge_to(repo: str, name: str, *, into: str = "main", message: str | None = 
         args += ["-m", message]
     _git(repo, args, timeout=60)
     return head_commit(repo)
+
+
+def add_worktree(repo: str, path: str, ref: str) -> None:
+    """Check out `ref` (detached) into a separate worktree at `path` — used to smoke-check a branch's
+    code without disturbing the live working tree."""
+    _git(repo, ["worktree", "add", "--detach", path, ref], timeout=60)
+
+
+def remove_worktree(repo: str, path: str) -> None:
+    """Remove a worktree (best-effort; never raises — used in cleanup paths)."""
+    _git(repo, ["worktree", "remove", "--force", path], check=False, timeout=60)

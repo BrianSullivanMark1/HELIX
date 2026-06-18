@@ -16,7 +16,7 @@ from helix.investment.autopilot import (
     normalize_roster,
     portfolio_snapshot,
 )
-from helix.selfdev import coder
+from helix.selfdev import coder, engine
 
 # --------------------------------------------------------------------------- #
 # Tool schemas — the spoken commands HELIX can act on. Each maps to a real engine/memory call in
@@ -186,6 +186,32 @@ XPERT_TOOLS: list[dict[str, Any]] = [
             },
             "required": ["task"],
         },
+    },
+    {
+        "name": "approve_change",
+        "description": (
+            "Approve and merge the most recent drafted code change into HELIX — the 'ship it' command. "
+            "Smoke-checks it first (its code must import), then merges it into the app; a restart loads "
+            "it. Use when the user says to ship/approve/merge/apply the drafted change, e.g. 'ship it', "
+            "'approve that', 'merge it', 'apply it'."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "reject_change",
+        "description": (
+            "Discard the most recent drafted code change and delete its branch. Use when the user says "
+            "to reject/discard/scrap the change, or 'don't apply that'."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_pending_changes",
+        "description": (
+            "List drafted code changes waiting for approval. Use when the user asks what's pending, "
+            "waiting to ship, or drafted."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
     },
 ]
 
@@ -522,14 +548,29 @@ class ActionRouter:
         result = coder.run_coding_task(task)
         if not result.ok:
             return ToolOutcome(f"I couldn't draft that change, sir: {result.error}")
+        engine.record_pending(self.ctx.settings, result)
         files = ", ".join(result.changed_files[:8]) + ("…" if len(result.changed_files) > 8 else "")
         cost = f" (about ${result.cost_usd:.2f})" if result.cost_usd else ""
         summary = (result.summary or "").strip()
         return ToolOutcome(
-            f"Done, sir — I drafted that on review branch {result.branch}{cost}. {summary} "
-            f"Files changed: {files or 'none'}. It's committed to a branch for your review and is NOT "
-            "applied to the running app yet — approving and merging it is the next step."
+            f"Done, sir — drafted on review branch {result.branch}{cost}. {summary} "
+            f"Files changed: {files or 'none'}. It's on a branch, not live yet — say 'ship it' to "
+            "approve and merge it, or 'reject it' to discard."
         )
+
+    def _tool_approve_change(self, _input: dict) -> ToolOutcome:
+        result = engine.approve(self.ctx.settings)
+        return ToolOutcome(("Shipped, sir. " + result.message) if result.ok else result.message)
+
+    def _tool_reject_change(self, _input: dict) -> ToolOutcome:
+        return ToolOutcome(engine.reject(self.ctx.settings).message)
+
+    def _tool_list_pending_changes(self, _input: dict) -> ToolOutcome:
+        items = engine.list_pending(self.ctx.settings)
+        if not items:
+            return ToolOutcome("Nothing's waiting to ship, sir.")
+        lines = [f"{(p.get('task') or '')[:60]} (branch {p.get('branch')})" for p in items]
+        return ToolOutcome("Pending: " + "; ".join(lines) + ".")
 
 
 # --------------------------------------------------------------------------- #
