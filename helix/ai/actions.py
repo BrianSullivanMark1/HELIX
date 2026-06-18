@@ -16,7 +16,7 @@ from helix.investment.autopilot import (
     normalize_roster,
     portfolio_snapshot,
 )
-from helix.selfdev import coder, engine
+from helix.selfdev import coder, engine, triggers
 
 # --------------------------------------------------------------------------- #
 # Tool schemas — the spoken commands HELIX can act on. Each maps to a real engine/memory call in
@@ -210,6 +210,15 @@ XPERT_TOOLS: list[dict[str, Any]] = [
         "description": (
             "List drafted code changes waiting for approval. Use when the user asks what's pending, "
             "waiting to ship, or drafted."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "fix_recent_crashes",
+        "description": (
+            "Check HELIX's error log for recent crashes and draft a fix for any new one (Opus drafts "
+            "it on a review branch; nothing is applied automatically). Use when the user asks to fix "
+            "crashes, bugs, or errors, or says 'fix what broke'."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -571,6 +580,15 @@ class ActionRouter:
             return ToolOutcome("Nothing's waiting to ship, sir.")
         lines = [f"{(p.get('task') or '')[:60]} (branch {p.get('branch')})" for p in items]
         return ToolOutcome("Pending: " + "; ".join(lines) + ".")
+
+    def _tool_fix_recent_crashes(self, _input: dict) -> ToolOutcome:
+        drafted = triggers.maybe_fix_crashes(self.ctx.settings)
+        if not drafted:
+            return ToolOutcome("No new crashes to fix, sir — nothing in the log I haven't handled.")
+        branches = ", ".join(d["branch"] for d in drafted)
+        return ToolOutcome(
+            f"Drafted {len(drafted)} crash fix(es) for review ({branches}). Say 'ship it' to approve, sir."
+        )
 
 
 # --------------------------------------------------------------------------- #

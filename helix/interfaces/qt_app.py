@@ -157,7 +157,7 @@ from helix.brokers.alpaca import (
 from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
-from helix.selfdev import restart as selfdev_restart
+from helix.selfdev import restart as selfdev_restart, triggers as selfdev_triggers
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
 from helix.investment.planner import build_briefing, render_briefing
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks, task_status
@@ -448,6 +448,14 @@ class HelixMainWindow(QMainWindow):
         self._selfdev_timer = QTimer(self)
         self._selfdev_timer.timeout.connect(self._selfdev_tick)
         self._selfdev_timer.start(60000)  # every 60s
+        # Auto crash-fix (§selfdev): draft fixes for new logged crashes, off-thread, ~2 min after
+        # launch and every 6 hours. Drafts only — never auto-merged (approval still required).
+        self._sd_workers = set()
+        self._crash_busy = False
+        QTimer.singleShot(120000, self._check_crashes)
+        self._crash_timer = QTimer(self)
+        self._crash_timer.timeout.connect(self._check_crashes)
+        self._crash_timer.start(6 * 3600 * 1000)
 
     def refresh_all(self) -> None:
         self.xpert_tab.refresh()
@@ -472,6 +480,24 @@ class HelixMainWindow(QMainWindow):
                 QApplication.exit(selfdev_restart.RESTART_EXIT_CODE)
         except Exception:
             pass
+
+    def _check_crashes(self) -> None:
+        """Off-thread: draft fixes for any new logged crash (recorded pending; never auto-merged)."""
+        if self._crash_busy:
+            return
+        self._crash_busy = True
+        spawn_worker(
+            self._sd_workers,
+            lambda: selfdev_triggers.maybe_fix_crashes(self.settings),
+            self._crashes_done,
+        )
+
+    def _crashes_done(self, ok: bool, payload) -> None:
+        self._crash_busy = False
+        if ok and payload:
+            self.statusBar().showMessage(
+                f"Drafted {len(payload)} crash fix(es) — ask Xpert to review and approve", 10000
+            )
 
 
 class DashboardTab(QWidget):
