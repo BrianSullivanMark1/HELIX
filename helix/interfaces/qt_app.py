@@ -70,7 +70,7 @@ from helix.ai.mock import (
     generate_mock_portfolio_research,
     generate_mock_research,
 )
-from helix.ai.speech import synthesize_speech
+from helix.ai.speech import DEFAULT_VOICE, VOICE_CHOICES, synthesize_speech
 from helix.ai.transcribe import is_available as stt_available, is_ready as stt_ready, transcribe
 from helix.ai.actions import (
     ActionContext,
@@ -1158,6 +1158,7 @@ class DashboardTab(QWidget):
 XPERT_INPUT_DEVICE_SETTING = "xpert_input_device"    # preferred mic, by description
 XPERT_OUTPUT_DEVICE_SETTING = "xpert_output_device"  # preferred speaker, by description
 XPERT_VOICE_SPEED_SETTING = "xpert_voice_speed"      # HELIX's talking rate (×), default 1.5
+XPERT_VOICE_SETTING = "xpert_voice"                  # HELIX's neural voice id (edge-tts)
 
 # Energy-based voice-activity detection (VAD). The speech threshold is ADAPTIVE — it tracks the
 # ambient noise floor, so it works across mics (a quiet close-talk headset vs. a noisier array mic)
@@ -1603,6 +1604,26 @@ class XpertTab(QWidget):
         self.session_label.setStyleSheet("color:#3ddc84;font-weight:600;")
         self.session_label.setVisible(False)
 
+        # Voice — which neural voice HELIX speaks with (edge-tts), with a Preview button to hear it.
+        self.voice_picker = NoScrollComboBox()
+        for voice_id, label in VOICE_CHOICES:
+            self.voice_picker.addItem(label, voice_id)
+        saved_voice = self.settings.get(XPERT_VOICE_SETTING, "") or DEFAULT_VOICE
+        voice_idx = self.voice_picker.findData(saved_voice)
+        if voice_idx < 0:  # a saved voice outside the curated list — keep it selectable
+            self.voice_picker.addItem(saved_voice, saved_voice)
+            voice_idx = self.voice_picker.findData(saved_voice)
+        self.voice_picker.setCurrentIndex(max(0, voice_idx))
+        self.voice_picker.currentIndexChanged.connect(self._on_voice_changed)
+        self.voice_preview_button = QPushButton("Preview")
+        self.voice_preview_button.setObjectName("ghostButton")
+        self.voice_preview_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.voice_preview_button.clicked.connect(self._preview_voice)
+        voice_row = QHBoxLayout()
+        voice_row.addWidget(QLabel("Voice"))
+        voice_row.addWidget(self.voice_picker, 1)
+        voice_row.addWidget(self.voice_preview_button)
+
         # Voice output speed — how fast HELIX talks (0.8×–2.0×).
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
         self.speed_slider.setMinimum(80)
@@ -1651,6 +1672,7 @@ class XpertTab(QWidget):
         controls_layout = QVBoxLayout(self.controls_box)
         controls_layout.setContentsMargins(14, 10, 14, 10)
         controls_layout.setSpacing(8)
+        controls_layout.addLayout(voice_row)
         controls_layout.addLayout(speed_row)
         controls_layout.addLayout(dev_row)
 
@@ -1817,6 +1839,22 @@ class XpertTab(QWidget):
             self.tts.stateChanged.connect(self._on_tts_state)
         except Exception:
             self.tts = None
+
+    # ---- voice selection -------------------------------------------------- #
+
+    def _voice_name(self) -> str:
+        """The edge-tts voice HELIX speaks with — the picker's choice, else the saved/default."""
+        picker = getattr(self, "voice_picker", None)
+        if picker is not None and picker.currentData():
+            return picker.currentData()
+        return self.settings.get(XPERT_VOICE_SETTING, "") or DEFAULT_VOICE
+
+    def _on_voice_changed(self, _index: int) -> None:
+        self.settings.set(XPERT_VOICE_SETTING, self._voice_name())
+
+    def _preview_voice(self) -> None:
+        """Speak a short sample so the user can hear the selected voice before committing."""
+        self._speak_text("Hello, sir. This is how I'll sound from now on.")
 
     # ---- voice output speed ----------------------------------------------- #
 
@@ -2408,7 +2446,10 @@ class XpertTab(QWidget):
         if self.player is not None and not self._speaking:
             self._speaking = True
             rate = self._voice_rate_str()  # honor the voice-speed slider
-            spawn_worker(self._workers, lambda: synthesize_speech(text, rate=rate), self._speak_ready)
+            voice = self._voice_name()     # honor the chosen voice
+            spawn_worker(
+                self._workers, lambda: synthesize_speech(text, voice=voice, rate=rate), self._speak_ready
+            )
         else:
             self._fallback_say(text)
             self._guard_speaking(text)
