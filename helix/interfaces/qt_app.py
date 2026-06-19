@@ -1253,16 +1253,22 @@ class ChatInput(QPlainTextEdit):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("askBox")
         self.setTabChangesFocus(True)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._min_h = 40
-        self._max_h = 150
+        self.setStyleSheet(
+            "QPlainTextEdit#askBox{border:1px solid #2f6c80;border-radius:12px;"
+            "background-color:rgba(13,30,37,0.75);color:#eaffff;padding:10px 14px;font-size:13pt;}"
+            "QPlainTextEdit#askBox:focus{border:1px solid #1dd8ff;background-color:rgba(16,38,46,0.9);}"
+        )
+        self._min_h = 70
+        self._max_h = 180
         self.setFixedHeight(self._min_h)
         self.document().contentsChanged.connect(self._adjust_height)
 
     def _adjust_height(self) -> None:
-        height = int(self.document().size().height()) + 2 * int(self.frameWidth()) + 10
+        height = int(self.document().size().height()) + 2 * int(self.frameWidth()) + 28
         self.setFixedHeight(max(self._min_h, min(self._max_h, height)))
 
     def keyPressEvent(self, event) -> None:
