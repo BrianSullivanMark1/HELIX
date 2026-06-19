@@ -340,18 +340,18 @@ XPERT_TOOLS: list[dict[str, Any]] = [
     {
         "name": "show_screen",
         "description": (
-            "Pop a panel up on the screen for the user to see — the investments table, home, work, "
-            "learning, or the live house cameras. Use whenever the user asks to see / show / open / "
-            "pull up one of those (e.g. 'show my investments', 'pull up the portfolio', 'open home', "
-            "'show cameras' / 'show me the cameras'). No confirmation needed."
+            "Pop a panel up on the screen for the user to see — the investments table, home, the "
+            "grocery list, work, learning, or the live house cameras. Use whenever the user asks to "
+            "see / show / open / pull up one of those (e.g. 'show my investments', 'pull up the "
+            "portfolio', 'open home', 'open the grocery list', 'show cameras'). No confirmation needed."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "screen": {
                     "type": "string",
-                    "enum": ["investment", "home", "enterprise", "learning", "cameras", "settings"],
-                    "description": "Which panel: investment (money/portfolio/trading), home, enterprise (work), learning, cameras (live house cameras), or settings (voice speed + devices).",
+                    "enum": ["investment", "home", "grocery", "enterprise", "learning", "cameras", "settings"],
+                    "description": "Which panel: investment (money/portfolio/trading), home, grocery (the shopping list + order from Fry's), enterprise (work), learning, cameras (live house cameras), or settings (voice speed + devices).",
                 }
             },
             "required": ["screen"],
@@ -836,12 +836,15 @@ class ActionRouter:
     def _tool_show_screen(self, tool_input: dict) -> ToolOutcome:
         raw = str(tool_input.get("screen", "")).strip().lower()
         alias = {"investments": "investment", "portfolio": "investment", "money": "investment",
-                 "stocks": "investment", "work": "enterprise", "camera": "cameras"}
+                 "stocks": "investment", "work": "enterprise", "camera": "cameras",
+                 "groceries": "grocery", "shopping": "grocery", "shopping list": "grocery",
+                 "grocery list": "grocery"}
         key = alias.get(raw, raw)
-        labels = {"investment": "the investments", "home": "home", "enterprise": "work",
-                  "learning": "learning", "cameras": "the cameras", "settings": "settings"}
+        labels = {"investment": "the investments", "home": "home", "grocery": "the grocery list",
+                  "enterprise": "work", "learning": "learning", "cameras": "the cameras",
+                  "settings": "settings"}
         if key not in labels:
-            return ToolOutcome("I can show investments, home, work, learning, or the cameras, sir. Which one?")
+            return ToolOutcome("I can show investments, home, the grocery list, work, learning, or the cameras, sir. Which one?")
         self.ctx.show_screen(key)
         return ToolOutcome(f"Pulling up {labels[key]}, sir.")
 
