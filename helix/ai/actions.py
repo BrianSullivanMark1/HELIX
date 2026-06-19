@@ -393,6 +393,7 @@ class ActionContext:
     start_auto: Callable[[], None] = lambda: None
     stop_auto: Callable[[], None] = lambda: None
     refresh_home: Callable[[], None] = lambda: None
+    on_progress: Callable[[str], None] = lambda _msg: None  # live "what HELIX is doing" step text
 
 
 @dataclass
@@ -654,7 +655,7 @@ class ActionRouter:
         task = str(tool_input.get("task", "")).strip()
         if not task:
             return ToolOutcome("Tell me what to build, change, or fix in HELIX, sir.")
-        result = coder.run_coding_task(task)
+        result = coder.run_coding_task(task, on_step=self.ctx.on_progress)
         if not result.ok:
             return ToolOutcome(f"I couldn't draft that change, sir: {result.error}")
         rec = engine.record_pending(self.ctx.settings, result)

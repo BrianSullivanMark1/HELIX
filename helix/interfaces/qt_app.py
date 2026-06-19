@@ -1520,6 +1520,7 @@ class XpertTab(QWidget):
             start_auto=lambda: self.request_invest.emit("start"),
             stop_auto=lambda: self.request_invest.emit("stop"),
             refresh_home=lambda: self.request_home_refresh.emit(),
+            on_progress=lambda text: self.convo_step.emit(text),
         )
         return ActionRouter(ctx)
 
@@ -1556,7 +1557,19 @@ class XpertTab(QWidget):
             "text_my_tasks": "Preparing a text...",
             "review_helix_100": "Reviewing the HELIX 500...",
             "scout_special_stocks": "Scouting moonshot stocks...",
-        }.get(tool_name, "Working on it...")
+            "improve_helix": "Drafting your change…",
+            "approve_change": "Shipping it…",
+            "reject_change": "Discarding the draft…",
+            "fix_recent_crashes": "Checking for crashes…",
+            "look": "Taking a look…",
+            "look_around": "Looking around the house…",
+            "scan_inventory": "Scanning…",
+            "add_to_shopping_list": "Updating the list…",
+            "order_groceries": "Preparing the order…",
+        }.get(tool_name)
+        if friendly is None:
+            # Not a known tool name → it's already a ready-made progress line (e.g. a coder streaming step).
+            friendly = tool_name or "Working on it..."
         self._set_convo_state("acting", friendly)
 
     def _research_fn(self, prompt: str) -> str:

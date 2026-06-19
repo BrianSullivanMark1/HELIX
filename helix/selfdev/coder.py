@@ -270,23 +270,59 @@ def run_coding_task(
         env.pop("ANTHROPIC_API_KEY", None)  # prefer the subscription token; don't let an API key override it
     else:
         env["ANTHROPIC_API_KEY"] = key
-    cmd = [cli, "-p", build_coder_prompt(task), "--output-format", "json",
+    # Stream the run so HELIX can show live progress ("Reading X", "Editing Y") instead of a black box.
+    cmd = [cli, "-p", build_coder_prompt(task), "--output-format", "stream-json", "--verbose",
            "--model", model, "--permission-mode", "acceptEdits"]
-    step("Opus 4.8 is working on the change...")
+    step("Opus 4.8 is working on the change…")
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # don't pop a console when HELIX runs windowless
     try:
-        proc = subprocess.run(
-            cmd, cwd=repo, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout, env=env,
+        proc = subprocess.Popen(
+            cmd, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", env=env,
+            stdin=subprocess.DEVNULL, creationflags=no_window,
         )
-    except subprocess.TimeoutExpired:
-        return abort(f"Coding run timed out after {timeout}s.")
     except (OSError, subprocess.SubprocessError) as exc:
         return abort(f"Could not run the coder: {exc}")
-
-    summary, cost, is_error = _parse_cli_json(proc.stdout)
-    if proc.returncode != 0 and not summary:
-        detail = (proc.stderr or summary or "the coder failed").strip()[:2000]
-        return abort(f"Coder exited {proc.returncode}: {detail}")
+    killer = threading.Timer(timeout, proc.kill)
+    killer.start()
+    final_event = None
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "result":
+                final_event = event
+            else:
+                note = _describe_event(event)
+                if note:
+                    step(note)
+        proc.wait()
+    except Exception as exc:  # noqa: BLE001 — a stream failure should abort cleanly, not crash
+        proc.kill()
+        return abort(f"Coder stream failed: {exc}")
+    finally:
+        killer.cancel()
+    try:
+        stderr_text = proc.stderr.read() or ""
+    except Exception:
+        stderr_text = ""
+    if final_event is not None:
+        summary = str(final_event.get("result") or "").strip()
+        raw_cost = final_event.get("total_cost_usd")
+        try:
+            cost = float(raw_cost) if raw_cost is not None else None
+        except (TypeError, ValueError):
+            cost = None
+        is_error = bool(final_event.get("is_error"))
+    else:
+        summary, cost, is_error = "", None, False
+    if (proc.returncode not in (0, None)) and not summary:
+        return abort(f"Coder exited {proc.returncode}: {(stderr_text or 'the coder failed').strip()[:1000]}")
 
     files = gitops.changed_files(repo)
     if not files:
