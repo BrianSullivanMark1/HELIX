@@ -106,6 +106,8 @@ DEFAULT_DRAWDOWN_BRAKE_PCT = 0.15         # raise cash once the account is down 
 DEFAULT_DEFENSIVE_CASH_BUFFER_PCT = 0.40  # cash to hold while in drawdown or a risk-off regime
 DEFAULT_CORE_STOP_LOSS_PCT = 0.25         # exit a core holding down 25%+ (deep single-name brake)
 DEFAULT_MIN_POSITIONS = 20                # diversification floor: never concentrate below 20 names
+DEFAULT_MAX_POSITIONS = 30                # concentration default for auto-investing: hold the top ~30 buys (§30)
+DEFAULT_MIN_POSITION_USD = 50.0           # don't OPEN a new core position smaller than this (skip dust slices)
 
 
 def research_max_tokens(settings: Any) -> int:
@@ -803,6 +805,7 @@ def build_rebalance_plan(
     *,
     max_position_pct: float = 0.20,
     max_positions: int = 0,
+    min_position_usd: float = 0.0,
     factor_scores: dict[str, float] | None = None,
     factor_overlay: bool = False,
     volatilities: dict[str, float] | None = None,
@@ -943,11 +946,13 @@ def build_rebalance_plan(
         keep_n = max(max_positions, risk.min_positions)  # §35 diversification floor: never below N names
     if keep_n and keep_n > 0 and len(buy_symbols) > keep_n:
         scores = factor_scores or {}
-        buy_symbols = sorted(
-            buy_symbols,
-            key=lambda s: (CONFIDENCE_WEIGHT.get(ratings[s]["confidence"], 1.0), scores.get(s, 0.0), s),
-            reverse=True,
-        )[:keep_n]
+        rank = lambda s: (CONFIDENCE_WEIGHT.get(ratings[s]["confidence"], 1.0), scores.get(s, 0.0), s)  # noqa: E731
+        # Avoid opening new positions when already at the cap: keep the names we already hold first
+        # (no needless churn), then fill any remaining slots with the highest-conviction NEW names.
+        held_buys = sorted((s for s in buy_symbols if holdings.get(s, 0.0) > 0), key=rank, reverse=True)[:keep_n]
+        open_slots = max(0, keep_n - len(held_buys))
+        new_buys = sorted((s for s in buy_symbols if holdings.get(s, 0.0) <= 0), key=rank, reverse=True)[:open_slots]
+        buy_symbols = held_buys + new_buys
     if preset == "Aggressive":
         weights = {symbol: CONFIDENCE_WEIGHT.get(ratings[symbol]["confidence"], 1.0) for symbol in buy_symbols}
     else:
@@ -977,6 +982,15 @@ def build_rebalance_plan(
         if watchlist_cap is not None:
             cap = min(cap, alloc * watchlist_cap)
         targets[symbol] = round(min(alloc, cap), 2)
+
+    # Minimum position size (reduce over-diversification): don't OPEN a new core position below the
+    # floor — a sub-threshold slice just adds a name without moving the needle. Existing holdings are
+    # left alone (their trims/exits are handled below); the freed budget falls through to cash, like
+    # the sector cap. 0 = off (the default — no behavior change for callers that don't set it).
+    if min_position_usd and min_position_usd > 0:
+        for symbol in buy_symbols:
+            if holdings.get(symbol, 0.0) <= 0 and 0.0 < targets.get(symbol, 0.0) < min_position_usd:
+                targets[symbol] = 0.0
 
     # Sector cap (§35): trim any one sector back to its share of the book so the core isn't secretly
     # one big macro bet. Applies to the core sleeve; unmapped names are exempt; freed budget -> cash.

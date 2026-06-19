@@ -25,6 +25,8 @@ from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.interfaces.api import HelixApiServer
 from helix.investment.autopilot import (
+    DEFAULT_MAX_POSITIONS,
+    DEFAULT_MIN_POSITION_USD,
     DEFAULT_RATING_MAX_AGE_DAYS,
     RESEARCH_TIMEOUT_SECONDS,
     ROSTER_SETTING,
@@ -545,6 +547,7 @@ def _autopilot_cycle(args: argparse.Namespace, memory: SQLiteMemory, settings: A
             plan = build_rebalance_plan(
                 total_equity, cash, holdings, watchlist, research_fn,
                 max_position_pct=max_position_pct, cash_buffer_pct=cash_buffer_pct, preset=args.preset,
+                max_positions=DEFAULT_MAX_POSITIONS, min_position_usd=DEFAULT_MIN_POSITION_USD,  # concentrate, skip dust
                 memory=memory,
                 rating_max_age_days=DEFAULT_RATING_MAX_AGE_DAYS,
                 on_issue=lambda message: print(f"[research] {message}"),
@@ -558,6 +561,7 @@ def _autopilot_cycle(args: argparse.Namespace, memory: SQLiteMemory, settings: A
             total_equity, cash, holdings, watchlist,
             lambda _prompt: generate_mock_portfolio_research(universe, args.preset),
             max_position_pct=max_position_pct, cash_buffer_pct=cash_buffer_pct, preset=args.preset,
+            max_positions=DEFAULT_MAX_POSITIONS, min_position_usd=DEFAULT_MIN_POSITION_USD,  # concentrate, skip dust
             memory=memory,
             rating_max_age_days=DEFAULT_RATING_MAX_AGE_DAYS,
         )

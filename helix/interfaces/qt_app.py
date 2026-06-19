@@ -109,6 +109,8 @@ from helix.investment.autopilot import (
     DEFAULT_DEFENSIVE_CASH_BUFFER_PCT,
     DEFAULT_DRAWDOWN_BRAKE_PCT,
     DEFAULT_MIN_POSITIONS,
+    DEFAULT_MAX_POSITIONS,
+    DEFAULT_MIN_POSITION_USD,
     DEFAULT_RATING_MAX_AGE_DAYS,
     DEFAULT_ROSTER_REVIEW_DAYS,
     DEFAULT_SECTOR_CAP_PCT,
@@ -3544,15 +3546,16 @@ class InvestTab(QWidget):
         self.max_positions = QSpinBox()
         self.max_positions.setMinimum(0)
         self.max_positions.setMaximum(500)
-        self.max_positions.setSpecialValueText("All (uncapped)")  # shown when value == 0
+        self.max_positions.setSpecialValueText(f"Default (top {DEFAULT_MAX_POSITIONS})")  # shown when value == 0
         try:
             self.max_positions.setValue(int(self.settings.get(INVEST_MAX_POSITIONS_SETTING, 0) or 0))
         except (TypeError, ValueError):
             self.max_positions.setValue(0)
         self.max_positions.setToolTip(
-            "Hold at most this many core names (the top-N by conviction, then momentum). 0 = uncapped. "
-            "Turning this on deliberately SELLS the names that miss the cut to concentrate - backtest "
-            "first to choose N (tighter = higher return but higher volatility)."
+            "Hold at most this many core names (the top-N by conviction, then momentum). "
+            f"0 = the baked default (top {DEFAULT_MAX_POSITIONS}), which concentrates rather than spreading across "
+            "the whole universe. Set your own N to override - backtest first (tighter = higher return but "
+            "higher volatility)."
         )
         self.max_positions.valueChanged.connect(
             lambda value: self.settings.set(INVEST_MAX_POSITIONS_SETTING, value)
@@ -4727,10 +4730,15 @@ class InvestTab(QWidget):
                 factor_scores = composite_factor_scores(momentum, quality, volatilities)
             elif max_positions > 0:
                 factor_scores = momentum  # concentration ranks on momentum when the overlay is off
+        # Reduce over-diversification (baked smart default): if the user hasn't set an explicit cap,
+        # still concentrate into the top ~30 buys and skip dust-sized new positions, rather than
+        # spreading capital across the whole 350+ universe. An explicit cap is always honored.
+        effective_max_positions = max_positions if max_positions > 0 else DEFAULT_MAX_POSITIONS
         plan = build_rebalance_plan(
             total_equity, cash, holdings, watchlist, research_fn,
             max_position_pct=1.0,  # no per-stock cap (removed at user direction) — sized by conviction + the cash buffer
-            max_positions=max_positions,
+            max_positions=effective_max_positions,
+            min_position_usd=DEFAULT_MIN_POSITION_USD,
             factor_scores=factor_scores,
             factor_overlay=factor_overlay,
             volatilities=volatilities,
