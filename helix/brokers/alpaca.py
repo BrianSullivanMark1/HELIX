@@ -165,6 +165,20 @@ class AlpacaClient:
                 break
         return out
 
+    def get_snapshot(self, symbol: str, feed: str = "iex") -> dict[str, Any]:
+        """Live snapshot for ONE symbol from the market-data API (`/v2/stocks/{symbol}/snapshot`,
+        free on paper with `feed="iex"`). Returns {latestTrade, latestQuote, minuteBar, dailyBar,
+        prevDailyBar} — enough to read the current price, the day's change vs the prior close, and
+        the day's volume. Used by the on-demand market-lookup tool (§7). `{}` if nothing comes back.
+        """
+        symbol = symbol.strip().upper()
+        if not symbol:
+            raise AlpacaError("A ticker symbol is required.")
+        response = self._request(
+            "GET", f"/v2/stocks/{symbol}/snapshot", {"feed": feed}, base=ALPACA_DATA_BASE_URL
+        )
+        return response if isinstance(response, dict) else {}
+
     def get_news(self, symbols: list | None = None, limit: int = 50, start: str | None = None) -> list:
         """Recent market news (data API `/v1beta1/news`, free on paper), newest first. Returns a
         list of {headline, summary, source, created_at, symbols}. Optional `symbols` filter."""
