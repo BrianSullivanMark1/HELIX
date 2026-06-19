@@ -312,6 +312,25 @@ XPERT_TOOLS: list[dict[str, Any]] = [
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "show_screen",
+        "description": (
+            "Pop a panel up on the screen for the user to see — the investments table, home, work, or "
+            "learning. Use whenever the user asks to see / show / open / pull up one of those (e.g. 'show "
+            "my investments', 'pull up the portfolio', 'open home'). No confirmation needed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "screen": {
+                    "type": "string",
+                    "enum": ["investment", "home", "enterprise", "learning"],
+                    "description": "Which panel: investment (money/portfolio/trading), home, enterprise (work), or learning.",
+                }
+            },
+            "required": ["screen"],
+        },
+    },
 ]
 
 TOOL_NAMES = {tool["name"] for tool in XPERT_TOOLS}
@@ -394,6 +413,7 @@ class ActionContext:
     stop_auto: Callable[[], None] = lambda: None
     refresh_home: Callable[[], None] = lambda: None
     on_progress: Callable[[str], None] = lambda _msg: None  # live "what HELIX is doing" step text
+    show_screen: Callable[[str], None] = lambda _name: None  # pop a panel up (investment/home/enterprise/learning)
 
 
 @dataclass
@@ -745,6 +765,17 @@ class ActionRouter:
             return ToolOutcome("I need a name and a source — a USB number like 0, or a stream URL, sir.")
         vision_camera.add_camera(self.ctx.settings, name, source)
         return ToolOutcome(f"Added the {name} camera, sir.")
+
+    def _tool_show_screen(self, tool_input: dict) -> ToolOutcome:
+        raw = str(tool_input.get("screen", "")).strip().lower()
+        alias = {"investments": "investment", "portfolio": "investment", "money": "investment",
+                 "stocks": "investment", "work": "enterprise"}
+        key = alias.get(raw, raw)
+        labels = {"investment": "the investments", "home": "home", "enterprise": "work", "learning": "learning"}
+        if key not in labels:
+            return ToolOutcome("I can show investments, home, work, or learning, sir. Which one?")
+        self.ctx.show_screen(key)
+        return ToolOutcome(f"Pulling up {labels[key]}, sir.")
 
     # -- groceries / shopping list ------------------------------------------ #
 

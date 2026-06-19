@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QStackedWidget,
@@ -473,7 +474,7 @@ class PresenceOrb(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         cx, cy = self.width() / 2.0, self.height() / 2.0
-        base = min(self.width(), self.height()) * 0.26
+        base = min(self.width(), self.height()) * 0.22
         state = self._state
         color = QColor(255, 200, 87) if state == "speaking" else QColor(29, 216, 255)
         wobble = math.sin(self._phase)
@@ -487,30 +488,60 @@ class PresenceOrb(QWidget):
             amp = 0.06
         radius = base * (1.0 + amp * (0.5 + 0.5 * wobble))
 
-        glow = QRadialGradient(QPointF(cx, cy), radius * 2.5)
-        inner = QColor(color); inner.setAlpha(70); glow.setColorAt(0.0, inner)
+        # soft outer glow
+        glow = QRadialGradient(QPointF(cx, cy), radius * 2.6)
+        inner = QColor(color); inner.setAlpha(60); glow.setColorAt(0.0, inner)
         outer = QColor(color); outer.setAlpha(0); glow.setColorAt(1.0, outer)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(glow)
-        painter.drawEllipse(QPointF(cx, cy), radius * 2.5, radius * 2.5)
+        painter.drawEllipse(QPointF(cx, cy), radius * 2.6, radius * 2.6)
 
+        # concentric rings
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        for index, alpha in enumerate((130, 70)):
+        for index, alpha in enumerate((150, 90, 45)):
             ring = QColor(color); ring.setAlpha(alpha)
-            pen = QPen(ring); pen.setWidthF(2.0)
+            pen = QPen(ring); pen.setWidthF(1.6)
             painter.setPen(pen)
-            rr = radius * (1.0 + 0.30 * index)
+            rr = radius * (1.0 + 0.32 * index)
             painter.drawEllipse(QPointF(cx, cy), rr, rr)
 
+        # rotating HUD reticle ticks
+        tick_r = radius * 1.95
+        tcol = QColor(color); tcol.setAlpha(120)
+        pen = QPen(tcol); pen.setWidthF(2.0); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        ticks = 12
+        for k in range(ticks):
+            ang = self._phase * 0.3 + (2 * math.pi * k / ticks)
+            long = (k % 3 == 0)
+            r2 = tick_r + (radius * 0.16 if long else radius * 0.07)
+            painter.drawLine(
+                QPointF(cx + math.cos(ang) * tick_r, cy + math.sin(ang) * tick_r),
+                QPointF(cx + math.cos(ang) * r2, cy + math.sin(ang) * r2),
+            )
+
+        # orbiting particles
+        painter.setPen(Qt.PenStyle.NoPen)
+        for j, (rr_mult, speed, size) in enumerate(((1.42, 0.7, 3.0), (1.7, -0.5, 2.3), (2.0, 0.95, 2.6))):
+            ang = self._phase * speed + j * 2.1
+            pcol = QColor(color); pcol.setAlpha(220)
+            painter.setBrush(pcol)
+            painter.drawEllipse(
+                QPointF(cx + math.cos(ang) * radius * rr_mult, cy + math.sin(ang) * radius * rr_mult), size, size
+            )
+
+        # rotating arc while working
         if state in ("thinking", "acting", "transcribing"):
             pen = QPen(QColor(color)); pen.setWidthF(3.0); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            span = QRectF(cx - radius * 1.55, cy - radius * 1.55, radius * 3.1, radius * 3.1)
-            painter.drawArc(span, int((self._phase * 55) % 360) * 16, 90 * 16)
+            painter.setPen(pen); painter.setBrush(Qt.BrushStyle.NoBrush)
+            span = QRectF(cx - radius * 1.25, cy - radius * 1.25, radius * 2.5, radius * 2.5)
+            painter.drawArc(span, int((self._phase * 70) % 360) * 16, 100 * 16)
 
+        # white-hot core
         core = QRadialGradient(QPointF(cx, cy), radius)
-        c0 = QColor(color); c0.setAlpha(235); core.setColorAt(0.0, c0)
-        c1 = QColor(color); c1.setAlpha(110); core.setColorAt(1.0, c1)
+        hot = QColor(255, 255, 255); hot.setAlpha(205); core.setColorAt(0.0, hot)
+        mid = QColor(color); mid.setAlpha(230); core.setColorAt(0.4, mid)
+        edge = QColor(color); edge.setAlpha(80); core.setColorAt(1.0, edge)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(core)
         painter.drawEllipse(QPointF(cx, cy), radius, radius)
@@ -562,68 +593,55 @@ class AmbientTile(QFrame):
 
 
 class ConsoleView(QWidget):
-    """The single-screen HELIX Console: Presence orb + the conversation (the heart) + four ambient
-    tiles (House · Money · Supplies · Self). Deep views are one tap or one sentence away."""
+    """The HELIX home — a big animated Presence orb (the app's face) with the conversation beneath it.
+    Nothing else shows until you ask: tables and panels pop up on request (by voice, or the one launcher
+    menu). No tabs, no tiles."""
 
-    def __init__(self, xpert: "XpertTab", memory: SQLiteMemory, open_view, parent=None) -> None:
+    def __init__(self, xpert: "XpertTab", memory: SQLiteMemory, open_view, show_launcher, parent=None) -> None:
         super().__init__(parent)
         self._xpert = xpert
         self.memory = memory
         self.settings = AppSettings()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(26, 16, 26, 18)
+        layout.setSpacing(10)
 
-        top = QHBoxLayout()
-        top.setSpacing(16)
-        self.orb = PresenceOrb()
-        self.orb.setFixedSize(84, 84)
-        title = QVBoxLayout()
-        title.setSpacing(3)
-        title.addStretch(1)
+        # top bar — brand + live presence, and the single launcher (the only manual navigation)
+        topbar = QHBoxLayout()
+        brand = QVBoxLayout()
+        brand.setSpacing(2)
         name = QLabel("HELIX")
         name.setObjectName("consoleBrand")
         self.presence = QLabel(_PRESENCE_TEXT["idle"])
         self.presence.setObjectName("consolePresence")
-        title.addWidget(name)
-        title.addWidget(self.presence)
-        title.addStretch(1)
-        more = QPushButton("More  ›")
-        more.setObjectName("ghostButton")
-        more.setCursor(Qt.CursorShape.PointingHandCursor)
-        more.setToolTip("Open the deep views — Home, Enterprise, Learning, Investment")
-        more.clicked.connect(lambda: open_view(None))
-        top.addWidget(self.orb)
-        top.addLayout(title)
-        top.addStretch(1)
-        top.addWidget(more, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addLayout(top)
+        brand.addWidget(name)
+        brand.addWidget(self.presence)
+        menu_button = QPushButton("☰  Menu")
+        menu_button.setObjectName("ghostButton")
+        menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        menu_button.setToolTip("Open anything — Investments, Home, Work, Learning")
+        menu_button.clicked.connect(show_launcher)
+        topbar.addLayout(brand)
+        topbar.addStretch(1)
+        topbar.addWidget(menu_button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(topbar)
 
-        divider = QFrame()
-        divider.setObjectName("consoleDivider")
-        divider.setFixedHeight(2)
-        layout.addWidget(divider)
+        # the orb — large, centered, the face of the app
+        self.orb = PresenceOrb()
+        self.orb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self.orb, 6)
 
-        layout.addWidget(xpert, 1)  # the conversation — the heart
-
-        tiles = QHBoxLayout()
-        tiles.setSpacing(12)
-        self.tile_house = AmbientTile("House", lambda: open_view("home"))
-        self.tile_money = AmbientTile("Money", lambda: open_view("investment"))
-        self.tile_supplies = AmbientTile("Supplies", lambda: open_view("home"))
-        self.tile_self = AmbientTile("Self", lambda: open_view("enterprise"))
-        for tile in (self.tile_house, self.tile_money, self.tile_supplies, self.tile_self):
-            tiles.addWidget(tile)
-        layout.addLayout(tiles)
+        # the conversation, de-emphasized beneath the orb
+        try:
+            xpert.compact()
+        except Exception:
+            pass
+        layout.addWidget(xpert, 5)
 
         self._orb_timer = QTimer(self)
         self._orb_timer.timeout.connect(self._sync_presence)
         self._orb_timer.start(70)
-        self._tile_timer = QTimer(self)
-        self._tile_timer.timeout.connect(self.refresh_tiles)
-        self._tile_timer.start(30000)
-        self.refresh_tiles()
 
         # Proactive door/area watch (§vision): cheap local motion detection on a 'door' camera; on
         # movement, one vision call describes who's there and HELIX announces it — only when idle.
@@ -643,45 +661,6 @@ class ConsoleView(QWidget):
         except Exception:
             pass
         self.presence.setText(_PRESENCE_TEXT.get(state, _PRESENCE_TEXT["idle"]))
-
-    def refresh_tiles(self) -> None:
-        """Update the glance tiles from local engine state (no network, so it never janks)."""
-        try:
-            cams = len(vision_camera.list_cameras(self.settings))
-            due = len(due_tasks(self.settings.get(HOME_TASKS_SETTING) or []))
-            self.tile_house.set_value(
-                f"{cams} camera(s)" if cams else "No eyes yet",
-                f"{due} chore(s) due" if due else "Chores clear",
-            )
-        except Exception:
-            self.tile_house.set_value("—", "")
-        try:
-            rows = self.memory.list_equity_history(30)
-            if rows:
-                last = rows[-1]
-                eq = float(last.get("equity") or 0.0)
-                pl = float(last.get("unrealized_pl") or 0.0)
-                self.tile_money.set_value(f"${eq:,.0f}", f"open P/L ${pl:+,.0f}")
-            else:
-                self.tile_money.set_value("—", "connect Alpaca")
-        except Exception:
-            self.tile_money.set_value("—", "")
-        try:
-            shopping = self.settings.get("shopping_list") or []
-            self.tile_supplies.set_value(
-                f"{len(shopping)} on the list" if shopping else "List empty",
-                "tap to order" if shopping else "—",
-            )
-        except Exception:
-            self.tile_supplies.set_value("—", "")
-        try:
-            pending = len(selfdev_engine.list_pending(self.settings))
-            self.tile_self.set_value(
-                f"{pending} change(s) ready" if pending else "All caught up",
-                "tap to approve" if pending else "self-improving",
-            )
-        except Exception:
-            self.tile_self.set_value("—", "")
 
     # ---- proactive door/area watch ---------------------------------------- #
 
@@ -725,6 +704,77 @@ class ConsoleView(QWidget):
             self._xpert.announce(f"Someone's at the door, sir. {payload}")
 
 
+class PanelHost(QWidget):
+    """Hosts ONE deep view at a time, summoned on request — a title + a back-to-HELIX button, no tab bar.
+    Tables and panels live here and pop up only when the user (or HELIX) opens them."""
+
+    def __init__(self, views: dict, on_home, parent=None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(10)
+        header = QHBoxLayout()
+        home_button = QPushButton("‹  HELIX")
+        home_button.setObjectName("ghostButton")
+        home_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        home_button.clicked.connect(on_home)
+        self.title = QLabel("")
+        self.title.setObjectName("panelTitle")
+        header.addWidget(home_button)
+        header.addSpacing(14)
+        header.addWidget(self.title)
+        header.addStretch(1)
+        layout.addLayout(header)
+        self._stack = QStackedWidget()
+        self._index: dict = {}
+        for position, (key, (label, widget)) in enumerate(views.items()):
+            self._stack.addWidget(widget)
+            self._index[key] = (position, label)
+        layout.addWidget(self._stack, 1)
+
+    def show_view(self, key: str) -> bool:
+        entry = self._index.get(key)
+        if entry is None:
+            return False
+        position, label = entry
+        self._stack.setCurrentIndex(position)
+        self.title.setText(label)
+        return True
+
+
+class Launcher(QWidget):
+    """The single manual navigation — a clean grid of destinations. Voice can open the same things."""
+
+    def __init__(self, items: list, on_pick, on_home, parent=None) -> None:
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(48, 34, 48, 40)
+        outer.setSpacing(18)
+        header = QHBoxLayout()
+        title = QLabel("What can I open?")
+        title.setObjectName("launcherTitle")
+        close_button = QPushButton("✕")
+        close_button.setObjectName("ghostButton")
+        close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_button.clicked.connect(on_home)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(close_button)
+        outer.addLayout(header)
+        grid = QGridLayout()
+        grid.setSpacing(18)
+        for n, (key, label, subtitle) in enumerate(items):
+            card = QPushButton(f"{label}\n{subtitle}")
+            card.setObjectName("launcherCard")
+            card.setCursor(Qt.CursorShape.PointingHandCursor)
+            card.setMinimumHeight(96)
+            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            card.clicked.connect(lambda _=False, k=key: on_pick(k))
+            grid.addWidget(card, n // 2, n % 2)
+        outer.addLayout(grid)
+        outer.addStretch(1)
+
+
 class HelixMainWindow(QMainWindow):
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
@@ -732,40 +782,44 @@ class HelixMainWindow(QMainWindow):
         self.setWindowTitle("HELIX")
         self.setStatusBar(QStatusBar())
 
-        # Deep domain views live behind 'More' or a sentence; Xpert is promoted to the Console itself.
+        # Deep views are summoned on request (a sentence, or the launcher) — no tabs. The orb IS the home.
         self.xpert_tab = XpertTab(memory)
         self.home_tab = HomeTab(memory)
         self.enterprise_tab = EnterpriseTab(memory)
         self.learning_tab = LearningTab(memory)
         self.investment_tab = InvestmentTab(memory, on_saved=self.refresh_all)
 
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self.home_tab, "Home")
-        self.tabs.addTab(self.enterprise_tab, "Enterprise")
-        self.tabs.addTab(self.learning_tab, "Learning")
-        self.tabs.addTab(self.investment_tab, "Investment")
-
-        more_page = QWidget()
-        more_layout = QVBoxLayout(more_page)
-        more_layout.setContentsMargins(10, 8, 10, 10)
-        back_bar = QHBoxLayout()
-        back_button = QPushButton("‹  Console")
-        back_button.clicked.connect(self._show_console)
-        back_bar.addWidget(back_button)
-        back_bar.addStretch(1)
-        more_layout.addLayout(back_bar)
-        more_layout.addWidget(self.tabs, 1)
-
-        self.console = ConsoleView(self.xpert_tab, memory, self.open_view)
+        self.panel_host = PanelHost(
+            {
+                "investment": ("Investments", self.investment_tab),
+                "home": ("Home", self.home_tab),
+                "enterprise": ("Work", self.enterprise_tab),
+                "learning": ("Learning", self.learning_tab),
+            },
+            on_home=self._show_home,
+        )
+        self.launcher = Launcher(
+            [
+                ("investment", "Investments", "balance · positions · trading"),
+                ("home", "Home", "chores · supplies · reminders"),
+                ("enterprise", "Work", "git + Slack · self-improvements"),
+                ("learning", "Learning", "research · AI"),
+            ],
+            on_pick=self.open_view,
+            on_home=self._show_home,
+        )
+        self.console = ConsoleView(self.xpert_tab, memory, self.open_view, self.show_launcher)
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self.console)  # 0 — the JARVIS console (default)
-        self.stack.addWidget(more_page)     # 1 — the deep domain tabs
+        self.stack.addWidget(self.console)     # 0 — the orb home (default)
+        self.stack.addWidget(self.panel_host)  # 1 — a summoned panel
+        self.stack.addWidget(self.launcher)    # 2 — the launcher menu
         self.setCentralWidget(self.stack)
 
-        # The Xpert assistant acts on the other pillars (start/stop investing, home tasks).
+        # The Xpert assistant acts on the other pillars + can pop panels up on request.
         self.xpert_tab.bind_investment(self.investment_tab.invest_tab)
         self.xpert_tab.bind_home(self.home_tab)
+        self.xpert_tab.request_show_screen.connect(self.open_view)
 
         self.refresh_all()
 
@@ -797,19 +851,16 @@ class HelixMainWindow(QMainWindow):
         self.statusBar().showMessage("HELIX memory synced", 3000)
 
     def open_view(self, name: str | None = None) -> None:
-        """Switch to a deep domain view (or just the More page if name is None)."""
-        self.stack.setCurrentIndex(1)
-        mapping = {
-            "home": self.home_tab,
-            "enterprise": self.enterprise_tab,
-            "learning": self.learning_tab,
-            "investment": self.investment_tab,
-        }
-        widget = mapping.get(name)
-        if widget is not None:
-            self.tabs.setCurrentWidget(widget)
+        """Pop a panel up (the investments table, home, work, learning). No name → the launcher menu."""
+        if name and self.panel_host.show_view(name):
+            self.stack.setCurrentIndex(1)
+        else:
+            self.show_launcher()
 
-    def _show_console(self) -> None:
+    def show_launcher(self) -> None:
+        self.stack.setCurrentIndex(2)
+
+    def _show_home(self) -> None:
         self.stack.setCurrentIndex(0)
 
     def _auto_trading(self) -> bool:
@@ -1173,6 +1224,7 @@ class XpertTab(QWidget):
     request_invest = pyqtSignal(str)        # "start" / "stop" auto-investing on the Investment tab
     request_home_refresh = pyqtSignal()     # reload the Home checklist after a task change
     convo_step = pyqtSignal(str)            # live "what HELIX is doing now" status during a turn
+    request_show_screen = pyqtSignal(str)   # ask the main window to pop a panel up (investment/home/…)
 
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
@@ -1226,6 +1278,7 @@ class XpertTab(QWidget):
         )
         subtitle.setObjectName("xpertHint")
         subtitle.setWordWrap(True)
+        self._subtitle = subtitle
 
         # --- Two-way voice conversation: the J.A.R.V.I.S. assistant (§23) ---
         self.convo_box = QGroupBox("Conversation")
@@ -1547,6 +1600,7 @@ class XpertTab(QWidget):
             stop_auto=lambda: self.request_invest.emit("stop"),
             refresh_home=lambda: self.request_home_refresh.emit(),
             on_progress=lambda text: self.convo_step.emit(text),
+            show_screen=lambda name: self.request_show_screen.emit(name),
         )
         return ActionRouter(ctx)
 
@@ -1760,6 +1814,13 @@ class XpertTab(QWidget):
             return
         self._append_transcript("HELIX", text)
         self._speak_reply(text)
+
+    def compact(self) -> None:
+        """Slim down for the orb home: drop the redundant hint header (the orb + presence say it all)."""
+        try:
+            self._subtitle.setVisible(False)
+        except Exception:
+            pass
 
     def _set_convo_state(self, state: str, detail: str = "") -> None:
         self._convo_state = state
@@ -6483,6 +6544,38 @@ def apply_hud_style(app: QApplication) -> None:
             border-color: #1dd8ff;
             color: #ffffff;
             background-color: rgba(23,81,97,0.5);
+        }
+
+        QLabel#panelTitle {
+            color: #eaffff;
+            font-size: 16pt;
+            font-weight: 800;
+            letter-spacing: 2px;
+        }
+
+        QLabel#launcherTitle {
+            color: #eaffff;
+            font-size: 22pt;
+            font-weight: 800;
+            letter-spacing: 3px;
+        }
+
+        QPushButton#launcherCard {
+            background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(20,44,53,0.55), stop:1 rgba(11,26,32,0.55));
+            color: #eaffff;
+            border: 1px solid #1b3a44;
+            border-radius: 16px;
+            padding: 16px 22px;
+            font-size: 15pt;
+            font-weight: 800;
+            text-align: left;
+        }
+
+        QPushButton#launcherCard:hover {
+            border-color: #1dd8ff;
+            background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(26,58,70,0.7), stop:1 rgba(13,32,40,0.7));
         }
 
         QLabel#xpertHint {
