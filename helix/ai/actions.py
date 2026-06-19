@@ -207,6 +207,14 @@ XPERT_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "audit_dead_code",
+        "description": (
+            "Audit HELIX's own code for dead / unused code and draft removals to keep it lean. Use when "
+            "the user asks to clean up, prune, audit, slim down, or tidy the codebase."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "approve_change",
         "description": (
             "Approve and merge the most recent drafted code change into HELIX — the 'ship it' command. "
@@ -711,15 +719,7 @@ class ActionRouter:
         feature = str(tool_input.get("feature", "")).strip()
         if not feature:
             return ToolOutcome("Which feature should I remove, sir?")
-        task = (
-            f"Completely and cleanly REMOVE the '{feature}' feature from HELIX, to keep the codebase lean. "
-            "Find everything that belongs ONLY to this feature and delete it: its module/files, its entry "
-            "in XPERT_TOOLS plus the matching _tool_ handler in helix/ai/actions.py, any launcher/menu "
-            "entry and UI panel, settings keys it owns, and any imports that become unused as a result. "
-            "Do NOT remove anything shared with other features. Afterward make sure the app still imports "
-            "and boots with no dangling references. Summarize exactly what you deleted."
-        )
-        result = coder.run_coding_task(task, on_step=self.ctx.on_progress)
+        result = coder.run_coding_task(coder.build_removal_task(feature), on_step=self.ctx.on_progress)
         if not result.ok:
             return ToolOutcome(f"I couldn't draft that removal, sir: {result.error}")
         rec = engine.record_pending(self.ctx.settings, result)
@@ -731,6 +731,29 @@ class ActionRouter:
             f"Drafted the removal of {feature} on review branch {result.branch}{cost}. {summary} "
             f"Files changed: {files or 'none'}. It's on a branch, not applied yet — say 'ship it' to "
             "approve, then I'll merge and restart lean."
+        )
+
+    def _tool_audit_dead_code(self, _input: dict) -> ToolOutcome:
+        task = (
+            "Audit HELIX for dead or unused code and remove what is clearly safe to remove, to keep it "
+            "lean. Look for: modules never imported, functions/classes never referenced, Xpert tools with "
+            "no handler (or handlers with no tool), launcher/registry entries with no backing code, and "
+            "unused imports. Remove only clearly-dead code; when unsure, leave it and note it. Make sure "
+            "the app still imports and boots. Summarize what you removed and what you flagged."
+        )
+        result = coder.run_coding_task(task, on_step=self.ctx.on_progress)
+        if not result.ok:
+            if "no file changes" in (result.error or "").lower():
+                return ToolOutcome("Audited the codebase, sir — nothing clearly dead to prune. It's lean.")
+            return ToolOutcome(f"I couldn't run the audit, sir: {result.error}")
+        rec = engine.record_pending(self.ctx.settings, result)
+        mailer.notify_drafted(self.ctx.settings, rec)
+        files = ", ".join(result.changed_files[:8]) + ("…" if len(result.changed_files) > 8 else "")
+        cost = f" (about ${result.cost_usd:.2f})" if result.cost_usd else ""
+        summary = (result.summary or "").strip()
+        return ToolOutcome(
+            f"Drafted a cleanup on review branch {result.branch}{cost}. {summary} Files: {files}. "
+            "Say 'ship it' to approve."
         )
 
     def _tool_approve_change(self, _input: dict) -> ToolOutcome:

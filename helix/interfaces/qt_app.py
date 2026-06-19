@@ -165,7 +165,7 @@ from helix.brokers.alpaca import (
 from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
-from helix.selfdev import engine as selfdev_engine, mailer as selfdev_mailer, restart as selfdev_restart, triggers as selfdev_triggers
+from helix.selfdev import coder as selfdev_coder, engine as selfdev_engine, mailer as selfdev_mailer, registry as selfdev_registry, restart as selfdev_restart, triggers as selfdev_triggers
 from helix.vision import analyze as vision_analyze, camera as vision_camera, watch as vision_watch
 from helix.interfaces.cameras import CameraCarousel
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
@@ -791,11 +791,14 @@ class Launcher(QWidget):
     Each card has a small ✕ to hide it from the menu; hidden items persist in settings
     (`launcher_hidden_items`) and can be brought back from Settings → Restore hidden menu items."""
 
-    def __init__(self, items: list, on_pick, on_home, settings: AppSettings | None = None, parent=None) -> None:
+    def __init__(self, items: list, on_pick, on_home, settings: AppSettings | None = None,
+                 removable_keys=None, on_remove_code=None, parent=None) -> None:
         super().__init__(parent)
         self._items = list(items)
         self._on_pick = on_pick
         self.settings = settings or AppSettings()
+        self._removable_keys = set(removable_keys or ())
+        self._on_remove_code = on_remove_code
         outer = QVBoxLayout(self)
         outer.setContentsMargins(48, 34, 48, 40)
         outer.setSpacing(18)
@@ -831,7 +834,7 @@ class Launcher(QWidget):
         for n, (key, label, subtitle) in enumerate(visible):
             card = _LauncherCard(key, f"{label}\n{subtitle}")
             card.clicked.connect(lambda _=False, k=key: self._on_pick(k))
-            card.hide_requested.connect(self._hide)
+            card.hide_requested.connect(self._on_badge)
             self._grid.addWidget(card, n // 2, n % 2)
 
     def _hide(self, key: str) -> None:
@@ -839,6 +842,15 @@ class Launcher(QWidget):
         hidden.add(key)
         self.settings.set(LAUNCHER_HIDDEN_SETTING, sorted(hidden))
         self._rebuild()
+
+    def _on_badge(self, key: str) -> None:
+        """The card ✕: for a self-added feature, remove its CODE (with approval); otherwise just hide the
+        card from the menu (restorable in Settings)."""
+        if key in self._removable_keys and self._on_remove_code is not None:
+            label = next((it[1] for it in self._items if it[0] == key), key)
+            self._on_remove_code(label)
+        else:
+            self._hide(key)
 
     def restore(self, key: str) -> None:
         hidden = self._hidden()
@@ -897,18 +909,25 @@ class HelixMainWindow(QMainWindow):
             },
             on_home=self._show_home,
         )
+        core_menu = [
+            ("investment", "Investments", "balance · positions · trading"),
+            ("home", "Home", "chores · supplies · reminders"),
+            ("enterprise", "Work", "git + Slack · self-improvements"),
+            ("learning", "Learning", "research · AI"),
+            ("cameras", "Cameras", "live house cameras"),
+            ("settings", "Settings", "voice speed · devices"),
+        ]
+        feature_menu = [
+            (f.get("key", ""), f.get("label", "Feature"), f.get("subtitle", ""))
+            for f in selfdev_registry.MENU_FEATURES if f.get("key")
+        ]
         self.launcher = Launcher(
-            [
-                ("investment", "Investments", "balance · positions · trading"),
-                ("home", "Home", "chores · supplies · reminders"),
-                ("enterprise", "Work", "git + Slack · self-improvements"),
-                ("learning", "Learning", "research · AI"),
-                ("cameras", "Cameras", "live house cameras"),
-                ("settings", "Settings", "voice speed · devices"),
-            ],
+            core_menu + feature_menu,
             on_pick=self.open_view,
             on_home=self._show_home,
             settings=AppSettings(),
+            removable_keys=selfdev_registry.feature_keys(),  # self-added items: the ✕ removes their code
+            on_remove_code=self._remove_feature,
         )
         self.console = ConsoleView(self.xpert_tab, memory, self.open_view, self.show_launcher)
 
@@ -997,6 +1016,34 @@ class HelixMainWindow(QMainWindow):
 
     def _show_home(self) -> None:
         self.stack.setCurrentIndex(0)
+
+    def _remove_feature(self, feature: str) -> None:
+        """Menu ✕ on a self-added feature: draft a clean removal of its code (Opus), for your approval."""
+        confirm = QMessageBox.question(
+            self,
+            "Remove feature",
+            f"Remove “{feature}” and delete its code?\nHELIX will draft the removal for your approval.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._show_home()
+        self.statusBar().showMessage(f"Drafting the removal of {feature}…", 6000)
+        spawn_worker(
+            self._sd_workers,
+            lambda: selfdev_coder.run_coding_task(selfdev_coder.build_removal_task(feature)),
+            self._removal_done,
+        )
+
+    def _removal_done(self, ok: bool, payload) -> None:
+        if ok and getattr(payload, "ok", False):
+            rec = selfdev_engine.record_pending(self.settings, payload)
+            selfdev_mailer.notify_drafted(self.settings, rec)
+            self.statusBar().showMessage(
+                "Removal drafted — approve it in Work → self-improvements, or say 'ship it'.", 10000
+            )
+        else:
+            detail = getattr(payload, "error", payload)
+            self.statusBar().showMessage(f"Couldn't draft the removal: {detail}", 9000)
 
     def _auto_trading(self) -> bool:
         """True while the Investment auto-loop is running — used to defer a restart so we never

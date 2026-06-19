@@ -140,7 +140,23 @@ def build_coder_prompt(task: str) -> str:
         "- Do NOT run `git commit`, `git push`, or any git command — HELIX handles version control. "
         "Just edit the files.\n"
         "- Never modify the `data/` directory, secrets, or API keys.\n"
+        "- If you add a user-facing feature that deserves its own screen, make it removable: register a "
+        "panel in HelixMainWindow's `views` dict, add its key to the show_screen tool, and append "
+        "{key, label, subtitle} to helix/selfdev/registry.py MENU_FEATURES — so the launcher shows it with "
+        "a remove (✕) option.\n"
         "- When done, briefly summarize what you changed and why, in a few sentences."
+    )
+
+
+def build_removal_task(feature: str) -> str:
+    """The task handed to Opus to cleanly delete a feature (used by remove_feature + the menu ✕)."""
+    return (
+        f"Completely and cleanly REMOVE the '{feature}' feature from HELIX, to keep the codebase lean. "
+        "Delete everything that belongs ONLY to it: its module/files, its XPERT_TOOLS entry + the matching "
+        "_tool_ handler in helix/ai/actions.py, its panel + its entry in HelixMainWindow's `views` dict and "
+        "in helix/selfdev/registry.py MENU_FEATURES, any settings keys it owns, and now-unused imports. Do "
+        "NOT remove anything shared with other features. Afterward make sure the app still imports and boots "
+        "with no dangling references. Summarize exactly what you deleted."
     )
 
 
