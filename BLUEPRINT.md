@@ -10,6 +10,12 @@
 
 ---
 
+**Status — 2026-06-18:** Phases 1–4 **shipped** — the Console, the Presence orb, the ambient tiles,
+grocery ordering, and the proactive door watch are all built, tested, and committed. Phase 5 (fully
+removing the tab "drawer") is intentionally **deferred** until the Console is proven in daily use, per
+this blueprint's own condition — the tabs are demoted behind **More**, not yet deleted (they still hold
+settings + Learning).
+
 ## 1. The heart
 
 **HELIX is the mind of the house.**
