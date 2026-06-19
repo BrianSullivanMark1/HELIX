@@ -161,6 +161,7 @@ from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
 from helix.selfdev import engine as selfdev_engine, mailer as selfdev_mailer, restart as selfdev_restart, triggers as selfdev_triggers
+from helix.vision import camera as vision_camera
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
 from helix.investment.planner import build_briefing, render_briefing
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks, task_status
@@ -513,13 +514,54 @@ class PresenceOrb(QWidget):
         painter.end()
 
 
-class ConsoleView(QWidget):
-    """The single-screen HELIX Console: the Presence orb + the conversation (the heart), with deep
-    domain views one tap ('More') or one sentence away. Ambient tiles fill the bottom row (Phase 2)."""
+class AmbientTile(QFrame):
+    """A small glanceable card on the Console — a label, a value, and a hint. Click to open the deep
+    view. Awareness, not a menu."""
 
-    def __init__(self, xpert: "XpertTab", on_more, parent=None) -> None:
+    def __init__(self, title: str, on_click=None, parent=None) -> None:
+        super().__init__(parent)
+        self._on_click = on_click
+        self.setObjectName("ambientTile")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            "QFrame#ambientTile{border:1px solid #16323b;border-radius:10px;background:rgba(18,38,46,0.35);}"
+            "QFrame#ambientTile:hover{border-color:#1dd8ff;}"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 9, 12, 9)
+        lay.setSpacing(1)
+        cap = QLabel(title)
+        cap.setStyleSheet("color:#6fb3c0;border:none;")
+        self._value = QLabel("…")
+        self._value.setStyleSheet("font-weight:700;font-size:15px;border:none;")
+        self._hint = QLabel("")
+        self._hint.setStyleSheet("color:#7faebb;border:none;")
+        lay.addWidget(cap)
+        lay.addWidget(self._value)
+        lay.addWidget(self._hint)
+
+    def set_value(self, value: str, hint: str = "") -> None:
+        self._value.setText(value)
+        self._hint.setText(hint)
+
+    def mousePressEvent(self, _event) -> None:
+        if self._on_click:
+            try:
+                self._on_click()
+            except Exception:
+                pass
+
+
+class ConsoleView(QWidget):
+    """The single-screen HELIX Console: Presence orb + the conversation (the heart) + four ambient
+    tiles (House · Money · Supplies · Self). Deep views are one tap or one sentence away."""
+
+    def __init__(self, xpert: "XpertTab", memory: SQLiteMemory, open_view, parent=None) -> None:
         super().__init__(parent)
         self._xpert = xpert
+        self.memory = memory
+        self.settings = AppSettings()
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 14, 18, 12)
         layout.setSpacing(12)
@@ -537,7 +579,7 @@ class ConsoleView(QWidget):
         title.addWidget(self.presence)
         more = QPushButton("More")
         more.setToolTip("Open the deep views — Home, Enterprise, Learning, Investment")
-        more.clicked.connect(on_more)
+        more.clicked.connect(lambda: open_view(None))
         top.addWidget(self.orb)
         top.addSpacing(8)
         top.addLayout(title)
@@ -547,13 +589,23 @@ class ConsoleView(QWidget):
 
         layout.addWidget(xpert, 1)  # the conversation — the heart
 
-        self.tiles = QHBoxLayout()  # ambient tiles land here in Phase 2
-        self.tiles.setSpacing(10)
-        layout.addLayout(self.tiles)
+        tiles = QHBoxLayout()
+        tiles.setSpacing(10)
+        self.tile_house = AmbientTile("House", lambda: open_view("home"))
+        self.tile_money = AmbientTile("Money", lambda: open_view("investment"))
+        self.tile_supplies = AmbientTile("Supplies", lambda: open_view("home"))
+        self.tile_self = AmbientTile("Self", lambda: open_view("enterprise"))
+        for tile in (self.tile_house, self.tile_money, self.tile_supplies, self.tile_self):
+            tiles.addWidget(tile)
+        layout.addLayout(tiles)
 
         self._orb_timer = QTimer(self)
         self._orb_timer.timeout.connect(self._sync_presence)
         self._orb_timer.start(70)
+        self._tile_timer = QTimer(self)
+        self._tile_timer.timeout.connect(self.refresh_tiles)
+        self._tile_timer.start(30000)
+        self.refresh_tiles()
 
     def _sync_presence(self) -> None:
         state = getattr(self._xpert, "_convo_state", "idle")
@@ -563,6 +615,45 @@ class ConsoleView(QWidget):
         except Exception:
             pass
         self.presence.setText(_PRESENCE_TEXT.get(state, _PRESENCE_TEXT["idle"]))
+
+    def refresh_tiles(self) -> None:
+        """Update the glance tiles from local engine state (no network, so it never janks)."""
+        try:
+            cams = len(vision_camera.list_cameras(self.settings))
+            due = len(due_tasks(self.settings.get(HOME_TASKS_SETTING) or []))
+            self.tile_house.set_value(
+                f"{cams} camera(s)" if cams else "No eyes yet",
+                f"{due} chore(s) due" if due else "Chores clear",
+            )
+        except Exception:
+            self.tile_house.set_value("—", "")
+        try:
+            rows = self.memory.list_equity_history(30)
+            if rows:
+                last = rows[-1]
+                eq = float(last.get("equity") or 0.0)
+                pl = float(last.get("unrealized_pl") or 0.0)
+                self.tile_money.set_value(f"${eq:,.0f}", f"open P/L ${pl:+,.0f}")
+            else:
+                self.tile_money.set_value("—", "connect Alpaca")
+        except Exception:
+            self.tile_money.set_value("—", "")
+        try:
+            shopping = self.settings.get("shopping_list") or []
+            self.tile_supplies.set_value(
+                f"{len(shopping)} on the list" if shopping else "List empty",
+                "tap to order" if shopping else "—",
+            )
+        except Exception:
+            self.tile_supplies.set_value("—", "")
+        try:
+            pending = len(selfdev_engine.list_pending(self.settings))
+            self.tile_self.set_value(
+                f"{pending} change(s) ready" if pending else "All caught up",
+                "tap to approve" if pending else "self-improving",
+            )
+        except Exception:
+            self.tile_self.set_value("—", "")
 
 
 class HelixMainWindow(QMainWindow):
@@ -596,7 +687,7 @@ class HelixMainWindow(QMainWindow):
         more_layout.addLayout(back_bar)
         more_layout.addWidget(self.tabs, 1)
 
-        self.console = ConsoleView(self.xpert_tab, on_more=self._show_more)
+        self.console = ConsoleView(self.xpert_tab, memory, self.open_view)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.console)  # 0 — the JARVIS console (default)
@@ -636,8 +727,18 @@ class HelixMainWindow(QMainWindow):
         self.enterprise_tab.refresh()
         self.statusBar().showMessage("HELIX memory synced", 3000)
 
-    def _show_more(self) -> None:
+    def open_view(self, name: str | None = None) -> None:
+        """Switch to a deep domain view (or just the More page if name is None)."""
         self.stack.setCurrentIndex(1)
+        mapping = {
+            "home": self.home_tab,
+            "enterprise": self.enterprise_tab,
+            "learning": self.learning_tab,
+            "investment": self.investment_tab,
+        }
+        widget = mapping.get(name)
+        if widget is not None:
+            self.tabs.setCurrentWidget(widget)
 
     def _show_console(self) -> None:
         self.stack.setCurrentIndex(0)
