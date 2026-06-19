@@ -763,13 +763,14 @@ LAUNCHER_HIDDEN_SETTING = "launcher_hidden_items"
 
 
 class _LauncherCard(QPushButton):
-    """A launcher destination card carrying a small ✕ badge that hides it from the menu.
-    The badge is a child button pinned to the top-right corner; clicking it emits `hide_requested`
-    and (because Qt routes the press to the child) does not also open the destination."""
+    """A launcher destination card carrying a small ✕ badge. The badge is a child button pinned to the
+    top-right corner; clicking it emits `hide_requested` and (because Qt routes the press to the child)
+    does not also open the destination. For a self-added feature the ✕ removes its CODE (non-restorable);
+    for a core pillar it just hides the card (restorable in Settings) — `removable` picks the tooltip."""
 
     hide_requested = pyqtSignal(str)
 
-    def __init__(self, key: str, text: str, parent=None) -> None:
+    def __init__(self, key: str, text: str, removable: bool = False, parent=None) -> None:
         super().__init__(text, parent)
         self._key = key
         self.setObjectName("launcherCard")
@@ -777,10 +778,13 @@ class _LauncherCard(QPushButton):
         self.setMinimumHeight(96)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._badge = QPushButton("✕", self)
-        self._badge.setObjectName("launcherHide")
+        self._badge.setObjectName("launcherRemove" if removable else "launcherHide")
         self._badge.setCursor(Qt.CursorShape.PointingHandCursor)
         self._badge.setFixedSize(22, 22)
-        self._badge.setToolTip("Hide from the menu (restore in Settings)")
+        self._badge.setToolTip(
+            "Remove this feature and delete its code (you approve the change first)"
+            if removable else "Hide from the menu (restore in Settings)"
+        )
         self._badge.clicked.connect(lambda: self.hide_requested.emit(self._key))
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
@@ -834,7 +838,7 @@ class Launcher(QWidget):
         hidden = self._hidden()
         visible = [it for it in self._items if it[0] not in hidden]
         for n, (key, label, subtitle) in enumerate(visible):
-            card = _LauncherCard(key, f"{label}\n{subtitle}")
+            card = _LauncherCard(key, f"{label}\n{subtitle}", removable=key in self._removable_keys)
             card.clicked.connect(lambda _=False, k=key: self._on_pick(k))
             card.hide_requested.connect(self._on_badge)
             self._grid.addWidget(card, n // 2, n % 2)
@@ -7223,7 +7227,7 @@ def apply_hud_style(app: QApplication) -> None:
                 stop:0 rgba(26,58,70,0.7), stop:1 rgba(13,32,40,0.7));
         }
 
-        QPushButton#launcherHide {
+        QPushButton#launcherHide, QPushButton#launcherRemove {
             background-color: rgba(8,20,25,0.55);
             color: #6f93a0;
             border: none;
@@ -7233,8 +7237,15 @@ def apply_hud_style(app: QApplication) -> None:
             padding: 0px;
         }
 
+        /* Hide (core pillars, reversible): a neutral hover — no danger implied. */
         QPushButton#launcherHide:hover {
-            background-color: rgba(255,90,90,0.85);
+            background-color: rgba(40,70,82,0.9);
+            color: #d6eef5;
+        }
+
+        /* Remove (self-added features): a destructive red hover — the ✕ deletes the feature's code. */
+        QPushButton#launcherRemove:hover {
+            background-color: rgba(230,60,60,0.95);
             color: #ffffff;
         }
 
