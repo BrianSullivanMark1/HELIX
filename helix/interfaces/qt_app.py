@@ -3122,7 +3122,20 @@ class ComponentsTab(QWidget):
         self._result_cards: list[ClickFrame] = []
         self._selected_index: int | None = None
 
-        outer = QVBoxLayout(self)
+        # Wrap everything in a scroll area (like GroceryTab) so the tall filter box + two-pane area +
+        # parts panel are always reachable when the window is short — at the app's minimum height the
+        # stacked blocks otherwise overflow and clip. With setWidgetResizable the content still grows to
+        # fill a tall window (preserving the two-pane fill), and only scrolls when space runs out.
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        page_scroll = QScrollArea()
+        page_scroll.setWidgetResizable(True)
+        page_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        root.addWidget(page_scroll)
+        content = QWidget()
+        page_scroll.setWidget(content)
+
+        outer = QVBoxLayout(content)
         outer.setContentsMargins(24, 20, 24, 16)
         outer.setSpacing(12)
 
@@ -3217,6 +3230,7 @@ class ComponentsTab(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setMinimumHeight(180)  # keep a usable results viewport; the page scroll handles overflow
         holder = QWidget()
         self.results_container = QVBoxLayout(holder)
         self.results_container.setContentsMargins(0, 0, 6, 0)
