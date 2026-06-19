@@ -13,6 +13,7 @@ from __future__ import annotations
 
 MENU_FEATURES: list[dict] = [
     {"key": "grocery", "label": "Groceries", "subtitle": "shopping list · order from Fry's"},
+    {"key": "components", "label": "Components", "subtitle": "parts list · DigiKey + Mouser"},
     # Self-added features land here, e.g.:
     # {"key": "weather", "label": "Weather", "subtitle": "local forecast"},
 ]

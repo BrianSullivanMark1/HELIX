@@ -172,6 +172,8 @@ from helix.investment.models import InvestmentProfile, RISK_LEVELS
 from helix.investment.planner import build_briefing, render_briefing
 from helix.home import groceries as groceries_store
 from helix.home import kroger
+from helix.components import parts as components_store
+from helix.components import vendors as component_vendors
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks, task_status
 from helix.home.notify import (
     CARRIER_CHOICES,
@@ -881,6 +883,7 @@ class HelixMainWindow(QMainWindow):
         self.xpert_tab = XpertTab(memory)
         self.home_tab = HomeTab(memory)
         self.grocery_tab = GroceryTab(memory)
+        self.components_tab = ComponentsTab(memory)
         self.enterprise_tab = EnterpriseTab(memory)
         self.learning_tab = LearningTab(memory)
         self.investment_tab = InvestmentTab(memory, on_saved=self.refresh_all)
@@ -910,6 +913,7 @@ class HelixMainWindow(QMainWindow):
                 "investment": ("Investments", self.investment_tab),
                 "home": ("Home", self.home_tab),
                 "grocery": ("Groceries", self.grocery_tab),
+                "components": ("Components", self.components_tab),
                 "enterprise": ("Work", self.enterprise_tab),
                 "learning": ("Learning", self.learning_tab),
                 "cameras": ("Cameras", self.cameras_tab),
@@ -3071,6 +3075,361 @@ class GroceryTab(QWidget):
                     for name in missing:
                         groceries_store.add_item(self.settings, name)
             self.order_status.setText(msg)
+        else:
+            self.order_status.setText(f"Couldn't place the order: {payload}")
+        self._rebuild()
+
+
+class ComponentsTab(QWidget):
+    """The electronics components build/wish list. Add parts (with quantity + notes), search the
+    DigiKey or Mouser catalog for part numbers / price / stock, and order the list from a vendor
+    (always confirmed — outward action). Settings-backed via `helix.components.parts`; vendor I/O via
+    `helix.components.vendors`. Mirrors GroceryTab so it matches the rest of the app."""
+
+    def __init__(self, memory: SQLiteMemory) -> None:
+        super().__init__()
+        self.memory = memory
+        self.settings = AppSettings()
+        self._workers: set = set()
+        self._ordering = False
+        self._searching = False
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        outer.addWidget(scroll)
+        content = QWidget()
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(14)
+
+        header = QLabel("Components")
+        header.setObjectName("sectionHeader")
+        layout.addWidget(header)
+        self.summary = QLabel()
+        self.summary.setObjectName("grocerySummary")
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+
+        # Add-part row — name, quantity, optional notes, and Add.
+        add_box = QGroupBox("Add a part")
+        add_row = QHBoxLayout(add_box)
+        add_row.setSpacing(10)
+        self.item_input = QLineEdit()
+        self.item_input.setPlaceholderText("e.g. Raspberry Pi Zero 2 W, OV2640 camera module")
+        self.item_input.returnPressed.connect(self._add_item)
+        self.qty_input = QSpinBox()
+        self.qty_input.setRange(1, 999)
+        self.qty_input.setValue(1)
+        self.qty_input.setPrefix("× ")
+        self.qty_input.setFixedWidth(92)
+        self.notes_input = QLineEdit()
+        self.notes_input.setPlaceholderText("notes (optional)")
+        self.notes_input.returnPressed.connect(self._add_item)
+        add_button = QPushButton("Add Part")
+        add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_button.clicked.connect(self._add_item)
+        add_row.addWidget(self.item_input, 2)
+        add_row.addWidget(self.qty_input)
+        add_row.addWidget(self.notes_input, 1)
+        add_row.addWidget(add_button)
+        layout.addWidget(add_box)
+
+        # The build list itself.
+        self.list_container = QVBoxLayout()
+        self.list_container.setSpacing(8)
+        layout.addLayout(self.list_container)
+        self.empty_label = QLabel(
+            "Your components list is empty. Add a part above, or just say "
+            "“HELIX, add a Raspberry Pi Zero 2 W to the parts list.”"
+        )
+        self.empty_label.setObjectName("groceryEmpty")
+        self.empty_label.setWordWrap(True)
+        layout.addWidget(self.empty_label)
+
+        # Catalog search — query + vendor + Search, results below with an Add button each.
+        search_box = QGroupBox("Search a vendor catalog")
+        search_outer = QVBoxLayout(search_box)
+        search_outer.setSpacing(10)
+        search_row = QHBoxLayout()
+        search_row.setSpacing(10)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("e.g. SPH0645 MEMS microphone")
+        self.search_input.returnPressed.connect(self._search)
+        self.vendor_search = NoScrollComboBox()
+        for v in component_vendors.VENDORS:
+            self.vendor_search.addItem(component_vendors.vendor_label(v), v)
+        self.vendor_search.setFixedWidth(120)
+        self.search_button = QPushButton("Search")
+        self.search_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.search_button.clicked.connect(self._search)
+        search_row.addWidget(self.search_input, 1)
+        search_row.addWidget(self.vendor_search)
+        search_row.addWidget(self.search_button)
+        search_outer.addLayout(search_row)
+        self.search_status = QLabel()
+        self.search_status.setObjectName("grocerySummary")
+        self.search_status.setWordWrap(True)
+        search_outer.addWidget(self.search_status)
+        self.results_container = QVBoxLayout()
+        self.results_container.setSpacing(8)
+        search_outer.addLayout(self.results_container)
+        layout.addWidget(search_box)
+
+        # Order history.
+        self.history_box = QGroupBox("Order history")
+        self.history_layout = QVBoxLayout(self.history_box)
+        self.history_layout.setSpacing(6)
+        layout.addWidget(self.history_box)
+
+        layout.addStretch(1)
+
+        # Order bar — pick a vendor and order (always confirmed; outward action).
+        order_bar = QHBoxLayout()
+        self.order_status = QLabel()
+        self.order_status.setObjectName("grocerySummary")
+        self.order_status.setWordWrap(True)
+        clear_button = QPushButton("Clear list")
+        clear_button.setObjectName("ghostButton")
+        clear_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_button.clicked.connect(self._clear_list)
+        self.vendor_order = NoScrollComboBox()
+        for v in component_vendors.VENDORS:
+            self.vendor_order.addItem(component_vendors.vendor_label(v), v)
+        self.vendor_order.setFixedWidth(120)
+        self.order_button = QPushButton("\U0001f9fe  Order parts")
+        self.order_button.setObjectName("orderButton")
+        self.order_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.order_button.clicked.connect(self._order)
+        order_bar.addWidget(self.order_status, 1)
+        order_bar.addWidget(clear_button)
+        order_bar.addWidget(self.vendor_order)
+        order_bar.addWidget(self.order_button)
+        layout.addLayout(order_bar)
+
+        self._rebuild()
+
+    # -- rendering ---------------------------------------------------------- #
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().showEvent(event)
+        self._rebuild()  # voice may have changed the list while this panel was hidden
+
+    def refresh(self) -> None:
+        self._rebuild()
+
+    def _clear_layout(self, lay) -> None:
+        while lay.count():
+            item = lay.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+            elif item.layout() is not None:
+                self._clear_layout(item.layout())
+
+    def _rebuild(self) -> None:
+        self._clear_layout(self.list_container)
+        items = components_store.list_items(self.settings)
+        total = sum(r["qty"] for r in items)
+        if items:
+            self.summary.setText(
+                f"{len(items)} part{'s' if len(items) != 1 else ''} on the list ({total} total)"
+            )
+            self.empty_label.hide()
+        else:
+            self.summary.setText("Nothing on the list yet.")
+            self.empty_label.show()
+        self.order_button.setEnabled(bool(items) and not self._ordering)
+        for row in items:
+            self.list_container.addWidget(self._item_row(row))
+        self._rebuild_history()
+
+    def _item_row(self, row: dict) -> QWidget:
+        line = QFrame()
+        line.setObjectName("groceryItem")
+        lay = QHBoxLayout(line)
+        lay.setContentsMargins(12, 6, 8, 6)
+        lay.setSpacing(10)
+        text = row["item"]
+        if row.get("notes"):
+            text += f"  —  {row['notes']}"
+        name = QLabel(text)
+        name.setObjectName("groceryItemName")
+        name.setWordWrap(True)
+        qty = QLabel(f"× {row['qty']}")
+        qty.setObjectName("groceryQty")
+        remove = QPushButton("✕")
+        remove.setObjectName("groceryRemove")
+        remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        remove.setFixedSize(28, 28)
+        remove.setToolTip(f"Remove {row['item']}")
+        remove.clicked.connect(lambda _=False, name=row["item"]: self._remove_item(name))
+        lay.addWidget(name, 1)
+        lay.addWidget(qty)
+        lay.addWidget(remove)
+        return line
+
+    def _rebuild_history(self) -> None:
+        self._clear_layout(self.history_layout)
+        history = components_store.order_history(self.settings)
+        if not history:
+            empty = QLabel("No orders yet.")
+            empty.setObjectName("groceryEmpty")
+            self.history_layout.addWidget(empty)
+            return
+        for entry in history[:8]:
+            label = QLabel(
+                f"{entry.get('placed', '')} · {component_vendors.vendor_label(entry.get('vendor', ''))} · "
+                f"{entry.get('count', 0)} part(s): " + ", ".join(entry.get("items", [])[:6])
+            )
+            label.setObjectName("groceryItem")
+            label.setWordWrap(True)
+            label.setContentsMargins(12, 6, 8, 6)
+            self.history_layout.addWidget(label)
+
+    # -- catalog search ----------------------------------------------------- #
+
+    def _search(self) -> None:
+        if self._searching:
+            return
+        query = self.search_input.text().strip()
+        if not query:
+            return
+        vendor = self.vendor_search.currentData()
+        if not component_vendors.is_configured(self.settings, vendor):
+            label = component_vendors.vendor_label(vendor)
+            self.search_status.setText(
+                f"{label} isn't connected. Add its API credentials in settings to search the catalog."
+            )
+            return
+        self._searching = True
+        self.search_button.setEnabled(False)
+        self.search_status.setText(f"Searching {component_vendors.vendor_label(vendor)}…")
+        self._clear_layout(self.results_container)
+        spawn_worker(
+            self._workers,
+            lambda: component_vendors.search(query, vendor, self.settings, limit=5),
+            self._search_done,
+        )
+
+    def _search_done(self, ok: bool, payload) -> None:
+        self._searching = False
+        self.search_button.setEnabled(True)
+        self._clear_layout(self.results_container)
+        if not ok:
+            self.search_status.setText(f"Search failed: {payload}")
+            return
+        results = payload or []
+        if not results:
+            self.search_status.setText("No matches.")
+            return
+        self.search_status.setText(f"{len(results)} result(s) — tap Add to put one on your list.")
+        for r in results:
+            self.results_container.addWidget(self._result_row(r))
+
+    def _result_row(self, r: dict) -> QWidget:
+        line = QFrame()
+        line.setObjectName("groceryItem")
+        lay = QHBoxLayout(line)
+        lay.setContentsMargins(12, 6, 8, 6)
+        lay.setSpacing(10)
+        bits = [r.get("part_number", "") or "?"]
+        if r.get("price"):
+            bits.append(f"${r['price']}")
+        if r.get("stock"):
+            bits.append(f"{r['stock']} in stock")
+        head = " · ".join(b for b in bits if b)
+        desc = r.get("description", "")
+        name = QLabel(head + (f"\n{desc}" if desc else ""))
+        name.setObjectName("groceryItemName")
+        name.setWordWrap(True)
+        add = QPushButton("Add")
+        add.setCursor(Qt.CursorShape.PointingHandCursor)
+        part = r.get("part_number") or desc or "part"
+        note = (r.get("description", "") or "")[:60]
+        add.clicked.connect(lambda _=False, p=part, n=note: self._add_result(p, n))
+        lay.addWidget(name, 1)
+        lay.addWidget(add)
+        return line
+
+    def _add_result(self, part: str, note: str) -> None:
+        components_store.add_item(self.settings, part, 1, note)
+        self._rebuild()
+
+    # -- actions ------------------------------------------------------------ #
+
+    def _add_item(self) -> None:
+        text = self.item_input.text().strip()
+        if not text:
+            return
+        components_store.add_item(self.settings, text, self.qty_input.value(), self.notes_input.text().strip())
+        self.item_input.clear()
+        self.notes_input.clear()
+        self.qty_input.setValue(1)
+        self.item_input.setFocus()
+        self._rebuild()
+
+    def _remove_item(self, item: str) -> None:
+        components_store.remove_item(self.settings, item)
+        self._rebuild()
+
+    def _clear_list(self) -> None:
+        if not components_store.list_items(self.settings):
+            return
+        confirm = QMessageBox.question(self, "Clear list", "Remove every part from the components list?")
+        if confirm == QMessageBox.StandardButton.Yes:
+            components_store.clear(self.settings)
+            self.order_status.setText("")
+            self._rebuild()
+
+    def _order(self) -> None:
+        if self._ordering:
+            return
+        items = components_store.list_items(self.settings)
+        if not items:
+            QMessageBox.information(self, "Order parts", "The components list is empty.")
+            return
+        vendor = self.vendor_order.currentData()
+        label = component_vendors.vendor_label(vendor)
+        if not component_vendors.is_configured(self.settings, vendor):
+            QMessageBox.information(
+                self,
+                f"Connect {label} first",
+                f"{label} isn't connected yet. Add its API credentials in settings to let HELIX "
+                f"prepare the order.\n\nYour list is saved:\n" + components_store.summary(self.settings),
+            )
+            return
+        preview = "\n".join(
+            f"  • {r['item']}" + (f"  ×{r['qty']}" if r["qty"] > 1 else "") for r in items
+        )
+        confirm = QMessageBox.question(
+            self,
+            f"Order from {label}",
+            f"Send these {len(items)} part(s) to {label}?\n\n{preview}\n\n"
+            "HELIX prepares the order — you review and check out on the vendor site. No charge happens here.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._ordering = True
+        self.order_button.setEnabled(False)
+        self.order_status.setText(f"Sending your list to {label}…")
+        spawn_worker(
+            self._workers,
+            lambda: component_vendors.submit_order(vendor, self.settings, items),
+            lambda ok, payload: self._order_done(ok, payload, vendor, items),
+        )
+
+    def _order_done(self, ok: bool, payload, vendor: str, items: list) -> None:
+        self._ordering = False
+        if ok and isinstance(payload, dict):
+            components_store.record_order(self.settings, vendor, items)
+            components_store.clear(self.settings)
+            count = len(payload.get("submitted", []))
+            self.order_status.setText(f"Sent {count} part(s) to {component_vendors.vendor_label(vendor)}. "
+                                      + payload.get("note", ""))
         else:
             self.order_status.setText(f"Couldn't place the order: {payload}")
         self._rebuild()

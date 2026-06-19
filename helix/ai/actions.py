@@ -19,6 +19,7 @@ from helix.investment.autopilot import (
 from helix.selfdev import coder, engine, mailer, triggers
 from helix.vision import analyze as vision_analyze, camera as vision_camera
 from helix.home import groceries, kroger
+from helix.components import parts as components, vendors as component_vendors
 
 # --------------------------------------------------------------------------- #
 # Tool schemas — the spoken commands HELIX can act on. Each maps to a real engine/memory call in
@@ -338,20 +339,91 @@ XPERT_TOOLS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "add_to_components_list",
+        "description": (
+            "Add an electronics hardware part to the components build/wish list. Use when the user "
+            "wants to build something or needs a part, e.g. 'add a Raspberry Pi Zero 2 W', 'put an "
+            "OV2640 camera module on the parts list'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string", "description": "The part, e.g. 'Raspberry Pi Zero 2 W', 'SPH0645 MEMS microphone'."},
+                "qty": {"type": "integer", "description": "How many (default 1)."},
+                "notes": {"type": "string", "description": "Optional note, e.g. 'with headers' or which project it's for."},
+            },
+            "required": ["item"],
+        },
+    },
+    {
+        "name": "remove_from_components_list",
+        "description": "Remove a part from the components list. Use when the user got it or changed their mind.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"item": {"type": "string", "description": "The part to remove."}},
+            "required": ["item"],
+        },
+    },
+    {
+        "name": "show_components_list",
+        "description": "Read back the current components/parts list. Use when the user asks what parts are on the list.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "search_components",
+        "description": (
+            "Search a vendor's electronics catalog (DigiKey or Mouser) for a part and report the top "
+            "results with part number, price, and stock. Use when the user asks to find/price/look up "
+            "a component, e.g. 'find an OV2640 on Mouser', 'what does a Pi Zero cost on DigiKey'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for, e.g. 'OV2640 camera module'."},
+                "vendor": {
+                    "type": "string",
+                    "enum": ["digikey", "mouser"],
+                    "description": "Which catalog to search: digikey or mouser (default mouser).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "order_components",
+        "description": (
+            "Order the components list from a vendor (DigiKey or Mouser). This reaches outward toward a "
+            "purchase, so it ALWAYS requires explicit spoken confirmation. Use when the user says to "
+            "order the parts, place the parts order, or send it to DigiKey/Mouser."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "vendor": {
+                    "type": "string",
+                    "enum": ["digikey", "mouser"],
+                    "description": "Which vendor to order from: digikey or mouser.",
+                }
+            },
+            "required": ["vendor"],
+        },
+    },
+    {
         "name": "show_screen",
         "description": (
             "Pop a panel up on the screen for the user to see — the investments table, home, the "
-            "grocery list, work, learning, or the live house cameras. Use whenever the user asks to "
-            "see / show / open / pull up one of those (e.g. 'show my investments', 'pull up the "
-            "portfolio', 'open home', 'open the grocery list', 'show cameras'). No confirmation needed."
+            "grocery list, the components/parts list, work, learning, or the live house cameras. Use "
+            "whenever the user asks to see / show / open / pull up one of those (e.g. 'show my "
+            "investments', 'pull up the portfolio', 'open home', 'open the grocery list', 'show "
+            "components', 'show cameras'). No confirmation needed."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "screen": {
                     "type": "string",
-                    "enum": ["investment", "home", "grocery", "enterprise", "learning", "cameras", "settings"],
-                    "description": "Which panel: investment (money/portfolio/trading), home, grocery (the shopping list + order from Fry's), enterprise (work), learning, cameras (live house cameras), or settings (voice speed + devices).",
+                    "enum": ["investment", "home", "grocery", "components", "enterprise", "learning", "cameras", "settings"],
+                    "description": "Which panel: investment (money/portfolio/trading), home, grocery (the shopping list + order from Fry's), components (electronics parts list + DigiKey/Mouser), enterprise (work), learning, cameras (live house cameras), or settings (voice speed + devices).",
                 }
             },
             "required": ["screen"],
@@ -490,6 +562,16 @@ class ActionRouter:
             if missing:
                 message += f" I couldn't find: {', '.join(missing)}."
             return message
+        if name == "order_components":
+            vendor = component_vendors.normalize_vendor(str(tool_input.get("vendor", "") or ""))
+            items = components.list_items(self.ctx.settings)
+            result = component_vendors.submit_order(vendor, self.ctx.settings, items)
+            components.record_order(self.ctx.settings, vendor, items)
+            components.clear(self.ctx.settings)
+            return (
+                f"Sent {len(result.get('submitted', []))} part(s) to "
+                f"{component_vendors.vendor_label(vendor)}, sir. {result.get('note', '')}"
+            )
         return "Done, sir."
 
     # -- read-only investment tools ----------------------------------------- #
@@ -838,13 +920,14 @@ class ActionRouter:
         alias = {"investments": "investment", "portfolio": "investment", "money": "investment",
                  "stocks": "investment", "work": "enterprise", "camera": "cameras",
                  "groceries": "grocery", "shopping": "grocery", "shopping list": "grocery",
-                 "grocery list": "grocery"}
+                 "grocery list": "grocery", "component": "components", "parts": "components",
+                 "parts list": "components", "components list": "components", "hardware": "components"}
         key = alias.get(raw, raw)
         labels = {"investment": "the investments", "home": "home", "grocery": "the grocery list",
-                  "enterprise": "work", "learning": "learning", "cameras": "the cameras",
-                  "settings": "settings"}
+                  "components": "the components list", "enterprise": "work", "learning": "learning",
+                  "cameras": "the cameras", "settings": "settings"}
         if key not in labels:
-            return ToolOutcome("I can show investments, home, the grocery list, work, learning, or the cameras, sir. Which one?")
+            return ToolOutcome("I can show investments, home, the grocery list, the components list, work, learning, or the cameras, sir. Which one?")
         self.ctx.show_screen(key)
         return ToolOutcome(f"Pulling up {labels[key]}, sir.")
 
@@ -889,6 +972,81 @@ class ActionRouter:
             "before it goes to the cart. They still check out themselves in the Fry's app.",
             requires_confirmation=True,
             pending=("order_groceries", {}),
+        )
+
+    # -- components / electronics parts -------------------------------------- #
+
+    def _components_tail(self) -> str:
+        return f"{len(components.list_items(self.ctx.settings))} part(s) on the list."
+
+    def _tool_add_to_components_list(self, tool_input: dict) -> ToolOutcome:
+        item = str(tool_input.get("item", "")).strip()
+        if not item:
+            return ToolOutcome("What part should I add, sir?")
+        try:
+            qty = int(tool_input.get("qty", 1) or 1)
+        except (TypeError, ValueError):
+            qty = 1
+        notes = str(tool_input.get("notes", "") or "").strip()
+        components.add_item(self.ctx.settings, item, qty, notes)
+        return ToolOutcome(f"Added {item} to the components list, sir. " + self._components_tail())
+
+    def _tool_remove_from_components_list(self, tool_input: dict) -> ToolOutcome:
+        item = str(tool_input.get("item", "")).strip()
+        if components.remove_item(self.ctx.settings, item):
+            return ToolOutcome(f"Removed {item}, sir. " + self._components_tail())
+        return ToolOutcome(f"{item} wasn't on the components list, sir.")
+
+    def _tool_show_components_list(self, _input: dict) -> ToolOutcome:
+        return ToolOutcome(components.summary(self.ctx.settings))
+
+    def _tool_search_components(self, tool_input: dict) -> ToolOutcome:
+        query = str(tool_input.get("query", "")).strip()
+        if not query:
+            return ToolOutcome("What part should I search for, sir?")
+        vendor = component_vendors.normalize_vendor(str(tool_input.get("vendor", "") or "mouser")) or "mouser"
+        if vendor not in component_vendors.VENDORS:
+            return ToolOutcome("I can search DigiKey or Mouser, sir. Which one?")
+        if not component_vendors.is_configured(self.ctx.settings, vendor):
+            return ToolOutcome(
+                f"{component_vendors.vendor_label(vendor)} isn't connected yet, sir — add its API "
+                "credentials in settings to let me search the catalog."
+            )
+        try:
+            results = component_vendors.search(query, vendor, self.ctx.settings, limit=5)
+        except component_vendors.VendorError as error:
+            return ToolOutcome(f"The {component_vendors.vendor_label(vendor)} search failed, sir: {error}")
+        if not results:
+            return ToolOutcome(f"No {component_vendors.vendor_label(vendor)} matches for '{query}', sir.")
+        lines = []
+        for r in results[:5]:
+            price = f" ${r['price']}" if r.get("price") else ""
+            stock = f", {r['stock']} in stock" if r.get("stock") else ""
+            lines.append(f"{r.get('part_number', '?')}{price}{stock} — {r.get('description', '')}".strip())
+        return ToolOutcome(
+            f"Top {component_vendors.vendor_label(vendor)} results for '{query}': " + "; ".join(lines) + "."
+        )
+
+    def _tool_order_components(self, tool_input: dict) -> ToolOutcome:
+        vendor = component_vendors.normalize_vendor(str(tool_input.get("vendor", "") or ""))
+        if vendor not in component_vendors.VENDORS:
+            return ToolOutcome("Which vendor should I order from, sir — DigiKey or Mouser?")
+        items = components.list_items(self.ctx.settings)
+        if not items:
+            return ToolOutcome("The components list is empty, sir — nothing to order.")
+        label = component_vendors.vendor_label(vendor)
+        if not component_vendors.is_configured(self.ctx.settings, vendor):
+            return ToolOutcome(
+                f"{label} isn't connected yet, sir. Here's the list so you can order it: "
+                + components.summary(self.ctx.settings)
+                + f". To let me prepare the order, add the {label} API credentials in settings."
+            )
+        return ToolOutcome(
+            f"CONFIRMATION REQUIRED: this will send {len(items)} part(s) to {label} — "
+            f"{components.summary(self.ctx.settings)}. Tell the user that and ask them to confirm out "
+            "loud before it goes to the vendor. They still review and check out on the vendor site.",
+            requires_confirmation=True,
+            pending=("order_components", {"vendor": vendor}),
         )
 
 
