@@ -18,6 +18,7 @@ from helix.investment.autopilot import (
 )
 from helix.selfdev import coder, engine, mailer, triggers
 from helix.vision import analyze as vision_analyze, camera as vision_camera
+from helix.home import groceries, kroger
 
 # --------------------------------------------------------------------------- #
 # Tool schemas — the spoken commands HELIX can act on. Each maps to a real engine/memory call in
@@ -273,6 +274,44 @@ XPERT_TOOLS: list[dict[str, Any]] = [
             "required": ["name", "source"],
         },
     },
+    {
+        "name": "add_to_shopping_list",
+        "description": (
+            "Add an item to the household shopping list. Use when the user says they need / are out of / "
+            "are low on something, or 'add X to the list'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string", "description": "The grocery item, e.g. milk, eggs, dish soap."},
+                "qty": {"type": "integer", "description": "How many (default 1)."},
+            },
+            "required": ["item"],
+        },
+    },
+    {
+        "name": "remove_from_shopping_list",
+        "description": "Remove an item from the shopping list. Use when the user got it or changed their mind.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"item": {"type": "string", "description": "The item to remove."}},
+            "required": ["item"],
+        },
+    },
+    {
+        "name": "show_shopping_list",
+        "description": "Read back the current shopping list. Use when the user asks what's on the list or what they need.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "order_groceries",
+        "description": (
+            "Add everything on the shopping list to the user's Fry's (Kroger) cart so they can check out. "
+            "This reaches outward toward a purchase, so it ALWAYS requires explicit spoken confirmation. "
+            "Use when the user says to order groceries, place the order, or send it to Fry's."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 TOOL_NAMES = {tool["name"] for tool in XPERT_TOOLS}
@@ -394,6 +433,16 @@ class ActionRouter:
         if name == "set_auto_investing":
             self.ctx.start_auto()
             return "Confirmed — live auto-investing is starting now, sir."
+        if name == "order_groceries":
+            items = groceries.list_items(self.ctx.settings)
+            result = kroger.order_list(self.ctx.settings, items)
+            added, missing = result.get("added", []), result.get("missing", [])
+            if added:
+                groceries.clear(self.ctx.settings)
+            message = f"Added {len(added)} item(s) to your Fry's cart, sir — open the app to check out."
+            if missing:
+                message += f" I couldn't find: {', '.join(missing)}."
+            return message
         return "Done, sir."
 
     # -- read-only investment tools ----------------------------------------- #
@@ -695,6 +744,49 @@ class ActionRouter:
             return ToolOutcome("I need a name and a source — a USB number like 0, or a stream URL, sir.")
         vision_camera.add_camera(self.ctx.settings, name, source)
         return ToolOutcome(f"Added the {name} camera, sir.")
+
+    # -- groceries / shopping list ------------------------------------------ #
+
+    def _list_tail(self) -> str:
+        return f"{len(groceries.list_items(self.ctx.settings))} item(s) on the list."
+
+    def _tool_add_to_shopping_list(self, tool_input: dict) -> ToolOutcome:
+        item = str(tool_input.get("item", "")).strip()
+        if not item:
+            return ToolOutcome("What should I add to the list, sir?")
+        try:
+            qty = int(tool_input.get("qty", 1) or 1)
+        except (TypeError, ValueError):
+            qty = 1
+        groceries.add_item(self.ctx.settings, item, qty)
+        return ToolOutcome(f"Added {item} to the shopping list, sir. " + self._list_tail())
+
+    def _tool_remove_from_shopping_list(self, tool_input: dict) -> ToolOutcome:
+        item = str(tool_input.get("item", "")).strip()
+        if groceries.remove_item(self.ctx.settings, item):
+            return ToolOutcome(f"Removed {item}, sir. " + self._list_tail())
+        return ToolOutcome(f"{item} wasn't on the list, sir.")
+
+    def _tool_show_shopping_list(self, _input: dict) -> ToolOutcome:
+        return ToolOutcome(groceries.summary(self.ctx.settings))
+
+    def _tool_order_groceries(self, _input: dict) -> ToolOutcome:
+        items = groceries.list_items(self.ctx.settings)
+        if not items:
+            return ToolOutcome("The shopping list is empty, sir — nothing to order.")
+        if not kroger.is_configured(self.ctx.settings):
+            return ToolOutcome(
+                "Fry's isn't connected yet, sir. Here's the list so you can order it: "
+                + groceries.summary(self.ctx.settings)
+                + ". To let me fill the cart, set up the Kroger account in settings."
+            )
+        return ToolOutcome(
+            f"CONFIRMATION REQUIRED: this will add {len(items)} item(s) to your Fry's cart — "
+            f"{groceries.summary(self.ctx.settings)}. Tell the user that and ask them to confirm out loud "
+            "before it goes to the cart. They still check out themselves in the Fry's app.",
+            requires_confirmation=True,
+            pending=("order_groceries", {}),
+        )
 
 
 # --------------------------------------------------------------------------- #
