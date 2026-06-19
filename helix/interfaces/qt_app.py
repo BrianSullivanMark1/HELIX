@@ -111,6 +111,7 @@ from helix.investment.autopilot import (
     DEFAULT_MIN_POSITIONS,
     DEFAULT_MAX_POSITIONS,
     DEFAULT_MIN_POSITION_USD,
+    DEFAULT_TRIM_BAND_PCT,
     DEFAULT_RATING_MAX_AGE_DAYS,
     DEFAULT_ROSTER_REVIEW_DAYS,
     DEFAULT_SECTOR_CAP_PCT,
@@ -4747,6 +4748,7 @@ class InvestTab(QWidget):
             risk=self._compute_risk_controls(client, symbols, total_equity),  # §35 risk controls
             cash_buffer_pct=DEFAULT_CASH_BUFFER / 100.0,
             preset=DEFAULT_PRESET,
+            trim_band_pct=DEFAULT_TRIM_BAND_PCT,  # let winners run before trimming overweight names
             memory=self.memory,
             rating_max_age_days=rating_age,
             special_symbols=special_symbols,

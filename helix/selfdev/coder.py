@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -172,6 +173,40 @@ def _parse_cli_json(stdout: str) -> tuple[str, float | None, bool]:
     except (TypeError, ValueError):
         cost = None
     return summary, cost, bool(obj.get("is_error"))
+
+
+def _describe_tool(name: str, tool_input: dict) -> str:
+    """A short, human 'what Opus is doing now' line from a Claude Code tool-use event."""
+    path = str(tool_input.get("file_path") or tool_input.get("path") or "")
+    short = path.replace("\\", "/").rsplit("/", 1)[-1] if path else ""
+    table = {
+        "Edit": f"Editing {short}" if short else "Editing a file",
+        "MultiEdit": f"Editing {short}" if short else "Editing files",
+        "Write": f"Writing {short}" if short else "Writing a file",
+        "Read": f"Reading {short}" if short else "Reading a file",
+        "NotebookEdit": f"Editing {short}" if short else "Editing a notebook",
+        "Bash": "Running a command",
+        "Grep": "Searching the code",
+        "Glob": "Looking for files",
+        "TodoWrite": "Planning the change",
+        "WebFetch": "Reading a page",
+        "WebSearch": "Searching the web",
+    }
+    return table.get(name, f"Using {name}" if name else "Working")
+
+
+def _describe_event(event: dict) -> str | None:
+    """Turn a streamed Claude Code event into a one-line progress note, or None if not worth showing."""
+    if event.get("type") != "assistant":
+        return None
+    for block in (event.get("message", {}) or {}).get("content", []) or []:
+        if block.get("type") == "tool_use":
+            return _describe_tool(block.get("name", ""), block.get("input", {}) or {})
+        if block.get("type") == "text":
+            text = (block.get("text") or "").strip()
+            if text:
+                return "Opus: " + text.split("\n", 1)[0][:90]
+    return None
 
 
 def run_coding_task(
