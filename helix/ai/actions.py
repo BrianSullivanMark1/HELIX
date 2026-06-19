@@ -324,8 +324,8 @@ XPERT_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "screen": {
                     "type": "string",
-                    "enum": ["investment", "home", "enterprise", "learning"],
-                    "description": "Which panel: investment (money/portfolio/trading), home, enterprise (work), or learning.",
+                    "enum": ["investment", "home", "enterprise", "learning", "settings"],
+                    "description": "Which panel: investment (money/portfolio/trading), home, enterprise (work), learning, or settings (voice speed + devices).",
                 }
             },
             "required": ["screen"],
@@ -771,7 +771,8 @@ class ActionRouter:
         alias = {"investments": "investment", "portfolio": "investment", "money": "investment",
                  "stocks": "investment", "work": "enterprise"}
         key = alias.get(raw, raw)
-        labels = {"investment": "the investments", "home": "home", "enterprise": "work", "learning": "learning"}
+        labels = {"investment": "the investments", "home": "home", "enterprise": "work",
+                  "learning": "learning", "settings": "settings"}
         if key not in labels:
             return ToolOutcome("I can show investments, home, work, or learning, sir. Which one?")
         self.ctx.show_screen(key)

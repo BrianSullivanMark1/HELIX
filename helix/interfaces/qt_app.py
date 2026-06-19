@@ -445,11 +445,14 @@ _PRESENCE_TEXT = {
 
 class PresenceOrb(QWidget):
     """HELIX's living presence — an animated orb that breathes when idle and reacts to its state
-    (listening / thinking / acting / speaking). The signature JARVIS element of the Console."""
+    (listening / thinking / acting / speaking). Left-click toggles the conversation. The JARVIS heart."""
+
+    clicked = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setMinimumSize(64, 64)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._state = "idle"
         self._level = 0.0
         self._phase = 0.0
@@ -469,6 +472,10 @@ class PresenceOrb(QWidget):
     def _tick(self) -> None:
         self._phase += 0.09
         self.update()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
@@ -632,12 +639,14 @@ class ConsoleView(QWidget):
         self.orb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.orb, 6)
 
-        # the conversation, de-emphasized beneath the orb
+        # the conversation box — slimmed, and HIDDEN until you tap the orb (left-click)
         try:
             xpert.compact()
         except Exception:
             pass
+        xpert.setVisible(False)
         layout.addWidget(xpert, 5)
+        self.orb.clicked.connect(self._toggle_conversation)
 
         self._orb_timer = QTimer(self)
         self._orb_timer.timeout.connect(self._sync_presence)
@@ -661,6 +670,10 @@ class ConsoleView(QWidget):
         except Exception:
             pass
         self.presence.setText(_PRESENCE_TEXT.get(state, _PRESENCE_TEXT["idle"]))
+
+    def _toggle_conversation(self) -> None:
+        """Left-click on the orb reveals or hides the conversation box."""
+        self._xpert.setVisible(not self._xpert.isVisible())
 
     # ---- proactive door/area watch ---------------------------------------- #
 
@@ -789,12 +802,27 @@ class HelixMainWindow(QMainWindow):
         self.learning_tab = LearningTab(memory)
         self.investment_tab = InvestmentTab(memory, on_saved=self.refresh_all)
 
+        # Settings panel — voice speed + audio devices, moved off the orb home and summonable like any
+        # other panel. Reparents Xpert's secondary controls here (keeps their wiring).
+        settings_panel = QWidget()
+        settings_layout = QVBoxLayout(settings_panel)
+        settings_layout.setContentsMargins(18, 14, 18, 16)
+        settings_layout.setSpacing(14)
+        settings_layout.addWidget(self.xpert_tab.controls_box)
+        new_chat_button = QPushButton("New chat")
+        new_chat_button.setObjectName("ghostButton")
+        new_chat_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        new_chat_button.clicked.connect(self.xpert_tab._new_chat)
+        settings_layout.addWidget(new_chat_button, 0, Qt.AlignmentFlag.AlignLeft)
+        settings_layout.addStretch(1)
+
         self.panel_host = PanelHost(
             {
                 "investment": ("Investments", self.investment_tab),
                 "home": ("Home", self.home_tab),
                 "enterprise": ("Work", self.enterprise_tab),
                 "learning": ("Learning", self.learning_tab),
+                "settings": ("Settings", settings_panel),
             },
             on_home=self._show_home,
         )
@@ -804,6 +832,7 @@ class HelixMainWindow(QMainWindow):
                 ("home", "Home", "chores · supplies · reminders"),
                 ("enterprise", "Work", "git + Slack · self-improvements"),
                 ("learning", "Learning", "research · AI"),
+                ("settings", "Settings", "voice speed · devices"),
             ],
             on_pick=self.open_view,
             on_home=self._show_home,
@@ -1301,7 +1330,7 @@ class XpertTab(QWidget):
         self.talk_button.setMinimumHeight(48)
         self.talk_button.pressed.connect(self._on_talk_pressed)
         self.talk_button.released.connect(self._on_talk_released)
-        new_chat_button = QPushButton("New chat")
+        self._new_chat_button = new_chat_button = QPushButton("New chat")
         new_chat_button.clicked.connect(self._new_chat)
         self.text_input = QLineEdit()
         self.text_input.setPlaceholderText("...or type to HELIX and press Enter")
@@ -1816,11 +1845,22 @@ class XpertTab(QWidget):
         self._speak_reply(text)
 
     def compact(self) -> None:
-        """Slim down for the orb home: drop the redundant hint header (the orb + presence say it all)."""
-        try:
-            self._subtitle.setVisible(False)
-        except Exception:
-            pass
+        """Slim down for the orb home: hide the hint, the buttons, and the typing line — the orb + voice
+        lead, and voice speed / devices live in the Settings panel. Leaves just the conversation log."""
+        for widget in (
+            getattr(self, "_subtitle", None),
+            getattr(self, "talk_button", None),
+            getattr(self, "_new_chat_button", None),
+            getattr(self, "send_button", None),
+            getattr(self, "text_input", None),
+            getattr(self, "listen_label", None),
+            getattr(self, "level_bar", None),
+        ):
+            if widget is not None:
+                try:
+                    widget.setVisible(False)
+                except Exception:
+                    pass
 
     def _set_convo_state(self, state: str, detail: str = "") -> None:
         self._convo_state = state
