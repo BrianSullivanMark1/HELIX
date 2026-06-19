@@ -36,9 +36,11 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHeaderView,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -742,8 +744,9 @@ class PanelHost(QWidget):
     """Hosts ONE deep view at a time, summoned on request — a title + a back-to-HELIX button, no tab bar.
     Tables and panels live here and pop up only when the user (or HELIX) opens them."""
 
-    def __init__(self, views: dict, on_home, parent=None) -> None:
+    def __init__(self, views: dict, on_home, settings: AppSettings | None = None, parent=None) -> None:
         super().__init__(parent)
+        self.settings = settings or AppSettings()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(10)
@@ -772,11 +775,21 @@ class PanelHost(QWidget):
             return False
         position, label = entry
         self._stack.setCurrentIndex(position)
-        self.title.setText(label)
+        self.title.setText(custom_menu_labels(self.settings).get(key, label))
         return True
 
 
 LAUNCHER_HIDDEN_SETTING = "launcher_hidden_items"
+LAUNCHER_LABELS_SETTING = "launcher_custom_labels"
+
+
+def custom_menu_labels(settings: AppSettings) -> dict[str, str]:
+    """User-chosen display names for menu items, keyed by view key (e.g. {"home": "House"}).
+    Stored in settings so a rename persists across restarts; tolerant of a missing/corrupt value."""
+    raw = settings.get(LAUNCHER_LABELS_SETTING, {})
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v) for k, v in raw.items() if str(v).strip()}
 
 
 class _LauncherCard(QPushButton):
@@ -786,6 +799,7 @@ class _LauncherCard(QPushButton):
     for a core pillar it just hides the card (restorable in Settings) — `removable` picks the tooltip."""
 
     hide_requested = pyqtSignal(str)
+    rename_requested = pyqtSignal(str)
 
     def __init__(self, key: str, text: str, removable: bool = False, parent=None) -> None:
         super().__init__(text, parent)
@@ -803,6 +817,14 @@ class _LauncherCard(QPushButton):
             if removable else "Hide from the menu (restore in Settings)"
         )
         self._badge.clicked.connect(lambda: self.hide_requested.emit(self._key))
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_menu)
+
+    def _show_menu(self, pos) -> None:
+        """Right-click (or long-press, which Qt maps to a context-menu request) → a Rename option."""
+        menu = QMenu(self)
+        menu.addAction("Rename…", lambda: self.rename_requested.emit(self._key))
+        menu.exec(self.mapToGlobal(pos))
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)
@@ -853,11 +875,14 @@ class Launcher(QWidget):
             if widget is not None:
                 widget.deleteLater()
         hidden = self._hidden()
+        labels = custom_menu_labels(self.settings)
         visible = [it for it in self._items if it[0] not in hidden]
         for n, (key, label, subtitle) in enumerate(visible):
-            card = _LauncherCard(key, f"{label}\n{subtitle}", removable=key in self._removable_keys)
+            shown = labels.get(key, label)
+            card = _LauncherCard(key, f"{shown}\n{subtitle}", removable=key in self._removable_keys)
             card.clicked.connect(lambda _=False, k=key: self._on_pick(k))
             card.hide_requested.connect(self._on_badge)
+            card.rename_requested.connect(self._rename)
             self._grid.addWidget(card, n // 2, n % 2)
 
     def _hide(self, key: str) -> None:
@@ -874,6 +899,25 @@ class Launcher(QWidget):
             self._on_remove_code(label)
         else:
             self._hide(key)
+
+    def _rename(self, key: str) -> None:
+        """Prompt for a new display name for this menu item; save it (or clear back to the default if
+        the box is emptied). Persists to settings so the rename survives a restart."""
+        default = next((it[1] for it in self._items if it[0] == key), key)
+        current = custom_menu_labels(self.settings).get(key, default)
+        text, ok = QInputDialog.getText(
+            self, "Rename menu item", f"Display name (leave blank to reset to “{default}”):", text=current
+        )
+        if not ok:
+            return
+        labels = custom_menu_labels(self.settings)
+        new_name = text.strip()
+        if new_name and new_name != default:
+            labels[key] = new_name
+        else:
+            labels.pop(key, None)
+        self.settings.set(LAUNCHER_LABELS_SETTING, labels)
+        self._rebuild()
 
     def restore(self, key: str) -> None:
         hidden = self._hidden()
@@ -935,6 +979,7 @@ class HelixMainWindow(QMainWindow):
                 "settings": ("Settings", settings_panel),
             },
             on_home=self._show_home,
+            settings=AppSettings(),
         )
         core_menu = [
             ("investment", "Investments", "balance · positions · trading"),
