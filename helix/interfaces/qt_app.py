@@ -757,11 +757,45 @@ class PanelHost(QWidget):
         return True
 
 
-class Launcher(QWidget):
-    """The single manual navigation — a clean grid of destinations. Voice can open the same things."""
+LAUNCHER_HIDDEN_SETTING = "launcher_hidden_items"
 
-    def __init__(self, items: list, on_pick, on_home, parent=None) -> None:
+
+class _LauncherCard(QPushButton):
+    """A launcher destination card carrying a small ✕ badge that hides it from the menu.
+    The badge is a child button pinned to the top-right corner; clicking it emits `hide_requested`
+    and (because Qt routes the press to the child) does not also open the destination."""
+
+    hide_requested = pyqtSignal(str)
+
+    def __init__(self, key: str, text: str, parent=None) -> None:
+        super().__init__(text, parent)
+        self._key = key
+        self.setObjectName("launcherCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(96)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._badge = QPushButton("✕", self)
+        self._badge.setObjectName("launcherHide")
+        self._badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._badge.setFixedSize(22, 22)
+        self._badge.setToolTip("Hide from the menu (restore in Settings)")
+        self._badge.clicked.connect(lambda: self.hide_requested.emit(self._key))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        self._badge.move(self.width() - self._badge.width() - 8, 8)
+
+
+class Launcher(QWidget):
+    """The single manual navigation — a clean grid of destinations. Voice can open the same things.
+    Each card has a small ✕ to hide it from the menu; hidden items persist in settings
+    (`launcher_hidden_items`) and can be brought back from Settings → Restore hidden menu items."""
+
+    def __init__(self, items: list, on_pick, on_home, settings: AppSettings | None = None, parent=None) -> None:
         super().__init__(parent)
+        self._items = list(items)
+        self._on_pick = on_pick
+        self.settings = settings or AppSettings()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(48, 34, 48, 40)
         outer.setSpacing(18)
@@ -776,18 +810,46 @@ class Launcher(QWidget):
         header.addStretch(1)
         header.addWidget(close_button)
         outer.addLayout(header)
-        grid = QGridLayout()
-        grid.setSpacing(18)
-        for n, (key, label, subtitle) in enumerate(items):
-            card = QPushButton(f"{label}\n{subtitle}")
-            card.setObjectName("launcherCard")
-            card.setCursor(Qt.CursorShape.PointingHandCursor)
-            card.setMinimumHeight(96)
-            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            card.clicked.connect(lambda _=False, k=key: on_pick(k))
-            grid.addWidget(card, n // 2, n % 2)
-        outer.addLayout(grid)
+        self._grid = QGridLayout()
+        self._grid.setSpacing(18)
+        outer.addLayout(self._grid)
         outer.addStretch(1)
+        self._rebuild()
+
+    def _hidden(self) -> set[str]:
+        raw = self.settings.get(LAUNCHER_HIDDEN_SETTING, [])
+        return set(raw) if isinstance(raw, list) else set()
+
+    def _rebuild(self) -> None:
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        hidden = self._hidden()
+        visible = [it for it in self._items if it[0] not in hidden]
+        for n, (key, label, subtitle) in enumerate(visible):
+            card = _LauncherCard(key, f"{label}\n{subtitle}")
+            card.clicked.connect(lambda _=False, k=key: self._on_pick(k))
+            card.hide_requested.connect(self._hide)
+            self._grid.addWidget(card, n // 2, n % 2)
+
+    def _hide(self, key: str) -> None:
+        hidden = self._hidden()
+        hidden.add(key)
+        self.settings.set(LAUNCHER_HIDDEN_SETTING, sorted(hidden))
+        self._rebuild()
+
+    def restore(self, key: str) -> None:
+        hidden = self._hidden()
+        hidden.discard(key)
+        self.settings.set(LAUNCHER_HIDDEN_SETTING, sorted(hidden))
+        self._rebuild()
+
+    def hidden_items(self) -> list:
+        """The (key, label, subtitle) tuples currently hidden — feeds the Settings restore list."""
+        hidden = self._hidden()
+        return [it for it in self._items if it[0] in hidden]
 
 
 class HelixMainWindow(QMainWindow):
@@ -817,6 +879,11 @@ class HelixMainWindow(QMainWindow):
         new_chat_button.setCursor(Qt.CursorShape.PointingHandCursor)
         new_chat_button.clicked.connect(self.xpert_tab._new_chat)
         settings_layout.addWidget(new_chat_button, 0, Qt.AlignmentFlag.AlignLeft)
+        restore_menu_button = QPushButton("Restore hidden menu items")
+        restore_menu_button.setObjectName("ghostButton")
+        restore_menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        restore_menu_button.clicked.connect(self._restore_menu_items)
+        settings_layout.addWidget(restore_menu_button, 0, Qt.AlignmentFlag.AlignLeft)
         settings_layout.addStretch(1)
 
         self.panel_host = PanelHost(
@@ -841,6 +908,7 @@ class HelixMainWindow(QMainWindow):
             ],
             on_pick=self.open_view,
             on_home=self._show_home,
+            settings=AppSettings(),
         )
         self.console = ConsoleView(self.xpert_tab, memory, self.open_view, self.show_launcher)
 
@@ -893,6 +961,39 @@ class HelixMainWindow(QMainWindow):
 
     def show_launcher(self) -> None:
         self.stack.setCurrentIndex(2)
+
+    def _restore_menu_items(self) -> None:
+        """A small dialog listing the menu items hidden via the ✕ badge, each with a Restore button."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Menu items")
+        layout = QVBoxLayout(dialog)
+        hidden = self.launcher.hidden_items()
+        if not hidden:
+            layout.addWidget(QLabel("No hidden menu items.\nTap the ✕ on a menu card to hide it."))
+        else:
+            layout.addWidget(QLabel("Hidden menu items — restore to show them in the menu again:"))
+            for key, label, _subtitle in hidden:
+                row = QHBoxLayout()
+                row.addWidget(QLabel(label))
+                row.addStretch(1)
+                restore = QPushButton("Restore")
+                restore.setObjectName("ghostButton")
+                restore.setCursor(Qt.CursorShape.PointingHandCursor)
+
+                def _do_restore(_=False, k=key, d=dialog) -> None:
+                    self.launcher.restore(k)
+                    d.accept()
+                    self._restore_menu_items()  # reopen so multiple items can be restored in a row
+
+                restore.clicked.connect(_do_restore)
+                row.addWidget(restore)
+                layout.addLayout(row)
+        close = QPushButton("Close")
+        close.setObjectName("ghostButton")
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+        dialog.exec()
 
     def _show_home(self) -> None:
         self.stack.setCurrentIndex(0)
@@ -6744,6 +6845,21 @@ def apply_hud_style(app: QApplication) -> None:
             border-color: #1dd8ff;
             background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                 stop:0 rgba(26,58,70,0.7), stop:1 rgba(13,32,40,0.7));
+        }
+
+        QPushButton#launcherHide {
+            background-color: rgba(8,20,25,0.55);
+            color: #6f93a0;
+            border: none;
+            border-radius: 11px;
+            font-size: 10pt;
+            font-weight: 800;
+            padding: 0px;
+        }
+
+        QPushButton#launcherHide:hover {
+            background-color: rgba(255,90,90,0.85);
+            color: #ffffff;
         }
 
         QLabel#xpertHint {
