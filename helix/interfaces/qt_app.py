@@ -527,18 +527,24 @@ class AmbientTile(QFrame):
         self.setObjectName("ambientTile")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(
-            "QFrame#ambientTile{border:1px solid #16323b;border-radius:10px;background:rgba(18,38,46,0.35);}"
-            "QFrame#ambientTile:hover{border-color:#1dd8ff;}"
+            "QFrame#ambientTile{border:1px solid #1b3a44;border-radius:14px;"
+            "background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(20,44,53,0.55),stop:1 rgba(11,26,32,0.55));}"
+            "QFrame#ambientTile:hover{border-color:#1dd8ff;"
+            "background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(26,58,70,0.7),stop:1 rgba(13,32,40,0.7));}"
         )
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 9, 12, 9)
-        lay.setSpacing(1)
-        cap = QLabel(title)
-        cap.setStyleSheet("color:#6fb3c0;border:none;")
+        lay.setContentsMargins(16, 13, 16, 13)
+        lay.setSpacing(3)
+        cap = QLabel(title.upper())
+        cap.setStyleSheet(
+            "color:#6fb3c0;border:none;font-size:10pt;font-weight:800;letter-spacing:1px;"
+        )
         self._value = QLabel("…")
-        self._value.setStyleSheet("font-weight:700;font-size:15px;border:none;")
+        self._value.setStyleSheet("color:#eaffff;font-weight:800;font-size:17px;border:none;")
         self._hint = QLabel("")
-        self._hint.setStyleSheet("color:#7faebb;border:none;")
+        self._hint.setStyleSheet("color:#7faebb;border:none;font-size:11pt;")
         lay.addWidget(cap)
         lay.addWidget(self._value)
         lay.addWidget(self._hint)
@@ -566,34 +572,43 @@ class ConsoleView(QWidget):
         self.settings = AppSettings()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 14, 18, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(24, 20, 24, 18)
+        layout.setSpacing(14)
 
         top = QHBoxLayout()
+        top.setSpacing(16)
         self.orb = PresenceOrb()
-        self.orb.setFixedSize(76, 76)
+        self.orb.setFixedSize(84, 84)
         title = QVBoxLayout()
-        title.setSpacing(0)
+        title.setSpacing(3)
+        title.addStretch(1)
         name = QLabel("HELIX")
-        name.setObjectName("sectionHeader")
+        name.setObjectName("consoleBrand")
         self.presence = QLabel(_PRESENCE_TEXT["idle"])
-        self.presence.setStyleSheet("color:#6fb3c0;")
+        self.presence.setObjectName("consolePresence")
         title.addWidget(name)
         title.addWidget(self.presence)
-        more = QPushButton("More")
+        title.addStretch(1)
+        more = QPushButton("More  ›")
+        more.setObjectName("ghostButton")
+        more.setCursor(Qt.CursorShape.PointingHandCursor)
         more.setToolTip("Open the deep views — Home, Enterprise, Learning, Investment")
         more.clicked.connect(lambda: open_view(None))
         top.addWidget(self.orb)
-        top.addSpacing(8)
         top.addLayout(title)
         top.addStretch(1)
-        top.addWidget(more)
+        top.addWidget(more, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(top)
+
+        divider = QFrame()
+        divider.setObjectName("consoleDivider")
+        divider.setFixedHeight(2)
+        layout.addWidget(divider)
 
         layout.addWidget(xpert, 1)  # the conversation — the heart
 
         tiles = QHBoxLayout()
-        tiles.setSpacing(10)
+        tiles.setSpacing(12)
         self.tile_house = AmbientTile("House", lambda: open_view("home"))
         self.tile_money = AmbientTile("Money", lambda: open_view("investment"))
         self.tile_supplies = AmbientTile("Supplies", lambda: open_view("home"))
@@ -1177,7 +1192,8 @@ class XpertTab(QWidget):
         self._inv_live = False
         self._inv_running = False
         self._inv_keys = False
-        # Hands-free wake-word ("HELIX") state. Off at launch — an always-on mic is opt-in each session.
+        # Hands-free wake-word ("HELIX") state. Always on: started right after launch (no toggle); it
+        # degrades silently to push-to-talk + typing if the mic / voice model / Claude key isn't ready.
         self._handsfree = False
         self._wake_listener = None
         self._followup = False        # within a window, the next utterance needs no wake word
@@ -1201,31 +1217,31 @@ class XpertTab(QWidget):
         content = QWidget()
         scroll.setWidget(content)
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(14)
+        layout.setContentsMargins(2, 0, 2, 2)
+        layout.setSpacing(12)
 
-        header = QLabel("Xpert — Talk to HELIX")
-        header.setObjectName("sectionHeader")
         subtitle = QLabel(
-            "Speak or type to HELIX — it answers and gets things done. Hold the button to talk, or "
-            "turn on Hands-free and just say HELIX."
+            "Just say “HELIX”, hold the button to talk, or type — HELIX answers aloud and gets "
+            "things done."
         )
+        subtitle.setObjectName("xpertHint")
         subtitle.setWordWrap(True)
 
         # --- Two-way voice conversation: the J.A.R.V.I.S. assistant (§23) ---
         self.convo_box = QGroupBox("Conversation")
         convo_layout = QVBoxLayout(self.convo_box)
-        convo_layout.setSpacing(10)
+        convo_layout.setSpacing(12)
         self.transcript = QTextEdit()
         self.transcript.setObjectName("briefingPanel")
         self.transcript.setReadOnly(True)
-        self.transcript.setMinimumHeight(320)
+        self.transcript.setMinimumHeight(340)
         self.convo_progress = QProgressBar()
         self.convo_progress.setRange(0, 0)
         self.convo_progress.setTextVisible(False)
         self.convo_progress.setMaximumHeight(6)
         self.convo_progress.setVisible(False)
         self.convo_status = QLabel("")
+        self.convo_status.setObjectName("convoStatus")
         self.convo_status.setWordWrap(True)
 
         self.talk_button = QPushButton("\U0001f3a4  Hold to Talk")
@@ -1241,24 +1257,23 @@ class XpertTab(QWidget):
         self.send_button.clicked.connect(self._on_send)
 
         talk_row = QHBoxLayout()
+        talk_row.setSpacing(10)
         talk_row.addWidget(self.talk_button, 1)
         talk_row.addWidget(new_chat_button)
 
-        # Hands-free wake word ("HELIX") + a live mic-level meter.
-        self.handsfree_check = QCheckBox("Hands-free — just say “HELIX”")
-        self.handsfree_check.setObjectName("handsfreeToggle")
-        self.handsfree_check.setToolTip(
-            "Always listen and act when you say HELIX — no button. Pauses itself while HELIX talks."
-        )
-        self.handsfree_check.toggled.connect(self._toggle_handsfree)
+        # Hands-free wake word ("HELIX") is always on (§23) — a live "listening" meter, no toggle.
+        self.listen_label = QLabel("\U0001f3a4  Listening for “HELIX”")
+        self.listen_label.setObjectName("listenHint")
+        self.listen_label.setVisible(False)
         self.level_bar = QProgressBar()
         self.level_bar.setRange(0, 100)
         self.level_bar.setTextVisible(False)
         self.level_bar.setMaximumHeight(8)
         self.level_bar.setVisible(False)
-        hf_row = QHBoxLayout()
-        hf_row.addWidget(self.handsfree_check)
-        hf_row.addWidget(self.level_bar, 1)
+        listen_row = QHBoxLayout()
+        listen_row.setSpacing(10)
+        listen_row.addWidget(self.listen_label)
+        listen_row.addWidget(self.level_bar, 1)
 
         # Voice output speed — how fast HELIX talks (0.8×–2.0×).
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
@@ -1291,29 +1306,40 @@ class XpertTab(QWidget):
         dev_row.addWidget(self.speaker_picker, 1)
 
         type_row = QHBoxLayout()
+        type_row.setSpacing(10)
         type_row.addWidget(self.text_input, 1)
         type_row.addWidget(self.send_button)
+
         convo_layout.addWidget(self.transcript, 1)
         convo_layout.addWidget(self.convo_progress)
+        convo_layout.addLayout(listen_row)
         convo_layout.addWidget(self.convo_status)
         convo_layout.addLayout(talk_row)
-        convo_layout.addLayout(hf_row)
-        convo_layout.addLayout(speed_row)
-        convo_layout.addLayout(dev_row)
         convo_layout.addLayout(type_row)
+
+        # Secondary controls (voice speed + audio devices), de-emphasized below the conversation.
+        self.controls_box = QWidget()
+        self.controls_box.setObjectName("xpertControls")
+        controls_layout = QVBoxLayout(self.controls_box)
+        controls_layout.setContentsMargins(14, 10, 14, 10)
+        controls_layout.setSpacing(8)
+        controls_layout.addLayout(speed_row)
+        controls_layout.addLayout(dev_row)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
-        self.status.setStyleSheet("color:#6fb3c0;")
+        self.status.setStyleSheet("color:#6fb3c0;font-size:12pt;")
 
-        layout.addWidget(header)
         layout.addWidget(subtitle)
         layout.addWidget(self.convo_box, 1)
+        layout.addWidget(self.controls_box)
         layout.addWidget(self.status)
 
         self._update_speed_label()
         self.refresh()
         self._new_chat()
+        # Hands-free is always on — start the wake listener once the event loop is running.
+        QTimer.singleShot(0, self._enable_handsfree)
 
     def refresh(self) -> None:
         spawn_worker(self._workers, self._gather, self._gather_done)
@@ -1623,40 +1649,21 @@ class XpertTab(QWidget):
             except Exception:
                 pass
 
-    def _toggle_handsfree(self, on: bool) -> None:
-        if on:
-            if not self.mic.is_available():
-                self._append_transcript("HELIX", "No microphone is available, sir.")
-                self.handsfree_check.setChecked(False)
-                return
-            if not stt_available():
-                self._append_transcript(
-                    "HELIX", "Hands-free needs faster-whisper, sir: pip install faster-whisper."
-                )
-                self.handsfree_check.setChecked(False)
-                return
-            if not stt_ready():  # model didn't pre-load before Qt — loading it now would crash (§23)
-                self._append_transcript(
-                    "HELIX", "The voice model didn't load at startup, sir — restart HELIX to enable hands-free."
-                )
-                self.handsfree_check.setChecked(False)
-                return
-            if not self._claude_ready():
-                self._append_transcript("HELIX", "Save a Claude key first, sir - Learning, Claude.")
-                self.handsfree_check.setChecked(False)
-                return
-            if not self._start_wake():
-                self._append_transcript("HELIX", "I couldn't open the microphone for hands-free, sir.")
-                self.handsfree_check.setChecked(False)
-                return
-            self._handsfree = True
-            self._followup = False
-            self.level_bar.setVisible(True)
-            self._append_transcript("HELIX", "Hands-free on, sir. Just say HELIX, then your request.")
-        else:
-            self._handsfree = False
-            self._stop_wake()
-            self.level_bar.setVisible(False)
+    def _enable_handsfree(self) -> None:
+        """Hands-free is always on (§23): continuously listen for the wake word “HELIX”. Started once
+        at launch; degrades silently to push-to-talk + typing if the mic, the local voice model, or a
+        Claude key isn't ready yet (it'll come up on a later launch once those are in place). The
+        stt_ready() guard matters — loading the voice model after Qt is up would crash the process."""
+        if self._handsfree:
+            return
+        if not (self.mic.is_available() and stt_available() and stt_ready() and self._claude_ready()):
+            return
+        if not self._start_wake():
+            return
+        self._handsfree = True
+        self._followup = False
+        self.level_bar.setVisible(True)
+        self.listen_label.setVisible(True)
         self._set_convo_state("idle")
 
     def _start_wake(self) -> bool:
@@ -6437,6 +6444,68 @@ def apply_hud_style(app: QApplication) -> None:
 
         QMessageBox {
             background-color: #061013;
+        }
+
+        /* --- Console (the JARVIS landing surface) + Xpert conversation --- */
+        QLabel#consoleBrand {
+            color: #eaffff;
+            font-size: 30pt;
+            font-weight: 900;
+            letter-spacing: 6px;
+        }
+
+        QLabel#consolePresence {
+            color: #6fb3c0;
+            font-size: 12pt;
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+
+        QFrame#consoleDivider {
+            border: none;
+            background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 rgba(29,216,255,0), stop:0.5 rgba(29,216,255,0.55),
+                stop:1 rgba(29,216,255,0));
+        }
+
+        QPushButton#ghostButton {
+            background-color: rgba(17,51,60,0.4);
+            color: #9fe9ff;
+            border: 1px solid #1e5a68;
+            border-radius: 16px;
+            padding: 6px 18px;
+            font-size: 12pt;
+            font-weight: 700;
+            min-height: 30px;
+        }
+
+        QPushButton#ghostButton:hover {
+            border-color: #1dd8ff;
+            color: #ffffff;
+            background-color: rgba(23,81,97,0.5);
+        }
+
+        QLabel#xpertHint {
+            color: #8fc7d4;
+            font-size: 12pt;
+            padding: 2px 2px 4px 2px;
+        }
+
+        QLabel#listenHint {
+            color: #1dd8ff;
+            font-size: 11pt;
+            font-weight: 700;
+        }
+
+        QLabel#convoStatus {
+            color: #9fc8d2;
+            font-size: 11pt;
+        }
+
+        QWidget#xpertControls {
+            background-color: rgba(11,26,32,0.5);
+            border: 1px solid #16323b;
+            border-radius: 10px;
         }
         """
     )
