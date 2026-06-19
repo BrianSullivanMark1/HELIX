@@ -190,6 +190,23 @@ XPERT_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "remove_feature",
+        "description": (
+            "Cleanly REMOVE a feature from HELIX's own code to keep the program lean — the inverse of "
+            "improve_helix. Use when the user asks to remove, delete, strip out, or get rid of a feature "
+            "(e.g. 'remove the dark mode toggle', 'get rid of the weather panel'). Opus deletes the "
+            "feature's module, its tool + handler, any menu/UI entry, and now-dead imports, on a review "
+            "branch — nothing is removed until you approve, then HELIX restarts lean."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "feature": {"type": "string", "description": "Which feature to remove, in the user's words."},
+            },
+            "required": ["feature"],
+        },
+    },
+    {
         "name": "approve_change",
         "description": (
             "Approve and merge the most recent drafted code change into HELIX — the 'ship it' command. "
@@ -688,6 +705,32 @@ class ActionRouter:
             f"Done, sir — drafted on review branch {result.branch}{cost}. {summary} "
             f"Files changed: {files or 'none'}. It's on a branch, not live yet — say 'ship it' to "
             "approve and merge it, or 'reject it' to discard."
+        )
+
+    def _tool_remove_feature(self, tool_input: dict) -> ToolOutcome:
+        feature = str(tool_input.get("feature", "")).strip()
+        if not feature:
+            return ToolOutcome("Which feature should I remove, sir?")
+        task = (
+            f"Completely and cleanly REMOVE the '{feature}' feature from HELIX, to keep the codebase lean. "
+            "Find everything that belongs ONLY to this feature and delete it: its module/files, its entry "
+            "in XPERT_TOOLS plus the matching _tool_ handler in helix/ai/actions.py, any launcher/menu "
+            "entry and UI panel, settings keys it owns, and any imports that become unused as a result. "
+            "Do NOT remove anything shared with other features. Afterward make sure the app still imports "
+            "and boots with no dangling references. Summarize exactly what you deleted."
+        )
+        result = coder.run_coding_task(task, on_step=self.ctx.on_progress)
+        if not result.ok:
+            return ToolOutcome(f"I couldn't draft that removal, sir: {result.error}")
+        rec = engine.record_pending(self.ctx.settings, result)
+        mailer.notify_drafted(self.ctx.settings, rec)
+        files = ", ".join(result.changed_files[:8]) + ("…" if len(result.changed_files) > 8 else "")
+        cost = f" (about ${result.cost_usd:.2f})" if result.cost_usd else ""
+        summary = (result.summary or "").strip()
+        return ToolOutcome(
+            f"Drafted the removal of {feature} on review branch {result.branch}{cost}. {summary} "
+            f"Files changed: {files or 'none'}. It's on a branch, not applied yet — say 'ship it' to "
+            "approve, then I'll merge and restart lean."
         )
 
     def _tool_approve_change(self, _input: dict) -> ToolOutcome:
