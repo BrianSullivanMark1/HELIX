@@ -411,7 +411,19 @@ def run_qt_app(memory: SQLiteMemory) -> int:
     exit_code = app.exec()
     QThreadPool.globalInstance().waitForDone(3000)
     log.info("HELIX desktop exited (code %s)", exit_code)
-    return exit_code
+    # Qt + native multimedia/camera objects can fault during interpreter teardown on Windows, which
+    # would make the process exit with a CRASH code (0xC0000409) even on a clean close — and the §39
+    # supervisor would then relaunch on every normal exit. Flush, then exit HARD with the intended code,
+    # skipping the crashy finalization: 0 stops the supervisor, RESTART_EXIT_CODE (42) relaunches it.
+    import logging
+    logging.shutdown()
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(exit_code)
+    return exit_code  # unreachable; kept for type sanity
 
 
 class HelixMainWindow(QMainWindow):
