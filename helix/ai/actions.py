@@ -422,8 +422,8 @@ XPERT_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "screen": {
                     "type": "string",
-                    "enum": ["investment", "home", "grocery", "components", "enterprise", "learning", "cameras", "settings"],
-                    "description": "Which panel: investment (money/portfolio/trading), home, grocery (the shopping list + order from Fry's), components (the Fabrication screen — electronics parts list + DigiKey/Mouser), enterprise (work), learning, cameras (live house cameras), or settings (voice speed + devices).",
+                    "enum": ["investment", "home", "grocery", "components", "enterprise", "learning", "cameras", "settings", "tasks"],
+                    "description": "Which panel: investment (money/portfolio/trading), home, grocery (the shopping list + order from Fry's), components (the Fabrication screen — electronics parts list + DigiKey/Mouser), enterprise (work), learning, cameras (live house cameras), settings (voice speed + devices), or tasks (the Tasks launcher — runnable actions like Morning Briefing).",
                 }
             },
             "required": ["screen"],
@@ -938,11 +938,11 @@ class ActionRouter:
                  "groceries": "grocery", "shopping": "grocery", "shopping list": "grocery",
                  "grocery list": "grocery", "component": "components", "parts": "components",
                  "parts list": "components", "components list": "components", "hardware": "components",
-                 "fabrication": "components", "fab": "components"}
+                 "fabrication": "components", "fab": "components", "task": "tasks"}
         key = alias.get(raw, raw)
         labels = {"investment": "the investments", "home": "home", "grocery": "the grocery list",
                   "components": "the Fabrication screen", "enterprise": "work", "learning": "learning",
-                  "cameras": "the cameras", "settings": "settings"}
+                  "cameras": "the cameras", "settings": "settings", "tasks": "the Tasks launcher"}
         if key not in labels:
             return ToolOutcome("I can show investments, home, the grocery list, the Fabrication screen, work, learning, or the cameras, sir. Which one?")
         self.ctx.show_screen(key)
