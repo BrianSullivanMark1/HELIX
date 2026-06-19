@@ -170,6 +170,8 @@ from helix.vision import analyze as vision_analyze, camera as vision_camera, wat
 from helix.interfaces.cameras import CameraCarousel
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
 from helix.investment.planner import build_briefing, render_briefing
+from helix.home import groceries as groceries_store
+from helix.home import kroger
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks, task_status
 from helix.home.notify import (
     CARRIER_CHOICES,
@@ -874,6 +876,7 @@ class HelixMainWindow(QMainWindow):
         # Deep views are summoned on request (a sentence, or the launcher) — no tabs. The orb IS the home.
         self.xpert_tab = XpertTab(memory)
         self.home_tab = HomeTab(memory)
+        self.grocery_tab = GroceryTab(memory)
         self.enterprise_tab = EnterpriseTab(memory)
         self.learning_tab = LearningTab(memory)
         self.investment_tab = InvestmentTab(memory, on_saved=self.refresh_all)
@@ -902,6 +905,7 @@ class HelixMainWindow(QMainWindow):
             {
                 "investment": ("Investments", self.investment_tab),
                 "home": ("Home", self.home_tab),
+                "grocery": ("Groceries", self.grocery_tab),
                 "enterprise": ("Work", self.enterprise_tab),
                 "learning": ("Learning", self.learning_tab),
                 "cameras": ("Cameras", self.cameras_tab),
@@ -941,6 +945,7 @@ class HelixMainWindow(QMainWindow):
         self.xpert_tab.bind_investment(self.investment_tab.invest_tab)
         self.xpert_tab.bind_home(self.home_tab)
         self.xpert_tab.request_show_screen.connect(self.open_view)
+        self.home_tab.request_show_screen.connect(self.open_view)
 
         self.refresh_all()
 
@@ -2824,9 +2829,254 @@ class PlaceholderTab(QWidget):
         layout.addWidget(panel, 1)
 
 
+class GroceryTab(QWidget):
+    """The household grocery list, organized by aisle. Add items with a quantity, remove them one by
+    one, and send the whole list to Fry's/Kroger (fills the cart via the official API — you tap
+    checkout in the Fry's app). The same list voice ('add milk') and fridge-cam scans feed; this is
+    its full-screen manager. Settings-backed via `helix.home.groceries` — no new storage."""
+
+    def __init__(self, memory: SQLiteMemory) -> None:
+        super().__init__()
+        self.memory = memory
+        self.settings = AppSettings()
+        self._workers: set = set()
+        self._ordering = False
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        outer.addWidget(scroll)
+        content = QWidget()
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(14)
+
+        header = QLabel("Groceries")
+        header.setObjectName("sectionHeader")
+        layout.addWidget(header)
+        self.summary = QLabel()
+        self.summary.setObjectName("grocerySummary")
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+
+        # Add-item row — a name field, a quantity selector, and Add.
+        add_box = QGroupBox("Add an item")
+        add_row = QHBoxLayout(add_box)
+        add_row.setSpacing(10)
+        self.item_input = QLineEdit()
+        self.item_input.setPlaceholderText("e.g. milk, bananas, paper towels")
+        self.item_input.returnPressed.connect(self._add_item)
+        self.qty_input = QSpinBox()
+        self.qty_input.setRange(1, 99)
+        self.qty_input.setValue(1)
+        self.qty_input.setPrefix("× ")
+        self.qty_input.setFixedWidth(84)
+        add_button = QPushButton("Add Item")
+        add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_button.clicked.connect(self._add_item)
+        add_row.addWidget(self.item_input, 1)
+        add_row.addWidget(self.qty_input)
+        add_row.addWidget(add_button)
+        layout.addWidget(add_box)
+
+        # The list itself — rebuilt into this container, grouped by aisle.
+        self.list_container = QVBoxLayout()
+        self.list_container.setSpacing(14)
+        layout.addLayout(self.list_container)
+        self.empty_label = QLabel("Your grocery list is empty. Add something above, or just say “HELIX, add milk.”")
+        self.empty_label.setObjectName("groceryEmpty")
+        self.empty_label.setWordWrap(True)
+        layout.addWidget(self.empty_label)
+
+        layout.addStretch(1)
+
+        # Order bar — the prominent action, always confirmed (real money + outward).
+        order_bar = QHBoxLayout()
+        self.order_status = QLabel()
+        self.order_status.setObjectName("grocerySummary")
+        self.order_status.setWordWrap(True)
+        clear_button = QPushButton("Clear list")
+        clear_button.setObjectName("ghostButton")
+        clear_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_button.clicked.connect(self._clear_list)
+        self.order_button = QPushButton("\U0001f6d2  Order from Fry's")
+        self.order_button.setObjectName("orderButton")
+        self.order_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.order_button.clicked.connect(self._order)
+        order_bar.addWidget(self.order_status, 1)
+        order_bar.addWidget(clear_button)
+        order_bar.addWidget(self.order_button)
+        layout.addLayout(order_bar)
+
+        self._rebuild()
+
+    # -- rendering ---------------------------------------------------------- #
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().showEvent(event)
+        self._rebuild()  # voice/cam may have changed the list while this panel was hidden
+
+    def refresh(self) -> None:
+        self._rebuild()
+
+    def _clear_container(self) -> None:
+        while self.list_container.count():
+            item = self.list_container.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+            else:
+                inner = item.layout()
+                if inner is not None:
+                    self._clear_layout(inner)
+
+    def _clear_layout(self, lay) -> None:
+        while lay.count():
+            item = lay.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+            elif item.layout() is not None:
+                self._clear_layout(item.layout())
+
+    def _rebuild(self) -> None:
+        self._clear_container()
+        items = groceries_store.list_items(self.settings)
+        total = sum(r["qty"] for r in items)
+        if items:
+            self.summary.setText(
+                f"{len(items)} item{'s' if len(items) != 1 else ''} on the list "
+                f"({total} total) · grouped by aisle"
+            )
+            self.empty_label.hide()
+        else:
+            self.summary.setText("Nothing on the list yet.")
+            self.empty_label.show()
+        self.order_button.setEnabled(bool(items) and not self._ordering)
+        for category, rows in groceries_store.group_items(items):
+            self.list_container.addWidget(self._category_widget(category, rows))
+
+    def _category_widget(self, category: str, rows: list[dict]) -> QWidget:
+        card = QFrame()
+        card.setObjectName("groceryCard")
+        box = QVBoxLayout(card)
+        box.setContentsMargins(16, 12, 16, 14)
+        box.setSpacing(8)
+        head = QLabel(f"{category}  ·  {len(rows)}")
+        head.setObjectName("groceryCategory")
+        box.addWidget(head)
+        for row in rows:
+            box.addWidget(self._item_row(row))
+        return card
+
+    def _item_row(self, row: dict) -> QWidget:
+        line = QFrame()
+        line.setObjectName("groceryItem")
+        lay = QHBoxLayout(line)
+        lay.setContentsMargins(12, 6, 8, 6)
+        lay.setSpacing(10)
+        name = QLabel(row["item"])
+        name.setObjectName("groceryItemName")
+        qty = QLabel(f"× {row['qty']}")
+        qty.setObjectName("groceryQty")
+        remove = QPushButton("✕")
+        remove.setObjectName("groceryRemove")
+        remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        remove.setFixedSize(28, 28)
+        remove.setToolTip(f"Remove {row['item']}")
+        remove.clicked.connect(lambda _=False, name=row["item"]: self._remove_item(name))
+        lay.addWidget(name, 1)
+        lay.addWidget(qty)
+        lay.addWidget(remove)
+        return line
+
+    # -- actions ------------------------------------------------------------ #
+
+    def _add_item(self) -> None:
+        text = self.item_input.text().strip()
+        if not text:
+            return
+        groceries_store.add_item(self.settings, text, self.qty_input.value())
+        self.item_input.clear()
+        self.qty_input.setValue(1)
+        self.item_input.setFocus()
+        self._rebuild()
+
+    def _remove_item(self, item: str) -> None:
+        groceries_store.remove_item(self.settings, item)
+        self._rebuild()
+
+    def _clear_list(self) -> None:
+        if not groceries_store.list_items(self.settings):
+            return
+        confirm = QMessageBox.question(self, "Clear list", "Remove every item from the grocery list?")
+        if confirm == QMessageBox.StandardButton.Yes:
+            groceries_store.clear(self.settings)
+            self.order_status.setText("")
+            self._rebuild()
+
+    def _order(self) -> None:
+        if self._ordering:
+            return
+        items = groceries_store.list_items(self.settings)
+        if not items:
+            QMessageBox.information(self, "Order from Fry's", "The grocery list is empty.")
+            return
+        if not kroger.is_configured(self.settings):
+            QMessageBox.information(
+                self,
+                "Connect Fry's first",
+                "Fry's isn't connected yet. Add your Kroger client id/secret and authorize once "
+                "(scripts/kroger_authorize.py) to let HELIX fill your cart.\n\nYour list is saved:\n"
+                + groceries_store.summary(self.settings),
+            )
+            return
+        preview = "\n".join(f"  • {r['item']}" + (f"  ×{r['qty']}" if r["qty"] > 1 else "") for r in items)
+        confirm = QMessageBox.question(
+            self,
+            "Order from Fry's",
+            f"Add these {len(items)} item(s) to your Fry's cart?\n\n{preview}\n\n"
+            "HELIX fills the cart — you tap checkout in the Fry's app. No charge happens here.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._ordering = True
+        self.order_button.setEnabled(False)
+        self.order_status.setText("Sending your list to Fry's…")
+        spawn_worker(
+            self._workers,
+            lambda: kroger.order_list(self.settings, items),
+            self._order_done,
+        )
+
+    def _order_done(self, ok: bool, payload) -> None:
+        self._ordering = False
+        if ok and isinstance(payload, dict):
+            added = payload.get("added", [])
+            missing = payload.get("missing", [])
+            if added:
+                groceries_store.clear(self.settings)  # the added items now live in the Fry's cart
+            msg = f"Added {len(added)} item(s) to your Fry's cart — tap checkout in the Fry's app."
+            if missing:
+                msg += f" Couldn't find: {', '.join(missing)} (still saved for next time)."
+                # Keep the misses on the list so they aren't lost.
+                if added:
+                    for name in missing:
+                        groceries_store.add_item(self.settings, name)
+            self.order_status.setText(msg)
+        else:
+            self.order_status.setText(f"Couldn't place the order: {payload}")
+        self._rebuild()
+
+
 class HomeTab(QWidget):
     """Interactive household checklist: check tasks off, see what's due by frequency, and get AI
     suggestions for saving time & money. Persisted to settings (action/item/frequency + last-done)."""
+
+    request_show_screen = pyqtSignal(str)  # ask the main window to open another panel (e.g. groceries)
 
     HOME_TASKS_SETTING = "home_tasks"
     DEFAULT_TASKS = [
@@ -2904,12 +3154,17 @@ class HomeTab(QWidget):
 
         actions = QHBoxLayout()
         actions.setSpacing(12)
+        grocery_button = QPushButton("\U0001f6d2  Grocery list")
+        grocery_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        grocery_button.setToolTip("Open the grocery list — add items and order from Fry's")
+        grocery_button.clicked.connect(lambda: self.request_show_screen.emit("grocery"))
         add_button = QPushButton("Add Task")
         add_button.clicked.connect(self.add_row)
         remove_button = QPushButton("Remove Selected")
         remove_button.clicked.connect(self.remove_row)
         reset_button = QPushButton("Reset to Defaults")
         reset_button.clicked.connect(self.reset_defaults)
+        actions.addWidget(grocery_button)
         actions.addStretch(1)
         actions.addWidget(reset_button)
         actions.addWidget(remove_button)
@@ -6761,6 +7016,80 @@ def apply_hud_style(app: QApplication) -> None:
             padding: 3px 14px;
             font-size: 11pt;
             font-weight: 700;
+        }
+
+        /* Grocery screen (GroceryTab). */
+        QLabel#grocerySummary {
+            color: #7faebb;
+            font-size: 12pt;
+        }
+        QLabel#groceryEmpty {
+            color: #6fb3c0;
+            font-size: 13pt;
+            padding: 18px 4px;
+        }
+        QFrame#groceryCard {
+            border: 1px solid #1b3a44;
+            border-radius: 12px;
+            background-color: rgba(13, 32, 40, 0.55);
+        }
+        QLabel#groceryCategory {
+            color: #ffc857;
+            font-size: 13pt;
+            font-weight: 800;
+            letter-spacing: 1px;
+        }
+        QFrame#groceryItem {
+            border: none;
+            border-radius: 8px;
+            background-color: #0b1d22;
+        }
+        QFrame#groceryItem:hover {
+            background-color: #11333c;
+        }
+        QLabel#groceryItemName {
+            color: #eaffff;
+            font-size: 13pt;
+            font-weight: 700;
+            border: none;
+        }
+        QLabel#groceryQty {
+            color: #1dd8ff;
+            font-size: 12pt;
+            font-weight: 800;
+            border: none;
+        }
+        QPushButton#groceryRemove {
+            min-height: 0;
+            padding: 0;
+            font-size: 12pt;
+            font-weight: 800;
+            color: #ff9e9e;
+            background-color: transparent;
+            border: 1px solid #4a2b2b;
+            border-radius: 14px;
+        }
+        QPushButton#groceryRemove:hover {
+            background-color: #ff6b6b;
+            color: #061013;
+            border-color: #ff6b6b;
+        }
+        QPushButton#orderButton {
+            background-color: #ffc857;
+            color: #061013;
+            border: 1px solid #ffd06a;
+            font-size: 14pt;
+            font-weight: 800;
+            padding: 12px 26px;
+        }
+        QPushButton#orderButton:hover {
+            background-color: #ffd784;
+            border-color: #fff6d6;
+        }
+        QPushButton#orderButton:disabled {
+            background-color: #2a2f33;
+            color: #6b7378;
+            border-color: #2a2f33;
         }
 
         QTableWidget {

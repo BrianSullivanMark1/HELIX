@@ -12,6 +12,7 @@ registers in HelixMainWindow's `views` dict and the `show_screen` key, so the la
 from __future__ import annotations
 
 MENU_FEATURES: list[dict] = [
+    {"key": "grocery", "label": "Groceries", "subtitle": "shopping list · order from Fry's"},
     # Self-added features land here, e.g.:
     # {"key": "weather", "label": "Weather", "subtitle": "local forecast"},
 ]
