@@ -104,10 +104,17 @@ ADVERSARIAL_MAX_CHECKS = 12
 DEFAULT_SECTOR_CAP_PCT = 0.25             # no one sector above 25% of the book
 DEFAULT_DRAWDOWN_BRAKE_PCT = 0.15         # raise cash once the account is down 15% from its peak
 DEFAULT_DEFENSIVE_CASH_BUFFER_PCT = 0.40  # cash to hold while in drawdown or a risk-off regime
-DEFAULT_CORE_STOP_LOSS_PCT = 0.25         # exit a core holding down 25%+ (deep single-name brake)
+DEFAULT_CORE_STOP_LOSS_PCT = 0.08         # HARD stop: exit a core holding down ~8% from entry, before
+                                          # losses compound (was a deep 25% catastrophe brake — too slow,
+                                          # it let small losses repeat; cut losers quickly and decisively)
 DEFAULT_MIN_POSITIONS = 20                # diversification floor: never concentrate below 20 names
 DEFAULT_MAX_POSITIONS = 30                # concentration default for auto-investing: hold the top ~30 buys (§30)
 DEFAULT_MIN_POSITION_USD = 50.0           # don't OPEN a new core position smaller than this (skip dust slices)
+# Let winners run (asymmetry): a still-buy-rated core position is only TRIMMED back toward its target
+# once it has drifted more than this far ABOVE target (e.g. 0.35 = 35% over). Below that band a winner
+# is left alone to keep compounding instead of being clipped at +1-2%. Full exits (target 0) and the
+# stop-loss above are NOT banded — only the "trim an overweight winner" case is. 0 = off (trim on any drift).
+DEFAULT_TRIM_BAND_PCT = 0.35
 
 
 def research_max_tokens(settings: Any) -> int:
@@ -815,6 +822,7 @@ def build_rebalance_plan(
     risk: "RiskControls | None" = None,
     cash_buffer_pct: float = 0.10,
     preset: str = "Aggressive",
+    trim_band_pct: float = 0.0,
     min_trade_usd: float = 1.0,
     deploy_budget: float = 0.0,
     memory: Any = None,
@@ -1070,6 +1078,18 @@ def build_rebalance_plan(
         rating = ratings.get(symbol, {"confidence": "", "rationale": ""})
         diff = round(target - current, 2)
         if abs(diff) < min_trade_usd:
+            continue
+        # Let winners run: don't clip a still-buy-rated overweight position until it has drifted past the
+        # trim band above its target — a winner that's grown is left to keep compounding instead of being
+        # trimmed at +1-2%. Only the "trim an overweight" case is banded; full exits (target 0) and the
+        # stop-loss / day-trade exits (which set their own target/reason) still fire immediately.
+        if (
+            diff < 0
+            and target > 0
+            and trim_band_pct > 0
+            and symbol not in exit_reasons
+            and current <= target * (1.0 + trim_band_pct)
+        ):
             continue
         if diff < 0:
             reason = exit_reasons.get(symbol) or ("exit: not buy-rated" if target == 0 else "trim to target/cap")

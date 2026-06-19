@@ -97,6 +97,10 @@ Return ONLY a JSON array. No prose, no markdown code fences. Each element must b
 Rules:
 - "buy" = strong long-term, risk-adjusted upside worth owning now. "watch" = good business, wrong
   time or price. "skip" = weak prospects, or too risky/overvalued for the long run.
+- ASYMMETRIC RISK/REWARD (required for a "buy"): only rate a name "buy" when the realistic upside is
+  at least ~2x the realistic downside from here (reward-to-risk >= 2:1). If the plausible loss is as
+  large as the plausible gain, it is a "watch", not a "buy" - we only take trades where the math is in
+  our favor. Reserve "high" confidence for the most lopsided, high-conviction setups.
 - A {preset} posture {_posture_hint(preset)}.
 - Be honest - no hype. Flag uncertainty. {data_caveat} This is research support, not financial advice.
 - Do NOT choose position sizes or dollar amounts; HELIX handles sizing.
