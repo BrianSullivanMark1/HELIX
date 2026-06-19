@@ -433,6 +433,17 @@ XPERT_TOOLS: list[dict[str, Any]] = [
 
 TOOL_NAMES = {tool["name"] for tool in XPERT_TOOLS}
 
+# The narrow tool set the Components "Project Builder" chat exposes: read/add/remove the parts list
+# and look up live pricing/stock. Deliberately excludes anything that spends money or reaches outward
+# (ordering stays a manual, confirmed step on the Parts List tab) so the typed chat needs no
+# spoken-confirmation gate.
+COMPONENTS_BUILDER_TOOLS = (
+    "add_to_components_list",
+    "remove_from_components_list",
+    "show_components_list",
+    "search_components",
+)
+
 
 # --------------------------------------------------------------------------- #
 # Affirmative / negative detection for the deterministic spoken-confirmation gate. This is the
@@ -525,12 +536,17 @@ class ActionRouter:
     """Maps tool calls to real HELIX engine/memory functions. Gated tools defer their side effect
     until ActionRouter.execute_confirmed is called after a spoken yes."""
 
-    def __init__(self, ctx: ActionContext) -> None:
+    def __init__(self, ctx: ActionContext, tool_names: tuple | set | None = None) -> None:
         self.ctx = ctx
+        # When given, restrict the advertised tools to this subset (used by the focused Components
+        # Project Builder chat). None = the full Xpert tool set.
+        self._tool_names = set(tool_names) if tool_names is not None else None
 
     @property
     def tools(self) -> list:
-        return XPERT_TOOLS
+        if self._tool_names is None:
+            return XPERT_TOOLS
+        return [tool for tool in XPERT_TOOLS if tool["name"] in self._tool_names]
 
     def run(self, name: str, tool_input: dict | None) -> ToolOutcome:
         tool_input = tool_input or {}

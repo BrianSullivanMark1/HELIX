@@ -75,6 +75,7 @@ from helix.ai.transcribe import is_available as stt_available, is_ready as stt_r
 from helix.ai.actions import (
     ActionContext,
     ActionRouter,
+    COMPONENTS_BUILDER_TOOLS,
     is_affirmative,
     is_negative,
     run_chat_turn,
@@ -83,6 +84,7 @@ from helix.ai.research import (
     build_enterprise_summary_prompt,
     build_jarvis_chat_system,
     build_portfolio_research_prompt,
+    build_project_builder_system,
     build_research_prompt,
     parse_research_json,
 )
@@ -3095,14 +3097,15 @@ class GroceryTab(QWidget):
         self._rebuild()
 
 
-class ComponentsTab(QWidget):
+class PartsListPanel(QWidget):
     """A smart, structured electronics-parts browser. Instead of free-text (and typos), the user
     picks a **category** → **package** → **spec dropdowns** (curated real-world values, only the
     fields relevant to that category), hits **Find It** to fire a structured query at DigiKey/Mouser,
     browses real results as selectable cards, and confirms the exact part in a slide-in detail panel
     before **Add to Parts List** or **Order Now**. The parts list + ordering live in their own panel,
     cleanly separated from search. Taxonomy/query in `helix.components.catalog` (pure); vendor I/O in
-    `helix.components.vendors`; the list is settings-backed via `helix.components.parts`."""
+    `helix.components.vendors`; the list is settings-backed via `helix.components.parts`. Mounted as
+    the **Parts List** tab of `ComponentsTab` (the **Project Builder** AI chat is the other tab)."""
 
     DETAIL_WIDTH = 380  # px the detail panel slides out to
 
@@ -3815,6 +3818,218 @@ class ComponentsTab(QWidget):
         else:
             self.order_status.setText(f"Couldn't place the order: {payload}")
         self._rebuild()
+
+
+class ProjectBuilderPanel(QWidget):
+    """The AI hardware **Project Builder** — a chat where the user describes a project in plain
+    language and Claude gathers requirements, runs a rigorous compatibility check (voltage/power
+    rails, bus/protocol, connectors, drivers, current budget, environment, quantity scaling), then
+    auto-populates the parts list (`add_to_components_list`) and shows an AI-verified BOM. Reuses the
+    Xpert tool loop (`run_chat_turn` + a tool-restricted `ActionRouter`); off-thread like XpertTab."""
+
+    step = pyqtSignal(str)  # worker-thread tool progress, marshalled to the UI thread
+
+    GREETING = (
+        "**Tell me what you want to build.** Describe it in plain language — e.g. "
+        "*“I want to place cameras and microphones around my house.”* I'll ask a few questions, "
+        "check every part is electrically and mechanically compatible, then build a verified parts "
+        "list for you."
+    )
+
+    def __init__(self, memory: SQLiteMemory, on_parts_changed=None) -> None:
+        super().__init__()
+        self.memory = memory
+        self.settings = AppSettings()
+        self._on_parts_changed = on_parts_changed or (lambda: None)
+        self._workers: set = set()
+        self._history: list = []   # full Messages-API history, persists across turns
+        self._turns: list = []     # [(who, text)] for on-screen rendering
+        self._busy = False
+        self._router = ActionRouter(
+            ActionContext(
+                memory=memory,
+                settings=self.settings,
+                research_fn=lambda _p: "",  # the builder's tools don't use research_fn
+            ),
+            tool_names=COMPONENTS_BUILDER_TOOLS,
+        )
+        self.step.connect(self._on_step)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(10)
+
+        self.transcript = QTextEdit()
+        self.transcript.setObjectName("briefingPanel")
+        self.transcript.setReadOnly(True)
+        self.transcript.setMinimumHeight(320)
+        outer.addWidget(self.transcript, 1)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        self.progress.setMaximumHeight(6)
+        self.progress.setVisible(False)
+        outer.addWidget(self.progress)
+
+        self.status = QLabel("")
+        self.status.setObjectName("grocerySummary")
+        self.status.setWordWrap(True)
+        outer.addWidget(self.status)
+
+        self.input = ChatInput()
+        self.input.setPlaceholderText(
+            "Describe your project…  (Enter to send · Shift+Enter for a new line)"
+        )
+        self.input.submitted.connect(self._send)
+        self.send_button = QPushButton("Send")
+        self.send_button.setObjectName("orderButton")
+        self.send_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.send_button.clicked.connect(self._send)
+        self.new_button = QPushButton("New project")
+        self.new_button.setObjectName("ghostButton")
+        self.new_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.new_button.clicked.connect(self._new_project)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(self.input, 1)
+        row.addWidget(self.send_button)
+        row.addWidget(self.new_button)
+        outer.addLayout(row)
+
+        self._new_project()
+
+    def _new_project(self) -> None:
+        self._history = []
+        self._turns = [("HELIX", self.GREETING)]
+        self.status.setText("")
+        self._render()
+
+    def _render(self) -> None:
+        blocks = []
+        for who, text in self._turns:
+            blocks.append(f"**{who}:**\n\n{text}")
+        self.transcript.setMarkdown("\n\n---\n\n".join(blocks))
+        bar = self.transcript.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        self.progress.setVisible(busy)
+        self.send_button.setEnabled(not busy)
+        self.input.setEnabled(not busy)
+        if not busy:
+            self.status.setText("")
+
+    def _send(self) -> None:
+        if self._busy:
+            return
+        text = self.input.toPlainText().strip()
+        if not text:
+            return
+        if not ClaudeClient().is_configured():
+            self._turns.append(
+                ("HELIX", "I need a Claude API key to do this — save one in **Learning → Claude**.")
+            )
+            self._render()
+            return
+        self.input.clear()
+        self._history.append({"role": "user", "content": text})
+        self._turns.append(("You", text))
+        self._render()
+        self._set_busy(True)
+        self.status.setText("Thinking…")
+        snapshot = list(self._history)
+        spawn_worker(self._workers, lambda: self._think(snapshot), self._thought)
+
+    def _think(self, messages: list):
+        model = DEFAULT_CLAUDE_MODEL  # compatibility reasoning is the point — use the strong model
+        client = ClaudeClient(ClaudeConfig(model=model, timeout_seconds=RESEARCH_TIMEOUT_SECONDS))
+        system = build_project_builder_system(self._context())
+        result = run_chat_turn(
+            client, model, system, messages, self._router,
+            max_iters=8, max_tokens=2048,
+            on_step=lambda name: self.step.emit(name),
+        )
+        for usage in result.usages:
+            in_tok = int(usage.get("input_tokens", 0) or 0)
+            out_tok = int(usage.get("output_tokens", 0) or 0)
+            if in_tok or out_tok:
+                self.memory.record_ai_usage(model, in_tok, out_tok, estimate_cost(model, in_tok, out_tok))
+        return result
+
+    def _thought(self, ok: bool, payload) -> None:
+        self._set_busy(False)
+        if not ok:
+            self._turns.append(("HELIX", f"I couldn't reach Claude just now. ({payload})"))
+            self._render()
+            return
+        result = payload
+        self._history = result.messages
+        self._turns.append(("HELIX", result.reply or "…"))
+        self._render()
+        self._on_parts_changed()  # the model may have added parts — refresh the Parts List tab
+
+    def _on_step(self, tool_name: str) -> None:
+        friendly = {
+            "add_to_components_list": "Adding parts to your list…",
+            "remove_from_components_list": "Adjusting the list…",
+            "show_components_list": "Reviewing the parts list…",
+            "search_components": "Searching the vendor catalog…",
+        }.get(tool_name, "Working on it…")
+        self.status.setText(friendly)
+
+    def _context(self) -> str:
+        items = components_store.list_items(self.settings)
+        connected = [
+            component_vendors.vendor_label(v)
+            for v in component_vendors.VENDORS
+            if component_vendors.is_configured(self.settings, v)
+        ]
+        vendor_line = (
+            "Connected for live search/pricing: " + ", ".join(connected)
+            if connected
+            else "No vendor (DigiKey/Mouser) is connected yet — offer search only as optional, and "
+            "note they can add API keys in settings."
+        )
+        list_line = (
+            "Parts already on the list: " + components_store.summary(self.settings)
+            if items
+            else "The parts list is currently empty."
+        )
+        return f"{list_line}\n{vendor_line}"
+
+
+class ComponentsTab(QWidget):
+    """The Components screen: two tabs — **Project Builder** (the AI chat that specs a project and
+    auto-populates a compatibility-verified BOM) and **Parts List** (the structured browser, list,
+    and vendor ordering). The Project Builder leads when the list is empty; otherwise the Parts List
+    opens first so a returning user lands on their saved build."""
+
+    def __init__(self, memory: SQLiteMemory) -> None:
+        super().__init__()
+        self.memory = memory
+        self.settings = AppSettings()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        self.parts_panel = PartsListPanel(memory)
+        self.builder_panel = ProjectBuilderPanel(memory, on_parts_changed=self.parts_panel.refresh)
+        self.tabs.addTab(self.builder_panel, "Project Builder")
+        self.tabs.addTab(self.parts_panel, "Parts List")
+
+        # Default to the Project Builder on a fresh, empty list; otherwise the saved Parts List.
+        if components_store.list_items(self.settings):
+            self.tabs.setCurrentWidget(self.parts_panel)
+        else:
+            self.tabs.setCurrentWidget(self.builder_panel)
+
+    def refresh(self) -> None:
+        self.parts_panel.refresh()
 
 
 class HomeTab(QWidget):
