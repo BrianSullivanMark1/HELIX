@@ -161,7 +161,7 @@ from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
 from helix.selfdev import engine as selfdev_engine, mailer as selfdev_mailer, restart as selfdev_restart, triggers as selfdev_triggers
-from helix.vision import camera as vision_camera
+from helix.vision import analyze as vision_analyze, camera as vision_camera, watch as vision_watch
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
 from helix.investment.planner import build_briefing, render_briefing
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks, task_status
@@ -607,6 +607,16 @@ class ConsoleView(QWidget):
         self._tile_timer.start(30000)
         self.refresh_tiles()
 
+        # Proactive door/area watch (§vision): cheap local motion detection on a 'door' camera; on
+        # movement, one vision call describes who's there and HELIX announces it — only when idle.
+        self._watch_det = vision_watch.MotionDetector()
+        self._watch_workers: set = set()
+        self._watch_busy = False
+        self._watch_cooldown = 0
+        self._watch_timer = QTimer(self)
+        self._watch_timer.timeout.connect(self._watch_tick)
+        self._watch_timer.start(8000)
+
     def _sync_presence(self) -> None:
         state = getattr(self._xpert, "_convo_state", "idle")
         self.orb.set_state(state)
@@ -654,6 +664,47 @@ class ConsoleView(QWidget):
             )
         except Exception:
             self.tile_self.set_value("—", "")
+
+    # ---- proactive door/area watch ---------------------------------------- #
+
+    def _watch_tick(self) -> None:
+        if self._watch_busy or not vision_camera.is_available():
+            return
+        if self._watch_cooldown > 0:
+            self._watch_cooldown -= 1
+            return
+        cam = vision_camera.get_camera(self.settings, "door")
+        if not cam:
+            return  # opt-in: only watches if a camera named "door" is registered
+        self._watch_busy = True
+        source = cam.get("source", vision_camera.DEFAULT_CAMERA_INDEX)
+        spawn_worker(self._watch_workers, lambda: self._watch_capture(source), self._watch_captured)
+
+    def _watch_capture(self, source):
+        frame = vision_camera.capture_jpeg(source)
+        return frame if self._watch_det.check(frame) else None  # only a frame back if something moved
+
+    def _watch_captured(self, ok: bool, payload) -> None:
+        if not ok or payload is None:
+            self._watch_busy = False
+            return
+        frame = payload
+        spawn_worker(
+            self._watch_workers,
+            lambda: vision_analyze.describe_image(
+                frame,
+                question="Is a person at the door? If so describe them briefly (sex, rough age, what "
+                "they're doing); if not, say what moved.",
+                memory=self.memory,
+            ),
+            self._watch_described,
+        )
+
+    def _watch_described(self, ok: bool, payload) -> None:
+        self._watch_busy = False
+        self._watch_cooldown = 8  # ~1 minute of quiet before the next alert
+        if ok and payload:
+            self._xpert.announce(f"Someone's at the door, sir. {payload}")
 
 
 class HelixMainWindow(QMainWindow):
@@ -1678,6 +1729,14 @@ class XpertTab(QWidget):
         self.transcript.append(f'<span style="color:{color};font-weight:700;">{who}:</span> {safe}')
         bar = self.transcript.verticalScrollBar()
         bar.setValue(bar.maximum())
+
+    def announce(self, text: str) -> None:
+        """Proactively say something (a door alert, a low-stock nudge) — but ONLY when idle, so HELIX
+        never talks over a turn. Used by the Console's awareness loop."""
+        if not text or self._convo_state != "idle":
+            return
+        self._append_transcript("HELIX", text)
+        self._speak_reply(text)
 
     def _set_convo_state(self, state: str, detail: str = "") -> None:
         self._convo_state = state
