@@ -1333,7 +1333,7 @@ class XpertTab(QWidget):
         self._new_chat_button = new_chat_button = QPushButton("New chat")
         new_chat_button.clicked.connect(self._new_chat)
         self.text_input = QLineEdit()
-        self.text_input.setPlaceholderText("...or type to HELIX and press Enter")
+        self.text_input.setPlaceholderText("Ask HELIX anything…  (press Enter)")
         self.text_input.returnPressed.connect(self._on_send)
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self._on_send)
@@ -1397,7 +1397,6 @@ class XpertTab(QWidget):
         convo_layout.addLayout(listen_row)
         convo_layout.addWidget(self.convo_status)
         convo_layout.addLayout(talk_row)
-        convo_layout.addLayout(type_row)
 
         # Secondary controls (voice speed + audio devices), de-emphasized below the conversation.
         self.controls_box = QWidget()
@@ -1413,6 +1412,7 @@ class XpertTab(QWidget):
         self.status.setStyleSheet("color:#6fb3c0;font-size:12pt;")
 
         layout.addWidget(subtitle)
+        layout.addWidget(self.text_input)  # the ask/question box, above the conversation
         layout.addWidget(self.convo_box, 1)
         layout.addWidget(self.controls_box)
         layout.addWidget(self.status)
@@ -1852,7 +1852,6 @@ class XpertTab(QWidget):
             getattr(self, "talk_button", None),
             getattr(self, "_new_chat_button", None),
             getattr(self, "send_button", None),
-            getattr(self, "text_input", None),
             getattr(self, "listen_label", None),
             getattr(self, "level_bar", None),
         ):
