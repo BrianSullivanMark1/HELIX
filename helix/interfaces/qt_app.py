@@ -928,7 +928,7 @@ class HelixMainWindow(QMainWindow):
                 "investment": ("Investments", self.investment_tab),
                 "home": ("Home", self.home_tab),
                 "grocery": ("Groceries", self.grocery_tab),
-                "components": ("Components", self.components_tab),
+                "components": ("Fabrication", self.components_tab),
                 "enterprise": ("Work", self.enterprise_tab),
                 "learning": ("Learning", self.learning_tab),
                 "cameras": ("Cameras", self.cameras_tab),
@@ -3142,7 +3142,7 @@ class PartsListPanel(QWidget):
         outer.setContentsMargins(24, 20, 24, 16)
         outer.setSpacing(12)
 
-        header = QLabel("Components")
+        header = QLabel("Fabrication")
         header.setObjectName("sectionHeader")
         outer.addWidget(header)
 

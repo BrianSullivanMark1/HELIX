@@ -412,10 +412,10 @@ XPERT_TOOLS: list[dict[str, Any]] = [
         "name": "show_screen",
         "description": (
             "Pop a panel up on the screen for the user to see — the investments table, home, the "
-            "grocery list, the components/parts list, work, learning, or the live house cameras. Use "
+            "grocery list, the Fabrication/parts list, work, learning, or the live house cameras. Use "
             "whenever the user asks to see / show / open / pull up one of those (e.g. 'show my "
             "investments', 'pull up the portfolio', 'open home', 'open the grocery list', 'show "
-            "components', 'show cameras'). No confirmation needed."
+            "fabrication', 'show cameras'). No confirmation needed."
         ),
         "input_schema": {
             "type": "object",
@@ -423,7 +423,7 @@ XPERT_TOOLS: list[dict[str, Any]] = [
                 "screen": {
                     "type": "string",
                     "enum": ["investment", "home", "grocery", "components", "enterprise", "learning", "cameras", "settings"],
-                    "description": "Which panel: investment (money/portfolio/trading), home, grocery (the shopping list + order from Fry's), components (electronics parts list + DigiKey/Mouser), enterprise (work), learning, cameras (live house cameras), or settings (voice speed + devices).",
+                    "description": "Which panel: investment (money/portfolio/trading), home, grocery (the shopping list + order from Fry's), components (the Fabrication screen — electronics parts list + DigiKey/Mouser), enterprise (work), learning, cameras (live house cameras), or settings (voice speed + devices).",
                 }
             },
             "required": ["screen"],
@@ -937,13 +937,14 @@ class ActionRouter:
                  "stocks": "investment", "work": "enterprise", "camera": "cameras",
                  "groceries": "grocery", "shopping": "grocery", "shopping list": "grocery",
                  "grocery list": "grocery", "component": "components", "parts": "components",
-                 "parts list": "components", "components list": "components", "hardware": "components"}
+                 "parts list": "components", "components list": "components", "hardware": "components",
+                 "fabrication": "components", "fab": "components"}
         key = alias.get(raw, raw)
         labels = {"investment": "the investments", "home": "home", "grocery": "the grocery list",
-                  "components": "the components list", "enterprise": "work", "learning": "learning",
+                  "components": "the Fabrication screen", "enterprise": "work", "learning": "learning",
                   "cameras": "the cameras", "settings": "settings"}
         if key not in labels:
-            return ToolOutcome("I can show investments, home, the grocery list, the components list, work, learning, or the cameras, sir. Which one?")
+            return ToolOutcome("I can show investments, home, the grocery list, the Fabrication screen, work, learning, or the cameras, sir. Which one?")
         self.ctx.show_screen(key)
         return ToolOutcome(f"Pulling up {labels[key]}, sir.")
 
