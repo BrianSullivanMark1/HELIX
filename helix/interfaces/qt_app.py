@@ -910,6 +910,7 @@ class HelixMainWindow(QMainWindow):
         try:
             if selfdev_restart.restart_pending(self.settings) and not self._auto_trading():
                 self.statusBar().showMessage("Restarting to apply a self-improvement…", 5000)
+                selfdev_restart.perform_restart(self.settings)  # supervisor relaunches us, or we self-spawn
                 QApplication.exit(selfdev_restart.RESTART_EXIT_CODE)
         except Exception:
             pass

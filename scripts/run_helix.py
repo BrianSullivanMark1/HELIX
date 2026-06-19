@@ -11,6 +11,7 @@ exponential backoff that resets after a healthy run. For launch-at-login, run
 scripts/install_autostart.ps1 once (points a Startup shortcut at this supervisor)."""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -24,6 +25,7 @@ MIN_BACKOFF = 5            # seconds before the first relaunch after a crash
 MAX_BACKOFF = 300          # cap the backoff at 5 minutes
 HEALTHY_RUN_SECONDS = 120  # a session at least this long is "healthy" -> reset the backoff
 RESTART_EXIT_CODE = 42     # a DELIBERATE self-restart (e.g. after a self-improvement merge), not a crash
+SUPERVISOR_ENV = "HELIX_SUPERVISED"  # tell the app a supervisor is watching (see helix/selfdev/restart.py)
 
 
 def next_action(exit_code: int, ran_seconds: float, backoff: int) -> tuple[bool, int, int]:
@@ -57,8 +59,9 @@ def main() -> int:
     _log(f"supervisor starting; launching {MAIN}")
     while True:
         started = time.monotonic()
+        env = dict(os.environ, **{SUPERVISOR_ENV: "1"})  # so the app relaunches via us, not by self-spawning
         try:
-            code = subprocess.call([sys.executable, str(MAIN)], cwd=str(REPO_ROOT))
+            code = subprocess.call([sys.executable, str(MAIN)], cwd=str(REPO_ROOT), env=env)
         except KeyboardInterrupt:
             _log("interrupted (Ctrl+C); stopping")
             return 0
