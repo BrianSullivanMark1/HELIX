@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -1244,6 +1245,35 @@ class WakeWordListener(QObject):
             self.utterance.emit(utter)
 
 
+class ChatInput(QPlainTextEdit):
+    """The ask box — multi-line: Enter sends, Shift+Enter makes a new line (for paragraphs). Grows with
+    its content up to a few lines, like a modern chat input."""
+
+    submitted = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setTabChangesFocus(True)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._min_h = 40
+        self._max_h = 150
+        self.setFixedHeight(self._min_h)
+        self.document().contentsChanged.connect(self._adjust_height)
+
+    def _adjust_height(self) -> None:
+        height = int(self.document().size().height()) + 2 * int(self.frameWidth()) + 10
+        self.setFixedHeight(max(self._min_h, min(self._max_h, height)))
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
+            event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
+            self.submitted.emit()
+            return
+        super().keyPressEvent(event)
+
+
 class XpertTab(QWidget):
     """The HELIX 'brain' - a two-way J.A.R.V.I.S.-style voice assistant that can act on every
     pillar, plus the one-way expert overview across all five pillars (H E L I X)."""
@@ -1332,9 +1362,9 @@ class XpertTab(QWidget):
         self.talk_button.released.connect(self._on_talk_released)
         self._new_chat_button = new_chat_button = QPushButton("New chat")
         new_chat_button.clicked.connect(self._new_chat)
-        self.text_input = QLineEdit()
-        self.text_input.setPlaceholderText("Ask HELIX anything…  (press Enter)")
-        self.text_input.returnPressed.connect(self._on_send)
+        self.text_input = ChatInput()
+        self.text_input.setPlaceholderText("Ask HELIX anything…  (Enter to send · Shift+Enter for a new line)")
+        self.text_input.submitted.connect(self._on_send)
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self._on_send)
 
@@ -1980,7 +2010,7 @@ class XpertTab(QWidget):
     def _on_send(self) -> None:
         if self._convo_state != "idle":
             return
-        text = self.text_input.text().strip()
+        text = self.text_input.toPlainText().strip()
         if not text:
             return
         self.text_input.clear()
