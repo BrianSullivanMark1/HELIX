@@ -990,9 +990,19 @@ WAKE_END_SILENCE_S = 0.7     # this much trailing quiet ends an utterance
 WAKE_MIN_SPEECH_S = 0.3      # ignore shorter blips (clicks, coughs)
 WAKE_MAX_UTTER_S = 12.0      # hard cap per utterance
 WAKE_PREROLL_S = 0.25        # keep this much pre-speech audio so the wake word isn't clipped
-WAKE_FOLLOWUP_MS = 9000      # after a reply, accept a follow-up with NO wake word for this long
+# Conversation session (§23): once HELIX answers a wake-word command, it stays in an active
+# session and keeps listening without the wake word until the user dismisses it or it goes quiet
+# for SESSION_IDLE_MS. A 1-second tick drives the on-screen countdown.
+SESSION_IDLE_MS = 5 * 60 * 1000   # end the session after this much inactivity (5 minutes)
+SESSION_TICK_MS = 1000            # how often the on-screen session countdown refreshes
 # Accept the obvious mis-hearings of "HELIX" so a clear command still lands.
 _WAKE_RE = re.compile(r"\b(?:hey\s+|ok\s+|okay\s+)?(?:he+lix|helics|healix|helex|heelux)\b[\s,.:;!?-]*", re.IGNORECASE)
+# Phrases that close an active conversation session immediately (no wake word needed).
+_DISMISSAL_RE = re.compile(
+    r"\b(?:good\s*bye|bye(?:\s+now)?|be\s+right\s+back|brb|i'?ll\s+be\s+back|"
+    r"that'?s\s+all|thank(?:s| you)\s*,?\s*he+lix)\b",
+    re.IGNORECASE,
+)
 
 
 def _pcm_rms(pcm: bytes) -> float:
@@ -1013,6 +1023,12 @@ def _split_wake(text: str) -> tuple:
     if not match:
         return False, ""
     return True, (text[match.end():] or "").strip()
+
+
+def _is_dismissal(text: str) -> bool:
+    """True if `text` is a phrase that should close an active conversation session
+    (e.g. 'goodbye', 'that's all', 'thanks HELIX'). Pure, so it's unit-testable."""
+    return bool(_DISMISSAL_RE.search(text or ""))
 
 
 def _write_wav16(data: bytes, path: str) -> None:
@@ -1317,11 +1333,16 @@ class XpertTab(QWidget):
         # degrades silently to push-to-talk + typing if the mic / voice model / Claude key isn't ready.
         self._handsfree = False
         self._wake_listener = None
-        self._followup = False        # within a window, the next utterance needs no wake word
         self._loading_devices = False
-        self._followup_timer = QTimer(self)
-        self._followup_timer.setSingleShot(True)
-        self._followup_timer.timeout.connect(lambda: setattr(self, "_followup", False))
+        # Conversation session: while active, utterances need no wake word (§23). The idle timer
+        # ends the session after SESSION_IDLE_MS of quiet; the tick refreshes the on-screen countdown.
+        self._session_active = False
+        self._session_timer = QTimer(self)
+        self._session_timer.setSingleShot(True)
+        self._session_timer.timeout.connect(lambda: self._end_session(spoken=False))
+        self._session_tick = QTimer(self)
+        self._session_tick.setInterval(SESSION_TICK_MS)
+        self._session_tick.timeout.connect(self._update_session_indicator)
         self._setup_tts()
         self._setup_mic()
         self._router = self._build_router()
@@ -1397,6 +1418,12 @@ class XpertTab(QWidget):
         listen_row.addWidget(self.listen_label)
         listen_row.addWidget(self.level_bar, 1)
 
+        # Subtle "in conversation" indicator + countdown, shown only while a session is active (§23).
+        self.session_label = QLabel("")
+        self.session_label.setObjectName("sessionPill")
+        self.session_label.setStyleSheet("color:#3ddc84;font-weight:600;")
+        self.session_label.setVisible(False)
+
         # Voice output speed — how fast HELIX talks (0.8×–2.0×).
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
         self.speed_slider.setMinimum(80)
@@ -1434,6 +1461,7 @@ class XpertTab(QWidget):
 
         convo_layout.addWidget(self.transcript, 1)
         convo_layout.addWidget(self.convo_progress)
+        convo_layout.addWidget(self.session_label)
         convo_layout.addLayout(listen_row)
         convo_layout.addWidget(self.convo_status)
         convo_layout.addLayout(talk_row)
@@ -1810,7 +1838,7 @@ class XpertTab(QWidget):
         if not self._start_wake():
             return
         self._handsfree = True
-        self._followup = False
+        self._end_session()
         self.level_bar.setVisible(True)
         self.listen_label.setVisible(True)
         self._set_convo_state("idle")
@@ -1835,9 +1863,36 @@ class XpertTab(QWidget):
         if hasattr(self, "level_bar"):
             self.level_bar.setValue(0)
 
-    def _arm_followup(self) -> None:
-        self._followup = True
-        self._followup_timer.start(WAKE_FOLLOWUP_MS)
+    def _start_session(self) -> None:
+        """Begin (or refresh) an active conversation session: HELIX keeps listening and answering
+        without the wake word until dismissed or quiet for SESSION_IDLE_MS (§23)."""
+        self._session_active = True
+        self._session_timer.start(SESSION_IDLE_MS)
+        if not self._session_tick.isActive():
+            self._session_tick.start()
+        self._update_session_indicator()
+
+    def _end_session(self, spoken: bool = False) -> None:
+        """Close the conversation session and return to wake-word-only listening. With spoken=True
+        HELIX briefly acknowledges (used when the user says a dismissal phrase)."""
+        was_active = self._session_active
+        self._session_active = False
+        self._session_timer.stop()
+        self._session_tick.stop()
+        if hasattr(self, "session_label"):
+            self.session_label.setVisible(False)
+        if spoken and was_active:
+            self._append_transcript("HELIX", "Of course, sir.")
+            self._speak_reply("Of course, sir.")
+
+    def _update_session_indicator(self) -> None:
+        if not self._session_active or not hasattr(self, "session_label"):
+            return
+        remaining = max(0, self._session_timer.remainingTime()) // 1000
+        self.session_label.setText(
+            f"\U0001f7e2  In conversation · say “goodbye” to end · {remaining // 60}:{remaining % 60:02d}"
+        )
+        self.session_label.setVisible(True)
 
     def _on_wake_level(self, level: float) -> None:
         self.level_bar.setValue(int(level * 100))
@@ -1867,15 +1922,20 @@ class XpertTab(QWidget):
                 pass
         text = str(payload or "").strip() if ok else ""
         matched, after = _split_wake(text)
-        in_followup = self._followup
-        self._followup = False
+        # During an active session, a dismissal phrase ("goodbye", "that's all", "thanks HELIX")
+        # ends it right away with a brief acknowledgement.
+        if self._session_active and _is_dismissal(text):
+            self._end_session(spoken=True)
+            return
         if matched:
             command = after.strip()
-        elif in_followup and text:
-            command = text  # within the follow-up window, the wake word isn't required
+        elif self._session_active and text:
+            command = text  # within an active session, the wake word isn't required
         else:
             self._set_convo_state("idle")  # not addressed to HELIX - keep listening
             return
+        # Engaged: open (or refresh) the conversation session so HELIX keeps the floor.
+        self._start_session()
         if not command:
             # bare "HELIX" - acknowledge, then take the next utterance as the command
             self._append_transcript("You", "HELIX")
@@ -1889,6 +1949,7 @@ class XpertTab(QWidget):
     def _new_chat(self) -> None:
         self._history = []
         self._pending_action = None
+        self._end_session()
         self.transcript.clear()
         self._append_transcript(
             "HELIX", "Standing by, sir. Hold the Talk button and speak, or type below."
@@ -2144,7 +2205,8 @@ class XpertTab(QWidget):
         def done() -> None:
             self._set_convo_state("idle")
             if self._handsfree:
-                self._arm_followup()  # accept a follow-up with no wake word for a beat
+                if self._session_active:
+                    self._start_session()  # reset the inactivity countdown from the end of the reply
                 if self._wake_listener is not None:
                     # Brief guard so HELIX's own voice tail / room echo can't re-trigger the wake word.
                     self._wake_listener.set_active(False)

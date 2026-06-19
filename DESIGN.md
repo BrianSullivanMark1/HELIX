@@ -1198,9 +1198,14 @@ noisier array mic — instead of a single fixed level that mis-fires on one and 
 (the original "glitchy" report). CPU stays low at idle (VAD only transcribes actual speech, not
 silence). The listener **pauses itself while HELIX transcribes/thinks/speaks** (gated by
 `_set_convo_state`, so it never hears its own reply), plus a **~450 ms guard after each reply**
-(`_resume_wake`) so HELIX's own voice tail / room echo can't re-trigger the wake word. A short
-**follow-up window** (`WAKE_FOLLOWUP_MS`) lets you keep talking — and answer confirmation prompts —
-without repeating the wake word. Bare "HELIX" → "Yes, sir?" then it takes the next utterance.
+(`_resume_wake`) so HELIX's own voice tail / room echo can't re-trigger the wake word. Once the wake
+word lands and HELIX answers, a **conversation session** opens (`_start_session` / `_end_session`,
+`SESSION_IDLE_MS` = 5 min): you keep talking — and answer confirmation prompts — **without repeating
+the wake word**, each utterance/reply resetting the idle countdown. The session ends after 5 minutes
+of quiet or **immediately on a dismissal phrase** ("goodbye", "be right back", "that's all", "thanks
+HELIX" — `_is_dismissal`), after which HELIX says "Of course, sir" and returns to wake-word-only
+listening. A subtle green **"In conversation"** pill (`session_label`) shows the live countdown.
+Bare "HELIX" → "Yes, sir?" then it takes the next utterance.
 **Opt-in each session** (no auto-start of an always-on mic). Engine: `WakeWordListener` +
 `VadSegmenter` in `qt_app.py`. (A dedicated wake-word engine would avoid transcribing every phrase,
 at the cost of a trained model/dependency — deferred.)
