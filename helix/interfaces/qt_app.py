@@ -1716,6 +1716,32 @@ class XpertTab(QWidget):
             # Not a known tool name → it's already a ready-made progress line (e.g. a coder streaming step).
             friendly = tool_name or "Working on it..."
         self._set_convo_state("acting", friendly)
+        # Narrate the coding-agent milestones aloud so the user can follow a code change by ear.
+        spoken = self._coding_narration(tool_name)
+        if spoken:
+            self._speak_text(spoken)
+
+    @staticmethod
+    def _coding_narration(step: str) -> str:
+        """Spoken line for an improve_helix / coder milestone, or "" to stay silent.
+
+        `step` is the raw value handed to `_on_convo_step` — a tool name for the initial call, then
+        the live progress strings from `selfdev.coder.run_coding_task`. Only the milestones get a
+        voice; the chatty per-file notes ("Reading X", "Editing Y") and quick non-coding tools stay
+        on the status label only.
+        """
+        msg = (step or "").lower()
+        if step == "improve_helix":
+            return "Drafting the change now."
+        if msg.startswith("creating work branch"):
+            return "Setting up a work branch."
+        if "is working on the change" in msg:
+            return "Writing the code now."
+        if msg.startswith("committing the proposed change"):
+            return "Committing the change."
+        if "captured for review" in msg:
+            return "There was a problem, but the changes were saved for review."
+        return ""
 
     def _research_fn(self, prompt: str) -> str:
         """A Claude call for the roster/special tools, recording usage (mirrors InvestTab)."""
