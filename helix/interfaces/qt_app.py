@@ -10,7 +10,7 @@ import tempfile
 import wave
 from datetime import date, datetime, timedelta, timezone
 
-from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QObject, QRunnable, QThreadPool, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QEasingCurve, QPointF, QPropertyAnimation, QRectF, QTimer, QObject, QRunnable, QThreadPool, QUrl, pyqtSignal
 from PyQt6.QtTextToSpeech import QTextToSpeech, QVoice
 from PyQt6.QtMultimedia import QAudioFormat, QAudioOutput, QAudioSource, QMediaDevices, QMediaPlayer
 from PyQt6.QtGui import (
@@ -174,6 +174,7 @@ from helix.home import groceries as groceries_store
 from helix.home import kroger
 from helix.components import parts as components_store
 from helix.components import vendors as component_vendors
+from helix.components import catalog as components_catalog
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks, task_status
 from helix.home.notify import (
     CARRIER_CHOICES,
@@ -365,6 +366,18 @@ class NoScrollDoubleSpinBox(QDoubleSpinBox):
 
     def wheelEvent(self, event) -> None:  # noqa: N802 (Qt override)
         event.ignore()
+
+
+class ClickFrame(QFrame):
+    """A QFrame that emits `clicked` on a left mouse press — used for the selectable category tiles
+    and vendor result cards on the Components screen."""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 class WorkerSignals(QObject):
@@ -3081,10 +3094,15 @@ class GroceryTab(QWidget):
 
 
 class ComponentsTab(QWidget):
-    """The electronics components build/wish list. Add parts (with quantity + notes), search the
-    DigiKey or Mouser catalog for part numbers / price / stock, and order the list from a vendor
-    (always confirmed — outward action). Settings-backed via `helix.components.parts`; vendor I/O via
-    `helix.components.vendors`. Mirrors GroceryTab so it matches the rest of the app."""
+    """A smart, structured electronics-parts browser. Instead of free-text (and typos), the user
+    picks a **category** → **package** → **spec dropdowns** (curated real-world values, only the
+    fields relevant to that category), hits **Find It** to fire a structured query at DigiKey/Mouser,
+    browses real results as selectable cards, and confirms the exact part in a slide-in detail panel
+    before **Add to Parts List** or **Order Now**. The parts list + ordering live in their own panel,
+    cleanly separated from search. Taxonomy/query in `helix.components.catalog` (pure); vendor I/O in
+    `helix.components.vendors`; the list is settings-backed via `helix.components.parts`."""
+
+    DETAIL_WIDTH = 380  # px the detail panel slides out to
 
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
@@ -3094,100 +3112,214 @@ class ComponentsTab(QWidget):
         self._ordering = False
         self._searching = False
 
+        self._category_key: str | None = None
+        self._cat_tiles: dict[str, ClickFrame] = {}
+        self._spec_combos: dict[str, QComboBox] = {}
+        self._package_combo: QComboBox | None = None
+        self._results: list[dict] = []
+        self._result_cards: list[ClickFrame] = []
+        self._selected_index: int | None = None
+
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        outer.addWidget(scroll)
-        content = QWidget()
-        scroll.setWidget(content)
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(14)
+        outer.setContentsMargins(24, 20, 24, 16)
+        outer.setSpacing(12)
 
         header = QLabel("Components")
         header.setObjectName("sectionHeader")
-        layout.addWidget(header)
-        self.summary = QLabel()
-        self.summary.setObjectName("grocerySummary")
-        self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
+        outer.addWidget(header)
 
-        # Add-part row — name, quantity, optional notes, and Add.
-        add_box = QGroupBox("Add a part")
-        add_row = QHBoxLayout(add_box)
-        add_row.setSpacing(10)
-        self.item_input = QLineEdit()
-        self.item_input.setPlaceholderText("e.g. Raspberry Pi Zero 2 W, OV2640 camera module")
-        self.item_input.returnPressed.connect(self._add_item)
-        self.qty_input = QSpinBox()
-        self.qty_input.setRange(1, 999)
-        self.qty_input.setValue(1)
-        self.qty_input.setPrefix("× ")
-        self.qty_input.setFixedWidth(92)
-        self.notes_input = QLineEdit()
-        self.notes_input.setPlaceholderText("notes (optional)")
-        self.notes_input.returnPressed.connect(self._add_item)
-        add_button = QPushButton("Add Part")
-        add_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_button.clicked.connect(self._add_item)
-        add_row.addWidget(self.item_input, 2)
-        add_row.addWidget(self.qty_input)
-        add_row.addWidget(self.notes_input, 1)
-        add_row.addWidget(add_button)
-        layout.addWidget(add_box)
+        # ---- main two-column row: [filters + results]  |  [detail panel] ----
+        main = QHBoxLayout()
+        main.setSpacing(14)
+        outer.addLayout(main, 1)
 
-        # The build list itself.
-        self.list_container = QVBoxLayout()
-        self.list_container.setSpacing(8)
-        layout.addLayout(self.list_container)
-        self.empty_label = QLabel(
-            "Your components list is empty. Add a part above, or just say "
-            "“HELIX, add a Raspberry Pi Zero 2 W to the parts list.”"
-        )
-        self.empty_label.setObjectName("groceryEmpty")
-        self.empty_label.setWordWrap(True)
-        layout.addWidget(self.empty_label)
+        left = QVBoxLayout()
+        left.setSpacing(12)
+        main.addLayout(left, 1)
+        left.addWidget(self._build_filter_box())
+        left.addWidget(self._build_chips_bar())
+        left.addWidget(self._build_results_area(), 1)
 
-        # Catalog search — query + vendor + Search, results below with an Add button each.
-        search_box = QGroupBox("Search a vendor catalog")
-        search_outer = QVBoxLayout(search_box)
-        search_outer.setSpacing(10)
-        search_row = QHBoxLayout()
-        search_row.setSpacing(10)
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("e.g. SPH0645 MEMS microphone")
-        self.search_input.returnPressed.connect(self._search)
+        self.detail_panel = self._build_detail_panel()
+        main.addWidget(self.detail_panel)
+        self.detail_panel.setMaximumWidth(0)  # collapsed until a card is selected
+        self._detail_anim = QPropertyAnimation(self.detail_panel, b"maximumWidth", self)
+        self._detail_anim.setDuration(220)
+        self._detail_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        # ---- parts list panel (added items + ordering), separated from search ----
+        outer.addWidget(self._build_parts_panel())
+
+        self._build_category_tiles()
+        self._rebuild()
+
+    # -- construction helpers ----------------------------------------------- #
+
+    def _build_filter_box(self) -> QWidget:
+        box = QGroupBox("Find a part")
+        lay = QVBoxLayout(box)
+        lay.setSpacing(10)
+
+        step1 = QLabel("1 · Category")
+        step1.setObjectName("componentStep")
+        lay.addWidget(step1)
+        self.category_grid = QGridLayout()
+        self.category_grid.setSpacing(8)
+        lay.addLayout(self.category_grid)
+
+        step2 = QLabel("2 · Specifications")
+        step2.setObjectName("componentStep")
+        lay.addWidget(step2)
+        self.spec_form = QFormLayout()
+        self.spec_form.setSpacing(8)
+        self.spec_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self.spec_hint = QLabel("Pick a category above to see its spec filters.")
+        self.spec_hint.setObjectName("grocerySummary")
+        self.spec_hint.setWordWrap(True)
+        lay.addWidget(self.spec_hint)
+        lay.addLayout(self.spec_form)
+
+        find_row = QHBoxLayout()
+        find_row.setSpacing(10)
+        self.find_button = QPushButton("\U0001f50d  Find It")
+        self.find_button.setObjectName("orderButton")
+        self.find_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.find_button.clicked.connect(self._search)
+        self.find_button.setEnabled(False)
         self.vendor_search = NoScrollComboBox()
         for v in component_vendors.VENDORS:
             self.vendor_search.addItem(component_vendors.vendor_label(v), v)
         self.vendor_search.setFixedWidth(120)
-        self.search_button = QPushButton("Search")
-        self.search_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.search_button.clicked.connect(self._search)
-        search_row.addWidget(self.search_input, 1)
-        search_row.addWidget(self.vendor_search)
-        search_row.addWidget(self.search_button)
-        search_outer.addLayout(search_row)
-        self.search_status = QLabel()
+        find_row.addWidget(self.find_button, 1)
+        find_row.addWidget(QLabel("from"))
+        find_row.addWidget(self.vendor_search)
+        lay.addLayout(find_row)
+        return box
+
+    def _build_chips_bar(self) -> QWidget:
+        bar = QWidget()
+        self.chips_row = QHBoxLayout(bar)
+        self.chips_row.setContentsMargins(2, 0, 2, 0)
+        self.chips_row.setSpacing(6)
+        return bar
+
+    def _build_results_area(self) -> QWidget:
+        wrap = QWidget()
+        lay = QVBoxLayout(wrap)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self.search_status = QLabel("Results appear here once you run a search.")
         self.search_status.setObjectName("grocerySummary")
         self.search_status.setWordWrap(True)
-        search_outer.addWidget(self.search_status)
-        self.results_container = QVBoxLayout()
+        lay.addWidget(self.search_status)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        holder = QWidget()
+        self.results_container = QVBoxLayout(holder)
+        self.results_container.setContentsMargins(0, 0, 6, 0)
         self.results_container.setSpacing(8)
-        search_outer.addLayout(self.results_container)
-        layout.addWidget(search_box)
+        self.results_container.addStretch(1)
+        scroll.setWidget(holder)
+        lay.addWidget(scroll, 1)
+        return wrap
 
-        # Order history.
-        self.history_box = QGroupBox("Order history")
-        self.history_layout = QVBoxLayout(self.history_box)
-        self.history_layout.setSpacing(6)
-        layout.addWidget(self.history_box)
+    def _build_detail_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("detailPanel")
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(16, 14, 16, 16)
+        lay.setSpacing(10)
 
-        layout.addStretch(1)
+        top = QHBoxLayout()
+        cap = QLabel("PART DETAIL")
+        cap.setObjectName("groceryCategory")
+        close = QPushButton("✕")
+        close.setObjectName("groceryRemove")
+        close.setFixedSize(28, 28)
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.clicked.connect(self._close_detail)
+        top.addWidget(cap, 1)
+        top.addWidget(close)
+        lay.addLayout(top)
 
-        # Order bar — pick a vendor and order (always confirmed; outward action).
+        self.detail_name = QLabel()
+        self.detail_name.setObjectName("detailName")
+        self.detail_name.setWordWrap(True)
+        lay.addWidget(self.detail_name)
+        self.detail_mfr = QLabel()
+        self.detail_mfr.setObjectName("grocerySummary")
+        self.detail_mfr.setWordWrap(True)
+        lay.addWidget(self.detail_mfr)
+
+        self.detail_desc = QLabel()
+        self.detail_desc.setObjectName("detailDesc")
+        self.detail_desc.setWordWrap(True)
+        lay.addWidget(self.detail_desc)
+
+        price_row = QHBoxLayout()
+        self.detail_price = QLabel()
+        self.detail_price.setObjectName("detailPrice")
+        self.detail_stock = QLabel()
+        self.detail_stock.setObjectName("detailStock")
+        price_row.addWidget(self.detail_price)
+        price_row.addStretch(1)
+        price_row.addWidget(self.detail_stock)
+        lay.addLayout(price_row)
+
+        specs_holder = QWidget()
+        self.detail_specs = QFormLayout(specs_holder)
+        self.detail_specs.setSpacing(6)
+        self.detail_specs.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        lay.addWidget(specs_holder)
+
+        lay.addStretch(1)
+
+        self.datasheet_button = QPushButton("Datasheet / product page")
+        self.datasheet_button.setObjectName("ghostButton")
+        self.datasheet_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.datasheet_button.clicked.connect(self._open_datasheet)
+        lay.addWidget(self.datasheet_button)
+
+        self.add_detail_button = QPushButton("＋  Add to Parts List")
+        self.add_detail_button.setObjectName("orderButton")
+        self.add_detail_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_detail_button.clicked.connect(self._add_selected)
+        lay.addWidget(self.add_detail_button)
+
+        self.order_now_button = QPushButton("Order Now")
+        self.order_now_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.order_now_button.clicked.connect(self._order_selected_now)
+        lay.addWidget(self.order_now_button)
+        return panel
+
+    def _build_parts_panel(self) -> QWidget:
+        box = QGroupBox("Your parts list")
+        lay = QVBoxLayout(box)
+        lay.setSpacing(8)
+        self.summary = QLabel()
+        self.summary.setObjectName("grocerySummary")
+        self.summary.setWordWrap(True)
+        lay.addWidget(self.summary)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setMaximumHeight(168)
+        holder = QWidget()
+        self.list_container = QVBoxLayout(holder)
+        self.list_container.setContentsMargins(0, 0, 6, 0)
+        self.list_container.setSpacing(6)
+        scroll.setWidget(holder)
+        lay.addWidget(scroll)
+        self.empty_label = QLabel(
+            "No parts yet. Search above and Add one, or say "
+            "“HELIX, add a Raspberry Pi Zero 2 W to the parts list.”"
+        )
+        self.empty_label.setObjectName("groceryEmpty")
+        self.empty_label.setWordWrap(True)
+        lay.addWidget(self.empty_label)
+
         order_bar = QHBoxLayout()
         self.order_status = QLabel()
         self.order_status.setObjectName("grocerySummary")
@@ -3200,7 +3332,7 @@ class ComponentsTab(QWidget):
         for v in component_vendors.VENDORS:
             self.vendor_order.addItem(component_vendors.vendor_label(v), v)
         self.vendor_order.setFixedWidth(120)
-        self.order_button = QPushButton("\U0001f9fe  Order parts")
+        self.order_button = QPushButton("\U0001f9fe  Order from vendor")
         self.order_button.setObjectName("orderButton")
         self.order_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.order_button.clicked.connect(self._order)
@@ -3208,11 +3340,324 @@ class ComponentsTab(QWidget):
         order_bar.addWidget(clear_button)
         order_bar.addWidget(self.vendor_order)
         order_bar.addWidget(self.order_button)
-        layout.addLayout(order_bar)
+        lay.addLayout(order_bar)
+        return box
 
+    def _build_category_tiles(self) -> None:
+        cols = 3
+        for i, cat in enumerate(components_catalog.CATEGORIES):
+            tile = ClickFrame()
+            tile.setObjectName("categoryTile")
+            tile.setCursor(Qt.CursorShape.PointingHandCursor)
+            row = QHBoxLayout(tile)
+            row.setContentsMargins(8, 6, 8, 6)
+            row.setSpacing(6)
+            icon = QLabel(cat["icon"])
+            icon.setObjectName("categoryIcon")
+            name = QLabel(cat["label"])
+            name.setObjectName("categoryName")
+            row.addWidget(icon)
+            row.addWidget(name, 1)
+            tile.clicked.connect(lambda _=False, k=cat["key"]: self._pick_category(k))
+            self._cat_tiles[cat["key"]] = tile
+            self.category_grid.addWidget(tile, i // cols, i % cols)
+
+    # -- filter cascade ----------------------------------------------------- #
+
+    def _pick_category(self, key: str) -> None:
+        self._category_key = key
+        for k, tile in self._cat_tiles.items():
+            tile.setProperty("selected", k == key)
+            tile.style().unpolish(tile)
+            tile.style().polish(tile)
+        self._build_spec_fields(key)
+        self.find_button.setEnabled(True)
+        self._rebuild_chips()
+
+    def _build_spec_fields(self, key: str) -> None:
+        while self.spec_form.rowCount():
+            self.spec_form.removeRow(0)
+        self._spec_combos.clear()
+        self._package_combo = None
+        cat = components_catalog.category(key)
+        if not cat:
+            return
+        self.spec_hint.hide()
+        if cat.get("packages"):
+            combo = NoScrollComboBox()
+            combo.addItem(components_catalog.ANY, components_catalog.ANY)
+            for pkg in cat["packages"]:
+                combo.addItem(pkg, pkg)
+            combo.currentIndexChanged.connect(self._rebuild_chips)
+            self._package_combo = combo
+            self.spec_form.addRow("Package", combo)
+        for field in cat["specs"]:
+            combo = NoScrollComboBox()
+            combo.addItem(components_catalog.ANY, components_catalog.ANY)
+            for opt in field["options"]:
+                combo.addItem(opt, opt)
+            combo.currentIndexChanged.connect(self._rebuild_chips)
+            self._spec_combos[field["key"]] = combo
+            self.spec_form.addRow(field["label"], combo)
+
+    def _current_specs(self) -> dict[str, str]:
+        return {k: (c.currentData() or "") for k, c in self._spec_combos.items()}
+
+    def _current_package(self) -> str:
+        return (self._package_combo.currentData() or "") if self._package_combo else ""
+
+    def _rebuild_chips(self) -> None:
+        self._clear_layout(self.chips_row)
+        if not self._category_key:
+            self.chips_row.addStretch(1)
+            return
+        chips = components_catalog.selected_chips(
+            self._category_key, self._current_package(), self._current_specs()
+        )
+        cat = components_catalog.category(self._category_key)
+        lead = QLabel(f"{cat['icon']} {cat['label']}")
+        lead.setObjectName("groceryCategory")
+        self.chips_row.addWidget(lead)
+        for kind, label, value in chips:
+            self.chips_row.addWidget(self._chip(kind, label, value))
+        self.chips_row.addStretch(1)
+
+    def _chip(self, kind: str, label: str, value: str) -> QWidget:
+        chip = QFrame()
+        chip.setObjectName("filterChip")
+        lay = QHBoxLayout(chip)
+        lay.setContentsMargins(10, 2, 4, 2)
+        lay.setSpacing(4)
+        text = QLabel(f"{label}: {value}")
+        text.setObjectName("filterChipText")
+        x = QPushButton("✕")
+        x.setObjectName("chipRemove")
+        x.setFixedSize(20, 20)
+        x.setCursor(Qt.CursorShape.PointingHandCursor)
+        x.clicked.connect(lambda _=False, k=kind: self._clear_filter(k))
+        lay.addWidget(text)
+        lay.addWidget(x)
+        return chip
+
+    def _clear_filter(self, kind: str) -> None:
+        if kind == "package" and self._package_combo is not None:
+            self._package_combo.setCurrentIndex(0)
+        elif kind in self._spec_combos:
+            self._spec_combos[kind].setCurrentIndex(0)
+        self._rebuild_chips()
+
+    # -- vendor search ------------------------------------------------------ #
+
+    def _search(self) -> None:
+        if self._searching or not self._category_key:
+            return
+        query = components_catalog.build_query(
+            self._category_key, self._current_package(), self._current_specs()
+        )
+        if not query:
+            return
+        vendor = self.vendor_search.currentData()
+        if not component_vendors.is_configured(self.settings, vendor):
+            label = component_vendors.vendor_label(vendor)
+            self.search_status.setText(
+                f"{label} isn't connected. Add its API credentials in settings to search the catalog."
+            )
+            return
+        self._searching = True
+        self.find_button.setEnabled(False)
+        self.search_status.setText(
+            f"Searching {component_vendors.vendor_label(vendor)} for “{query}”…"
+        )
+        self._clear_results()
+        spawn_worker(
+            self._workers,
+            lambda: component_vendors.search(query, vendor, self.settings, limit=12),
+            lambda ok, payload: self._search_done(ok, payload, query),
+        )
+
+    def _search_done(self, ok: bool, payload, query: str) -> None:
+        self._searching = False
+        self.find_button.setEnabled(bool(self._category_key))
+        self._clear_results()
+        if not ok:
+            self.search_status.setText(f"Search failed: {payload}")
+            return
+        self._results = list(payload or [])
+        if not self._results:
+            self.search_status.setText(f"No matches for “{query}”. Loosen a filter and try again.")
+            return
+        self.search_status.setText(
+            f"{len(self._results)} result(s) for “{query}” — click a card to inspect it."
+        )
+        for i, r in enumerate(self._results):
+            card = self._result_card(r, i)
+            self._result_cards.append(card)
+            self.results_container.insertWidget(self.results_container.count() - 1, card)
+
+    def _clear_results(self) -> None:
+        for card in self._result_cards:
+            card.setParent(None)
+            card.deleteLater()
+        self._result_cards = []
+        self._results = []
+        self._selected_index = None
+        self._close_detail()
+
+    def _result_card(self, r: dict, index: int) -> ClickFrame:
+        card = ClickFrame()
+        card.setObjectName("resultCard")
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(4)
+
+        top = QHBoxLayout()
+        pn = QLabel(r.get("part_number", "") or "(no part #)")
+        pn.setObjectName("resultPart")
+        pn.setWordWrap(True)
+        badge = QLabel(component_vendors.vendor_label(r.get("vendor", "")))
+        badge.setObjectName("vendorBadge")
+        top.addWidget(pn, 1)
+        top.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addLayout(top)
+
+        mfr = (r.get("manufacturer", "") or "").strip()
+        desc = (r.get("description", "") or "").strip()
+        sub = QLabel((mfr + " · " if mfr else "") + desc)
+        sub.setObjectName("resultDesc")
+        sub.setWordWrap(True)
+        lay.addWidget(sub)
+
+        meta = QHBoxLayout()
+        price = QLabel(f"${r['price']}" if r.get("price") else "price n/a")
+        price.setObjectName("resultPrice")
+        stock_text, stock_color = self._stock_badge(r.get("stock", ""))
+        stock = QLabel(stock_text)
+        stock.setStyleSheet(f"color: {stock_color}; font-weight: 800;")
+        meta.addWidget(price)
+        meta.addStretch(1)
+        meta.addWidget(stock)
+        lay.addLayout(meta)
+
+        card.clicked.connect(lambda _=False, i=index: self._select_result(i))
+        return card
+
+    @staticmethod
+    def _stock_badge(stock_raw) -> tuple[str, str]:
+        """(label, hex colour) — green plenty, amber low, red none/unknown."""
+        text = str(stock_raw or "").strip()
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if digits:
+            n = int(digits)
+            if n <= 0:
+                return ("Out of stock", "#ff6b6b")
+            if n < 50:
+                return (f"{n:,} in stock", "#ffc857")
+            return (f"{n:,} in stock", "#5fe39a")
+        if text:
+            return (text, "#5fe39a")
+        return ("Stock unknown", "#ff6b6b")
+
+    # -- detail panel ------------------------------------------------------- #
+
+    def _select_result(self, index: int) -> None:
+        if not (0 <= index < len(self._results)):
+            return
+        self._selected_index = index
+        for i, card in enumerate(self._result_cards):
+            card.setProperty("selected", i == index)
+            card.style().unpolish(card)
+            card.style().polish(card)
+        self._fill_detail(self._results[index])
+        self._open_detail()
+
+    def _fill_detail(self, r: dict) -> None:
+        self.detail_name.setText(r.get("part_number", "") or "(no part number)")
+        self.detail_mfr.setText(r.get("manufacturer", "") or "")
+        desc = (r.get("description", "") or "").strip()
+        self.detail_desc.setText(desc or "No description provided by the vendor.")
+        self.detail_price.setText(f"${r['price']}" if r.get("price") else "Price n/a")
+        stock_text, stock_color = self._stock_badge(r.get("stock", ""))
+        self.detail_stock.setText("● " + stock_text)
+        self.detail_stock.setStyleSheet(f"color: {stock_color}; font-weight: 800;")
+
+        while self.detail_specs.rowCount():
+            self.detail_specs.removeRow(0)
+        self._add_spec_row("Vendor", component_vendors.vendor_label(r.get("vendor", "")))
+        if r.get("part_number"):
+            self._add_spec_row("Part #", r["part_number"])
+        # The structured filters that produced this result — the spec context the vendor data lacks.
+        if self._category_key:
+            for _kind, label, value in components_catalog.selected_chips(
+                self._category_key, self._current_package(), self._current_specs()
+            ):
+                self._add_spec_row(label, value)
+
+        self.datasheet_button.setEnabled(bool(r.get("url")))
+
+    def _add_spec_row(self, label: str, value: str) -> None:
+        val = QLabel(value)
+        val.setObjectName("detailSpecValue")
+        val.setWordWrap(True)
+        key = QLabel(label)
+        key.setObjectName("detailSpecKey")
+        self.detail_specs.addRow(key, val)
+
+    def _open_detail(self) -> None:
+        self.detail_panel.show()
+        self._detail_anim.stop()
+        self._detail_anim.setStartValue(self.detail_panel.maximumWidth())
+        self._detail_anim.setEndValue(self.DETAIL_WIDTH)
+        self._detail_anim.start()
+
+    def _close_detail(self) -> None:
+        self._detail_anim.stop()
+        self._detail_anim.setStartValue(self.detail_panel.maximumWidth())
+        self._detail_anim.setEndValue(0)
+        self._detail_anim.start()
+        if self._selected_index is not None:
+            self._selected_index = None
+            for card in self._result_cards:
+                card.setProperty("selected", False)
+                card.style().unpolish(card)
+                card.style().polish(card)
+
+    def _open_datasheet(self) -> None:
+        if self._selected_index is None:
+            return
+        url = (self._results[self._selected_index].get("url") or "").strip()
+        if url:
+            from PyQt6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _selected_part(self) -> tuple[str, str] | None:
+        if self._selected_index is None:
+            return None
+        r = self._results[self._selected_index]
+        part = (r.get("part_number") or r.get("description") or "part").strip()
+        # Fold the unit price into the note so the parts-list total can be estimated (§_estimated_cost).
+        price = f"${r['price']}" if r.get("price") else ""
+        note_bits = [b for b in [r.get("manufacturer", ""), (r.get("description", "") or "")[:48], price] if b]
+        return part, " — ".join(note_bits)
+
+    def _add_selected(self) -> None:
+        sel = self._selected_part()
+        if not sel:
+            return
+        components_store.add_item(self.settings, sel[0], 1, sel[1])
+        self.order_status.setText(f"Added {sel[0]} to your parts list.")
         self._rebuild()
 
-    # -- rendering ---------------------------------------------------------- #
+    def _order_selected_now(self) -> None:
+        sel = self._selected_part()
+        if not sel:
+            return
+        components_store.add_item(self.settings, sel[0], 1, sel[1])
+        self._rebuild()
+        vendor = self._results[self._selected_index].get("vendor") or self.vendor_order.currentData()
+        self._order(vendor)
+
+    # -- parts list rendering ----------------------------------------------- #
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().showEvent(event)
@@ -3234,10 +3679,12 @@ class ComponentsTab(QWidget):
         self._clear_layout(self.list_container)
         items = components_store.list_items(self.settings)
         total = sum(r["qty"] for r in items)
+        est = self._estimated_cost(items)
         if items:
-            self.summary.setText(
-                f"{len(items)} part{'s' if len(items) != 1 else ''} on the list ({total} total)"
-            )
+            summary = f"{len(items)} part{'s' if len(items) != 1 else ''} on the list ({total} total)"
+            if est:
+                summary += f" · est. ${est:,.2f}"
+            self.summary.setText(summary)
             self.empty_label.hide()
         else:
             self.summary.setText("Nothing on the list yet.")
@@ -3245,7 +3692,22 @@ class ComponentsTab(QWidget):
         self.order_button.setEnabled(bool(items) and not self._ordering)
         for row in items:
             self.list_container.addWidget(self._item_row(row))
-        self._rebuild_history()
+
+    def _estimated_cost(self, items: list[dict]) -> float:
+        """Best-effort total from prices captured into notes — 0.0 if none are known.
+
+        The vendor result's price is folded into the note when a part is added, so a known unit
+        price like '$3.20' in the note lets us sum the list. Silent when prices are unknown."""
+        total = 0.0
+        for row in items:
+            note = row.get("notes", "") or ""
+            match = re.search(r"\$\s*([0-9]+(?:\.[0-9]+)?)", note)
+            if match:
+                try:
+                    total += float(match.group(1)) * int(row.get("qty", 1) or 1)
+                except ValueError:
+                    pass
+        return total
 
     def _item_row(self, row: dict) -> QWidget:
         line = QFrame()
@@ -3272,105 +3734,7 @@ class ComponentsTab(QWidget):
         lay.addWidget(remove)
         return line
 
-    def _rebuild_history(self) -> None:
-        self._clear_layout(self.history_layout)
-        history = components_store.order_history(self.settings)
-        if not history:
-            empty = QLabel("No orders yet.")
-            empty.setObjectName("groceryEmpty")
-            self.history_layout.addWidget(empty)
-            return
-        for entry in history[:8]:
-            label = QLabel(
-                f"{entry.get('placed', '')} · {component_vendors.vendor_label(entry.get('vendor', ''))} · "
-                f"{entry.get('count', 0)} part(s): " + ", ".join(entry.get("items", [])[:6])
-            )
-            label.setObjectName("groceryItem")
-            label.setWordWrap(True)
-            label.setContentsMargins(12, 6, 8, 6)
-            self.history_layout.addWidget(label)
-
-    # -- catalog search ----------------------------------------------------- #
-
-    def _search(self) -> None:
-        if self._searching:
-            return
-        query = self.search_input.text().strip()
-        if not query:
-            return
-        vendor = self.vendor_search.currentData()
-        if not component_vendors.is_configured(self.settings, vendor):
-            label = component_vendors.vendor_label(vendor)
-            self.search_status.setText(
-                f"{label} isn't connected. Add its API credentials in settings to search the catalog."
-            )
-            return
-        self._searching = True
-        self.search_button.setEnabled(False)
-        self.search_status.setText(f"Searching {component_vendors.vendor_label(vendor)}…")
-        self._clear_layout(self.results_container)
-        spawn_worker(
-            self._workers,
-            lambda: component_vendors.search(query, vendor, self.settings, limit=5),
-            self._search_done,
-        )
-
-    def _search_done(self, ok: bool, payload) -> None:
-        self._searching = False
-        self.search_button.setEnabled(True)
-        self._clear_layout(self.results_container)
-        if not ok:
-            self.search_status.setText(f"Search failed: {payload}")
-            return
-        results = payload or []
-        if not results:
-            self.search_status.setText("No matches.")
-            return
-        self.search_status.setText(f"{len(results)} result(s) — tap Add to put one on your list.")
-        for r in results:
-            self.results_container.addWidget(self._result_row(r))
-
-    def _result_row(self, r: dict) -> QWidget:
-        line = QFrame()
-        line.setObjectName("groceryItem")
-        lay = QHBoxLayout(line)
-        lay.setContentsMargins(12, 6, 8, 6)
-        lay.setSpacing(10)
-        bits = [r.get("part_number", "") or "?"]
-        if r.get("price"):
-            bits.append(f"${r['price']}")
-        if r.get("stock"):
-            bits.append(f"{r['stock']} in stock")
-        head = " · ".join(b for b in bits if b)
-        desc = r.get("description", "")
-        name = QLabel(head + (f"\n{desc}" if desc else ""))
-        name.setObjectName("groceryItemName")
-        name.setWordWrap(True)
-        add = QPushButton("Add")
-        add.setCursor(Qt.CursorShape.PointingHandCursor)
-        part = r.get("part_number") or desc or "part"
-        note = (r.get("description", "") or "")[:60]
-        add.clicked.connect(lambda _=False, p=part, n=note: self._add_result(p, n))
-        lay.addWidget(name, 1)
-        lay.addWidget(add)
-        return line
-
-    def _add_result(self, part: str, note: str) -> None:
-        components_store.add_item(self.settings, part, 1, note)
-        self._rebuild()
-
     # -- actions ------------------------------------------------------------ #
-
-    def _add_item(self) -> None:
-        text = self.item_input.text().strip()
-        if not text:
-            return
-        components_store.add_item(self.settings, text, self.qty_input.value(), self.notes_input.text().strip())
-        self.item_input.clear()
-        self.notes_input.clear()
-        self.qty_input.setValue(1)
-        self.item_input.setFocus()
-        self._rebuild()
 
     def _remove_item(self, item: str) -> None:
         components_store.remove_item(self.settings, item)
@@ -3385,14 +3749,16 @@ class ComponentsTab(QWidget):
             self.order_status.setText("")
             self._rebuild()
 
-    def _order(self) -> None:
+    def _order(self, vendor: str | None = None) -> None:
         if self._ordering:
             return
         items = components_store.list_items(self.settings)
         if not items:
             QMessageBox.information(self, "Order parts", "The components list is empty.")
             return
-        vendor = self.vendor_order.currentData()
+        vendor = component_vendors.normalize_vendor(vendor) if vendor else self.vendor_order.currentData()
+        if vendor not in component_vendors.VENDORS:
+            vendor = self.vendor_order.currentData()
         label = component_vendors.vendor_label(vendor)
         if not component_vendors.is_configured(self.settings, vendor):
             QMessageBox.information(
@@ -7454,6 +7820,109 @@ def apply_hud_style(app: QApplication) -> None:
             color: #6b7378;
             border-color: #2a2f33;
         }
+
+        /* Components screen — structured parts browser (ComponentsTab). */
+        QLabel#componentStep {
+            color: #8eeaff;
+            font-size: 11pt;
+            font-weight: 800;
+            letter-spacing: 1px;
+            padding-top: 4px;
+        }
+        QFrame#categoryTile {
+            border: 1px solid #1b3a44;
+            border-radius: 10px;
+            background-color: #0b1d22;
+        }
+        QFrame#categoryTile:hover {
+            background-color: #11333c;
+            border-color: #1dd8ff;
+        }
+        QFrame#categoryTile[selected="true"] {
+            background-color: #102f38;
+            border: 2px solid #ffbd3e;
+        }
+        QLabel#categoryIcon { font-size: 16pt; border: none; }
+        QLabel#categoryName {
+            color: #eaffff;
+            font-size: 11pt;
+            font-weight: 700;
+            border: none;
+        }
+        QFrame#filterChip {
+            border: 1px solid #2c6574;
+            border-radius: 12px;
+            background-color: #0b1d22;
+        }
+        QLabel#filterChipText {
+            color: #8eeaff;
+            font-size: 11pt;
+            font-weight: 700;
+            border: none;
+        }
+        QPushButton#chipRemove {
+            min-height: 0;
+            padding: 0;
+            font-size: 10pt;
+            font-weight: 800;
+            color: #8eeaff;
+            background-color: transparent;
+            border: none;
+        }
+        QPushButton#chipRemove:hover { color: #ff6b6b; }
+        QFrame#resultCard {
+            border: 1px solid #1b3a44;
+            border-radius: 10px;
+            background-color: rgba(13, 32, 40, 0.55);
+        }
+        QFrame#resultCard:hover {
+            background-color: #11333c;
+            border-color: #1dd8ff;
+        }
+        QFrame#resultCard[selected="true"] {
+            border: 2px solid #ffbd3e;
+            background-color: #102f38;
+        }
+        QLabel#resultPart {
+            color: #eaffff;
+            font-size: 13pt;
+            font-weight: 800;
+            border: none;
+        }
+        QLabel#resultDesc { color: #aee3f0; font-size: 11pt; border: none; }
+        QLabel#resultPrice {
+            color: #ffc857;
+            font-size: 12pt;
+            font-weight: 800;
+            border: none;
+        }
+        QLabel#vendorBadge {
+            color: #061013;
+            background-color: #1dd8ff;
+            border-radius: 7px;
+            padding: 2px 8px;
+            font-size: 10pt;
+            font-weight: 800;
+        }
+        QFrame#detailPanel {
+            border: 1px solid #1dd8ff;
+            border-radius: 12px;
+            background-color: #08171b;
+        }
+        QLabel#detailName {
+            color: #ffc857;
+            font-size: 18pt;
+            font-weight: 800;
+        }
+        QLabel#detailDesc { color: #dff9ff; font-size: 12pt; }
+        QLabel#detailPrice {
+            color: #ffc857;
+            font-size: 20pt;
+            font-weight: 800;
+        }
+        QLabel#detailStock { font-size: 12pt; font-weight: 800; }
+        QLabel#detailSpecKey { color: #7faebb; font-size: 11pt; font-weight: 700; }
+        QLabel#detailSpecValue { color: #eaffff; font-size: 11pt; font-weight: 700; }
 
         QTableWidget {
             background-color: #071417;
