@@ -444,8 +444,8 @@ XPERT_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "screen": {
                     "type": "string",
-                    "enum": ["investment", "home", "grocery", "components", "enterprise", "learning", "cameras", "settings", "tasks"],
-                    "description": "Which panel: investment (money/portfolio/trading), home, grocery (the shopping list + order from Fry's), components (the Fabrication screen — electronics parts list + DigiKey/Mouser), enterprise (work), learning, cameras (live house cameras), settings (voice speed + devices), or tasks (the Tasks launcher — runnable actions like Morning Briefing).",
+                    "enum": ["investment", "risk", "home", "grocery", "components", "enterprise", "learning", "cameras", "settings", "tasks"],
+                    "description": "Which panel: investment (money/portfolio/trading), risk (the real-time risk monitor — margin usage, position concentration, active risk alerts), home, grocery (the shopping list + order from Fry's), components (the Fabrication screen — electronics parts list + DigiKey/Mouser), enterprise (work), learning, cameras (live house cameras), settings (voice speed + devices), or tasks (the Tasks launcher — runnable actions like Morning Briefing).",
                 }
             },
             "required": ["screen"],
@@ -984,12 +984,13 @@ class ActionRouter:
         raw = str(tool_input.get("screen", "")).strip().lower()
         alias = {"investments": "investment", "portfolio": "investment", "money": "investment",
                  "stocks": "investment", "work": "enterprise", "camera": "cameras",
+                 "risk monitor": "risk", "risks": "risk", "risk dashboard": "risk",
                  "groceries": "grocery", "shopping": "grocery", "shopping list": "grocery",
                  "grocery list": "grocery", "component": "components", "parts": "components",
                  "parts list": "components", "components list": "components", "hardware": "components",
                  "fabrication": "components", "fab": "components", "task": "tasks"}
         key = alias.get(raw, raw)
-        labels = {"investment": "the investments", "home": "home", "grocery": "the grocery list",
+        labels = {"investment": "the investments", "risk": "the risk monitor", "home": "home", "grocery": "the grocery list",
                   "components": "the Fabrication screen", "enterprise": "work", "learning": "learning",
                   "cameras": "the cameras", "settings": "settings", "tasks": "the Tasks launcher"}
         if key not in labels:
