@@ -198,6 +198,61 @@ def regime_risk_off(closes: Any, *, window: int = 40) -> bool:
     return series[-1] < moving_avg
 
 
+def quote_line(symbol: str, snapshot: Any) -> str:
+    """One-line live quote from an Alpaca snapshot dict (`get_snapshot`): price, change vs the prior
+    close, and the day's volume. Pure — reads `latestTrade`/`dailyBar`/`prevDailyBar`. Falls back
+    across those fields so it still reads something useful pre-market or on thin data; returns a bare
+    '$price' (or '' if even that is missing) when there's no prior close to compute a change from."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    daily = snapshot.get("dailyBar") or {}
+    prev = snapshot.get("prevDailyBar") or {}
+    trade = snapshot.get("latestTrade") or {}
+
+    def _num(*candidates: Any) -> float | None:
+        for value in candidates:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                return number
+        return None
+
+    price = _num(trade.get("p"), daily.get("c"), prev.get("c"))
+    if price is None:
+        return ""
+    parts = [f"${price:,.2f}"]
+    prior = _num(prev.get("c"))
+    if prior:
+        change = price - prior
+        pct = (change / prior) * 100.0
+        parts.append(f"{change:+,.2f} ({pct:+.2f}%) today")
+    volume = daily.get("v")
+    try:
+        vol = int(float(volume))
+    except (TypeError, ValueError):
+        vol = 0
+    if vol > 0:
+        parts.append(f"volume {vol:,}")
+    return f"{symbol.upper()}: " + ", ".join(parts)
+
+
+def recent_headlines(articles: Any, *, limit: int = 5) -> list[str]:
+    """Flatten Alpaca news articles into ['date: headline (source)', …], newest first. Pure."""
+    out: list[str] = []
+    for article in articles or []:
+        headline = str(article.get("headline", "")).strip()
+        if not headline:
+            continue
+        when = str(article.get("created_at", ""))[:10]
+        source = str(article.get("source", "")).strip()
+        tail = f" ({source})" if source else ""
+        out.append(f"{when}: {headline}{tail}".strip(": "))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def build_market_context(
     bars_by_symbol: dict,
     articles: list,

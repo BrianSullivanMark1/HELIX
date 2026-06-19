@@ -16,6 +16,7 @@ from helix.investment.autopilot import (
     normalize_roster,
     portfolio_snapshot,
 )
+from helix.investment.market_data import quote_line, recent_headlines
 from helix.selfdev import coder, engine, mailer, triggers
 from helix.vision import analyze as vision_analyze, camera as vision_camera
 from helix.home import groceries, kroger
@@ -70,6 +71,27 @@ XPERT_TOOLS: list[dict[str, Any]] = [
             "pillar is doing."
         ),
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "look_up_ticker",
+        "description": (
+            "Look up LIVE market data for any stock ticker on demand: the current price, the day's "
+            "change (dollars and percent), the day's volume, and a few recent news headlines — "
+            "straight from the Alpaca market-data API, not memory. Use whenever the user asks what a "
+            "stock is trading at, how a name is doing today, or for news on a ticker (e.g. 'what is "
+            "ASTS trading at right now', 'any news on CRDO', 'how's NVDA today'). Pass the ticker "
+            "symbol; this is real-time data, so never guess a price you can get from here."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "The stock ticker symbol to look up, e.g. ASTS, CRDO, NVDA.",
+                }
+            },
+            "required": ["symbol"],
+        },
     },
     {
         "name": "set_auto_investing",
@@ -658,6 +680,33 @@ class ActionRouter:
             f"${usage.get('total_cost', 0):.4f} all-time (estimated). Enterprise is still a roadmap "
             "placeholder with no data yet."
         )
+
+    def _tool_look_up_ticker(self, tool_input: dict) -> ToolOutcome:
+        symbol = str(tool_input.get("symbol", "")).strip().upper()
+        if not symbol:
+            return ToolOutcome("Which ticker should I look up, sir?")
+        try:
+            client = AlpacaClient.from_settings(self.ctx.settings)
+        except AlpacaError:
+            return ToolOutcome(
+                "I can't reach live market data — the user needs to save their Alpaca keys on the "
+                "Investment tab first."
+            )
+        try:
+            quote = quote_line(symbol, client.get_snapshot(symbol))
+        except AlpacaError as error:
+            return ToolOutcome(f"I couldn't get a live quote for {symbol}, sir: {error}")
+        if not quote:
+            return ToolOutcome(
+                f"I didn't get any market data back for {symbol} — it may not be a valid US ticker, sir."
+            )
+        try:
+            headlines = recent_headlines(client.get_news([symbol], limit=5), limit=4)
+        except AlpacaError:
+            headlines = []
+        if headlines:
+            return ToolOutcome(quote + "\nRecent headlines:\n- " + "\n- ".join(headlines))
+        return ToolOutcome(quote + "\n(No recent headlines on file.)")
 
     # -- auto-investing control (gated for live) ---------------------------- #
 
