@@ -1071,18 +1071,20 @@ class HelixMainWindow(QMainWindow):
             detail = getattr(payload, "error", payload)
             self.statusBar().showMessage(f"Couldn't draft the removal: {detail}", 9000)
 
-    def _auto_trading(self) -> bool:
-        """True while the Investment auto-loop is running — used to defer a restart so we never
-        interrupt a live trade cycle."""
+    def _trade_cycle_active(self) -> bool:
+        """True only while a trade cycle is actively executing — used to defer a restart so we never
+        interrupt a live cycle. Checks the per-cycle flag (`_cycle_busy`), NOT `_running`: `_running`
+        stays True for the whole always-on session (including the long idle waits between cycles), so
+        gating the restart on it would defer it forever. Paper trading auto-resumes after the restart."""
         try:
-            return bool(getattr(self.investment_tab.invest_tab, "_running", False))
+            return bool(getattr(self.investment_tab.invest_tab, "_cycle_busy", False))
         except Exception:
             return False
 
     def _selfdev_tick(self) -> None:
         """Background self-improvement beat. Applies a pending restart when it's safe (not mid-trade)."""
         try:
-            if selfdev_restart.restart_pending(self.settings) and not self._auto_trading():
+            if selfdev_restart.restart_pending(self.settings) and not self._trade_cycle_active():
                 self.statusBar().showMessage("Restarting to apply a self-improvement…", 5000)
                 selfdev_restart.perform_restart(self.settings)  # supervisor relaunches us, or we self-spawn
                 QApplication.exit(selfdev_restart.RESTART_EXIT_CODE)
