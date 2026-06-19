@@ -167,6 +167,7 @@ from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
 from helix.selfdev import engine as selfdev_engine, mailer as selfdev_mailer, restart as selfdev_restart, triggers as selfdev_triggers
 from helix.vision import analyze as vision_analyze, camera as vision_camera, watch as vision_watch
+from helix.interfaces.cameras import CameraCarousel
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
 from helix.investment.planner import build_briefing, render_briefing
 from helix.home.tasks import HOME_TASKS_SETTING, due_tasks, task_status
@@ -802,6 +803,7 @@ class HelixMainWindow(QMainWindow):
         self.enterprise_tab = EnterpriseTab(memory)
         self.learning_tab = LearningTab(memory)
         self.investment_tab = InvestmentTab(memory, on_saved=self.refresh_all)
+        self.cameras_tab = CameraCarousel()  # the house cameras, on a spinnable carousel wheel
 
         # Settings panel — voice speed + audio devices, moved off the orb home and summonable like any
         # other panel. Reparents Xpert's secondary controls here (keeps their wiring).
@@ -823,6 +825,7 @@ class HelixMainWindow(QMainWindow):
                 "home": ("Home", self.home_tab),
                 "enterprise": ("Work", self.enterprise_tab),
                 "learning": ("Learning", self.learning_tab),
+                "cameras": ("Cameras", self.cameras_tab),
                 "settings": ("Settings", settings_panel),
             },
             on_home=self._show_home,
@@ -833,6 +836,7 @@ class HelixMainWindow(QMainWindow):
                 ("home", "Home", "chores · supplies · reminders"),
                 ("enterprise", "Work", "git + Slack · self-improvements"),
                 ("learning", "Learning", "research · AI"),
+                ("cameras", "Cameras", "live house cameras"),
                 ("settings", "Settings", "voice speed · devices"),
             ],
             on_pick=self.open_view,
