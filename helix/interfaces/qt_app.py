@@ -154,6 +154,13 @@ from helix.investment.autopilot import (
     tradable_assets,
     tradable_symbols,
 )
+from helix.investment.risk import (
+    DEFAULT_LOSS_THRESHOLD_PCT,
+    RISK_LOSS_THRESHOLD_SETTING,
+    alert_signature,
+    alert_speech,
+    evaluate_risk,
+)
 from helix.investment.market_data import build_market_context, factor_signals, regime_risk_off, volatility_signals
 from helix.investment.fundamentals import fetch_fundamentals, fundamental_score, fundamentals_block
 from helix.investment.sectors import fetch_sectors, sector_of, sectors_for
@@ -986,6 +993,206 @@ class TasksView(QWidget):
         self.output.setPlainText(str(payload) if ok else f"{task.label} failed: {payload}")
 
 
+class RiskMonitorTab(QWidget):
+    """Real-time risk monitor (§13 guardrails, watched live). Polls the Alpaca account + positions in
+    the background and warns when (1) cash goes negative — margin is being used, (2) a single position
+    exceeds 20% of equity, or (3) an open loss passes the configurable threshold (default 15%). Shows a
+    dashboard — margin usage, top concentration positions, active alerts — and speaks NEW alerts aloud
+    through HELIX's voice (only when the alert set changes, never on every poll). Pure scoring lives in
+    `helix.investment.risk`; this is just the I/O edge (poll + draw + speak)."""
+
+    POLL_MS = 60000  # background cadence; mirrors the Invest tab's quiet portfolio refresh
+
+    def __init__(self, memory: SQLiteMemory, speak=None, parent=None) -> None:
+        super().__init__(parent)
+        self.memory = memory
+        self.settings = AppSettings()
+        self._speak = speak  # callable(str) | None — HELIX's voice, wired by the main window
+        self._workers: set = set()
+        self._busy = False
+        self._last_signature = None  # speak only when the tripped-alert set changes
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        outer.addWidget(scroll)
+        content = QWidget()
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(24, 20, 24, 24)
+        layout.setSpacing(16)
+
+        # The headline banner: green when clear, red/amber when something is tripped.
+        self.banner = QLabel("Checking risk…")
+        self.banner.setWordWrap(True)
+        self.banner.setObjectName("riskBanner")
+        self.banner.setMinimumHeight(54)
+        self._set_banner_clear("Checking risk…")
+        layout.addWidget(self.banner)
+
+        # Dashboard strip: equity / margin usage / cash.
+        strip = QHBoxLayout()
+        strip.setSpacing(14)
+        self.equity_metric = self._metric("Equity", "—")
+        self.margin_metric = self._metric("Margin in use", "—")
+        self.cash_metric = self._metric("Cash", "—")
+        strip.addWidget(self.equity_metric["box"])
+        strip.addWidget(self.margin_metric["box"])
+        strip.addWidget(self.cash_metric["box"])
+        layout.addLayout(strip)
+
+        layout.addWidget(self._section_label("Top concentration"))
+        self.conc_table = QTableWidget(0, 3)
+        self.conc_table.setHorizontalHeaderLabels(["Symbol", "Value", "% of portfolio"])
+        head = self.conc_table.horizontalHeader()
+        head.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        head.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        head.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.conc_table.verticalHeader().setVisible(False)
+        self.conc_table.verticalHeader().setDefaultSectionSize(36)
+        self.conc_table.setAlternatingRowColors(True)
+        self.conc_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.conc_table.setMaximumHeight(280)
+        layout.addWidget(self.conc_table)
+
+        layout.addWidget(self._section_label("Active alerts"))
+        self.alerts_list = QPlainTextEdit()
+        self.alerts_list.setReadOnly(True)
+        self.alerts_list.setPlaceholderText("No active risk alerts — the portfolio is within all limits.")
+        self.alerts_list.setMaximumHeight(150)
+        layout.addWidget(self.alerts_list)
+
+        # Controls: the configurable open-loss threshold + a refresh.
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Alert when a position's open loss exceeds"))
+        self.loss_box = percent_box(
+            float(self.settings.get(RISK_LOSS_THRESHOLD_SETTING, DEFAULT_LOSS_THRESHOLD_PCT))
+        )
+        self.loss_box.editingFinished.connect(self._on_threshold_changed)
+        controls.addWidget(self.loss_box)
+        controls.addStretch(1)
+        refresh = QPushButton("Refresh now")
+        refresh.setObjectName("ghostButton")
+        refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh.clicked.connect(self._poll)
+        controls.addWidget(refresh)
+        layout.addLayout(controls)
+        layout.addStretch(1)
+
+        # Run continuously in the background while the app is open.
+        self.poll_timer = QTimer(self)
+        self.poll_timer.timeout.connect(self._poll)
+        self.poll_timer.start(self.POLL_MS)
+        QTimer.singleShot(1500, self._poll)  # first read shortly after launch
+
+    # -- small UI builders --------------------------------------------------- #
+
+    def _section_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet("color:#1dd8ff; font-weight:700; padding-top:6px;")
+        return label
+
+    def _metric(self, caption: str, value: str) -> dict:
+        box = QFrame()
+        box.setObjectName("riskMetric")
+        col = QVBoxLayout(box)
+        col.setContentsMargins(16, 12, 16, 12)
+        cap = QLabel(caption)
+        cap.setStyleSheet("color:#6fb3c0;")
+        val = QLabel(value)
+        val.setStyleSheet("font-size: 18pt; font-weight: 800; color: #ffc857;")
+        col.addWidget(cap)
+        col.addWidget(val)
+        return {"box": box, "value": val}
+
+    def _set_banner_clear(self, text: str) -> None:
+        self.banner.setText(text)
+        self.banner.setStyleSheet(
+            "QLabel#riskBanner{background:#10301f;border:1px solid #2f7d52;border-radius:8px;"
+            "padding:12px;color:#7ee0a6;font-weight:700;}"
+        )
+
+    def _set_banner_alert(self, text: str, critical: bool) -> None:
+        color = "#ff6b6b" if critical else "#ffc857"
+        bg = "#3a1414" if critical else "#332a10"
+        self.banner.setText(text)
+        self.banner.setStyleSheet(
+            f"QLabel#riskBanner{{background:{bg};border:1px solid {color};border-radius:8px;"
+            f"padding:12px;color:{color};font-weight:700;}}"
+        )
+
+    # -- polling + scoring --------------------------------------------------- #
+
+    def set_speak(self, speak) -> None:
+        self._speak = speak
+
+    def _on_threshold_changed(self) -> None:
+        self.settings.set(RISK_LOSS_THRESHOLD_SETTING, float(self.loss_box.value()))
+        self._poll()
+
+    def _poll(self) -> None:
+        if self._busy:
+            return
+        if not (self.settings.get(ALPACA_API_KEY_SETTING) and self.settings.get(ALPACA_SECRET_KEY_SETTING)):
+            self._set_banner_clear("Save your Alpaca keys to monitor portfolio risk.")
+            return
+        self._busy = True
+        spawn_worker(self._workers, self._fetch, self._done)
+
+    def _fetch(self):
+        client = AlpacaClient.from_settings(self.settings)
+        snapshot = portfolio_snapshot(client.get_account(), client.get_positions())
+        threshold = float(self.settings.get(RISK_LOSS_THRESHOLD_SETTING, DEFAULT_LOSS_THRESHOLD_PCT))
+        return evaluate_risk(snapshot, loss_threshold_pct=threshold)
+
+    def _done(self, ok: bool, payload) -> None:
+        self._busy = False
+        if not ok:
+            self._set_banner_clear("Risk data unavailable (check your Alpaca keys / connection).")
+            return
+        report = payload
+        self.equity_metric["value"].setText(f"${report.equity:,.0f}")
+        self.cash_metric["value"].setText(f"${report.cash:,.0f}")
+        if report.margin_used > 0:
+            self.margin_metric["value"].setText(f"${report.margin_used:,.0f}  ({report.margin_pct:.0f}%)")
+        else:
+            self.margin_metric["value"].setText("$0  (none)")
+
+        rows = report.concentration[:8]
+        self.conc_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            over = row.pct > 20.0
+            self.conc_table.setItem(r, 0, QTableWidgetItem(row.symbol))
+            self.conc_table.setItem(r, 1, QTableWidgetItem(f"${row.market_value:,.0f}"))
+            pct_item = QTableWidgetItem(f"{row.pct:.1f}%")
+            if over:
+                pct_item.setForeground(QColor("#ff6b6b"))
+            self.conc_table.setItem(r, 2, pct_item)
+
+        if report.ok:
+            self._set_banner_clear("✓ All clear — no risk alerts.")
+            self.alerts_list.setPlainText("")
+        else:
+            n = len(report.alerts)
+            self._set_banner_alert(
+                f"⚠ {n} risk alert{'s' if n != 1 else ''} — see below.", report.critical
+            )
+            self.alerts_list.setPlainText("\n".join(f"• {a.message}" for a in report.alerts))
+
+        # Speak only when the set of tripped alerts changes (not every poll).
+        signature = alert_signature(report)
+        if signature != self._last_signature:
+            self._last_signature = signature
+            line = alert_speech(report)
+            if line and self._speak is not None:
+                self._speak(line)
+
+    def refresh(self) -> None:
+        self._poll()
+
+
 class HelixMainWindow(QMainWindow):
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
@@ -1002,6 +1209,8 @@ class HelixMainWindow(QMainWindow):
         self.learning_tab = LearningTab(memory)
         self.investment_tab = InvestmentTab(memory, on_saved=self.refresh_all)
         self.cameras_tab = CameraCarousel()  # the house cameras, on a spinnable carousel wheel
+        # Real-time risk monitor — runs continuously in the background; speaks alerts via the Xpert voice.
+        self.risk_tab = RiskMonitorTab(memory, speak=self.xpert_tab._speak_text)
 
         # Settings panel — voice speed + audio devices, moved off the orb home and summonable like any
         # other panel. Reparents Xpert's secondary controls here (keeps their wiring).
@@ -1025,6 +1234,7 @@ class HelixMainWindow(QMainWindow):
         self.panel_host = PanelHost(
             {
                 "investment": ("Investments", self.investment_tab),
+                "risk": ("Risk Monitor", self.risk_tab),
                 "home": ("Home", self.home_tab),
                 "grocery": ("Groceries", self.grocery_tab),
                 "components": ("Fabrication", self.components_tab),
@@ -1101,6 +1311,7 @@ class HelixMainWindow(QMainWindow):
         self.learning_tab.refresh()
         self.investment_tab.refresh()
         self.enterprise_tab.refresh()
+        self.risk_tab.refresh()
         self.statusBar().showMessage("HELIX memory synced", 3000)
 
     def open_view(self, name: str | None = None) -> None:
