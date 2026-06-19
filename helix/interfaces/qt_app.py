@@ -170,6 +170,7 @@ from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
 from helix.selfdev import coder as selfdev_coder, engine as selfdev_engine, mailer as selfdev_mailer, registry as selfdev_registry, restart as selfdev_restart, triggers as selfdev_triggers
+from helix.tasks import registry as tasks_registry
 from helix.vision import analyze as vision_analyze, camera as vision_camera, watch as vision_watch
 from helix.interfaces.cameras import CameraCarousel
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
@@ -627,7 +628,7 @@ class ConsoleView(QWidget):
     Nothing else shows until you ask: tables and panels pop up on request (by voice, or the one launcher
     menu). No tabs, no tiles."""
 
-    def __init__(self, xpert: "XpertTab", memory: SQLiteMemory, open_view, show_launcher, parent=None) -> None:
+    def __init__(self, xpert: "XpertTab", memory: SQLiteMemory, open_view, show_launcher, show_tasks=None, parent=None) -> None:
         super().__init__(parent)
         self._xpert = xpert
         self.memory = memory
@@ -647,6 +648,11 @@ class ConsoleView(QWidget):
         self.presence.setObjectName("consolePresence")
         brand.addWidget(name)
         brand.addWidget(self.presence)
+        tasks_button = QPushButton("⚡  Tasks")
+        tasks_button.setObjectName("ghostButton")
+        tasks_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        tasks_button.setToolTip("Run a task — Morning Briefing, Check All Systems, Review Portfolio…")
+        tasks_button.clicked.connect(show_tasks or show_launcher)
         menu_button = QPushButton("☰  Menu")
         menu_button.setObjectName("ghostButton")
         menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -654,6 +660,8 @@ class ConsoleView(QWidget):
         menu_button.clicked.connect(show_launcher)
         topbar.addLayout(brand)
         topbar.addStretch(1)
+        topbar.addWidget(tasks_button, 0, Qt.AlignmentFlag.AlignTop)
+        topbar.addSpacing(8)
         topbar.addWidget(menu_button, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(topbar)
 
@@ -931,6 +939,53 @@ class Launcher(QWidget):
         return [it for it in self._items if it[0] in hidden]
 
 
+class TasksView(QWidget):
+    """The Tasks launcher — a grid of runnable task "applications" (the action counterpart to the Menu's
+    app shortcuts). Each card runs its task off-thread and shows the result below. Cards come from
+    `helix.tasks.registry` (append to BUILTIN_TASKS or call register()), so this panel grows with no UI
+    edits. Opened by the Tasks button in the Console top bar, mirroring how Menu opens the launcher."""
+
+    def __init__(self, on_home, parent=None) -> None:
+        super().__init__(parent)
+        self._workers: set = set()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(48, 34, 48, 40)
+        outer.setSpacing(18)
+        header = QHBoxLayout()
+        title = QLabel("Run a task")
+        title.setObjectName("launcherTitle")
+        close_button = QPushButton("✕")
+        close_button.setObjectName("ghostButton")
+        close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_button.clicked.connect(on_home)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(close_button)
+        outer.addLayout(header)
+        grid = QGridLayout()
+        grid.setSpacing(18)
+        for n, task in enumerate(tasks_registry.all_tasks()):
+            card = QPushButton(f"{task.label}\n{task.subtitle}")
+            card.setObjectName("launcherCard")
+            card.setCursor(Qt.CursorShape.PointingHandCursor)
+            card.setMinimumHeight(96)
+            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            card.clicked.connect(lambda _=False, t=task: self._run(t))
+            grid.addWidget(card, n // 2, n % 2)
+        outer.addLayout(grid)
+        self.output = QPlainTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setPlaceholderText("Pick a task to run — its result appears here.")
+        outer.addWidget(self.output, 1)
+
+    def _run(self, task) -> None:
+        self.output.setPlainText(f"Running {task.label}…")
+        spawn_worker(self._workers, task.run, lambda ok, payload, t=task: self._done(t, ok, payload))
+
+    def _done(self, task, ok: bool, payload) -> None:
+        self.output.setPlainText(str(payload) if ok else f"{task.label} failed: {payload}")
+
+
 class HelixMainWindow(QMainWindow):
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
@@ -1001,12 +1056,16 @@ class HelixMainWindow(QMainWindow):
             removable_keys=selfdev_registry.feature_keys(),  # self-added items: the ✕ removes their code
             on_remove_code=self._remove_feature,
         )
-        self.console = ConsoleView(self.xpert_tab, memory, self.open_view, self.show_launcher)
+        self.tasks_view = TasksView(on_home=self._show_home)
+        self.console = ConsoleView(
+            self.xpert_tab, memory, self.open_view, self.show_launcher, self.show_tasks
+        )
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.console)     # 0 — the orb home (default)
         self.stack.addWidget(self.panel_host)  # 1 — a summoned panel
         self.stack.addWidget(self.launcher)    # 2 — the launcher menu
+        self.stack.addWidget(self.tasks_view)  # 3 — the Tasks launcher
         self.setCentralWidget(self.stack)
 
         # The Xpert assistant acts on the other pillars + can pop panels up on request.
@@ -1046,13 +1105,18 @@ class HelixMainWindow(QMainWindow):
 
     def open_view(self, name: str | None = None) -> None:
         """Pop a panel up (the investments table, home, work, learning). No name → the launcher menu."""
-        if name and self.panel_host.show_view(name):
+        if name == "tasks":
+            self.show_tasks()
+        elif name and self.panel_host.show_view(name):
             self.stack.setCurrentIndex(1)
         else:
             self.show_launcher()
 
     def show_launcher(self) -> None:
         self.stack.setCurrentIndex(2)
+
+    def show_tasks(self) -> None:
+        self.stack.setCurrentIndex(3)
 
     def _restore_menu_items(self) -> None:
         """A small dialog listing the menu items hidden via the ✕ badge, each with a Restore button."""
