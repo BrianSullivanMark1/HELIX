@@ -22,6 +22,7 @@ from PyQt6.QtGui import (
     QPainterPath,
     QPen,
     QPolygonF,
+    QRadialGradient,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -44,6 +45,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSlider,
     QSpinBox,
+    QStackedWidget,
     QStatusBar,
     QTabWidget,
     QTableWidget,
@@ -426,30 +428,182 @@ def run_qt_app(memory: SQLiteMemory) -> int:
     return exit_code  # unreachable; kept for type sanity
 
 
+_PRESENCE_TEXT = {
+    "idle": "Standing by, sir.",
+    "listening": "Listening…",
+    "transcribing": "Catching that…",
+    "thinking": "Thinking…",
+    "acting": "On it…",
+    "speaking": "Speaking.",
+}
+
+
+class PresenceOrb(QWidget):
+    """HELIX's living presence — an animated orb that breathes when idle and reacts to its state
+    (listening / thinking / acting / speaking). The signature JARVIS element of the Console."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumSize(64, 64)
+        self._state = "idle"
+        self._level = 0.0
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(33)  # ~30 fps
+
+    def set_state(self, state: str) -> None:
+        self._state = state or "idle"
+
+    def set_level(self, level: float) -> None:
+        try:
+            self._level = max(0.0, min(1.0, float(level)))
+        except (TypeError, ValueError):
+            self._level = 0.0
+
+    def _tick(self) -> None:
+        self._phase += 0.09
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        base = min(self.width(), self.height()) * 0.26
+        state = self._state
+        color = QColor(255, 200, 87) if state == "speaking" else QColor(29, 216, 255)
+        wobble = math.sin(self._phase)
+        if state == "listening":
+            amp = 0.12 + 0.55 * self._level
+        elif state in ("thinking", "acting", "transcribing"):
+            amp = 0.16
+        elif state == "speaking":
+            amp = 0.18
+        else:
+            amp = 0.06
+        radius = base * (1.0 + amp * (0.5 + 0.5 * wobble))
+
+        glow = QRadialGradient(QPointF(cx, cy), radius * 2.5)
+        inner = QColor(color); inner.setAlpha(70); glow.setColorAt(0.0, inner)
+        outer = QColor(color); outer.setAlpha(0); glow.setColorAt(1.0, outer)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(glow)
+        painter.drawEllipse(QPointF(cx, cy), radius * 2.5, radius * 2.5)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for index, alpha in enumerate((130, 70)):
+            ring = QColor(color); ring.setAlpha(alpha)
+            pen = QPen(ring); pen.setWidthF(2.0)
+            painter.setPen(pen)
+            rr = radius * (1.0 + 0.30 * index)
+            painter.drawEllipse(QPointF(cx, cy), rr, rr)
+
+        if state in ("thinking", "acting", "transcribing"):
+            pen = QPen(QColor(color)); pen.setWidthF(3.0); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            span = QRectF(cx - radius * 1.55, cy - radius * 1.55, radius * 3.1, radius * 3.1)
+            painter.drawArc(span, int((self._phase * 55) % 360) * 16, 90 * 16)
+
+        core = QRadialGradient(QPointF(cx, cy), radius)
+        c0 = QColor(color); c0.setAlpha(235); core.setColorAt(0.0, c0)
+        c1 = QColor(color); c1.setAlpha(110); core.setColorAt(1.0, c1)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(core)
+        painter.drawEllipse(QPointF(cx, cy), radius, radius)
+        painter.end()
+
+
+class ConsoleView(QWidget):
+    """The single-screen HELIX Console: the Presence orb + the conversation (the heart), with deep
+    domain views one tap ('More') or one sentence away. Ambient tiles fill the bottom row (Phase 2)."""
+
+    def __init__(self, xpert: "XpertTab", on_more, parent=None) -> None:
+        super().__init__(parent)
+        self._xpert = xpert
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 12)
+        layout.setSpacing(12)
+
+        top = QHBoxLayout()
+        self.orb = PresenceOrb()
+        self.orb.setFixedSize(76, 76)
+        title = QVBoxLayout()
+        title.setSpacing(0)
+        name = QLabel("HELIX")
+        name.setObjectName("sectionHeader")
+        self.presence = QLabel(_PRESENCE_TEXT["idle"])
+        self.presence.setStyleSheet("color:#6fb3c0;")
+        title.addWidget(name)
+        title.addWidget(self.presence)
+        more = QPushButton("More")
+        more.setToolTip("Open the deep views — Home, Enterprise, Learning, Investment")
+        more.clicked.connect(on_more)
+        top.addWidget(self.orb)
+        top.addSpacing(8)
+        top.addLayout(title)
+        top.addStretch(1)
+        top.addWidget(more)
+        layout.addLayout(top)
+
+        layout.addWidget(xpert, 1)  # the conversation — the heart
+
+        self.tiles = QHBoxLayout()  # ambient tiles land here in Phase 2
+        self.tiles.setSpacing(10)
+        layout.addLayout(self.tiles)
+
+        self._orb_timer = QTimer(self)
+        self._orb_timer.timeout.connect(self._sync_presence)
+        self._orb_timer.start(70)
+
+    def _sync_presence(self) -> None:
+        state = getattr(self._xpert, "_convo_state", "idle")
+        self.orb.set_state(state)
+        try:
+            self.orb.set_level(self._xpert.level_bar.value() / 100.0)
+        except Exception:
+            pass
+        self.presence.setText(_PRESENCE_TEXT.get(state, _PRESENCE_TEXT["idle"]))
+
+
 class HelixMainWindow(QMainWindow):
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
         self.memory = memory
-        self.setWindowTitle("HELIX - Home Enterprise Learning Investment Expert")
+        self.setWindowTitle("HELIX")
         self.setStatusBar(QStatusBar())
 
-        self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
-
+        # Deep domain views live behind 'More' or a sentence; Xpert is promoted to the Console itself.
         self.xpert_tab = XpertTab(memory)
         self.home_tab = HomeTab(memory)
         self.enterprise_tab = EnterpriseTab(memory)
         self.learning_tab = LearningTab(memory)
         self.investment_tab = InvestmentTab(memory, on_saved=self.refresh_all)
 
+        self.tabs = QTabWidget()
         self.tabs.addTab(self.home_tab, "Home")
         self.tabs.addTab(self.enterprise_tab, "Enterprise")
         self.tabs.addTab(self.learning_tab, "Learning")
         self.tabs.addTab(self.investment_tab, "Investment")
-        self.tabs.addTab(self.xpert_tab, "Xpert")
-        self.tabs.setCurrentWidget(self.home_tab)
 
-        # The Xpert voice assistant acts on the other pillars (start/stop investing, home tasks).
+        more_page = QWidget()
+        more_layout = QVBoxLayout(more_page)
+        more_layout.setContentsMargins(10, 8, 10, 10)
+        back_bar = QHBoxLayout()
+        back_button = QPushButton("‹  Console")
+        back_button.clicked.connect(self._show_console)
+        back_bar.addWidget(back_button)
+        back_bar.addStretch(1)
+        more_layout.addLayout(back_bar)
+        more_layout.addWidget(self.tabs, 1)
+
+        self.console = ConsoleView(self.xpert_tab, on_more=self._show_more)
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.console)  # 0 — the JARVIS console (default)
+        self.stack.addWidget(more_page)     # 1 — the deep domain tabs
+        self.setCentralWidget(self.stack)
+
+        # The Xpert assistant acts on the other pillars (start/stop investing, home tasks).
         self.xpert_tab.bind_investment(self.investment_tab.invest_tab)
         self.xpert_tab.bind_home(self.home_tab)
 
@@ -481,6 +635,12 @@ class HelixMainWindow(QMainWindow):
         self.investment_tab.refresh()
         self.enterprise_tab.refresh()
         self.statusBar().showMessage("HELIX memory synced", 3000)
+
+    def _show_more(self) -> None:
+        self.stack.setCurrentIndex(1)
+
+    def _show_console(self) -> None:
+        self.stack.setCurrentIndex(0)
 
     def _auto_trading(self) -> bool:
         """True while the Investment auto-loop is running — used to defer a restart so we never
