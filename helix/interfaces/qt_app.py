@@ -808,6 +808,7 @@ class PanelHost(QWidget):
 
 LAUNCHER_HIDDEN_SETTING = "launcher_hidden_items"
 LAUNCHER_LABELS_SETTING = "launcher_custom_labels"
+TASKS_HIDDEN_SETTING = "tasks_hidden_items"  # task keys removed from the Tasks launcher via the ✕ badge
 
 
 def custom_menu_labels(settings: AppSettings) -> dict[str, str]:
@@ -828,7 +829,8 @@ class _LauncherCard(QPushButton):
     hide_requested = pyqtSignal(str)
     rename_requested = pyqtSignal(str)
 
-    def __init__(self, key: str, text: str, removable: bool = False, permanent: bool = False, parent=None) -> None:
+    def __init__(self, key: str, text: str, removable: bool = False, permanent: bool = False,
+                 badge_tooltip: str | None = None, allow_rename: bool = True, parent=None) -> None:
         super().__init__(text, parent)
         self._key = key
         self.setObjectName("launcherCard")
@@ -848,12 +850,15 @@ class _LauncherCard(QPushButton):
             self._badge.setCursor(Qt.CursorShape.PointingHandCursor)
             self._badge.setFixedSize(22, 22)
             self._badge.setToolTip(
-                "Remove this feature and delete its code (you approve the change first)"
-                if removable else "Hide from the menu (restore in Settings)"
+                badge_tooltip if badge_tooltip is not None else (
+                    "Remove this feature and delete its code (you approve the change first)"
+                    if removable else "Hide from the menu (restore in Settings)"
+                )
             )
             self._badge.clicked.connect(lambda: self.hide_requested.emit(self._key))
-        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.customContextMenuRequested.connect(self._show_menu)
+        if allow_rename:
+            self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.customContextMenuRequested.connect(self._show_menu)
 
     def _show_menu(self, pos) -> None:
         """Right-click (or long-press, which Qt maps to a context-menu request) → a Rename option."""
@@ -980,9 +985,10 @@ class TasksView(QWidget):
     `helix.tasks.registry` (append to BUILTIN_TASKS or call register()), so this panel grows with no UI
     edits. Opened by the Tasks button in the Console top bar, mirroring how Menu opens the launcher."""
 
-    def __init__(self, on_home, parent=None) -> None:
+    def __init__(self, on_home, settings: AppSettings | None = None, parent=None) -> None:
         super().__init__(parent)
         self._workers: set = set()
+        self.settings = settings or AppSettings()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(48, 34, 48, 40)
         outer.setSpacing(18)
@@ -997,21 +1003,45 @@ class TasksView(QWidget):
         header.addStretch(1)
         header.addWidget(close_button)
         outer.addLayout(header)
-        grid = QGridLayout()
-        grid.setSpacing(18)
-        for n, task in enumerate(tasks_registry.all_tasks()):
-            card = QPushButton(f"{task.label}\n{task.subtitle}")
-            card.setObjectName("launcherCard")
-            card.setCursor(Qt.CursorShape.PointingHandCursor)
-            card.setMinimumHeight(96)
-            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            card.clicked.connect(lambda _=False, t=task: self._run(t))
-            grid.addWidget(card, n // 2, n % 2)
-        outer.addLayout(grid)
+        self._grid = QGridLayout()
+        self._grid.setSpacing(18)
+        outer.addLayout(self._grid)
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
         self.output.setPlaceholderText("Pick a task to run — its result appears here.")
         outer.addWidget(self.output, 1)
+        self._rebuild()
+
+    def _hidden(self) -> set[str]:
+        raw = self.settings.get(TASKS_HIDDEN_SETTING, [])
+        return set(raw) if isinstance(raw, list) else set()
+
+    def _rebuild(self) -> None:
+        """(Re)build the task grid. Each card carries a ✕ badge (the same _LauncherCard used by the Menu)
+        that removes the task from the list; removals persist in settings, so they stick across restarts."""
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        hidden = self._hidden()
+        visible = [t for t in tasks_registry.all_tasks() if t.key not in hidden]
+        for n, task in enumerate(visible):
+            card = _LauncherCard(
+                task.key, f"{task.label}\n{task.subtitle}",
+                badge_tooltip="Remove this task from the list",
+                allow_rename=False,
+            )
+            card.clicked.connect(lambda _=False, t=task: self._run(t))
+            card.hide_requested.connect(self._remove)
+            self._grid.addWidget(card, n // 2, n % 2)
+
+    def _remove(self, key: str) -> None:
+        """The task card ✕: drop the task from the launcher and remember it as hidden in settings."""
+        hidden = self._hidden()
+        hidden.add(key)
+        self.settings.set(TASKS_HIDDEN_SETTING, sorted(hidden))
+        self._rebuild()
 
     def _run(self, task) -> None:
         self.output.setPlainText(f"Running {task.label}…")
@@ -1478,7 +1508,7 @@ class HelixMainWindow(QMainWindow):
             on_remove_code=self._remove_feature,
             permanent_keys=selfdev_constitution.PERMANENT_MENU_KEYS,  # Settings/Archive: no ✕, ever
         )
-        self.tasks_view = TasksView(on_home=self._show_home)
+        self.tasks_view = TasksView(on_home=self._show_home, settings=AppSettings())
         self.console = ConsoleView(
             self.xpert_tab, memory, self.open_view, self.show_launcher, self.show_tasks
         )
