@@ -1025,7 +1025,13 @@ class TasksView(QWidget):
             if widget is not None:
                 widget.deleteLater()
         hidden = self._hidden()
-        visible = [t for t in tasks_registry.all_tasks() if t.key not in hidden]
+        all_tasks = tasks_registry.all_tasks()
+        visible = [t for t in all_tasks if t.key not in hidden]
+        if not visible:
+            # Self-heal: every task ended up hidden (e.g. all three ✕'d away), which would leave the
+            # launcher permanently blank with no way back. Clear the hidden set so the tasks return.
+            self.settings.set(TASKS_HIDDEN_SETTING, [])
+            visible = all_tasks
         for n, task in enumerate(visible):
             card = _LauncherCard(
                 task.key, f"{task.label}\n{task.subtitle}",
@@ -1037,8 +1043,13 @@ class TasksView(QWidget):
             self._grid.addWidget(card, n // 2, n % 2)
 
     def _remove(self, key: str) -> None:
-        """The task card ✕: drop the task from the launcher and remember it as hidden in settings."""
+        """The task card ✕: drop the task from the launcher and remember it as hidden in settings.
+        Refuses to hide the final card so the launcher always keeps at least one runnable task."""
         hidden = self._hidden()
+        remaining = [t for t in tasks_registry.all_tasks() if t.key != key and t.key not in hidden]
+        if not remaining:
+            self.output.setPlainText("That's the last task, sir — I'll keep it on the launcher.")
+            return
         hidden.add(key)
         self.settings.set(TASKS_HIDDEN_SETTING, sorted(hidden))
         self._rebuild()
@@ -2901,13 +2912,26 @@ class XpertTab(QWidget):
                     self._append_transcript(
                         "You" if message.get("role") == "user" else "HELIX", content
                     )
-            self._append_transcript("HELIX", "Resuming where we left off, sir.")
         else:
             self._history = []
-            self._append_transcript(
-                "HELIX", "Standing by, sir. Hold the Talk button and speak, or type below."
-            )
+        # A short, warm greeting on launch — nothing more. No auto-read of tasks, investments, or
+        # briefings; HELIX simply says hello and waits for the first request.
+        greeting = self._startup_greeting()
+        self._append_transcript("HELIX", greeting)
+        self._speak_text(greeting)
         self._set_convo_state("idle")
+
+    @staticmethod
+    def _startup_greeting() -> str:
+        """Pick a randomized welcome so the launch greeting varies each run and never feels canned."""
+        return random.choice([
+            "Hello, sir. How is your day?",
+            "Good to see you, sir. What can I do for you?",
+            "Welcome back, sir. How can I help?",
+            "Good day, sir. What are we working on?",
+            "Hello again, sir. How's your day going?",
+            "At your service, sir. What's on your mind?",
+        ])
 
     def _persist_turn(self, role: str, content: str) -> None:
         """Append one conversation turn to the SQLite history immediately (best-effort — persistence
