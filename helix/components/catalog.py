@@ -208,16 +208,6 @@ def category(key: str) -> dict | None:
     return _BY_KEY.get(key)
 
 
-def spec_field(category_key: str, spec_key: str) -> dict | None:
-    cat = _BY_KEY.get(category_key)
-    if not cat:
-        return None
-    for field in cat["specs"]:
-        if field["key"] == spec_key:
-            return field
-    return None
-
-
 def selected_chips(category_key: str, package: str, specs: dict[str, str]) -> list[tuple[str, str, str]]:
     """The active selections as (kind, label, value) tuples for the dismissible filter chips.
 

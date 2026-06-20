@@ -106,23 +106,6 @@ def generate_mock_special_research(n_picks: int = 8) -> str:
     return json.dumps(out)
 
 
-def generate_mock_home_suggestions(tasks: list[str] | None = None) -> str:
-    """Offline stand-in for the home time/money optimizer — no API spend."""
-    items = [
-        {"title": "Auto-deliver pantry & baby staples", "saves": "both", "effort": "low",
-         "detail": "Set up Subscribe & Save / auto-ship for diapers, wipes, paper goods and pantry basics so they arrive on a schedule - removes a weekly errand and is usually 5-15% cheaper."},
-        {"title": "Batch-cook + meal-kit hybrid", "saves": "time", "effort": "medium",
-         "detail": "Cook 2-3 big-batch proteins on Sunday and use a meal kit only for variety nights; cuts daily cooking to assembly and trims takeout spend."},
-        {"title": "Robot vacuum on a daily schedule", "saves": "time", "effort": "low",
-         "detail": "Schedule a robot vac daily and reserve the monthly deep shampoo for carpets - removes most of the vacuuming chore."},
-        {"title": "Everything on autopay + one review day", "saves": "both", "effort": "low",
-         "detail": "Put home and business bills on autopay with a single monthly calendar reminder to review - avoids late fees and the manual paying."},
-        {"title": "Standing grocery cart you reorder in one tap", "saves": "time", "effort": "low",
-         "detail": "Build a saved cart of weekly staples at one store; each week just edit the few deltas instead of rebuilding the list."},
-    ]
-    return json.dumps(items)
-
-
 def _default_subject(stream_name: str, watchlist: list[dict[str, Any]]) -> str:
     if watchlist and stream_name == "Stock Selection":
         return str(watchlist[0].get("symbol", "WATCHLIST")).upper()
