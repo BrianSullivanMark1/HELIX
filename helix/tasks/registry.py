@@ -23,37 +23,10 @@ class Task:
     run: Callable[[], str]
 
 
-def _morning_briefing() -> str:
-    return (
-        "Morning Briefing — placeholder.\n"
-        "This is where HELIX will assemble your overnight market moves, calendar, and home reminders."
-    )
-
-
-def _check_all_systems() -> str:
-    return (
-        "All Systems — placeholder.\n"
-        "This is where HELIX will report broker, AI, and camera connectivity at a glance."
-    )
-
-
-def _review_portfolio() -> str:
-    return (
-        "Review Portfolio — placeholder.\n"
-        "This is where HELIX will summarize positions, P&L, and any rebalancing it recommends."
-    )
-
-
-# Example built-ins demonstrating the pattern. Replace the placeholder callables with real work, or
-# append/register new tasks alongside them.
-BUILTIN_TASKS: list[Task] = [
-    Task("morning_briefing", "Run Morning Briefing",
-         "overnight markets · calendar · reminders", _morning_briefing),
-    Task("check_systems", "Check All Systems",
-         "broker · AI · cameras", _check_all_systems),
-    Task("review_portfolio", "Review Portfolio",
-         "positions · P&L · rebalance", _review_portfolio),
-]
+# The Tasks launcher starts blank — no built-in default tasks. Add real task apps either by appending a
+# Task here, or programmatically at runtime via `register(Task(...))`; both feed `all_tasks()`, so a new
+# task app appears with no UI changes.
+BUILTIN_TASKS: list[Task] = []
 
 
 def register(task: Task) -> None:

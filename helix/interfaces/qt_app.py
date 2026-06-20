@@ -664,7 +664,7 @@ class ConsoleView(QWidget):
         tasks_button = QPushButton("⚡  Tasks")
         tasks_button.setObjectName("ghostButton")
         tasks_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        tasks_button.setToolTip("Run a task — Morning Briefing, Check All Systems, Review Portfolio…")
+        tasks_button.setToolTip("Run a task")
         tasks_button.clicked.connect(show_tasks or show_launcher)
         # Archive lives here as a standalone, always-visible button (not buried in the menu) — it's the
         # recovery lifeline the Commandments require to always exist and function.
