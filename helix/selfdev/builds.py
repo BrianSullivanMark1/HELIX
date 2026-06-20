@@ -71,6 +71,38 @@ def create_workspace(name: str, *, request: str = "") -> Path:
     return ws
 
 
+def delete_build(slug: str) -> bool:
+    """Permanently delete a Build's workspace (its code + git history). Returns True if removed."""
+    import shutil
+    ws = workspace_dir(slug)
+    if not ws.exists():
+        return False
+    shutil.rmtree(ws, ignore_errors=True)
+    return not ws.exists()
+
+
+def entry_point(ws: Path) -> dict:
+    """Best-effort guess at how to run a Build, for the in-app runner.
+
+    Returns {"kind": "html"|"python"|"none", "path": <file or "">}. Prefers a single HTML file, then a
+    conventional Python entry (main.py / app.py / run.py / <slug>.py), then the only .py file present."""
+    ws = Path(ws)
+    htmls = sorted(p for p in ws.glob("*.html"))
+    if htmls:
+        preferred = next((p for p in htmls if p.name.lower() in ("index.html", "app.html")), htmls[0])
+        return {"kind": "html", "path": str(preferred)}
+    pys = [p for p in ws.glob("*.py")]
+    if pys:
+        slug = read_manifest(ws).get("slug", "")
+        names = ["main.py", "app.py", "run.py", f"{slug}.py"]
+        preferred = next((ws / n for n in names if (ws / n).exists()), None)
+        if preferred is None and len(pys) == 1:
+            preferred = pys[0]
+        if preferred is not None:
+            return {"kind": "python", "path": str(preferred)}
+    return {"kind": "none", "path": ""}
+
+
 def read_manifest(ws: Path) -> dict:
     try:
         return json.loads((Path(ws) / MANIFEST_NAME).read_text(encoding="utf-8"))

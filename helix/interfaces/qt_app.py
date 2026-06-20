@@ -84,7 +84,7 @@ from helix.core.conversation import ConversationStore
 from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
-from helix.selfdev import coder as selfdev_coder, constitution as selfdev_constitution, engine as selfdev_engine, mailer as selfdev_mailer, registry as selfdev_registry, restart as selfdev_restart, triggers as selfdev_triggers, versioning as selfdev_versioning
+from helix.selfdev import builds as selfdev_builds, coder as selfdev_coder, constitution as selfdev_constitution, engine as selfdev_engine, mailer as selfdev_mailer, registry as selfdev_registry, restart as selfdev_restart, triggers as selfdev_triggers, versioning as selfdev_versioning
 from helix.tasks import registry as tasks_registry
 
 
@@ -546,7 +546,7 @@ class ConsoleView(QWidget):
         menu_button = QPushButton("☰  Menu")
         menu_button.setObjectName("ghostButton")
         menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        menu_button.setToolTip("Open anything — Investments, Home, Work, Learning")
+        menu_button.setToolTip("Your apps — and ‘New app’ to build one")
         menu_button.clicked.connect(show_launcher)
         tasks_button = QPushButton("⚡  Tasks")
         tasks_button.setObjectName("ghostButton")
@@ -581,7 +581,7 @@ class ConsoleView(QWidget):
             xpert.compact()
         except Exception:
             pass
-        xpert.setVisible(False)
+        xpert.setVisible(True)  # the conversation is the front door — show it so the user can just type
         layout.addWidget(xpert, 5)
         self.orb.clicked.connect(self._toggle_conversation)
 
@@ -631,6 +631,14 @@ class PanelHost(QWidget):
             self._stack.addWidget(widget)
             self._index[key] = (position, label)
         layout.addWidget(self._stack, 1)
+
+    def add_view(self, key: str, label: str, widget) -> None:
+        """Register a panel at runtime (e.g. a freshly-built app), so it can be summoned immediately
+        without a restart."""
+        if key in self._index:
+            return
+        position = self._stack.addWidget(widget)
+        self._index[key] = (position, label)
 
     def show_view(self, key: str) -> bool:
         entry = self._index.get(key)
@@ -1076,6 +1084,95 @@ class GuardrailsBox(QGroupBox):
         layout.addWidget(scroll)
 
 
+class BuildView(QWidget):
+    """A built app's home screen: what it is, a button to run or open it, and its README.
+
+    Generated apps live in their own folder under data/builds/<slug>/. Running is best-effort: an HTML
+    app opens in the browser; a Python app launches in a new console (needs Python on the machine);
+    otherwise the folder is opened so the user can run it however its README says."""
+
+    def __init__(self, build: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._build = build
+        self._path = build.get("path", "")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 18)
+        layout.setSpacing(12)
+
+        req = (build.get("request") or "").strip()
+        if req:
+            blurb = QLabel(req)
+            blurb.setObjectName("xpertHint")
+            blurb.setWordWrap(True)
+            layout.addWidget(blurb)
+
+        row = QHBoxLayout()
+        run_button = QPushButton("▶  Run")
+        run_button.setObjectName("primaryButton")
+        run_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        run_button.clicked.connect(self._run)
+        folder_button = QPushButton("📂  Open folder")
+        folder_button.setObjectName("ghostButton")
+        folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        folder_button.clicked.connect(self._open_folder)
+        row.addWidget(run_button)
+        row.addWidget(folder_button)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        readme = QTextEdit()
+        readme.setReadOnly(True)
+        readme.setPlainText(self._read_readme())
+        layout.addWidget(readme, 1)
+
+        self._status = QLabel("")
+        self._status.setObjectName("xpertHint")
+        self._status.setWordWrap(True)
+        layout.addWidget(self._status)
+
+    def _read_readme(self) -> str:
+        from pathlib import Path
+        base = Path(self._path)
+        for name in ("README.md", "readme.md", "README.txt", "readme.txt"):
+            p = base / name
+            if p.exists():
+                try:
+                    return p.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    pass
+        try:
+            files = [f.name for f in base.iterdir() if f.is_file() and not f.name.startswith(".")]
+            return "This app's files:\n  " + "\n  ".join(sorted(files))
+        except OSError:
+            return "(couldn't read the app folder)"
+
+    def _open_folder(self) -> None:
+        try:
+            os.startfile(self._path)  # Windows file explorer
+        except Exception as error:  # noqa: BLE001
+            self._status.setText(f"Couldn't open the folder: {error}")
+
+    def _run(self) -> None:
+        import subprocess
+        from helix.selfdev import builds as _builds
+        entry = _builds.entry_point(self._path)
+        try:
+            if entry["kind"] == "html":
+                os.startfile(entry["path"])
+                self._status.setText("Opened in your browser.")
+            elif entry["kind"] == "python":
+                subprocess.Popen(
+                    [sys.executable, entry["path"]], cwd=self._path,
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                )
+                self._status.setText(f"Running {os.path.basename(entry['path'])} in a new window.")
+            else:
+                os.startfile(self._path)
+                self._status.setText("No obvious entry point — opened the folder; see the README to run it.")
+        except Exception as error:  # noqa: BLE001
+            self._status.setText(f"Couldn't run it: {error}")
+
+
 class HelixMainWindow(QMainWindow):
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
@@ -1118,25 +1215,11 @@ class HelixMainWindow(QMainWindow):
             on_home=self._show_home,
             settings=AppSettings(),
         )
-        core_menu = [
-            ("new", "New app", "describe an app and I'll build it"),
-            ("settings", "Settings", "voice · keys · devices"),
-            # Archive is reached via its own standalone button in the Console top bar (always visible),
-            # so it no longer appears as a card inside the launcher menu.
-        ]
-        feature_menu = [
-            (f.get("key", ""), f.get("label", "Feature"), f.get("subtitle", ""))
-            for f in selfdev_registry.MENU_FEATURES if f.get("key")
-        ]
-        self.launcher = Launcher(
-            core_menu + feature_menu,
-            on_pick=self.open_view,
-            on_home=self._show_home,
-            settings=AppSettings(),
-            removable_keys=selfdev_registry.feature_keys(),  # self-added items: the ✕ removes their code
-            on_remove_code=self._remove_feature,
-            permanent_keys=selfdev_constitution.PERMANENT_MENU_KEYS,  # Settings/Archive: no ✕, ever
-        )
+        # Register a panel for each app the user has already built, and build the menu from them.
+        self._build_views: dict = {}
+        for build in selfdev_builds.list_builds():
+            self._register_build_view(build)
+        self.launcher = self._make_launcher()
         self.tasks_view = TasksView(on_home=self._show_home, settings=AppSettings())
         self.console = ConsoleView(
             self.xpert_tab, memory, self.open_view, self.show_launcher, self.show_tasks
@@ -1189,9 +1272,72 @@ class HelixMainWindow(QMainWindow):
         self.xpert_tab.refresh()
         self.statusBar().showMessage("HELIX memory synced", 3000)
 
-    def _on_build_created(self, name: str) -> None:
-        """A new app was built via the Console — note it and refresh the menu so its card appears."""
-        self.statusBar().showMessage(f"Built {name} — it's in your menu now.", 8000)
+    def _register_build_view(self, build: dict) -> None:
+        slug = build.get("slug", "")
+        if not slug or slug in self._build_views:
+            return
+        view = BuildView(build)
+        self._build_views[slug] = view
+        self.panel_host.add_view(slug, build.get("name", slug), view)
+
+    def _make_launcher(self) -> "Launcher":
+        """Build the menu: New app + Settings, then a card for each app the user has built."""
+        builds_list = selfdev_builds.list_builds()
+        core_menu = [
+            ("new", "New app", "describe an app and I'll build it"),
+            ("settings", "Settings", "voice · keys · devices"),
+        ]
+        build_menu = [
+            (b["slug"], b.get("name", b["slug"]), (b.get("request") or "")[:60])
+            for b in builds_list
+        ]
+        return Launcher(
+            core_menu + build_menu,
+            on_pick=self.open_view,
+            on_home=self._show_home,
+            settings=AppSettings(),
+            removable_keys={b["slug"] for b in builds_list},  # the ✕ on a built app deletes it
+            on_remove_code=self._remove_build,
+            permanent_keys=selfdev_constitution.PERMANENT_MENU_KEYS,  # Settings/Archive: no ✕, ever
+        )
+
+    def _rebuild_menu(self) -> None:
+        """Recreate the launcher (after a build is added/removed) and swap it into the stack in place."""
+        new_launcher = self._make_launcher()
+        idx = self.stack.indexOf(self.launcher)
+        if idx != -1:
+            self.stack.insertWidget(idx, new_launcher)
+            self.stack.removeWidget(self.launcher)
+            self.launcher.deleteLater()
+        else:
+            self.stack.addWidget(new_launcher)
+        self.launcher = new_launcher
+
+    def _on_build_created(self, slug: str) -> None:
+        """A new app was built via the Console — register its panel, refresh the menu, and open it."""
+        build = next((b for b in selfdev_builds.list_builds() if b.get("slug") == slug), None)
+        if build is None:
+            self.statusBar().showMessage("Built your app — it's in your menu now.", 8000)
+            return
+        self._register_build_view(build)
+        self._rebuild_menu()
+        self.statusBar().showMessage(f"Built {build.get('name', slug)} — opening it.", 8000)
+        self.open_view(slug)
+
+    def _remove_build(self, slug: str) -> None:
+        """The ✕ on a built-app card: delete its workspace (code + history) after confirmation."""
+        build = next((b for b in selfdev_builds.list_builds() if b.get("slug") == slug), None)
+        name = (build.get("name", slug) if build else slug)
+        confirm = QMessageBox.question(
+            self, "Delete app", f"Delete “{name}” and all its files?\nThis can't be undone.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        selfdev_builds.delete_build(slug)
+        self._build_views.pop(slug, None)
+        self._show_home()
+        self._rebuild_menu()
+        self.statusBar().showMessage(f"Deleted {name}.", 6000)
 
     def open_view(self, name: str | None = None) -> None:
         """Open a screen by key. 'new' → the Console (where you describe an app); 'tasks'/'archive'
@@ -1832,8 +1978,7 @@ class XpertTab(QWidget):
         layout.setSpacing(12)
 
         subtitle = QLabel(
-            "Just say “HELIX”, hold the button to talk, or type — HELIX answers aloud and gets "
-            "things done."
+            "Describe an app and I’ll build it. Say “HELIX”, hold the button to talk, or just type."
         )
         subtitle.setObjectName("xpertHint")
         subtitle.setWordWrap(True)

@@ -230,11 +230,11 @@ class ActionRouter:
         if name == "build_app":
             bname = str(tool_input.get("name", "")).strip() or "app"
             request = str(tool_input.get("request", "")).strip()
-            _ws, result = builds.build_app(bname, request, on_step=self.ctx.on_progress)
+            ws, result = builds.build_app(bname, request, on_step=self.ctx.on_progress)
             if not result.ok:
                 return f"I couldn't build that, sir: {result.error}"
             try:
-                self.ctx.on_build_created(bname)
+                self.ctx.on_build_created(ws.name)  # the slug — so the UI can open the exact Build
             except Exception:
                 pass
             summary = (result.summary or "").strip()
