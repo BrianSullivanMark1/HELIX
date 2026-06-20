@@ -173,6 +173,7 @@ from helix.brokers.alpaca import (
     AlpacaClient,
     AlpacaError,
 )
+from helix.core.conversation import ConversationStore
 from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
@@ -833,6 +834,12 @@ class _LauncherCard(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(96)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # NOTE (X-button audit, 2026-06-20): the task asked to resume any prior in-progress "X button"
+        # fix. Audited the ✕ badge paths app-wide (this card badge + Launcher._on_badge/_hide, the
+        # grocery/components/chip remove ✕, the version-Archive purge ✕) and found no incomplete or
+        # broken work — all ✕ handlers are wired and functional. No git/TODO breadcrumbs of an unfinished
+        # fix were found either. If a regression resurfaces, start here: the badge press is routed to the
+        # child button so it must NOT also trigger the card's open action (resizeEvent re-pins it).
         self._badge = None
         if not permanent:  # permanent items (Settings, Archive) carry no ✕ — they can't be hidden or removed
             self._badge = QPushButton("✕", self)
@@ -2124,6 +2131,13 @@ class XpertTab(QWidget):
         self.settings = AppSettings()
         self._workers = set()
         self._state = None
+        # SQLite-backed conversation persistence so HELIX retains context across restarts. Self-
+        # contained (its own tables in the same data/helix.db), resumes the most recent session on
+        # launch, and writes each turn immediately (a crash loses at most the in-flight turn).
+        try:
+            self._convo_store = ConversationStore(memory.db_path)
+        except Exception:
+            self._convo_store = None  # persistence is best-effort; never block the conversation
         # Conversation state for the voice assistant (§23).
         self._history = []            # full Messages-API history; persists across turns
         self._pending_action = None   # a money/outward action awaiting an explicit spoken "yes"
@@ -2315,7 +2329,7 @@ class XpertTab(QWidget):
 
         self._update_speed_label()
         self.refresh()
-        self._new_chat()
+        self._restore_chat()  # resume the persisted conversation from the last run (or greet if none)
         # Hands-free is always on — start the wake listener once the event loop is running.
         QTimer.singleShot(0, self._enable_handsfree)
 
@@ -2794,11 +2808,62 @@ class XpertTab(QWidget):
         self._history = []
         self._pending_action = None
         self._end_session()
+        # "New chat" closes the persisted session (with a one-line summary) and starts a fresh one,
+        # so the next restart resumes THIS new conversation, not the one just cleared.
+        if self._convo_store is not None:
+            try:
+                self._convo_store.new_session()
+            except Exception:
+                pass
         self.transcript.clear()
         self._append_transcript(
             "HELIX", "Standing by, sir. Hold the Talk button and speak, or type below."
         )
         self._set_convo_state("idle")
+
+    def _restore_chat(self) -> None:
+        """On startup, rebuild the in-memory conversation buffer from the persisted history so HELIX
+        picks up where the last run left off. Falls back to the standard greeting if there's nothing
+        saved (or persistence is unavailable)."""
+        self._pending_action = None
+        self._end_session()
+        self.transcript.clear()
+        loaded: list = []
+        if self._convo_store is not None:
+            try:
+                loaded = self._convo_store.load_recent_messages(50)
+            except Exception:
+                loaded = []
+        # Drop a trailing user turn whose assistant reply never landed (a crash mid-turn), so the
+        # buffer doesn't open the next turn with two consecutive user messages (the API rejects that).
+        while loaded and loaded[-1].get("role") == "user":
+            loaded.pop()
+        if loaded:
+            # The trimmer guarantees the window opens on a plain user turn (Messages-API requirement).
+            self._history = self._trim_history(loaded)
+            for message in self._history:
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    self._append_transcript(
+                        "You" if message.get("role") == "user" else "HELIX", content
+                    )
+            self._append_transcript("HELIX", "Resuming where we left off, sir.")
+        else:
+            self._history = []
+            self._append_transcript(
+                "HELIX", "Standing by, sir. Hold the Talk button and speak, or type below."
+            )
+        self._set_convo_state("idle")
+
+    def _persist_turn(self, role: str, content: str) -> None:
+        """Append one conversation turn to the SQLite history immediately (best-effort — persistence
+        never breaks the live conversation)."""
+        if self._convo_store is None:
+            return
+        try:
+            self._convo_store.append_turn(role, content)
+        except Exception:
+            pass
 
     def _append_transcript(self, who: str, text: str) -> None:
         color = "#ffc857" if who == "HELIX" else "#1dd8ff"
@@ -2961,6 +3026,9 @@ class XpertTab(QWidget):
     # ---- the turn (Think + Act + Speak) ----------------------------------- #
 
     def _handle_user_text(self, text: str) -> None:
+        # Persist the user turn the moment it arrives, so a crash/restart loses at most this in-flight
+        # turn (covers all branches below — they each record this same text into the in-memory buffer).
+        self._persist_turn("user", text)
         # Deterministic spoken-confirmation gate for any pending money/outward action: it fires
         # ONLY on the user's own affirmative words, never on the model's say-so.
         if self._pending_action is not None:
@@ -2980,6 +3048,7 @@ class XpertTab(QWidget):
                 reply = "Cancelled, sir."
                 self._history.append({"role": "user", "content": text})
                 self._history.append({"role": "assistant", "content": reply})
+                self._persist_turn("assistant", reply)
                 self._append_transcript("HELIX", reply)
                 self._speak_reply(reply)
                 return
@@ -3032,12 +3101,14 @@ class XpertTab(QWidget):
         result = payload
         self._history = result.messages
         self._pending_action = result.pending
+        self._persist_turn("assistant", result.reply)
         self._append_transcript("HELIX", result.reply)
         self._speak_reply(result.reply)
 
     def _confirmed_done(self, ok: bool, payload) -> None:
         reply = str(payload) if ok else f"That didn't go through, sir: {payload}"
         self._history.append({"role": "assistant", "content": reply})
+        self._persist_turn("assistant", reply)
         self._append_transcript("HELIX", reply)
         self._speak_reply(reply)
 

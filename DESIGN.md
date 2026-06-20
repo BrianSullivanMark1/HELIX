@@ -82,6 +82,7 @@ Entry point. Delegates straight to `helix.interfaces.cli:main`.
 | `config.py` | `HelixConfig` (frozen dataclass) resolves `root_dir`, `data_dir`, `db_path`, `settings_path`. `load_config()` creates `data/` if missing. Paths are derived relative to the repo root. |
 | `settings.py` | `AppSettings` — a tiny JSON key/value store backed by `data/helix_settings.json`. `get/set/remove/load/save`. Tolerates missing/corrupt files by returning `{}`. Holds API keys and UI preferences. |
 | `memory.py` | `SQLiteMemory` — the system of record. Creates the schema on init and exposes typed accessors for the tables (see §5), including `record_equity`/`list_equity_history` for the equity curve (§19) and `cached_ratings` for the rating cache / cadence (§14). |
+| `conversation.py` | `ConversationStore` — SQLite-backed persistence for the JARVIS conversation so HELIX retains context across restarts (§5). Self-contained: owns its own tables (`conversation_history`, `sessions`, `session_summaries`) in the same `data/helix.db`. Resumes the most recent session on launch, writes each turn immediately (`append_turn`), rebuilds the in-memory Claude buffer (`load_recent_messages`/`get_recent_history`), and summarizes a session (last assistant line, ≤200 chars) on "New chat" or after 200 turns. Wired into `XpertTab`. |
 | `daemon.py` | `run_core()` — the `run` command's loop: prints the investment briefing, sleeps `interval` seconds, repeats until Ctrl+C (or one pass if `--once`). |
 
 ### `helix/investment/` — the Investment pillar
@@ -269,6 +270,16 @@ Three tables, created idempotently on startup:
   the dataset the Xpert opinion reviews to calibrate the strategy.
 - **`ai_usage`** — per-call Claude token usage + estimated cost (`model`, `input_tokens`,
   `output_tokens`, `est_cost`, `created_at`). Powers the invest scorecard's monthly-spend figure.
+- **`conversation_history`** — the persisted JARVIS conversation so HELIX retains context across
+  restarts (managed by `ConversationStore`, not `SQLiteMemory`). Columns: `id`, `timestamp`, `role`
+  (`user`/`assistant`), `content`, `session_id`. One row per turn, written immediately so a crash
+  loses at most the in-flight turn. On startup the most recent session's last ~50 turns rebuild the
+  in-memory Claude buffer.
+- **`sessions`** — one row per conversation session (`session_id` UUID, `created_at`, `last_active`).
+  The most recent is resumed on launch; "New chat" and a >200-turn roll-over mint a fresh one.
+- **`session_summaries`** — a one-line summary (the last assistant message, ≤200 chars) written when
+  a session ends or exceeds 200 turns, so very old context stays scannable without ballooning the
+  prompt. Columns: `id`, `session_id`, `summary`, `created_at`.
 
 ### JSON — `data/helix_settings.json` (via `AppSettings`)
 Flat key/value store. Known keys:
