@@ -2245,6 +2245,53 @@ notional unchanged, non-frac whole-share buy = 80, skip-if-<1-share / no-price, 
 close-position, failed-order resilience, no-nonfrac back-compat — 10 checks); a **live spot-check** (the
 universe expands to **12,722** names, **5,678** flagged non-fractionable); compile + import clean.
 
+## 43. Archive — feature provenance, versioning & safe rollback (§selfdev)
+
+> **Status: SHIPPED.** A user-facing **Archive** (a core menu item) over the self-improvement loop:
+> every self-built feature records the **prompt that constructed it** in SQLite, the whole-app version
+> history is restorable, there is a user-set **master default** and an immutable **ROOT baseline** (a
+> blank-menu factory reset), versions can be **purged**, and there is a manual **GitHub backup**. The
+> aim: the user never loses work permanently, and a broken self-edit is always recoverable.
+
+**The split: git stores, SQLite indexes.** Every self-improvement already lands as one `--no-ff` merge
+on `main` (§selfdev) — an immutable, revertible version. So **git/GitHub is the version store**; we do
+*not* reinvent snapshots. `helix/core/memory.py` adds two tables as the **human-friendly index**:
+`interface_versions` (one row per app version: commit, label, prompt, the `is_default` / `is_root`
+pointers) and `feature_provenance` (the construction prompt(s) behind each menu button, keyed by
+feature). `helix/selfdev/versioning.py` is the Qt-free engine; `ArchiveTab` in `qt_app.py` is the view.
+
+**Provenance + cleanup (Phase 1).** `versioning.sync(memory, settings, repo)` reconciles git merge
+history into the index — idempotent, so it **backfills** the existing versions and self-heals. For each
+merge it stores the version (prompt = the coder task / merge body), and by diffing `MENU_FEATURES` at
+the merge vs its parent it **attributes the prompt to the menu button it built**. It then
+`prune_feature_provenance(registry.feature_keys())` — so removing a feature (its ✕) **cleans up its
+SQLite rows**. Sync runs ~8s after launch and whenever the Archive opens, off-thread.
+
+**Archive UI (Phase 2).** A vertical list of version cards (newest first), each showing its label, date,
+and the prompt that built it. Whole-app snapshots — a card's **Restore** rolls the *entire* app back.
+
+**Restore + defaults + ROOT (Phase 3).** Restores are **non-destructive**: `restore_version` does
+`git read-tree -u --reset <commit>` then commits the result on `main` (history is never rewritten;
+nothing is lost), and sets the §selfdev restart flag so the app relaunches into the restored code via
+the shared `_apply_restart_if_safe`. **Master default** = a user-pinned known-good checkpoint.
+**Reset to Default (Root)** = restore the immutable **root baseline** (pinned once at install = the
+then-current known-good HEAD) **with a blank menu** (`MENU_FEATURES = []`, core pillars only) — the
+factory-reset lifeline. Root and default are **non-purgeable** (no ✕; enforced in the SQL `WHERE` too).
+
+**Purge + backup (Phase 4).** Per-version ✕ = **permanent purge**: delete its work branch + its index
+row. It deliberately does **not** rewrite `main`'s history (the one operation that could corrupt the
+repo / lose unrelated work), so a merged version's code persists in the timeline even after its Archive
+entry is gone. Backup is **local-first**: a manual **Back up to GitHub** button pushes `main` to origin.
+
+**Decisions locked (Brian, 2026-06-19):** revert = whole-app snapshots · ✕ = permanent purge (no
+history rewrite) · backup = local-only + manual push · ROOT = modern-core-at-install + blank menu,
+immutable & non-purgeable · the red ✕ hover means *destructive* (remove/purge), neutral means *hide*.
+
+**Verified (2026-06-19):** `sync` backfilled 18 versions from real history with correct per-feature
+provenance (grocery/components/risk); a **throwaway-clone test** confirmed `reset_to_root` blanks the
+menu (`[]`) and `restore_version` rolls the whole app back, both as clean non-destructive commits;
+an **offscreen-Qt test** rendered the Archive (cards + ROOT) without error; compile + import clean.
+
 ---
 
 *Update this file whenever the architecture changes. It is the canonical description of HELIX.*

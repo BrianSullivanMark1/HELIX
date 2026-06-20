@@ -126,6 +126,53 @@ def merge_to(repo: str, name: str, *, into: str = "main", message: str | None = 
     return head_commit(repo)
 
 
+def show_file(repo: str, ref: str, path: str, *, timeout: int = 30) -> str | None:
+    """Return the contents of `path` as it existed at `ref` (commit/branch/tag), or None if absent there."""
+    try:
+        return _git(repo, ["show", f"{ref}:{path}"], timeout=timeout)
+    except GitError:
+        return None
+
+
+def log_merges(repo: str, branch: str = "main", *, limit: int = 200) -> list[dict]:
+    """First-parent merge commits on `branch`, newest first: [{sha, date, subject, body}].
+
+    These are the self-improvement landings (`merge_to` makes one --no-ff merge per approval), so they
+    are the natural unit for the Archive's whole-app version list.
+    """
+    sep, rec = "\x1f", "\x1e"
+    fmt = sep.join(["%H", "%cI", "%s", "%b"]) + rec
+    try:
+        out = _git(
+            repo, ["log", "--first-parent", "--merges", f"-{int(limit)}", f"--format={fmt}", branch], timeout=60
+        )
+    except GitError:
+        return []
+    versions: list[dict] = []
+    for chunk in out.split(rec):
+        if not chunk.strip():
+            continue
+        parts = chunk.strip("\n").split(sep)
+        if len(parts) < 4:
+            continue
+        versions.append(
+            {"sha": parts[0].strip(), "date": parts[1].strip(), "subject": parts[2].strip(), "body": parts[3].strip()}
+        )
+    return versions
+
+
+def restore_tree(repo: str, ref: str, *, timeout: int = 60) -> None:
+    """Make the index + working tree exactly match `ref`'s tree WITHOUT moving HEAD — the basis for a
+    non-destructive 'restore to version X' (the caller commits the result on the current branch, so
+    history is preserved and nothing is lost). Tracked files only; the gitignored data/ dir is untouched."""
+    _git(repo, ["read-tree", "-u", "--reset", ref], timeout=timeout)
+
+
+def push(repo: str, *, remote: str = "origin", ref: str = "main", timeout: int = 120) -> str:
+    """Push `ref` to `remote` (manual GitHub backup). Raises GitError on failure."""
+    return _git(repo, ["push", remote, ref], timeout=timeout)
+
+
 def add_worktree(repo: str, path: str, ref: str) -> None:
     """Check out `ref` (detached) into a separate worktree at `path` — used to smoke-check a branch's
     code without disturbing the live working tree."""

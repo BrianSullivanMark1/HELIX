@@ -124,6 +124,34 @@ class SQLiteMemory:
                     symbol TEXT PRIMARY KEY,
                     fractionable INTEGER NOT NULL DEFAULT 1
                 );
+
+                -- §selfdev Archive: every self-improvement is a revertible commit on main; this is the
+                -- human-friendly index of those versions (whole-app snapshots) you can restore to. git
+                -- is the version STORE; this table is the INDEX (prompts, labels, default/root pointers).
+                CREATE TABLE IF NOT EXISTS interface_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    commit_sha TEXT NOT NULL UNIQUE,
+                    label TEXT NOT NULL DEFAULT '',
+                    prompt TEXT NOT NULL DEFAULT '',
+                    branch TEXT NOT NULL DEFAULT '',
+                    is_default INTEGER NOT NULL DEFAULT 0,
+                    is_root INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                -- §selfdev: the construction prompt(s) behind each menu button, so each self-built
+                -- feature carries its provenance. Cleaned up when the feature is removed (its ✕).
+                CREATE TABLE IF NOT EXISTS feature_provenance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    feature_key TEXT NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    prompt TEXT NOT NULL DEFAULT '',
+                    branch TEXT NOT NULL DEFAULT '',
+                    commit_sha TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'build',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(feature_key, commit_sha)
+                );
                 """
             )
 
@@ -758,6 +786,153 @@ class SQLiteMemory:
             "sells": int(sells["n"]) if sells else 0,
             "since": str(since)[:10],
         }
+
+    # -- self-improvement Archive: versions & provenance (§selfdev) ------------ #
+
+    def upsert_interface_version(
+        self, commit_sha: str, label: str, prompt: str, branch: str = "", created_at: str | None = None
+    ) -> None:
+        """Record (or refresh) one app version — a point on main's timeline, keyed by commit so a
+        re-sync is idempotent. Never touches the is_default / is_root pointers."""
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO interface_versions (commit_sha, label, prompt, branch, created_at)
+                VALUES (?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+                ON CONFLICT(commit_sha) DO UPDATE SET
+                    label = CASE WHEN interface_versions.is_root = 1 THEN interface_versions.label ELSE excluded.label END,
+                    prompt = CASE WHEN interface_versions.is_root = 1 THEN interface_versions.prompt ELSE excluded.prompt END,
+                    branch = excluded.branch
+                """,
+                (commit_sha, label, prompt, branch, created_at),
+            )
+
+    def list_interface_versions(self) -> list[dict[str, Any]]:
+        """All recorded app versions, newest first (the Archive list)."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, commit_sha, label, prompt, branch, is_default, is_root, created_at
+                FROM interface_versions
+                ORDER BY datetime(created_at) DESC, id DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_interface_version(self, version_id: int) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM interface_versions WHERE id = ?", (version_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_interface_version(self, version_id: int) -> bool:
+        """Purge a version from the Archive. Refuses to delete the master default or the root baseline
+        (their protection lives in the WHERE clause, so it can't be bypassed by a stray call)."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM interface_versions WHERE id = ? AND is_default = 0 AND is_root = 0",
+                (version_id,),
+            )
+        return cursor.rowcount > 0
+
+    def set_default_version(self, version_id: int) -> bool:
+        """Pin one version as the master default (clears any previous). Returns True if it existed."""
+        with self.connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM interface_versions WHERE id = ?", (version_id,)
+            ).fetchone()
+            if not exists:
+                return False
+            connection.execute("UPDATE interface_versions SET is_default = 0")
+            connection.execute(
+                "UPDATE interface_versions SET is_default = 1 WHERE id = ?", (version_id,)
+            )
+        return True
+
+    def get_default_version(self) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM interface_versions WHERE is_default = 1 LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_root_version(self) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM interface_versions WHERE is_root = 1 LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def ensure_root_version(self, commit_sha: str, label: str, prompt: str) -> bool:
+        """Pin the immutable ROOT baseline once (the blank-menu factory-reset target). No-op if set."""
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM interface_versions WHERE is_root = 1 LIMIT 1"
+            ).fetchone()
+            if existing:
+                return False
+            connection.execute(
+                """
+                INSERT INTO interface_versions (commit_sha, label, prompt, branch, is_root, created_at)
+                VALUES (?, ?, ?, '', 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(commit_sha) DO UPDATE SET is_root = 1, label = excluded.label
+                """,
+                (commit_sha, label, prompt),
+            )
+        return True
+
+    def upsert_feature_provenance(
+        self, feature_key: str, label: str, prompt: str, branch: str = "",
+        commit_sha: str = "", kind: str = "build",
+    ) -> None:
+        """Save the construction prompt behind a menu feature (idempotent per feature+commit)."""
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO feature_provenance (feature_key, label, prompt, branch, commit_sha, kind, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(feature_key, commit_sha) DO UPDATE SET
+                    label = excluded.label, prompt = excluded.prompt,
+                    branch = excluded.branch, kind = excluded.kind
+                """,
+                (feature_key, label, prompt, branch, commit_sha, kind),
+            )
+
+    def list_feature_provenance(self, feature_key: str | None = None) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            if feature_key:
+                rows = connection.execute(
+                    "SELECT * FROM feature_provenance WHERE feature_key = ? ORDER BY id DESC",
+                    (feature_key,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM feature_provenance ORDER BY id DESC"
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_feature_provenance(self, feature_key: str) -> int:
+        """Remove all stored prompts for one menu feature — the SQLite cleanup when its ✕ removes it."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM feature_provenance WHERE feature_key = ?", (feature_key,)
+            )
+        return cursor.rowcount
+
+    def prune_feature_provenance(self, keep_keys) -> int:
+        """Delete provenance for any feature no longer in the menu (self-healing cleanup on removal).
+        Passing an empty set clears all provenance (a blank menu has no features)."""
+        keep = [str(k) for k in (keep_keys or []) if str(k)]
+        with self.connect() as connection:
+            if keep:
+                placeholders = ",".join("?" * len(keep))
+                cursor = connection.execute(
+                    f"DELETE FROM feature_provenance WHERE feature_key NOT IN ({placeholders})", keep
+                )
+            else:
+                cursor = connection.execute("DELETE FROM feature_provenance")
+        return cursor.rowcount
 
     def prune_old_data(self, days: int = 365) -> None:
         """Rolling-window retention: drop time-series rows older than `days` (default 1 year).

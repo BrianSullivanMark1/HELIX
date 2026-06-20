@@ -176,7 +176,7 @@ from helix.brokers.alpaca import (
 from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
-from helix.selfdev import coder as selfdev_coder, engine as selfdev_engine, mailer as selfdev_mailer, registry as selfdev_registry, restart as selfdev_restart, triggers as selfdev_triggers
+from helix.selfdev import coder as selfdev_coder, engine as selfdev_engine, mailer as selfdev_mailer, registry as selfdev_registry, restart as selfdev_restart, triggers as selfdev_triggers, versioning as selfdev_versioning
 from helix.tasks import registry as tasks_registry
 from helix.vision import analyze as vision_analyze, camera as vision_camera, watch as vision_watch
 from helix.interfaces.cameras import CameraCarousel
@@ -898,7 +898,7 @@ class Launcher(QWidget):
             card.clicked.connect(lambda _=False, k=key: self._on_pick(k))
             card.hide_requested.connect(self._on_badge)
             card.rename_requested.connect(self._rename)
-            self._grid.addWidget(card, n // 2, n % 2)
+            self._grid.addWidget(card, n, 0)  # single column — menu cards stack vertically, not in a grid
 
     def _hide(self, key: str) -> None:
         hidden = self._hidden()
@@ -1193,6 +1193,148 @@ class RiskMonitorTab(QWidget):
         self._poll()
 
 
+class ArchiveTab(QWidget):
+    """Archive / version history (§selfdev): a vertical list of saved app versions you can restore, with
+    a user-set master DEFAULT, an immutable ROOT (blank-menu) factory reset, per-version purge, and
+    manual GitHub backup. Versions are whole-app snapshots — restoring rolls the entire app back to that
+    point as a new, non-destructive commit. git is the version store; this view reads the SQLite index."""
+
+    restore_requested = pyqtSignal(int)
+    setdefault_requested = pyqtSignal(int)
+    purge_requested = pyqtSignal(int)
+    reset_root_requested = pyqtSignal()
+    push_requested = pyqtSignal()
+
+    def __init__(self, memory, parent=None) -> None:
+        super().__init__(parent)
+        self.memory = memory
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 18, 24, 20)
+        outer.setSpacing(12)
+        intro = QLabel(
+            "Every self-improvement is saved here as a version. Restore any of them to roll the whole app "
+            "back — a new commit is made, so nothing is ever lost."
+        )
+        intro.setObjectName("archiveIntro")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+
+        actions = QHBoxLayout()
+        reset_btn = QPushButton("⟲  Reset to Default (Root) — blank menu")
+        reset_btn.setObjectName("dangerButton")
+        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset_btn.setToolTip(
+            "Factory reset: a clean app with only the core pillars and a blank menu — your lifeline if "
+            "something breaks. Non-destructive (a new commit; history is kept)."
+        )
+        reset_btn.clicked.connect(self.reset_root_requested.emit)
+        push_btn = QPushButton("⬆  Back up to GitHub")
+        push_btn.setObjectName("ghostButton")
+        push_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        push_btn.setToolTip("Push main to GitHub now (manual off-machine backup).")
+        push_btn.clicked.connect(self.push_requested.emit)
+        actions.addWidget(reset_btn)
+        actions.addStretch(1)
+        actions.addWidget(push_btn)
+        outer.addLayout(actions)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._host = QWidget()
+        self._list = QVBoxLayout(self._host)
+        self._list.setContentsMargins(0, 0, 0, 0)
+        self._list.setSpacing(10)
+        scroll.setWidget(self._host)
+        outer.addWidget(scroll, 1)
+        self.refresh()
+
+    def refresh(self) -> None:
+        while self._list.count():
+            item = self._list.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        try:
+            versions = self.memory.list_interface_versions()
+        except Exception:
+            versions = []
+        if not versions:
+            empty = QLabel("No versions yet. As HELIX builds features, each one is saved here.")
+            empty.setObjectName("archiveMeta")
+            self._list.addWidget(empty)
+        for version in versions:
+            self._list.addWidget(self._version_card(version))
+        self._list.addStretch(1)
+
+    def _version_card(self, v: dict) -> QFrame:
+        is_root = bool(v.get("is_root"))
+        is_default = bool(v.get("is_default"))
+        protected = is_root or is_default
+        vid = int(v.get("id"))
+        card = QFrame()
+        card.setObjectName("archiveCardRoot" if is_root else "archiveCard")
+        col = QVBoxLayout(card)
+        col.setSpacing(6)
+
+        head = QHBoxLayout()
+        name = QLabel(v.get("label") or (v.get("commit_sha") or "")[:10])
+        name.setObjectName("archiveLabel")
+        name.setWordWrap(True)
+        head.addWidget(name, 1)
+        if is_default:
+            tag = QLabel("DEFAULT")
+            tag.setObjectName("archiveTagDefault")
+            head.addWidget(tag, 0, Qt.AlignmentFlag.AlignTop)
+        if is_root:
+            tag = QLabel("ROOT")
+            tag.setObjectName("archiveTagRoot")
+            head.addWidget(tag, 0, Qt.AlignmentFlag.AlignTop)
+        col.addLayout(head)
+
+        meta_bits = [(v.get("created_at") or "")[:16]]
+        if not is_root:
+            meta_bits.append((v.get("commit_sha") or "")[:10])
+        meta = QLabel(" · ".join(b for b in meta_bits if b))
+        meta.setObjectName("archiveMeta")
+        col.addWidget(meta)
+
+        prompt = (v.get("prompt") or "").strip()
+        if prompt:
+            preview = QLabel(prompt[:220] + ("…" if len(prompt) > 220 else ""))
+            preview.setObjectName("archivePrompt")
+            preview.setWordWrap(True)
+            col.addWidget(preview)
+
+        btns = QHBoxLayout()
+        restore = QPushButton("Reset to this" if is_root else "Restore")
+        restore.setObjectName("ghostButton")
+        restore.setCursor(Qt.CursorShape.PointingHandCursor)
+        restore.clicked.connect(
+            lambda _=False, i=vid, r=is_root: (
+                self.reset_root_requested.emit() if r else self.restore_requested.emit(i)
+            )
+        )
+        btns.addWidget(restore)
+        if not protected:
+            setdef = QPushButton("Set as default")
+            setdef.setObjectName("ghostButton")
+            setdef.setCursor(Qt.CursorShape.PointingHandCursor)
+            setdef.clicked.connect(lambda _=False, i=vid: self.setdefault_requested.emit(i))
+            btns.addWidget(setdef)
+        btns.addStretch(1)
+        if not protected:
+            purge = QPushButton("✕")
+            purge.setObjectName("launcherRemove")
+            purge.setFixedSize(26, 26)
+            purge.setCursor(Qt.CursorShape.PointingHandCursor)
+            purge.setToolTip("Permanently remove this version from the Archive")
+            purge.clicked.connect(lambda _=False, i=vid: self.purge_requested.emit(i))
+            btns.addWidget(purge)
+        col.addLayout(btns)
+        return card
+
+
 class HelixMainWindow(QMainWindow):
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
@@ -1231,6 +1373,7 @@ class HelixMainWindow(QMainWindow):
         settings_layout.addWidget(restore_menu_button, 0, Qt.AlignmentFlag.AlignLeft)
         settings_layout.addStretch(1)
 
+        self.archive_tab = ArchiveTab(memory)
         self.panel_host = PanelHost(
             {
                 "investment": ("Investments", self.investment_tab),
@@ -1242,6 +1385,7 @@ class HelixMainWindow(QMainWindow):
                 "learning": ("Learning", self.learning_tab),
                 "cameras": ("Cameras", self.cameras_tab),
                 "settings": ("Settings", settings_panel),
+                "archive": ("Archive", self.archive_tab),
             },
             on_home=self._show_home,
             settings=AppSettings(),
@@ -1253,6 +1397,7 @@ class HelixMainWindow(QMainWindow):
             ("learning", "Learning", "research · AI"),
             ("cameras", "Cameras", "live house cameras"),
             ("settings", "Settings", "voice speed · devices"),
+            ("archive", "Archive", "versions · restore · safety"),
         ]
         feature_menu = [
             (f.get("key", ""), f.get("label", "Feature"), f.get("subtitle", ""))
@@ -1283,6 +1428,11 @@ class HelixMainWindow(QMainWindow):
         self.xpert_tab.bind_home(self.home_tab)
         self.xpert_tab.request_show_screen.connect(self.open_view)
         self.home_tab.request_show_screen.connect(self.open_view)
+        self.archive_tab.restore_requested.connect(self._archive_restore)
+        self.archive_tab.setdefault_requested.connect(self._archive_set_default)
+        self.archive_tab.purge_requested.connect(self._archive_purge)
+        self.archive_tab.reset_root_requested.connect(self._archive_reset_root)
+        self.archive_tab.push_requested.connect(self._archive_push)
 
         self.refresh_all()
 
@@ -1296,6 +1446,8 @@ class HelixMainWindow(QMainWindow):
         # launch and every 6 hours. Drafts only — never auto-merged (approval still required).
         self._sd_workers = set()
         self._crash_busy = False
+        # Backfill the Archive from git history and clean up provenance for any removed feature, off-thread.
+        QTimer.singleShot(8000, self._archive_startup_sync)
         QTimer.singleShot(120000, self._check_crashes)
         self._crash_timer = QTimer(self)
         self._crash_timer.timeout.connect(self._check_crashes)
@@ -1318,6 +1470,8 @@ class HelixMainWindow(QMainWindow):
         """Pop a panel up (the investments table, home, work, learning). No name → the launcher menu."""
         if name == "tasks":
             self.show_tasks()
+        elif name == "archive":
+            self._open_archive()
         elif name and self.panel_host.show_view(name):
             self.stack.setCurrentIndex(1)
         else:
@@ -1405,13 +1559,130 @@ class HelixMainWindow(QMainWindow):
 
     def _selfdev_tick(self) -> None:
         """Background self-improvement beat. Applies a pending restart when it's safe (not mid-trade)."""
+        self._apply_restart_if_safe()
+
+    def _apply_restart_if_safe(self) -> None:
+        """Perform a pending restart now if no trade cycle is mid-flight (otherwise the 60s tick gets it).
+        Shared by the background beat and the Archive's restore/reset (which set the restart flag)."""
         try:
             if selfdev_restart.restart_pending(self.settings) and not self._trade_cycle_active():
-                self.statusBar().showMessage("Restarting to apply a self-improvement…", 5000)
+                self.statusBar().showMessage("Restarting to apply the change…", 5000)
                 selfdev_restart.perform_restart(self.settings)  # supervisor relaunches us, or we self-spawn
                 QApplication.exit(selfdev_restart.RESTART_EXIT_CODE)
         except Exception:
             pass
+
+    # -- Archive: versions, restore, root reset, purge, backup (§selfdev) ------ #
+
+    def _archive_repo(self) -> str:
+        return str(load_config().root_dir)
+
+    def _open_archive(self) -> None:
+        """Show the Archive, syncing git history → SQLite off-thread first so the list is current."""
+        if self.panel_host.show_view("archive"):
+            self.stack.setCurrentIndex(1)
+        self.statusBar().showMessage("Loading versions…", 3000)
+        spawn_worker(
+            self._sd_workers,
+            lambda: selfdev_versioning.sync(self.memory, self.settings, self._archive_repo()),
+            self._archive_synced,
+        )
+
+    def _archive_synced(self, ok: bool, payload) -> None:
+        self.archive_tab.refresh()
+        if not ok:
+            self.statusBar().showMessage(f"Couldn't refresh versions: {payload}", 6000)
+
+    def _archive_restore(self, version_id: int) -> None:
+        row = self.memory.get_interface_version(version_id)
+        if not row:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Restore version",
+            f"Roll the WHOLE app back to:\n\n{(row.get('label') or '')[:120]}\n\n"
+            "A new restore-commit is made (nothing is lost), then HELIX restarts to load it.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._show_home()
+        self.statusBar().showMessage("Restoring…", 8000)
+        spawn_worker(
+            self._sd_workers,
+            lambda: selfdev_versioning.restore_version(
+                self._archive_repo(), row["commit_sha"], label=(row.get("label") or "")[:40]
+            ),
+            self._restore_done,
+        )
+
+    def _archive_reset_root(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Reset to Default (Root)",
+            "Reset HELIX to its ROOT baseline — a clean app with a BLANK menu (core pillars only).\n\n"
+            "This is the factory reset / lifeline. A new commit is made (history is kept), then HELIX restarts.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._show_home()
+        self.statusBar().showMessage("Resetting to root…", 8000)
+        spawn_worker(
+            self._sd_workers,
+            lambda: selfdev_versioning.reset_to_root(self._archive_repo(), self.memory),
+            self._restore_done,
+        )
+
+    def _restore_done(self, ok: bool, payload) -> None:
+        if ok and payload:
+            selfdev_restart.request_restart(self.settings)
+            self.statusBar().showMessage("Restored — HELIX will restart to apply it.", 8000)
+            self._apply_restart_if_safe()
+        elif ok:
+            self.statusBar().showMessage("Already at that version — nothing to restore.", 6000)
+        else:
+            self.statusBar().showMessage(f"Restore failed: {payload}", 9000)
+
+    def _archive_set_default(self, version_id: int) -> None:
+        if selfdev_versioning.set_default(self.memory, version_id):
+            self.statusBar().showMessage("Master default set.", 5000)
+        self.archive_tab.refresh()
+
+    def _archive_purge(self, version_id: int) -> None:
+        row = self.memory.get_interface_version(version_id)
+        name = ((row.get("label") if row else "") or "this version")[:80]
+        confirm = QMessageBox.question(
+            self,
+            "Remove version",
+            f"Permanently remove “{name}” from the Archive?\nThis can't be undone.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        ok, message = selfdev_versioning.purge_version(self._archive_repo(), self.memory, version_id)
+        self.statusBar().showMessage(message, 6000)
+        self.archive_tab.refresh()
+
+    def _archive_push(self) -> None:
+        self.statusBar().showMessage("Backing up to GitHub…", 8000)
+        spawn_worker(
+            self._sd_workers,
+            lambda: selfdev_versioning.push_to_github(self._archive_repo()),
+            self._push_done,
+        )
+
+    def _push_done(self, ok: bool, payload) -> None:
+        if ok and isinstance(payload, tuple):
+            self.statusBar().showMessage(payload[1], 8000)
+        else:
+            self.statusBar().showMessage(f"Backup failed: {payload}", 8000)
+
+    def _archive_startup_sync(self) -> None:
+        """One-shot, ~8s after launch: reconcile git history into the Archive and prune provenance for
+        features that have been removed — so SQLite cleanup happens even if the Archive is never opened."""
+        spawn_worker(
+            self._sd_workers,
+            lambda: selfdev_versioning.sync(self.memory, self.settings, self._archive_repo()),
+            lambda ok, payload: None,
+        )
 
     def _check_crashes(self) -> None:
         """Off-thread: draft fixes for any new logged crash (recorded pending; never auto-merged)."""
@@ -8668,6 +8939,43 @@ def apply_hud_style(app: QApplication) -> None:
             background-color: rgba(230,60,60,0.95);
             color: #ffffff;
         }
+
+        /* Archive (§selfdev versions & restore). */
+        QLabel#archiveIntro {
+            color: #8fc7d4;
+            font-size: 11pt;
+            padding: 0px 2px 6px 2px;
+        }
+        QFrame#archiveCard {
+            background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(20,44,53,0.5), stop:1 rgba(11,26,32,0.5));
+            border: 1px solid #1b3a44;
+            border-radius: 12px;
+            padding: 12px 14px;
+        }
+        QFrame#archiveCard:hover { border-color: #1dd8ff; }
+        QFrame#archiveCardRoot {
+            background-color: rgba(20,40,30,0.5);
+            border: 1px solid #2c6e4a;
+            border-radius: 12px;
+            padding: 12px 14px;
+        }
+        QLabel#archiveLabel { color: #eaffff; font-size: 13pt; font-weight: 800; }
+        QLabel#archiveMeta { color: #6f93a0; font-size: 9pt; }
+        QLabel#archivePrompt { color: #b9d9e2; font-size: 10pt; }
+        QLabel#archiveTagDefault {
+            color: #07141a; background-color: #1dd8ff; border-radius: 8px;
+            padding: 1px 8px; font-size: 9pt; font-weight: 800;
+        }
+        QLabel#archiveTagRoot {
+            color: #ffffff; background-color: #2c8e5a; border-radius: 8px;
+            padding: 1px 8px; font-size: 9pt; font-weight: 800;
+        }
+        QPushButton#dangerButton {
+            background-color: rgba(120,30,30,0.55); color: #ffd9d9;
+            border: 1px solid #6e2a2a; border-radius: 12px; padding: 10px 16px; font-weight: 800;
+        }
+        QPushButton#dangerButton:hover { background-color: rgba(200,55,55,0.9); color: #ffffff; }
 
         QLabel#xpertHint {
             color: #8fc7d4;
