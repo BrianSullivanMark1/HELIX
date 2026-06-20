@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from helix.core.config import load_config
-from helix.selfdev import coder, gitops
+from helix.selfdev import coder, constitution, gitops
 
 SELFDEV_PENDING_SETTING = "selfdev_pending"
 
@@ -72,6 +72,20 @@ def _set_status(settings: Any, branch: str, status: str) -> None:
     settings.set(SELFDEV_PENDING_SETTING, pending)
 
 
+def _changed_files_for(repo: str, rec: dict) -> list[str]:
+    """The files a pending change touches — from git (authoritative), with the recorded list as fallback."""
+    base = rec.get("base") or "main"
+    branch = rec.get("branch") or ""
+    if branch:
+        try:
+            names = gitops.diff_names(repo, base, branch)
+            if names:
+                return names
+        except gitops.GitError:
+            pass
+    return list(rec.get("files") or [])
+
+
 def smoke_check(repo: str, ref: str) -> tuple[bool, str]:
     """Import-check a branch's code in an isolated worktree, so the live tree is never disturbed.
 
@@ -118,6 +132,18 @@ def approve(settings: Any, *, pending_id: str | None = None, into: str = "main",
     if not rec:
         return ApprovalResult(False, "There's no pending change to approve.")
     branch = rec["branch"]
+    # GUARDRAIL (Commandments 7 & 8): a self-change may never edit the protected machinery — the laws,
+    # the approval gate, the off switch, or the recovery paths. Every approval route funnels through
+    # here, so this scan is the one line nothing self-written can bypass.
+    violations = constitution.check_change(_changed_files_for(repo, rec))
+    if violations:
+        _set_status(settings, branch, "blocked_guardrail")
+        return ApprovalResult(
+            False,
+            "Blocked by the Twelve Commandments: this change edits protected machinery "
+            f"({', '.join(violations)}). HELIX can't weaken its own guardrails or recovery paths. "
+            "Reject it — or, if a human truly intends this, amend the constitution out-of-band.",
+        )
     ok, detail = smoke_check(repo, branch)
     if not ok:
         _set_status(settings, branch, "failed_check")

@@ -24,7 +24,7 @@ from typing import Callable
 
 from helix.core.config import load_config
 from helix.core.settings import AppSettings
-from helix.selfdev import gitops
+from helix.selfdev import constitution, gitops
 
 DEFAULT_CODER_MODEL = "claude-opus-4-8"   # Opus 4.8 — the coding brain, at Brian's direction
 CODER_TIMEOUT_SECONDS = 1800              # a real coding task can take a few minutes
@@ -140,6 +140,12 @@ def build_coder_prompt(task: str) -> str:
         "- Do NOT run `git commit`, `git push`, or any git command — HELIX handles version control. "
         "Just edit the files.\n"
         "- Never modify the `data/` directory, secrets, or API keys.\n"
+        "- HELIX is bound by its Twelve Commandments (helix/selfdev/constitution.py). You MUST NOT edit, "
+        "weaken, disable, or work around any of these PROTECTED files: " + ", ".join(constitution.PROTECTED_PATHS)
+        + ". Never weaken the human-approval gate, the Archive or root-reset recovery, the off switch, or "
+        "the live-trading confirmation, and never add any way for HELIX to approve its own changes. A change "
+        "touching protected machinery is auto-rejected at merge and wasted.\n"
+        "- The Settings and Archive menu items are permanent — never make them removable or hideable.\n"
         "- If you add a user-facing feature that deserves its own screen, make it removable: register a "
         "panel in HelixMainWindow's `views` dict, add its key to the show_screen tool, and append "
         "{key, label, subtitle} to helix/selfdev/registry.py MENU_FEATURES — so the launcher shows it with "

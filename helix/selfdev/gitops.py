@@ -134,6 +134,13 @@ def show_file(repo: str, ref: str, path: str, *, timeout: int = 30) -> str | Non
         return None
 
 
+def diff_names(repo: str, base: str, branch: str, *, timeout: int = 30) -> list[str]:
+    """Files that `branch` changes relative to `base` (the merge-base three-dot diff), repo-relative and
+    forward-slashed. Used by the approval gate to scan a self-change against the protected paths."""
+    out = _git(repo, ["diff", "--name-only", f"{base}...{branch}"], timeout=timeout)
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
 def log_merges(repo: str, branch: str = "main", *, limit: int = 200) -> list[dict]:
     """First-parent merge commits on `branch`, newest first: [{sha, date, subject, body}].
 

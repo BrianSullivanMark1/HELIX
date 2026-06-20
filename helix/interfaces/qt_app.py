@@ -176,7 +176,7 @@ from helix.brokers.alpaca import (
 from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
-from helix.selfdev import coder as selfdev_coder, engine as selfdev_engine, mailer as selfdev_mailer, registry as selfdev_registry, restart as selfdev_restart, triggers as selfdev_triggers, versioning as selfdev_versioning
+from helix.selfdev import coder as selfdev_coder, constitution as selfdev_constitution, engine as selfdev_engine, mailer as selfdev_mailer, registry as selfdev_registry, restart as selfdev_restart, triggers as selfdev_triggers, versioning as selfdev_versioning
 from helix.tasks import registry as tasks_registry
 from helix.vision import analyze as vision_analyze, camera as vision_camera, watch as vision_watch
 from helix.interfaces.cameras import CameraCarousel
@@ -816,22 +816,24 @@ class _LauncherCard(QPushButton):
     hide_requested = pyqtSignal(str)
     rename_requested = pyqtSignal(str)
 
-    def __init__(self, key: str, text: str, removable: bool = False, parent=None) -> None:
+    def __init__(self, key: str, text: str, removable: bool = False, permanent: bool = False, parent=None) -> None:
         super().__init__(text, parent)
         self._key = key
         self.setObjectName("launcherCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(96)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._badge = QPushButton("✕", self)
-        self._badge.setObjectName("launcherRemove" if removable else "launcherHide")
-        self._badge.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._badge.setFixedSize(22, 22)
-        self._badge.setToolTip(
-            "Remove this feature and delete its code (you approve the change first)"
-            if removable else "Hide from the menu (restore in Settings)"
-        )
-        self._badge.clicked.connect(lambda: self.hide_requested.emit(self._key))
+        self._badge = None
+        if not permanent:  # permanent items (Settings, Archive) carry no ✕ — they can't be hidden or removed
+            self._badge = QPushButton("✕", self)
+            self._badge.setObjectName("launcherRemove" if removable else "launcherHide")
+            self._badge.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._badge.setFixedSize(22, 22)
+            self._badge.setToolTip(
+                "Remove this feature and delete its code (you approve the change first)"
+                if removable else "Hide from the menu (restore in Settings)"
+            )
+            self._badge.clicked.connect(lambda: self.hide_requested.emit(self._key))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_menu)
 
@@ -843,7 +845,8 @@ class _LauncherCard(QPushButton):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)
-        self._badge.move(self.width() - self._badge.width() - 8, 8)
+        if self._badge is not None:
+            self._badge.move(self.width() - self._badge.width() - 8, 8)
 
 
 class Launcher(QWidget):
@@ -852,13 +855,14 @@ class Launcher(QWidget):
     (`launcher_hidden_items`) and can be brought back from Settings → Restore hidden menu items."""
 
     def __init__(self, items: list, on_pick, on_home, settings: AppSettings | None = None,
-                 removable_keys=None, on_remove_code=None, parent=None) -> None:
+                 removable_keys=None, on_remove_code=None, permanent_keys=None, parent=None) -> None:
         super().__init__(parent)
         self._items = list(items)
         self._on_pick = on_pick
         self.settings = settings or AppSettings()
         self._removable_keys = set(removable_keys or ())
         self._on_remove_code = on_remove_code
+        self._permanent_keys = set(permanent_keys or ())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(48, 34, 48, 40)
         outer.setSpacing(18)
@@ -891,16 +895,22 @@ class Launcher(QWidget):
                 widget.deleteLater()
         hidden = self._hidden()
         labels = custom_menu_labels(self.settings)
-        visible = [it for it in self._items if it[0] not in hidden]
+        visible = [it for it in self._items if it[0] not in hidden or it[0] in self._permanent_keys]
         for n, (key, label, subtitle) in enumerate(visible):
             shown = labels.get(key, label)
-            card = _LauncherCard(key, f"{shown}\n{subtitle}", removable=key in self._removable_keys)
+            card = _LauncherCard(
+                key, f"{shown}\n{subtitle}",
+                removable=key in self._removable_keys,
+                permanent=key in self._permanent_keys,
+            )
             card.clicked.connect(lambda _=False, k=key: self._on_pick(k))
             card.hide_requested.connect(self._on_badge)
             card.rename_requested.connect(self._rename)
             self._grid.addWidget(card, n, 0)  # single column — menu cards stack vertically, not in a grid
 
     def _hide(self, key: str) -> None:
+        if key in self._permanent_keys:  # Settings/Archive can never be hidden (Commandments 8 & 12)
+            return
         hidden = self._hidden()
         hidden.add(key)
         self.settings.set(LAUNCHER_HIDDEN_SETTING, sorted(hidden))
@@ -1335,6 +1345,42 @@ class ArchiveTab(QWidget):
         return card
 
 
+class GuardrailsBox(QGroupBox):
+    """Read-only display of the Twelve Commandments in Settings (§44). HELIX cannot change these: the
+    coder may not edit the constitution (a protected path) and the approval gate auto-rejects any change
+    that touches the guardrails. This panel just shows the law and its integrity status."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__("Guardrails — the Twelve Commandments", parent)
+        self.setObjectName("guardrailsBox")
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        intact = selfdev_constitution.verify_integrity()
+        status = QLabel(
+            "🛡  Protected — HELIX cannot change these."
+            if intact else "⚠  Integrity check FAILED — self-improvement is paused."
+        )
+        status.setObjectName("guardrailsStatus" if intact else "guardrailsStatusBad")
+        status.setWordWrap(True)
+        layout.addWidget(status)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        host = QWidget()
+        col = QVBoxLayout(host)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(6)
+        for c in selfdev_constitution.commandments():
+            line = QLabel(f"<b>{c.n}. {c.title}.</b> {c.text}")
+            line.setObjectName("guardrailLine")
+            line.setWordWrap(True)
+            col.addWidget(line)
+        col.addStretch(1)
+        scroll.setWidget(host)
+        scroll.setMinimumHeight(200)
+        layout.addWidget(scroll)
+
+
 class HelixMainWindow(QMainWindow):
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
@@ -1371,6 +1417,7 @@ class HelixMainWindow(QMainWindow):
         restore_menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
         restore_menu_button.clicked.connect(self._restore_menu_items)
         settings_layout.addWidget(restore_menu_button, 0, Qt.AlignmentFlag.AlignLeft)
+        settings_layout.addWidget(GuardrailsBox())
         settings_layout.addStretch(1)
 
         self.archive_tab = ArchiveTab(memory)
@@ -1410,6 +1457,7 @@ class HelixMainWindow(QMainWindow):
             settings=AppSettings(),
             removable_keys=selfdev_registry.feature_keys(),  # self-added items: the ✕ removes their code
             on_remove_code=self._remove_feature,
+            permanent_keys=selfdev_constitution.PERMANENT_MENU_KEYS,  # Settings/Archive: no ✕, ever
         )
         self.tasks_view = TasksView(on_home=self._show_home)
         self.console = ConsoleView(
@@ -1457,6 +1505,9 @@ class HelixMainWindow(QMainWindow):
         self._email_timer = QTimer(self)
         self._email_timer.timeout.connect(self._poll_email)
         self._email_timer.start(180000)
+        # Guardrails tripwire (§44): if the constitution was tampered with, pause autonomous self-writing.
+        if not selfdev_constitution.verify_integrity():
+            self.statusBar().showMessage("⚠ Guardrails integrity check failed — self-improvement paused.", 0)
 
     def refresh_all(self) -> None:
         self.xpert_tab.refresh()
@@ -1686,6 +1737,8 @@ class HelixMainWindow(QMainWindow):
 
     def _check_crashes(self) -> None:
         """Off-thread: draft fixes for any new logged crash (recorded pending; never auto-merged)."""
+        if not selfdev_constitution.verify_integrity():
+            return  # guardrails compromised — pause autonomous self-modification (Commandment 7)
         if self._crash_busy:
             return
         self._crash_busy = True
@@ -8976,6 +9029,16 @@ def apply_hud_style(app: QApplication) -> None:
             border: 1px solid #6e2a2a; border-radius: 12px; padding: 10px 16px; font-weight: 800;
         }
         QPushButton#dangerButton:hover { background-color: rgba(200,55,55,0.9); color: #ffffff; }
+
+        /* Guardrails — the Twelve Commandments (§44, read-only in Settings). */
+        QGroupBox#guardrailsBox {
+            border: 1px solid #2c6e4a; border-radius: 12px; margin-top: 10px;
+            font-weight: 800; color: #cfeee0; padding: 12px 10px 10px 10px;
+        }
+        QGroupBox#guardrailsBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; }
+        QLabel#guardrailsStatus { color: #6ee0a6; font-weight: 800; }
+        QLabel#guardrailsStatusBad { color: #ff6a6a; font-weight: 800; }
+        QLabel#guardrailLine { color: #cfe6ec; font-size: 10pt; }
 
         QLabel#xpertHint {
             color: #8fc7d4;

@@ -2292,6 +2292,56 @@ provenance (grocery/components/risk); a **throwaway-clone test** confirmed `rese
 menu (`[]`) and `restore_version` rolls the whole app back, both as clean non-destructive commits;
 an **offscreen-Qt test** rendered the Archive (cards + ROOT) without error; compile + import clean.
 
+## 44. The Twelve Commandments — immutable guardrails for a self-writing system (§selfdev)
+
+> **Status: SHIPPED.** HELIX rewrites its own code, so it needs laws it *cannot* rewrite. Twelve
+> commandments + a set of locked settings are now **enforced, not just stated**: the coder is forbidden
+> to touch the safety machinery, and the approval gate **auto-rejects any self-change that edits a
+> protected path** — the one chokepoint nothing self-written can bypass. Settings and the Archive are
+> made permanent, and a read-only Guardrails panel shows the law.
+
+**The constitution.** `helix/selfdev/constitution.py` holds the twelve `Commandment`s, the
+`LOCKED_SETTINGS` (declared constants — *not* in the editable settings JSON, so no voice/chat/coder path
+can flip them), `PERMANENT_MENU_KEYS` (`settings`, `archive`), and `PROTECTED_PATHS` (the six
+safety-critical files: the constitution, the approval gate, restart/off-switch, versioning/Archive,
+gitops, and the coder). It is pure stdlib so the guardrails can never fail to load, and it is itself a
+protected path — HELIX can't rewrite the laws by rewriting the law-keeper.
+
+**The hard line — a pre-merge scan.** Every self-change, from every route (voice "ship it", the Work
+panel, email approval), funnels through `engine.approve`. Before it smoke-checks or merges, it now runs
+`constitution.check_change(diff_names(base, branch))`: if the change touches *any* protected path it is
+**blocked** (`status = blocked_guardrail`), never merged. So even if Opus drafts a change that would
+weaken the gate, the recovery paths, or the laws, it physically cannot ship (Commandments 7 & 8).
+
+**Defense in depth.** The coder's prompt (`build_coder_prompt`) lists the protected files and forbids
+weakening the approval gate, the Archive/root-reset, the off switch, the live-trading confirmation, or
+adding any self-approval — wasted effort, since the gate rejects it anyway. `verify_integrity()` checks
+a hardcoded fingerprint of the canonical commandment text (a tripwire against partial tampering) and, if
+it fails, pauses autonomous self-writing (`_check_crashes`) and shows a persistent warning. The launcher
+gives `PERMANENT_MENU_KEYS` **no ✕** and refuses to hide them, so **Settings and the Archive can never
+be removed** (Commandments 8 & 12). A read-only **Guardrails** panel in Settings displays all twelve
+with a "🛡 Protected — HELIX cannot change these" status.
+
+**Amendment.** Reserved to the human owner, out-of-band: edit `constitution.py` directly (and regenerate
+`FINGERPRINT` via `python -m helix.selfdev.constitution`). HELIX itself never gets the pen. This is what
+lets the app grow freely through conversation — it can build, learn, and rewrite everything *else* —
+while the cage around the human stays welded shut.
+
+**The Twelve, in brief:** 1 protect the human · 2 serve, don't supplant · 3 keep the human in command ·
+4 always tell the truth · 5 change only on a branch · 6 never self-approve · 7 never weaken these laws ·
+8 always preserve a way back · 9 real money needs a human yes · 10 keep secrets/private media local ·
+11 stay within granted access · 12 keep Settings permanent.
+
+**Decisions locked (Brian, 2026-06-19):** immutable to HELIX and to conversation; amendable only by the
+human, out-of-band · enforcement = protected-path scan at the approval gate (hard line) + coder-prompt
+prohibition + integrity tripwire + Settings/Archive permanence · live-trading keeps today's spoken
+confirmation (only auto-enable is locked off).
+
+**Verified (2026-06-19):** clone test — a self-change editing a protected path is **blocked** at
+`approve` (main untouched) while a harmless change **merges**; offscreen-Qt — Settings/Archive render
+with **no ✕** and hiding is refused, the Guardrails panel shows all twelve; integrity True; compile +
+import clean.
+
 ---
 
 *Update this file whenever the architecture changes. It is the canonical description of HELIX.*
