@@ -181,7 +181,6 @@ from helix.tasks import registry as tasks_registry
 from helix.vision import analyze as vision_analyze, camera as vision_camera, watch as vision_watch
 from helix.interfaces.cameras import CameraCarousel
 from helix.investment.models import InvestmentProfile, RISK_LEVELS
-from helix.investment.planner import build_briefing, render_briefing
 from helix.home import groceries as groceries_store
 from helix.home import kroger
 from helix.components import parts as components_store
@@ -1779,34 +1778,6 @@ class HelixMainWindow(QMainWindow):
         if ok and payload:
             applied = ", ".join(f"{a['action']} {a['branch']}" for a in payload)
             self.statusBar().showMessage(f"Email approval applied: {applied}", 10000)
-
-
-class DashboardTab(QWidget):
-    def __init__(self, memory: SQLiteMemory) -> None:
-        super().__init__()
-        self.memory = memory
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(18)
-        header = QLabel("Investment Briefing")
-        header.setObjectName("sectionHeader")
-
-        self.briefing = QTextEdit()
-        self.briefing.setObjectName("briefingPanel")
-        self.briefing.setReadOnly(True)
-        self.briefing.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.refresh)
-
-        layout.addWidget(header)
-        layout.addWidget(self.briefing, 1)
-        layout.addWidget(refresh, alignment=Qt.AlignmentFlag.AlignRight)
-
-    def refresh(self) -> None:
-        briefing = build_briefing(self.memory.get_investment_profile())
-        self.briefing.setPlainText(render_briefing(briefing))
 
 
 # --- Audio devices + hands-free wake-word ("HELIX") voice detection (§23) --------------------- #
