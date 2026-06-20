@@ -1080,6 +1080,7 @@ class RiskMonitorTab(QWidget):
         self._workers: set = set()
         self._busy = False
         self._last_signature = None  # speak only when the tripped-alert set changes
+        self._primed = False  # the first read after launch sets the baseline SILENTLY (no startup finance blurt)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1250,9 +1251,14 @@ class RiskMonitorTab(QWidget):
             )
             self.alerts_list.setPlainText("\n".join(f"• {a.message}" for a in report.alerts))
 
-        # Speak only when the set of tripped alerts changes (not every poll).
+        # Speak only when the set of tripped alerts CHANGES — and never on the first read after launch,
+        # so startup is just HELIX's hello, not a finance briefing. The first poll primes the baseline
+        # silently; genuinely new alerts that arise later in the session still speak.
         signature = alert_signature(report)
-        if signature != self._last_signature:
+        if not self._primed:
+            self._primed = True
+            self._last_signature = signature
+        elif signature != self._last_signature:
             self._last_signature = signature
             line = alert_speech(report)
             if line and self._speak is not None:
