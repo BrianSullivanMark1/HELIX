@@ -106,6 +106,7 @@ def smoke_check(repo: str, ref: str) -> tuple[bool, str]:
             proc = subprocess.run(
                 [sys.executable, "-c", code], cwd=worktree, capture_output=True,
                 text=True, encoding="utf-8", errors="replace", timeout=180,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # don't flash a console window
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return False, f"smoke check could not run: {exc}"

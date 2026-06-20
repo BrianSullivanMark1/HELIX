@@ -12,6 +12,11 @@ from __future__ import annotations
 
 import subprocess
 
+# On Windows a windowless launch (pythonw) flashes a console window for every child console process
+# (each git call). CREATE_NO_WINDOW suppresses that; it is 0 on other platforms. Without it, a burst of
+# git calls — e.g. the Archive sync at startup — pops a burst of black terminal windows on screen.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
 class GitError(RuntimeError):
     """A git command failed (non-zero exit, or git could not run)."""
@@ -27,6 +32,7 @@ def _git(repo: str, args: list[str], *, timeout: int = 30, check: bool = True) -
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            creationflags=_NO_WINDOW,
         )
     except (FileNotFoundError, subprocess.SubprocessError, OSError) as exc:
         raise GitError(f"git {' '.join(args)} could not run: {exc}") from exc

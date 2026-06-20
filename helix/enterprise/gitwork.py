@@ -42,6 +42,7 @@ def _git(repo_path: str, args: list[str], timeout: int = 15) -> str | None:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # don't flash a console window
         )
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
         return None
