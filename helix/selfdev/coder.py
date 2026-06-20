@@ -241,9 +241,13 @@ def run_coding_task(
     branch: str | None = None,
     timeout: int = CODER_TIMEOUT_SECONDS,
     cli_path: str | None = None,
+    prompt: str | None = None,
     on_step: Callable[[str], None] | None = None,
 ) -> CoderResult:
     """Have Opus 4.8 implement `task` on a fresh `selfdev/*` branch and return the proposed change.
+
+    `prompt` overrides the default self-improvement instruction — pass a build-an-app prompt
+    (`builds.build_app_prompt`) when targeting a standalone Build workspace instead of HELIX itself.
 
     Safe + reversible by construction: aborts unless the working tree is clean, does all work on a new
     branch, and — on success — commits to that branch then switches back to the base branch so the
@@ -293,7 +297,7 @@ def run_coding_task(
     else:
         env["ANTHROPIC_API_KEY"] = key
     # Stream the run so HELIX can show live progress ("Reading X", "Editing Y") instead of a black box.
-    cmd = [cli, "-p", build_coder_prompt(task), "--output-format", "stream-json", "--verbose",
+    cmd = [cli, "-p", prompt or build_coder_prompt(task), "--output-format", "stream-json", "--verbose",
            "--model", model, "--permission-mode", "acceptEdits"]
     step("Opus 4.8 is working on the change…")
     no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # don't pop a console when HELIX runs windowless

@@ -48,6 +48,18 @@ def is_git_repo(repo: str) -> bool:
         return False
 
 
+def init(repo: str, *, initial_branch: str = "main") -> None:
+    """Initialise a fresh git repository at `repo` with `initial_branch` as the default branch.
+
+    Used to give each Build its own isolated, versioned workspace (§forge). Tolerates older gits that
+    lack `init -b` by falling back to init + branch rename."""
+    try:
+        _git(repo, ["init", "-b", initial_branch])
+    except GitError:
+        _git(repo, ["init"])
+        _git(repo, ["checkout", "-B", initial_branch], check=False)
+
+
 def current_branch(repo: str) -> str:
     return _git(repo, ["rev-parse", "--abbrev-ref", "HEAD"])
 
