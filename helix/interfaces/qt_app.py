@@ -655,21 +655,32 @@ class ConsoleView(QWidget):
         self.presence.setObjectName("consolePresence")
         brand.addWidget(name)
         brand.addWidget(self.presence)
-        tasks_button = QPushButton("⚡  Tasks")
-        tasks_button.setObjectName("ghostButton")
-        tasks_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        tasks_button.setToolTip("Run a task — Morning Briefing, Check All Systems, Review Portfolio…")
-        tasks_button.clicked.connect(show_tasks or show_launcher)
         menu_button = QPushButton("☰  Menu")
         menu_button.setObjectName("ghostButton")
         menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
         menu_button.setToolTip("Open anything — Investments, Home, Work, Learning")
         menu_button.clicked.connect(show_launcher)
+        tasks_button = QPushButton("⚡  Tasks")
+        tasks_button.setObjectName("ghostButton")
+        tasks_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        tasks_button.setToolTip("Run a task — Morning Briefing, Check All Systems, Review Portfolio…")
+        tasks_button.clicked.connect(show_tasks or show_launcher)
+        # Archive lives here as a standalone, always-visible button (not buried in the menu) — it's the
+        # recovery lifeline the Commandments require to always exist and function.
+        archive_button = QPushButton("🗂  Archive")
+        archive_button.setObjectName("ghostButton")
+        archive_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        archive_button.setToolTip("Versions · restore · safety")
+        archive_button.clicked.connect(lambda: open_view("archive"))
+        # The manual-navigation buttons, stacked vertically: Menu → Tasks → Archive.
+        nav = QVBoxLayout()
+        nav.setSpacing(8)
+        nav.addWidget(menu_button)
+        nav.addWidget(tasks_button)
+        nav.addWidget(archive_button)
         topbar.addLayout(brand)
         topbar.addStretch(1)
-        topbar.addWidget(tasks_button, 0, Qt.AlignmentFlag.AlignTop)
-        topbar.addSpacing(8)
-        topbar.addWidget(menu_button, 0, Qt.AlignmentFlag.AlignTop)
+        topbar.addLayout(nav)
         layout.addLayout(topbar)
 
         # the orb — large, centered, the face of the app
@@ -906,7 +917,7 @@ class Launcher(QWidget):
             card.clicked.connect(lambda _=False, k=key: self._on_pick(k))
             card.hide_requested.connect(self._on_badge)
             card.rename_requested.connect(self._rename)
-            self._grid.addWidget(card, n, 0)  # single column — menu cards stack vertically, not in a grid
+            self._grid.addWidget(card, n // 2, n % 2)  # 2-column grid — compact and readable
 
     def _hide(self, key: str) -> None:
         if key in self._permanent_keys:  # Settings/Archive can never be hidden (Commandments 8 & 12)
@@ -1444,7 +1455,8 @@ class HelixMainWindow(QMainWindow):
             ("learning", "Learning", "research · AI"),
             ("cameras", "Cameras", "live house cameras"),
             ("settings", "Settings", "voice speed · devices"),
-            ("archive", "Archive", "versions · restore · safety"),
+            # Archive is reached via its own standalone button in the Console top bar (always visible),
+            # so it no longer appears as a card inside the launcher menu.
         ]
         feature_menu = [
             (f.get("key", ""), f.get("label", "Feature"), f.get("subtitle", ""))
