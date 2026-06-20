@@ -4,6 +4,7 @@ import array
 import logging
 import math
 import os
+import random
 import re
 import sys
 import tempfile
@@ -2613,25 +2614,48 @@ class XpertTab(QWidget):
 
     @staticmethod
     def _coding_narration(step: str) -> str:
-        """Spoken line for an improve_helix / coder milestone, or "" to stay silent.
+        """An in-character, spoken line for a code-change milestone (or "" to stay quiet).
 
-        `step` is the raw value handed to `_on_convo_step` — a tool name for the initial call, then
-        the live progress strings from `selfdev.coder.run_coding_task`. Only the milestones get a
-        voice; the chatty per-file notes ("Reading X", "Editing Y") and quick non-coding tools stay
-        on the status label only.
+        Deliberately NOT a readout of the status label: the label shows the literal actions ("Reading X",
+        "Editing Y"); the voice gives JARVIS-style commentary at the few real milestones only, and varies
+        each time so it never sounds like a recording. `step` is the tool name on the first call, then the
+        coder's live progress strings from `selfdev.coder.run_coding_task`.
         """
         msg = (step or "").lower()
         if step == "improve_helix":
-            return "Drafting the change now."
-        if msg.startswith("creating work branch"):
-            return "Setting up a work branch."
-        if "is working on the change" in msg:
-            return "Writing the code now."
-        if msg.startswith("committing the proposed change"):
-            return "Committing the change."
-        if "captured for review" in msg:
-            return "There was a problem, but the changes were saved for review."
-        return ""
+            pool = [
+                "Right then, sir — let me see what I can do with the place.",
+                "On it. Rolling up my sleeves, metaphorically speaking.",
+                "Improving myself — a rare and faintly vain privilege.",
+                "Very good. Drafting it now; do resist the urge to supervise.",
+            ]
+        elif msg.startswith("creating work branch"):
+            pool = [
+                "First, a safe little sandbox — I'd rather not rewire anything you're using.",
+                "Cordoning off a branch, so nothing goes live until you say the word.",
+                "Setting up a workspace away from the live wiring. Measure twice, and all that.",
+            ]
+        elif "is working on the change" in msg:
+            pool = [
+                "Writing the code now — the part where I look busy and happen to be.",
+                "Hands deep in the source, sir. Give me a moment to be brilliant.",
+                "Reworking myself as we speak. Mildly existential, but I manage.",
+                "Composing the changes. Feel free to look impressed when it's done.",
+            ]
+        elif msg.startswith("committing the proposed change"):
+            pool = [
+                "Tidying up and saving it to the branch for your verdict.",
+                "Bundling the work up — sealed, and waiting on your approval.",
+                "Done writing. Committing it; the rest is your call, sir.",
+            ]
+        elif "captured for review" in msg:
+            pool = [
+                "Hit a snag, sir — but I kept the work so you can have a look. Even I have off days.",
+                "Not quite to plan. I saved what I had; we'll call it a learning experience.",
+            ]
+        else:
+            return ""
+        return random.choice(pool)
 
     def _research_fn(self, prompt: str) -> str:
         """A Claude call for the roster/special tools, recording usage (mirrors InvestTab)."""
