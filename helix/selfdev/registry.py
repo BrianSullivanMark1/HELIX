@@ -1,22 +1,18 @@
-"""Registry of SELF-ADDED features that appear in the launcher menu (§selfdev).
+"""Registry of the apps a user has BUILT, which appear as cards in the launcher menu (§forge).
 
-When HELIX writes a new user-facing feature for itself, it registers the feature here so the launcher
-shows it with a remove (✕) affordance. Core features (Investments, Home, Work, Learning, Settings) are
-NOT listed here and cannot be removed. Removing a self-added feature deletes its code AND its entry here
-(via `remove_feature`). Keeping this a plain list the coder edits means the launcher stays in sync after
-a restart.
+The product ships with this list EMPTY — the menu starts blank. Each app the user builds through the
+Console is registered here so the launcher shows its card with a remove (✕) affordance. Core screens
+(Settings, Archive) are NOT listed here and cannot be removed. Keeping this a plain list means the
+launcher stays in sync after a restart.
 
-Each entry: {"key": "...", "label": "...", "subtitle": "..."}. `key` must match the panel the feature
+Each entry: {"key": "...", "label": "...", "subtitle": "..."}. `key` matches the panel the app
 registers in HelixMainWindow's `views` dict and the `show_screen` key, so the launcher card opens it.
 """
 from __future__ import annotations
 
 MENU_FEATURES: list[dict] = [
-    {"key": "grocery", "label": "Groceries", "subtitle": "shopping list · order from Fry's"},
-    {"key": "components", "label": "Fabrication", "subtitle": "parts list · DigiKey + Mouser"},
-    {"key": "risk", "label": "Risk Monitor", "subtitle": "margin · concentration · loss alerts"},
-    # Self-added features land here, e.g.:
-    # {"key": "weather", "label": "Weather", "subtitle": "local forecast"},
+    # Ships EMPTY: the menu starts blank and fills only with apps the user builds. Each built app
+    # lands here as {"key": "...", "label": "...", "subtitle": "..."} so the launcher shows its card.
 ]
 
 
