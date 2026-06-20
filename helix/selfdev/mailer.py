@@ -14,7 +14,7 @@ import re
 from email.header import decode_header, make_header
 from typing import Any, Callable
 
-from helix.home.notify import sms_config, send_text_via_email
+from helix.core.mailer import sms_config, send_text_via_email
 from helix.selfdev import engine
 
 SELFDEV_NOTIFY_EMAIL_SETTING = "selfdev_notify_email"       # where to email approval requests (Brian)

@@ -78,7 +78,6 @@ from helix.ai.transcribe import is_available as stt_available, is_ready as stt_r
 from helix.ai.actions import (
     ActionContext,
     ActionRouter,
-    COMPONENTS_BUILDER_TOOLS,
     is_affirmative,
     is_negative,
     run_chat_turn,
@@ -2168,10 +2167,9 @@ class XpertTab(QWidget):
 
     # Worker -> main-thread signals (Qt queues these across threads, so tool side effects that
     # touch widgets are marshalled safely back to the UI thread).
-    request_invest = pyqtSignal(str)        # "start" / "stop" auto-investing on the Investment tab
-    request_home_refresh = pyqtSignal()     # reload the Home checklist after a task change
     convo_step = pyqtSignal(str)            # live "what HELIX is doing now" status during a turn
-    request_show_screen = pyqtSignal(str)   # ask the main window to pop a panel up (investment/home/…)
+    request_show_screen = pyqtSignal(str)   # ask the main window to open a screen (menu/tasks/archive/settings)
+    request_build_created = pyqtSignal(str) # a new app was built — refresh the menu so its card appears
 
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
@@ -2193,11 +2191,6 @@ class XpertTab(QWidget):
         self._convo_context = ""      # HELIX live context, snapshotted at the start of each turn
         self._speak_done_cb = None    # called when the current spoken reply finishes
         self._pending_speech = ""
-        self._invest_tab = None       # bound by HelixMainWindow (start/stop auto-investing)
-        self._home_tab = None
-        self._inv_live = False
-        self._inv_running = False
-        self._inv_keys = False
         # Hands-free wake-word ("HELIX") state. Always on: started right after launch (no toggle); it
         # degrades silently to push-to-talk + typing if the mic / voice model / Claude key isn't ready.
         self._handsfree = False
@@ -2215,8 +2208,6 @@ class XpertTab(QWidget):
         self._setup_tts()
         self._setup_mic()
         self._router = self._build_router()
-        self.request_invest.connect(self._do_invest_action)
-        self.request_home_refresh.connect(self._do_home_refresh)
         self.convo_step.connect(self._on_convo_step)
 
         outer_layout = QVBoxLayout(self)
@@ -2437,55 +2428,30 @@ class XpertTab(QWidget):
             self.status.setText("Save your Alpaca keys in the Investment tab to load your balance.")
 
     def _context(self) -> str:
+        """A short, live snapshot of the user's workshop for the system prompt: what they've built
+        and what's waiting to ship."""
         state = self._state or {}
+        lines: list[str] = []
         try:
-            due = due_tasks(self.settings.get(HOME_TASKS_SETTING) or [])
+            from helix.selfdev import builds as _builds
+            made = _builds.list_builds()
         except Exception:
-            due = []
-        if due:
-            due_txt = ", ".join(
-                f"{entry['action']} {entry['item']}".strip()
-                + ("/overdue" if entry["status"] == "Overdue" else "")
-                for entry in due
-            )
-            home_line = f"Home: {len(due)} task(s) due now ({due_txt})."
+            made = []
+        if made:
+            names = ", ".join(b["name"] for b in made[:12])
+            lines.append(f"Apps the user has built ({len(made)}): {names}.")
         else:
-            home_line = "Home: household tasks all caught up."
-        lines = [
-            home_line,
-            "Enterprise: planned (later).",
-            f"Learning: {state.get('calls', 0)} Claude calls, ~${state.get('month_cost', 0):.4f} this month.",
-        ]
-        if state.get("alpaca_ok"):
-            sign = "+" if state.get("gains", 0) >= 0 else ""
-            lines.append(
-                f"Investment: balance ${state.get('equity', 0):,.2f}, cash ${state.get('cash', 0):,.2f}, "
-                f"{state.get('n_positions', 0)} positions, open gains {sign}${state.get('gains', 0):,.2f}."
-            )
-            if state.get("positions"):
-                holdings = ", ".join(f"{sym} ${val:,.0f}" for sym, val in state["positions"])
-                lines.append(f"Holdings: {holdings}.")
-        else:
-            lines.append("Investment: Alpaca not connected / no balance loaded.")
-        counts = state.get("action_counts", {})
+            lines.append("The user hasn't built any apps yet.")
+        try:
+            from helix.selfdev import engine as _engine
+            pending = _engine.list_pending(self.settings)
+        except Exception:
+            pending = []
+        if pending:
+            lines.append(f"{len(pending)} HELIX code change(s) drafted and waiting to ship.")
         lines.append(
-            f"Stored pick logic: {counts.get('buy', 0)} buy-rated, {counts.get('watch', 0)} watch, "
-            f"{counts.get('skip', 0)} skip across {state.get('rated', 0)} stocks."
+            f"Claude usage: {state.get('calls', 0)} calls, ~${state.get('month_cost', 0):.4f} this month."
         )
-        if state.get("recent_sells"):
-            sells_txt = "; ".join(f"{sym} ({reason})" for sym, reason in state["recent_sells"])
-            lines.append(f"Recent sells: {sells_txt}.")
-        if state.get("since"):
-            lines.append(
-                f"Track record on file: {state.get('trades', 0)} trades and "
-                f"{state.get('sells_total', 0)} sells since {state['since']} (rolling 1-year window)."
-            )
-        perf = state.get("performance") or {}
-        if perf.get("closed", 0) > 0:
-            lines.append(
-                f"Realized results: hit rate {perf['hit_rate']}% over {perf['closed']} closed positions, "
-                f"avg return {perf['avg_return_pct']:+.1f}%, realized P/L ${perf['realized_pl']:+,.2f}."
-            )
         return "\n".join(lines)
 
     @staticmethod
@@ -2596,59 +2562,24 @@ class XpertTab(QWidget):
             memory=self.memory,
             settings=self.settings,
             research_fn=self._research_fn,
-            is_live=lambda: self._inv_live,
-            auto_running=lambda: self._inv_running,
-            keys_ready=lambda: self._inv_keys,
-            start_auto=lambda: self.request_invest.emit("start"),
-            stop_auto=lambda: self.request_invest.emit("stop"),
-            refresh_home=lambda: self.request_home_refresh.emit(),
             on_progress=lambda text: self.convo_step.emit(text),
             show_screen=lambda name: self.request_show_screen.emit(name),
+            on_build_created=lambda name: self.request_build_created.emit(name),
         )
         return ActionRouter(ctx)
 
-    def bind_investment(self, invest_tab) -> None:
-        self._invest_tab = invest_tab
-
-    def bind_home(self, home_tab) -> None:
-        self._home_tab = home_tab
-
-    def _do_invest_action(self, which: str) -> None:
-        """Main-thread handler for start/stop auto-investing (emitted from a worker, queued here)."""
-        if self._invest_tab is None:
-            return
-        if which == "start":
-            self._invest_tab.voice_start()
-            self._inv_running = bool(getattr(self._invest_tab, "_running", False))
-        elif which == "stop":
-            self._invest_tab.voice_stop()
-            self._inv_running = False
-
-    def _do_home_refresh(self) -> None:
-        if self._home_tab is not None:
-            self._home_tab.refresh()
-
     def _on_convo_step(self, tool_name: str) -> None:
         friendly = {
-            "get_portfolio": "Checking your portfolio...",
-            "get_recent_sells": "Looking up recent sells...",
-            "get_track_record": "Reviewing the track record...",
-            "set_auto_investing": "Adjusting auto-investing...",
-            "get_home_tasks": "Checking your home tasks...",
-            "complete_home_task": "Updating your task list...",
-            "add_home_task": "Adding the task...",
-            "text_my_tasks": "Preparing a text...",
-            "review_helix_100": "Reviewing the HELIX 500...",
-            "scout_special_stocks": "Scouting moonshot stocks...",
+            "build_app": "Building your app…",
+            "list_builds": "Checking your apps…",
             "improve_helix": "Drafting your change…",
+            "remove_feature": "Drafting the removal…",
+            "audit_dead_code": "Auditing the code…",
             "approve_change": "Shipping it…",
             "reject_change": "Discarding the draft…",
+            "list_pending_changes": "Checking what's pending…",
             "fix_recent_crashes": "Checking for crashes…",
-            "look": "Taking a look…",
-            "look_around": "Looking around the house…",
-            "scan_inventory": "Scanning…",
-            "add_to_shopping_list": "Updating the list…",
-            "order_groceries": "Preparing the order…",
+            "show_screen": "Pulling that up…",
         }.get(tool_name)
         if friendly is None:
             # Not a known tool name → it's already a ready-made progress line (e.g. a coder streaming step).
@@ -3022,17 +2953,7 @@ class XpertTab(QWidget):
         return ClaudeClient().is_configured()
 
     def _begin_turn(self) -> None:
-        """Snapshot live investment state on the main thread before the worker runs (the worker
-        must not touch widgets), and capture the HELIX context for the system prompt."""
-        if self._invest_tab is not None:
-            try:
-                self._inv_live = self._invest_tab.is_real()
-                self._inv_running = bool(getattr(self._invest_tab, "_running", False))
-            except Exception:
-                pass
-        self._inv_keys = bool(
-            self.settings.get(ALPACA_API_KEY_SETTING) and self.settings.get(ALPACA_SECRET_KEY_SETTING)
-        )
+        """Capture the live HELIX context for the system prompt before the worker runs."""
         self._convo_context = self._context()
 
     # ---- push-to-talk ----------------------------------------------------- #
