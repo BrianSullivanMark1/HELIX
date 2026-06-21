@@ -86,6 +86,7 @@ from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
 from helix.selfdev import builds as selfdev_builds, coder as selfdev_coder, constitution as selfdev_constitution, engine as selfdev_engine, mailer as selfdev_mailer, registry as selfdev_registry, restart as selfdev_restart, triggers as selfdev_triggers, versioning as selfdev_versioning
 from helix.tasks import registry as tasks_registry
+from helix.agents import registry as agents_registry
 
 
 _LOG = logging.getLogger(LOGGER_NAME)
@@ -374,7 +375,7 @@ class ConsoleView(QWidget):
     Nothing else shows until you ask: tables and panels pop up on request (by voice, or the one launcher
     menu). No tabs, no tiles."""
 
-    def __init__(self, xpert: "XpertTab", memory: SQLiteMemory, open_view, show_launcher, show_tasks=None, parent=None) -> None:
+    def __init__(self, xpert: "XpertTab", memory: SQLiteMemory, open_view, show_launcher, show_tasks=None, show_agents=None, parent=None) -> None:
         super().__init__(parent)
         self._xpert = xpert
         self.memory = memory
@@ -404,6 +405,11 @@ class ConsoleView(QWidget):
         tasks_button.setCursor(Qt.CursorShape.PointingHandCursor)
         tasks_button.setToolTip("Run a task")
         tasks_button.clicked.connect(show_tasks or show_launcher)
+        agents_button = QPushButton("🤖  Agents")
+        agents_button.setObjectName("ghostButton")
+        agents_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        agents_button.setToolTip("Goal-driven automations — and ‘New Agent’")
+        agents_button.clicked.connect(show_agents or show_launcher)
         # Archive lives here as a standalone, always-visible button (not buried in the menu) — it's the
         # recovery lifeline the Commandments require to always exist and function.
         archive_button = QPushButton("🗂  Archive")
@@ -411,11 +417,12 @@ class ConsoleView(QWidget):
         archive_button.setCursor(Qt.CursorShape.PointingHandCursor)
         archive_button.setToolTip("Versions · restore · safety")
         archive_button.clicked.connect(lambda: open_view("archive"))
-        # The manual-navigation buttons, stacked vertically: Menu → Tasks → Archive.
+        # The manual-navigation buttons, stacked vertically: Menu → Tasks → Agents → Archive.
         nav = QVBoxLayout()
         nav.setSpacing(8)
         nav.addWidget(menu_button)
         nav.addWidget(tasks_button)
+        nav.addWidget(agents_button)
         nav.addWidget(archive_button)
         topbar.addLayout(brand)
         topbar.addStretch(1)
@@ -797,6 +804,159 @@ class TasksView(QWidget):
         self.output.setPlainText(str(payload) if ok else f"{task.label} failed: {payload}")
 
 
+class AgentsView(QWidget):
+    """The Agents screen — goal-driven automations. Leads with New Agent + Settings (mirroring Tasks),
+    then a card per agent the user has created. Clicking an agent opens its AgentView panel."""
+
+    def __init__(self, on_home, settings: AppSettings | None = None, on_pick=None, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = settings or AppSettings()
+        self._on_pick = on_pick
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(48, 34, 48, 40)
+        outer.setSpacing(16)
+        header = QHBoxLayout()
+        title = QLabel("Agents")
+        title.setObjectName("launcherTitle")
+        close_button = QPushButton("✕")
+        close_button.setObjectName("ghostButton")
+        close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_button.clicked.connect(on_home)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(close_button)
+        outer.addLayout(header)
+        hint = QLabel("Agents run on their own toward a goal. Design one with New Agent, then run it.")
+        hint.setObjectName("xpertHint")
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
+        self._grid = QGridLayout()
+        self._grid.setSpacing(18)
+        outer.addLayout(self._grid)
+        outer.addStretch(1)
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        n = 0
+        for key, label, subtitle in (
+            ("newagent", "New Agent", "design it with me, then run"),
+            ("agentsettings", "Settings", "agent options"),
+        ):
+            card = _LauncherCard(key, f"{label}\n{subtitle}", permanent=True, allow_rename=False)
+            card.clicked.connect(lambda _=False, k=key: self._pick(k))
+            self._grid.addWidget(card, n // 2, n % 2)
+            n += 1
+        for agent in agents_registry.list_agents(self.settings):
+            state = "on" if agent.get("enabled") else "off"
+            card = _LauncherCard(
+                agent["key"], f"{agent.get('name', 'Agent')}\n{(agent.get('goal', '') or '')[:46]}  ·  {state}",
+                badge_tooltip="Delete this agent", allow_rename=False,
+            )
+            card.clicked.connect(lambda _=False, k=agent["key"]: self._pick(k))
+            card.hide_requested.connect(self._remove)
+            self._grid.addWidget(card, n // 2, n % 2)
+            n += 1
+
+    def _pick(self, key: str) -> None:
+        if self._on_pick is not None:
+            self._on_pick(key)
+
+    def _remove(self, key: str) -> None:
+        agent = agents_registry.get_agent(self.settings, key)
+        name = (agent.get("name", key) if agent else key)
+        confirm = QMessageBox.question(self, "Delete agent", f"Delete the agent “{name}”?")
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        agents_registry.delete_agent(self.settings, key)
+        self._rebuild()
+
+
+class AgentView(QWidget):
+    """One agent's panel: its goal, an on/off toggle, and Run now (executes the goal through the AI
+    tool-loop). Anything that needs approval pauses and is reported rather than auto-run."""
+
+    step_signal = pyqtSignal(str)
+
+    def __init__(self, memory: SQLiteMemory, settings: AppSettings, agent_key: str, parent=None) -> None:
+        super().__init__(parent)
+        self.memory = memory
+        self.settings = settings
+        self.key = agent_key
+        self._workers: set = set()
+        agent = agents_registry.get_agent(settings, agent_key) or {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 18)
+        layout.setSpacing(12)
+        goal = QLabel(agent.get("goal", "") or "(no goal set)")
+        goal.setObjectName("xpertHint")
+        goal.setWordWrap(True)
+        layout.addWidget(goal)
+
+        row = QHBoxLayout()
+        self.run_button = QPushButton("▶  Run now")
+        self.run_button.setObjectName("primaryButton")
+        self.run_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.run_button.clicked.connect(self._run)
+        row.addWidget(self.run_button)
+        self.enabled_box = QCheckBox("Enabled")
+        self.enabled_box.setChecked(bool(agent.get("enabled")))
+        self.enabled_box.stateChanged.connect(self._toggle_enabled)
+        row.addWidget(self.enabled_box)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        trigger = QLabel("Trigger: manual (Run now). Scheduled triggers are coming.")
+        trigger.setObjectName("xpertHint")
+        layout.addWidget(trigger)
+
+        self.log = QTextBrowser()
+        self.log.setObjectName("designTranscript")
+        self.log.setOpenExternalLinks(True)
+        last = agent.get("last_result", "")
+        if last:
+            self.log.setMarkdown(f"**Last run** ({agent.get('last_run', '')})\n\n{last}")
+        else:
+            self.log.setPlaceholderText("Run the agent and its activity appears here.")
+        layout.addWidget(self.log, 1)
+
+        self.step_signal.connect(lambda m: self.log.setMarkdown(f"_{m}_"))
+
+    def _toggle_enabled(self) -> None:
+        agents_registry.update_agent(self.settings, self.key, enabled=self.enabled_box.isChecked())
+
+    def _run(self) -> None:
+        agent = agents_registry.get_agent(self.settings, self.key)
+        if not agent:
+            return
+        self.run_button.setEnabled(False)
+        self.log.setMarkdown("_Running…_")
+        self.step_signal.emit("Running…")
+        spawn_worker(
+            self._workers,
+            lambda: agents_registry.run_agent(self.settings, self.memory, agent,
+                                              on_step=lambda s: self.step_signal.emit(s)),
+            self._done,
+        )
+
+    def _done(self, ok: bool, payload) -> None:
+        self.run_button.setEnabled(True)
+        if not ok:
+            self.log.setMarkdown(f"**Run failed:** {payload}")
+            return
+        reply = payload.get("reply", "")
+        pending = payload.get("pending")
+        text = f"**Last run** ({payload.get('ran_at', '')})\n\n{reply}"
+        if pending:
+            text += f"\n\n---\n\n⚠ The agent {pending}."
+        self.log.setMarkdown(text)
+
+
 class ArchiveTab(QWidget):
     """Archive / version history (§selfdev): a vertical list of saved app versions you can restore, with
     a user-set master DEFAULT, an immutable ROOT (blank-menu) factory reset, per-version purge, and
@@ -1077,7 +1237,7 @@ class DesignDialog(QDialog):
     def __init__(self, memory: SQLiteMemory, kind: str = "app", on_built=None, parent=None) -> None:
         super().__init__(parent)
         self.memory = memory
-        self.kind = "task" if kind == "task" else "app"
+        self.kind = kind if kind in ("task", "agent") else "app"
         self._on_built = on_built
         self._workers: set = set()
         self._messages: list = []
@@ -1085,7 +1245,7 @@ class DesignDialog(QDialog):
         self._busy = False
         self._client = ClaudeClient(ClaudeConfig(model=DEFAULT_RESEARCH_MODEL, timeout_seconds=90))
 
-        noun = "task" if self.kind == "task" else "app"
+        noun = {"task": "task", "agent": "agent"}.get(self.kind, "app")
         self.setWindowTitle(f"Design your {noun}")
         self.setObjectName("designDialog")
         self.resize(720, 640)
@@ -1124,7 +1284,7 @@ class DesignDialog(QDialog):
         layout.addLayout(input_row)
 
         button_row = QHBoxLayout()
-        self.build_button = QPushButton(f"Build {noun}")
+        self.build_button = QPushButton("Create agent" if self.kind == "agent" else f"Build {noun}")
         self.build_button.setObjectName("primaryButton")
         self.build_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.build_button.setEnabled(False)  # enabled once the design has been discussed
@@ -1149,7 +1309,7 @@ class DesignDialog(QDialog):
     def _render_intro(self, noun: str) -> None:
         self._md = (
             f"**HELIX** — Tell me what {noun} you'd like and I'll help you design it. "
-            "When it's ready, hit **Build**.\n\n---\n\n"
+            "When it's ready, hit the button below.\n\n---\n\n"
         )
         self.transcript.setMarkdown(self._md)
 
@@ -1170,6 +1330,16 @@ class DesignDialog(QDialog):
             self.status.setText("")
 
     def _design_system(self) -> str:
+        if self.kind == "agent":
+            return (
+                "You are HELIX's design partner, helping the user design an AGENT — a goal-driven "
+                "automation that runs on its own through HELIX's tools. Have a SHARP, quick back-and-forth: "
+                "nail down (1) the agent's GOAL, (2) its TRIGGER (manual for now; schedule/event later), "
+                "(3) the ACTIONS it should take, and (4) GUARDRAILS — what it may do freely vs. what needs "
+                "the user's approval (anything that spends money or reaches outward). You may use Markdown. "
+                "Do NOT write code; this is design. Keep replies tight. When it's solid, give a short, "
+                "clear statement of the agent's goal and how it should behave."
+            )
         noun = "task" if self.kind == "task" else "app"
         return (
             f"You are HELIX's design partner, helping the user design a small {noun} before any code is "
@@ -1227,6 +1397,16 @@ class DesignDialog(QDialog):
         if self._busy or not self._messages:
             return
         name = self.name_field.text().strip() or self._default_name()
+        if self.kind == "agent":
+            # An agent isn't a code build — save it as a goal-driven automation.
+            record = agents_registry.add_agent(AppSettings(), name, goal=self._compose_request())
+            if self._on_built is not None:
+                try:
+                    self._on_built(record["key"])
+                except Exception:
+                    pass
+            self.accept()
+            return
         noun = "task" if self.kind == "task" else "app"
         confirm = QMessageBox.question(
             self, f"Build {noun}",
@@ -1298,6 +1478,7 @@ class HelixMainWindow(QMainWindow):
             {
                 "settings": ("App settings", settings_panel),
                 "tasksettings": ("Task settings", self._make_task_settings_panel()),
+                "agentsettings": ("Agent settings", self._make_agent_settings_panel()),
                 "archive": ("Archive", self.archive_tab),
             },
             on_home=self._show_home,
@@ -1307,17 +1488,23 @@ class HelixMainWindow(QMainWindow):
         self._build_views: dict = {}
         for build in selfdev_builds.list_builds():
             self._register_build_view(build)
+        # Register a panel for each existing agent.
+        self._agent_views: dict = {}
+        for agent in agents_registry.list_agents(AppSettings()):
+            self._register_agent_view(agent)
         self.launcher = self._make_launcher()
         self.tasks_view = TasksView(on_home=self._show_home, settings=AppSettings(), on_pick=self.open_view)
+        self.agents_view = AgentsView(on_home=self._show_home, settings=AppSettings(), on_pick=self.open_view)
         self.console = ConsoleView(
-            self.xpert_tab, memory, self.open_view, self.show_launcher, self.show_tasks
+            self.xpert_tab, memory, self.open_view, self.show_launcher, self.show_tasks, self.show_agents
         )
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self.console)     # 0 — the orb home (default)
-        self.stack.addWidget(self.panel_host)  # 1 — a summoned panel
-        self.stack.addWidget(self.launcher)    # 2 — the launcher menu
-        self.stack.addWidget(self.tasks_view)  # 3 — the Tasks launcher
+        self.stack.addWidget(self.console)      # 0 — the orb home (default)
+        self.stack.addWidget(self.panel_host)   # 1 — a summoned panel
+        self.stack.addWidget(self.launcher)     # 2 — the launcher menu
+        self.stack.addWidget(self.tasks_view)   # 3 — the Tasks screen
+        self.stack.addWidget(self.agents_view)  # 4 — the Agents screen
         self.setCentralWidget(self.stack)
 
         # The Console conversation can open screens and announce a freshly-built app.
@@ -1491,17 +1678,62 @@ class HelixMainWindow(QMainWindow):
         self._rebuild_menu()
         self.statusBar().showMessage(f"Deleted {name}.", 6000)
 
+    # -- agents -------------------------------------------------------------- #
+
+    def _register_agent_view(self, agent: dict) -> None:
+        key = agent.get("key", "")
+        if not key or key in self._agent_views:
+            return
+        view = AgentView(self.memory, AppSettings(), key)
+        self._agent_views[key] = view
+        self.panel_host.add_view(key, agent.get("name", key), view)
+
+    def _make_agent_settings_panel(self) -> QWidget:
+        """Settings scoped to Agents (opened by the Settings card on the Agents screen)."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setSpacing(14)
+        hint = QLabel(
+            "Settings for your agents. An agent is a goal-driven automation — design one with “New "
+            "Agent”, run it from its page, and toggle it on. Anything that spends money or reaches "
+            "outward always asks for your approval first."
+        )
+        hint.setObjectName("xpertHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        return panel
+
+    def _on_agent_created(self, key: str) -> None:
+        """A new agent was created via the editor — register its panel, refresh the list, and open it."""
+        agent = agents_registry.get_agent(AppSettings(), key)
+        if agent is None:
+            return
+        self._register_agent_view(agent)
+        self.agents_view._rebuild()
+        self.statusBar().showMessage(f"Created agent {agent.get('name', key)} — opening it.", 8000)
+        self.open_view(key)
+
+    def show_agents(self) -> None:
+        self.agents_view._rebuild()  # reflect any added/removed agents
+        self.stack.setCurrentIndex(4)
+
     def open_view(self, name: str | None = None) -> None:
-        """Open a screen by key. 'newapp'/'newtask' open the design editor; 'tasks'/'archive' are
-        special; a built-app key opens its panel. No/unknown name → the menu."""
+        """Open a screen by key. 'newapp'/'newtask'/'newagent' open the design editor; tasks/agents/
+        archive are special; a built-app or agent key opens its panel. No/unknown name → the menu."""
         if name == "newapp":
             self._open_design("app")
         elif name == "newtask":
             self._open_design("task")
+        elif name == "newagent":
+            self._open_design("agent")
         elif name in ("new", None):
             self._show_home()
         elif name == "tasks":
             self.show_tasks()
+        elif name == "agents":
+            self.show_agents()
         elif name == "archive":
             self._open_archive()
         elif name and self.panel_host.show_view(name):
@@ -1510,8 +1742,9 @@ class HelixMainWindow(QMainWindow):
             self.show_launcher()
 
     def _open_design(self, kind: str) -> None:
-        """Open the design editor for a new app or task; on a finished build, register + open it."""
-        dialog = DesignDialog(self.memory, kind=kind, on_built=self._on_build_created, parent=self)
+        """Open the design editor for a new app/task/agent; on finish, register + open the result."""
+        on_built = self._on_agent_created if kind == "agent" else self._on_build_created
+        dialog = DesignDialog(self.memory, kind=kind, on_built=on_built, parent=self)
         dialog.exec()
 
     def show_launcher(self) -> None:
