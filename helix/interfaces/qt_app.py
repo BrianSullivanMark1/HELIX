@@ -746,10 +746,11 @@ class TasksView(QWidget):
             if widget is not None:
                 widget.deleteLater()
         n = 0
-        # Permanent cards (no ✕): New Task opens the Console to describe one; Settings opens settings.
+        # Permanent cards (no ✕): New Task opens the Console; Settings opens TASK settings (the Menu's
+        # Settings opens app settings — the two are deliberately separate).
         for key, label, subtitle in (
             ("new", "New Task", "describe a task and I'll build it"),
-            ("settings", "Settings", "voice · keys · devices"),
+            ("tasksettings", "Settings", "task options"),
         ):
             card = _LauncherCard(key, f"{label}\n{subtitle}", permanent=True, allow_rename=False)
             card.clicked.connect(lambda _=False, k=key: self._pick(k))
@@ -1099,7 +1100,8 @@ class HelixMainWindow(QMainWindow):
         # in the menu is an app the user has built (registered in selfdev_registry.MENU_FEATURES).
         self.panel_host = PanelHost(
             {
-                "settings": ("Settings", settings_panel),
+                "settings": ("App settings", settings_panel),
+                "tasksettings": ("Task settings", self._make_task_settings_panel()),
                 "archive": ("Archive", self.archive_tab),
             },
             on_home=self._show_home,
@@ -1195,6 +1197,36 @@ class HelixMainWindow(QMainWindow):
             self.console.refresh_key_gate()
         except Exception:
             pass
+
+    def _make_task_settings_panel(self) -> QWidget:
+        """Settings scoped to Tasks (opened by the Settings card on the Tasks screen) — kept separate
+        from the app-wide settings the Menu opens."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setSpacing(14)
+        hint = QLabel(
+            "Settings for your tasks. Tasks are quick actions you run from the Tasks screen — describe "
+            "one with “New Task”, and remove one with its ✕."
+        )
+        hint.setObjectName("xpertHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        restore = QPushButton("Restore removed tasks")
+        restore.setObjectName("ghostButton")
+        restore.setCursor(Qt.CursorShape.PointingHandCursor)
+        restore.clicked.connect(self._restore_tasks)
+        layout.addWidget(restore, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch(1)
+        return panel
+
+    def _restore_tasks(self) -> None:
+        AppSettings().set(TASKS_HIDDEN_SETTING, [])
+        try:
+            self.tasks_view._rebuild()
+        except Exception:
+            pass
+        self.statusBar().showMessage("Restored removed tasks.", 5000)
 
     def _register_build_view(self, build: dict) -> None:
         slug = build.get("slug", "")
