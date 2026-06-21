@@ -216,7 +216,7 @@ class PresenceOrb(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         cx, cy = self.width() / 2.0, self.height() / 2.0
-        base = min(self.width(), self.height()) * 0.22
+        base = min(self.width(), self.height()) * 0.30  # large, screen-filling presence
         state = self._state
         color = QColor(255, 200, 87) if state == "speaking" else QColor(29, 216, 255)
         wobble = math.sin(self._phase)
@@ -389,8 +389,9 @@ class ConsoleView(QWidget):
         self.voice_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.voice_toggle.clicked.connect(self._toggle_voice_input)
         self._sync_voice_toggle()
-        # The manual-navigation buttons, stacked vertically: Menu → Tasks → Agents → Archive → Voice.
-        nav = QVBoxLayout()
+        # The manual-navigation buttons in a single horizontal ROW across the top, so they never eat
+        # the orb's vertical space: Apps · Tasks · Agents · Archive · Voice.
+        nav = QHBoxLayout()
         nav.setSpacing(8)
         nav.addWidget(menu_button)
         nav.addWidget(tasks_button)
@@ -420,17 +421,18 @@ class ConsoleView(QWidget):
         layout.addWidget(self._key_gate)
         self.refresh_key_gate()
 
-        # the orb — large, centered, the face of the app
+        # the orb — the face of the app. It fills the whole screen by default; the conversation is
+        # hidden until you tap the orb, so the orb stays big and uncrowded.
         self.orb = PresenceOrb()
         self.orb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout.addWidget(self.orb, 6)
+        layout.addWidget(self.orb, 8)
 
-        # the conversation box — slimmed, and HIDDEN until you tap the orb (left-click)
+        # the conversation box — HIDDEN until you tap the orb (left-click), so the orb is screen-sized.
         try:
             xpert.compact()
         except Exception:
             pass
-        xpert.setVisible(True)  # the conversation is the front door — show it so the user can just type
+        xpert.setVisible(False)
         layout.addWidget(xpert, 5)
         self.orb.clicked.connect(self._toggle_conversation)
 
