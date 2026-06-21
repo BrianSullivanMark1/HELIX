@@ -395,7 +395,7 @@ class ConsoleView(QWidget):
         self.presence.setObjectName("consolePresence")
         brand.addWidget(name)
         brand.addWidget(self.presence)
-        menu_button = QPushButton("☰  Menu")
+        menu_button = QPushButton("☰  Apps")
         menu_button.setObjectName("ghostButton")
         menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
         menu_button.setToolTip("Your apps — and ‘New app’ to build one")
