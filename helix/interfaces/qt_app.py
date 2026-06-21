@@ -758,7 +758,7 @@ class TasksView(QWidget):
         n = 0
         for key, label, subtitle in (
             ("newtask", "New Task", "design it with me, then build"),
-            ("tasksettings", "Settings", "task options"),
+            ("settings", "Settings", "key · voice"),
         ):
             card = _LauncherCard(key, f"{label}\n{subtitle}", permanent=True, allow_rename=False)
             card.clicked.connect(lambda _=False, k=key: self._pick(k))
@@ -836,7 +836,7 @@ class AgentsView(QWidget):
         n = 0
         for key, label, subtitle in (
             ("newagent", "New Agent", "design it with me, then run"),
-            ("agentsettings", "Settings", "agent options"),
+            ("settings", "Settings", "key · voice"),
         ):
             card = _LauncherCard(key, f"{label}\n{subtitle}", permanent=True, allow_rename=False)
             card.clicked.connect(lambda _=False, k=key: self._pick(k))
@@ -1090,40 +1090,6 @@ class ArchiveTab(QWidget):
         return card
 
 
-class GuardrailsBox(QGroupBox):
-    """Read-only display of the Twelve Commandments in Settings (§44). HELIX cannot change these: the
-    coder may not edit the constitution (a protected path) and the approval gate auto-rejects any change
-    that touches the guardrails. This panel just shows the law and its integrity status."""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__("Guardrails — the Twelve Commandments", parent)
-        self.setObjectName("guardrailsBox")
-        layout = QVBoxLayout(self)
-        layout.setSpacing(8)
-        intact = selfdev_constitution.verify_integrity()
-        status = QLabel(
-            "🛡  Protected — HELIX cannot change these."
-            if intact else "⚠  Integrity check FAILED — self-improvement is paused."
-        )
-        status.setObjectName("guardrailsStatus" if intact else "guardrailsStatusBad")
-        status.setWordWrap(True)
-        layout.addWidget(status)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        host = QWidget()
-        col = QVBoxLayout(host)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(6)
-        for c in selfdev_constitution.commandments():
-            line = QLabel(f"<b>{c.n}. {c.title}.</b> {c.text}")
-            line.setObjectName("guardrailLine")
-            line.setWordWrap(True)
-            col.addWidget(line)
-        col.addStretch(1)
-        scroll.setWidget(host)
-        scroll.setMinimumHeight(200)
-        layout.addWidget(scroll)
 
 
 class BuildView(QWidget):
@@ -1452,33 +1418,27 @@ class HelixMainWindow(QMainWindow):
 
         # Settings panel — voice speed + audio devices + keys, summonable like any other panel.
         # Reparents Xpert's secondary controls here (keeps their wiring).
+        # One simple Settings — the same screen everywhere. Just the two things that matter: your
+        # Claude key and your voice. (Restore-hidden lives quietly at the bottom.)
         settings_panel = QWidget()
         settings_layout = QVBoxLayout(settings_panel)
         settings_layout.setContentsMargins(18, 14, 18, 16)
         settings_layout.setSpacing(14)
         settings_layout.addWidget(self._make_key_box())
         settings_layout.addWidget(self.xpert_tab.controls_box)
-        new_chat_button = QPushButton("New chat")
-        new_chat_button.setObjectName("ghostButton")
-        new_chat_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        new_chat_button.clicked.connect(self.xpert_tab._new_chat)
-        settings_layout.addWidget(new_chat_button, 0, Qt.AlignmentFlag.AlignLeft)
+        settings_layout.addStretch(1)
         restore_menu_button = QPushButton("Restore hidden menu items")
         restore_menu_button.setObjectName("ghostButton")
         restore_menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
         restore_menu_button.clicked.connect(self._restore_menu_items)
         settings_layout.addWidget(restore_menu_button, 0, Qt.AlignmentFlag.AlignLeft)
-        settings_layout.addWidget(GuardrailsBox())
-        settings_layout.addStretch(1)
 
         self.archive_tab = ArchiveTab(memory)
         # The menu starts blank: the only built-in panels are Settings and Archive. Everything else
         # in the menu is an app the user has built (from selfdev_builds.list_builds()).
         self.panel_host = PanelHost(
             {
-                "settings": ("App settings", settings_panel),
-                "tasksettings": ("Task settings", self._make_task_settings_panel()),
-                "agentsettings": ("Agent settings", self._make_agent_settings_panel()),
+                "settings": ("Settings", settings_panel),  # one Settings, reached from every screen
                 "archive": ("Archive", self.archive_tab),
             },
             on_home=self._show_home,
@@ -1582,35 +1542,7 @@ class HelixMainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _make_task_settings_panel(self) -> QWidget:
-        """Settings scoped to Tasks (opened by the Settings card on the Tasks screen) — kept separate
-        from the app-wide settings the Menu opens."""
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(18, 14, 18, 16)
-        layout.setSpacing(14)
-        hint = QLabel(
-            "Settings for your tasks. Tasks are quick actions you run from the Tasks screen — describe "
-            "one with “New Task”, and remove one with its ✕."
-        )
-        hint.setObjectName("xpertHint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        restore = QPushButton("Restore removed tasks")
-        restore.setObjectName("ghostButton")
-        restore.setCursor(Qt.CursorShape.PointingHandCursor)
-        restore.clicked.connect(self._restore_tasks)
-        layout.addWidget(restore, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addStretch(1)
-        return panel
 
-    def _restore_tasks(self) -> None:
-        AppSettings().set(TASKS_HIDDEN_SETTING, [])
-        try:
-            self.tasks_view._rebuild()
-        except Exception:
-            pass
-        self.statusBar().showMessage("Restored removed tasks.", 5000)
 
     def _register_build_view(self, build: dict) -> None:
         slug = build.get("slug", "")
@@ -1713,22 +1645,6 @@ class HelixMainWindow(QMainWindow):
         self._agent_views[key] = view
         self.panel_host.add_view(key, agent.get("name", key), view)
 
-    def _make_agent_settings_panel(self) -> QWidget:
-        """Settings scoped to Agents (opened by the Settings card on the Agents screen)."""
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(18, 14, 18, 16)
-        layout.setSpacing(14)
-        hint = QLabel(
-            "Settings for your agents. An agent is a goal-driven automation — design one with “New "
-            "Agent”, run it from its page, and toggle it on. Anything that spends money or reaches "
-            "outward always asks for your approval first."
-        )
-        hint.setObjectName("xpertHint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        layout.addStretch(1)
-        return panel
 
     def _on_agent_created(self, key: str) -> None:
         """A new agent was created via the editor — register its panel, refresh the list, and open it."""
