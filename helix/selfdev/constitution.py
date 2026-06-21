@@ -90,6 +90,8 @@ PROTECTED_PATHS: tuple[str, ...] = (
     "helix/selfdev/api_coder.py",      # the Forge: the no-CLI build fallback
     "helix/ai/actions.py",             # the command/tool surface (build + self-improve tools + the gate)
     "helix/interfaces/qt_app.py",      # the front interface: the four nav buttons + the Console shell
+    "helix/tasks/registry.py",         # the Tasks machinery (the data it holds stays freely editable)
+    "helix/agents/registry.py",        # the Agents machinery (agents themselves are data, add/remove freely)
 )
 
 # Fingerprint of the canonical commandment text — a tripwire against partial tampering. Hardcoded (not
