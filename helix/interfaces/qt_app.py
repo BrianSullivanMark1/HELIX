@@ -571,6 +571,24 @@ class ConsoleView(QWidget):
         topbar.addLayout(nav)
         layout.addLayout(topbar)
 
+        # First-run gate: until a Claude key is saved, HELIX can't build anything — say so plainly
+        # and point to Settings, rather than failing silently.
+        self._key_gate = QFrame()
+        self._key_gate.setObjectName("keyGate")
+        gate_row = QHBoxLayout(self._key_gate)
+        gate_row.setContentsMargins(14, 10, 14, 10)
+        gate_msg = QLabel("Add your Claude API key to start building apps.")
+        gate_msg.setObjectName("xpertHint")
+        gate_msg.setWordWrap(True)
+        gate_button = QPushButton("Open Settings")
+        gate_button.setObjectName("primaryButton")
+        gate_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        gate_button.clicked.connect(lambda: open_view("settings"))
+        gate_row.addWidget(gate_msg, 1)
+        gate_row.addWidget(gate_button, 0)
+        layout.addWidget(self._key_gate)
+        self.refresh_key_gate()
+
         # the orb — large, centered, the face of the app
         self.orb = PresenceOrb()
         self.orb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -597,6 +615,14 @@ class ConsoleView(QWidget):
         except Exception:
             pass
         self.presence.setText(_PRESENCE_TEXT.get(state, _PRESENCE_TEXT["idle"]))
+
+    def refresh_key_gate(self) -> None:
+        """Show the 'add your key' banner only while no Claude key is configured."""
+        try:
+            configured = ClaudeClient().is_configured()
+        except Exception:
+            configured = True
+        self._key_gate.setVisible(not configured)
 
     def _toggle_conversation(self) -> None:
         """Left-click on the orb reveals or hides the conversation box."""
@@ -1190,6 +1216,7 @@ class HelixMainWindow(QMainWindow):
         settings_layout = QVBoxLayout(settings_panel)
         settings_layout.setContentsMargins(18, 14, 18, 16)
         settings_layout.setSpacing(14)
+        settings_layout.addWidget(self._make_key_box())
         settings_layout.addWidget(self.xpert_tab.controls_box)
         new_chat_button = QPushButton("New chat")
         new_chat_button.setObjectName("ghostButton")
@@ -1271,6 +1298,40 @@ class HelixMainWindow(QMainWindow):
     def refresh_all(self) -> None:
         self.xpert_tab.refresh()
         self.statusBar().showMessage("HELIX memory synced", 3000)
+
+    def _make_key_box(self) -> QGroupBox:
+        """The Claude API key field for Settings — the one credential HELIX needs to build apps."""
+        box = QGroupBox("Claude API key")
+        layout = QVBoxLayout(box)
+        hint = QLabel(
+            "HELIX uses Claude to build your apps. Paste your key below — it's stored locally on this "
+            "machine only. Get one at console.anthropic.com."
+        )
+        hint.setObjectName("xpertHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self._key_field = QLineEdit()
+        self._key_field.setEchoMode(QLineEdit.EchoMode.Password)
+        self._key_field.setPlaceholderText("sk-ant-…")
+        existing = AppSettings().get(CLAUDE_API_KEY_SETTING, "") or ""
+        if existing:
+            self._key_field.setText(existing)
+        layout.addWidget(self._key_field)
+        save = QPushButton("Save key")
+        save.setObjectName("ghostButton")
+        save.setCursor(Qt.CursorShape.PointingHandCursor)
+        save.clicked.connect(self._save_key)
+        layout.addWidget(save, 0, Qt.AlignmentFlag.AlignLeft)
+        return box
+
+    def _save_key(self) -> None:
+        key = self._key_field.text().strip()
+        AppSettings().set(CLAUDE_API_KEY_SETTING, key)
+        self.statusBar().showMessage("Saved your Claude key." if key else "Cleared the Claude key.", 5000)
+        try:
+            self.console.refresh_key_gate()
+        except Exception:
+            pass
 
     def _register_build_view(self, build: dict) -> None:
         slug = build.get("slug", "")
@@ -2782,7 +2843,7 @@ class XpertTab(QWidget):
 
         if not self._claude_ready():
             self._append_transcript(
-                "HELIX", "I need a Claude API key to talk, sir - save one in Learning, Claude."
+                "HELIX", "I need a Claude API key to begin, sir — add one in Settings (the ⚙ menu)."
             )
             self._set_convo_state("idle")
             return
@@ -3429,6 +3490,28 @@ def apply_hud_style(app: QApplication) -> None:
             border-color: #1dd8ff;
             color: #ffffff;
             background-color: rgba(23,81,97,0.5);
+        }
+
+        QPushButton#primaryButton {
+            background-color: #0e8aa8;
+            color: #eaffff;
+            border: 1px solid #1dd8ff;
+            border-radius: 16px;
+            padding: 6px 20px;
+            font-size: 12pt;
+            font-weight: 700;
+            min-height: 30px;
+        }
+
+        QPushButton#primaryButton:hover {
+            background-color: #15a6c8;
+            color: #ffffff;
+        }
+
+        QFrame#keyGate {
+            background-color: rgba(255,200,87,0.10);
+            border: 1px solid #ffc857;
+            border-radius: 14px;
         }
 
         QLabel#panelTitle {

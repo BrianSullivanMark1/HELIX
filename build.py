@@ -1,15 +1,17 @@
 #!/usr/bin/env python
-"""Build a standalone Windows HELIX.exe with PyInstaller — for the living-room tablet (§41).
+"""Build a standalone Windows HELIX.exe with PyInstaller — for distribution (§41).
 
-    python build.py               # windowed dashboard build  -> dist\\HELIX\\HELIX.exe
-    python build.py --with-voice  # also bundle the Xpert voice stack (faster-whisper / edge-tts)
+    python build.py               # windowed build           -> dist\\HELIX\\HELIX.exe
+    python build.py --with-voice  # also bundle the voice stack (faster-whisper / edge-tts)
     python build.py --console     # keep a console window (to debug a first build)
     python build.py --dry-run     # print the PyInstaller command, build nothing
 
-Build ON Windows (PyInstaller makes a same-OS binary), then copy the whole dist\\HELIX\\ folder to the
-tablet. On first launch HELIX creates data\\ NEXT TO the .exe; copy your existing
-data\\helix_settings.json (Alpaca + Claude keys) and data\\helix.db into dist\\HELIX\\data\\ to carry
-over your account + history. Requires: pip install pyinstaller."""
+Build ON Windows (PyInstaller makes a same-OS binary), then ship the whole dist\\HELIX\\ folder.
+
+DISTRIBUTION HYGIENE: the build NEVER bundles data\\ — it is excluded so no keys, settings, or personal
+history can leak into a shipped build. On first launch HELIX creates an empty data\\ NEXT TO the .exe,
+and the user enters their own Claude key in Settings. Do not copy your own data\\ into a build you share.
+Requires: pip install pyinstaller."""
 from __future__ import annotations
 
 import importlib.util
@@ -49,6 +51,7 @@ def build_command(*, console: bool, with_voice: bool) -> list[str]:
         "--onedir",               # a folder (robust for big Qt apps; faster start than --onefile)
         "--console" if console else "--windowed",
         "--paths", str(ROOT),     # so `import helix...` resolves during analysis
+        # NOTE: data/ is deliberately never added here, so keys/settings/history can't leak into a build.
     ]
     if with_voice:
         for pkg in VOICE_PACKAGES:
@@ -81,8 +84,8 @@ def main() -> int:
         return code
     exe = ROOT / "dist" / NAME / f"{NAME}.exe"
     print(f"\nBuilt: {exe}")
-    print(r"Copy the whole dist\HELIX\ folder to the tablet, then copy your data\helix_settings.json")
-    print(r"(keys) + data\helix.db into dist\HELIX\data\ to carry over your account + history.")
+    print(r"Ship the whole dist\HELIX\ folder. It contains NO keys or data — on first launch HELIX")
+    print(r"creates an empty data\ next to the .exe and the user enters their own Claude key in Settings.")
     return 0
 
 

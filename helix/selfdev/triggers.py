@@ -16,7 +16,7 @@ from helix.core.config import load_config
 from helix.selfdev import coder, engine, mailer
 
 SELFDEV_HANDLED_CRASHES_SETTING = "selfdev_handled_crashes"
-SELFDEV_AUTOFIX_SETTING = "selfdev_autofix_crashes"  # default on; set False to disable auto crash-fixing
+SELFDEV_AUTOFIX_SETTING = "selfdev_autofix_crashes"  # default OFF (opt-in); set True to auto-draft crash fixes
 
 # A traceback block: from the "Traceback" header to the next timestamped log line (or another
 # traceback, or end of text). reliability.py writes the traceback as a multi-line message with no
@@ -53,8 +53,8 @@ def maybe_fix_crashes(
     """Draft fixes for NEW logged crashes. Returns a list of drafted-change records (possibly empty).
 
     De-dups by signature (persisted in settings) so a repeating crash is drafted once. Each draft is
-    recorded as pending for approval — nothing is merged. Respects the autofix setting (default on)."""
-    if settings.get(SELFDEV_AUTOFIX_SETTING) is False:
+    recorded as pending for approval — nothing is merged. Opt-in: OFF unless the user enables it."""
+    if settings.get(SELFDEV_AUTOFIX_SETTING) is not True:
         return []
     run = run or coder.run_coding_task
     path = log_path or str(load_config().data_dir / "helix.log")

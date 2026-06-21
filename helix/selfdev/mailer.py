@@ -18,7 +18,7 @@ from helix.core.mailer import sms_config, send_text_via_email
 from helix.selfdev import engine
 
 SELFDEV_NOTIFY_EMAIL_SETTING = "selfdev_notify_email"       # where to email approval requests (Brian)
-SELFDEV_EMAIL_APPROVAL_SETTING = "selfdev_email_approval"   # default on; set False to disable
+SELFDEV_EMAIL_APPROVAL_SETTING = "selfdev_email_approval"   # default OFF (opt-in); set True to enable
 
 _TOKEN_RE = re.compile(r"\[HELIX selfdev ([^\]]+)\]")
 _AFFIRM = ("yes", "yep", "yeah", "ship it", "approve", "approved", "merge", "do it", "ok", "okay", "go ahead", "y")
@@ -36,7 +36,7 @@ def is_configured(settings: Any) -> bool:
 
 def notify_drafted(settings: Any, rec: dict, *, smtp_factory=None) -> bool:
     """Email Brian a drafted change with its diffstat and how to approve. Returns whether it sent."""
-    if settings.get(SELFDEV_EMAIL_APPROVAL_SETTING) is False or not is_configured(settings):
+    if settings.get(SELFDEV_EMAIL_APPROVAL_SETTING) is not True or not is_configured(settings):
         return False
     cfg = sms_config(settings)
     branch = rec.get("branch", "")
@@ -85,7 +85,7 @@ def poll_replies(settings: Any, *, imap_factory: Callable[..., Any] | None = Non
 
     Acts only on a reply (a) carrying our `[HELIX selfdev <branch>]` token, (b) from the notify
     address, with (c) a clear yes/no — then marks it Seen. Anything else is left untouched."""
-    if settings.get(SELFDEV_EMAIL_APPROVAL_SETTING) is False or not is_configured(settings):
+    if settings.get(SELFDEV_EMAIL_APPROVAL_SETTING) is not True or not is_configured(settings):
         return []
     cfg = sms_config(settings)
     sender, password, me = cfg["sender"], cfg["app_password"], _recipient(settings)
