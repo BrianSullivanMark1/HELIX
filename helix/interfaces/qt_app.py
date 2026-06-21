@@ -1306,34 +1306,6 @@ class HelixMainWindow(QMainWindow):
     def _show_home(self) -> None:
         self.stack.setCurrentIndex(0)
 
-    def _remove_feature(self, feature: str) -> None:
-        """Menu ✕ on a self-added feature: draft a clean removal of its code (Opus), for your approval."""
-        confirm = QMessageBox.question(
-            self,
-            "Remove feature",
-            f"Remove “{feature}” and delete its code?\nHELIX will draft the removal for your approval.",
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
-        self._show_home()
-        self.statusBar().showMessage(f"Drafting the removal of {feature}…", 6000)
-        spawn_worker(
-            self._sd_workers,
-            lambda: selfdev_coder.run_coding_task(selfdev_coder.build_removal_task(feature)),
-            self._removal_done,
-        )
-
-    def _removal_done(self, ok: bool, payload) -> None:
-        if ok and getattr(payload, "ok", False):
-            rec = selfdev_engine.record_pending(self.settings, payload)
-            selfdev_mailer.notify_drafted(self.settings, rec)
-            self.statusBar().showMessage(
-                "Removal drafted — approve it in Work → self-improvements, or say 'ship it'.", 10000
-            )
-        else:
-            detail = getattr(payload, "error", payload)
-            self.statusBar().showMessage(f"Couldn't draft the removal: {detail}", 9000)
-
     def _trade_cycle_active(self) -> bool:
         """No long-running foreground work to protect anymore, so a pending restart is always safe to
         apply on the next tick. (Kept as a hook in case a future Build wants to defer restarts.)"""

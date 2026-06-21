@@ -161,9 +161,9 @@ A clean clone/build has no keys and no data. On first launch HELIX creates an em
 blank (`New app` + `Settings`), and the Console shows a banner: *"Add your Claude API key to start
 building apps."* Once the key is saved in Settings, the conversation is live and the user can build.
 
-The coding agent additionally needs the **Claude Code CLI** present on the machine (resolved from the
-Claude desktop app's install or `claude` on PATH). Packaging it for machines without it is the main open
-item — see below.
+The coding agent uses the **Claude Code CLI** when it's installed (more capable), and otherwise falls
+back to an **API-based coder** (`selfdev/api_coder.py`) that builds with only the Anthropic key — so a
+fresh download builds apps with no CLI required. The CLI path stays the preferred one for power users.
 
 ---
 
@@ -177,12 +177,14 @@ STT/TTS stack.
 
 ## 10. Known gaps / next
 
-- **Claude Code CLI on a fresh machine.** The coding agent shells out to `claude.exe`; a stranger's
-  machine may not have it. Bundle or first-run-install it (or build an agent loop on the API) — this is
-  the load-bearing distribution item.
-- **Verification in a frozen build.** `engine.smoke_check` import-checks via the Python interpreter; in a
-  frozen exe `sys.executable` is the app, not Python, so it's a dev-mode safeguard. Define a real
-  pre-merge check for the packaged target.
+- **Coding capability.** The API-coder fallback (no CLI) writes single-file apps well; complex,
+  multi-file apps are stronger via the Claude Code CLI. Both work; the CLI is just more capable.
+- **Running generated apps.** HTML apps open in the browser anywhere. Python apps need Python on the
+  machine — in a frozen build (no Python) the runner falls back to opening the folder. The builder is
+  biased toward dependency-free HTML for this reason.
+- **Verification of HELIX self-changes in a frozen build.** `engine.smoke_check` import-checks via the
+  Python interpreter; in a frozen exe `sys.executable` is the app, not Python, so it's a dev-mode
+  safeguard. (Builds aren't affected — this is only the HELIX-edits-HELIX path.)
 - **`memory.py` slimming.** Retains legacy tables/methods from the old pillars; harmless but worth pruning
   to the Archive/usage/provenance essentials.
 - **Cross-platform.** Today Windows-first (CLI path resolution, console flags). macOS/Linux later.
