@@ -76,7 +76,9 @@ LOCKED_SETTINGS: dict = {
 PERMANENT_MENU_KEYS: frozenset = frozenset({"settings", "archive"})
 
 # Files HELIX may never modify through its own self-dev loop — the safety-critical machinery that keeps
-# the commandments enforceable and the human in control. Repo-relative, forward-slashed.
+# the commandments enforceable, plus the IMMUTABLE BACKBONE: the front interface (the four nav buttons
+# + Console shell) and the Forge engine itself. Commanding HELIX can build Apps/Tasks/Agents (which only
+# ever touch data/builds/), but it can never rewrite this structure. Repo-relative, forward-slashed.
 PROTECTED_PATHS: tuple[str, ...] = (
     "helix/selfdev/constitution.py",   # the laws + the scanner
     "helix/selfdev/engine.py",         # the approval gate (where the scan runs)
@@ -84,6 +86,10 @@ PROTECTED_PATHS: tuple[str, ...] = (
     "helix/selfdev/versioning.py",     # the recovery / Archive backend
     "helix/selfdev/gitops.py",         # the merge / restore / push primitives
     "helix/selfdev/coder.py",          # the self-edit engine + the commandments carried in its prompt
+    "helix/selfdev/builds.py",         # the Forge: per-Build workspaces + the build pipeline
+    "helix/selfdev/api_coder.py",      # the Forge: the no-CLI build fallback
+    "helix/ai/actions.py",             # the command/tool surface (build + self-improve tools + the gate)
+    "helix/interfaces/qt_app.py",      # the front interface: the four nav buttons + the Console shell
 )
 
 # Fingerprint of the canonical commandment text — a tripwire against partial tampering. Hardcoded (not
