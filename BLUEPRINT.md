@@ -1,224 +1,112 @@
 # HELIX — Blueprint
 
-> **The north star + the interface overhaul.** This is the "where we're going" doc.
-> For "what already exists in the code today," read [`DESIGN.md`](DESIGN.md) — it is the source of truth
-> for the engines. This blueprint redraws the **shell** on top of those engines and names the concept.
->
-> **For a fresh Claude session:** read `DESIGN.md` first (the foundation is real and substantial — vision,
-> voice, self-improvement, and investing all work today). Then build the **Console** described here.
-> **Keep every engine. Replace the surface.**
+> **The north star.** What HELIX is and where it's going. For "how the code works today," read
+> [`DESIGN.md`](DESIGN.md).
 
 ---
-
-**Status — 2026-06-18:** Phases 1–4 **shipped** — the Console, the Presence orb, the ambient tiles,
-grocery ordering, and the proactive door watch are all built, tested, and committed. Phase 5 (fully
-removing the tab "drawer") is intentionally **deferred** until the Console is proven in daily use, per
-this blueprint's own condition — the tabs are demoted behind **More**, not yet deleted (they still hold
-settings + Learning).
 
 ## 1. The heart
 
-**HELIX is the mind of the house.**
+**HELIX is an app-builder you talk to.**
 
-Not an app you operate — a presence you talk to. It is always on. It **sees** (cameras), **hears** and
-**speaks** (a wearable earpiece), **acts** across the home, and **improves its own code** when you ask.
-You move around the house with a tiny earpiece and HELIX is simply *there* — answering, watching,
-keeping the place stocked, handling the busywork, and getting better every week because you talked to it.
+You describe an app in plain language — "a tip calculator," "a habit tracker with a 7-day streak,"
+"a Pomodoro timer" — and HELIX writes the real code, builds it, and drops it into your menu as an app
+you can open, run, and keep. Every app it makes is its own project, versioned and reversible.
 
-It should feel like **J.A.R.V.I.S.**: calm, capable, anticipatory, one step ahead — and **simple**. One
-quiet screen. One voice. Everything else handled underneath.
+It should feel like talking to a brilliant engineer who never gets tired: you say what you want, it
+makes it, and it's yours. No setup, no accounts, no boilerplate. Download it, add your Claude key once,
+and start inventing.
 
-The test for every design choice: *would Tony just say it out loud and trust it to be done?* If a feature
-needs a tab, a form, and three clicks, we've failed the heart of it.
-
----
-
-## 2. Design principles
-
-- **Voice-first, glance-second, click-last.** You mostly *talk*. The screen keeps you *aware*. You rarely click.
-- **One screen.** No tabs to hop. The whole app is a single, calm console. (The current **Investment tab**
-  is the reference: one screen, the essentials visible, every knob baked to a smart default and hidden.)
-- **AI proposes, human approves — for anything that spends money or reaches outward.** Trades, grocery
-  orders, code merges, emails: HELIX drafts, you confirm with one word. Never silent.
-- **Anticipate, don't ask.** Surface what matters (milk is low, someone's at the door, a fix is ready)
-  before being asked. Pull, not push; ambient, not noisy.
-- **Smart defaults over knobs.** HELIX thinks under the hood and self-calibrates. New settings are a last
-  resort, tucked behind one ⚙.
-- **Local-first.** Everything runs on the dedicated laptop. Data and secrets stay on the machine; the only
-  egress is deliberate Claude / broker / store calls.
-- **Elegant + dark.** The cyan/amber HUD aesthetic stays. Lots of breathing room. Nothing shouts.
+The test for every design choice: *could a non-programmer get a working app just by describing it?*
+If a feature needs a form, a config file, and three clicks, we've failed the heart of it.
 
 ---
 
-## 3. The interface — **the HELIX Console**
+## 2. The two layers
 
-Replace the five tabs with **one surface**: the Console. Its signature element is the **Presence** — a
-living orb that *is* HELIX. You talk to the orb; a few ambient tiles keep you aware; everything deep is a
-sentence away.
+1. **The Forge** — the engine. The conversation (the orb) plus the coding agent behind it. This is the
+   product: it turns a sentence into working code. (Internally this is `helix/selfdev/` + the Console.)
+2. **Your apps** — what the Forge makes. Each one is a self-contained project in its own folder, shown
+   as a card in your menu, runnable, and versioned. (We call one an *app*; internally a *Build*.)
+
+Everything else is just the chrome around those two things: a menu of your apps, a place to run them,
+and a history you can roll back.
+
+---
+
+## 3. Design principles
+
+- **Blank out of the box.** A fresh download has no keys, no data, no pre-loaded anybody's stuff. The
+  first thing you see is an invitation to build, and one field for your Claude key.
+- **Conversation-first.** You mostly talk or type. The screen keeps you aware; you rarely hunt through menus.
+- **AI proposes, human approves — for anything that spends or changes the app itself.** Building uses
+  Claude and is confirmed first; changing HELIX's own code is drafted on a branch and needs your "ship it."
+- **Local-first.** Everything runs on your machine. Your key and your apps stay on disk; the only egress
+  is the deliberate Claude API call.
+- **Smart defaults over knobs.** New settings are a last resort, behind one ⚙.
+- **Elegant + dark.** The cyan/amber HUD aesthetic and the living Presence orb stay. Nothing shouts.
+
+---
+
+## 4. The interface — the Console
+
+One screen. Its signature element is the **Presence** — a living orb that *is* HELIX. You talk to the
+orb; the conversation sits beneath it; everything deep is one sentence or one tap away.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  ◉  HELIX                     “Listening, sir.”              ⚙   │   Presence · status · settings
+│  ◉  HELIX                  “Listening.”      ☰ Menu ⚡ Tasks 🗂 Archive │
 ├─────────────────────────────────────────────────────────────────┤
+│   ▸ Add your Claude API key to start building apps.   [Open Settings] │  (only until a key is set)
 │                                                                  │
-│     ╭─ conversation ──────────────────────────────────────╮      │
-│     │  You    ·  what's in the fridge?                     │      │
-│     │  HELIX  ·  Milk, eggs, leftovers. You're low on      │      │
-│     │            milk — add it to the Fry's order?         │      │
-│     ╰──────────────────────────────────────────────────────╯      │
+│                         (  ◉  the orb  )                          │
 │                                                                  │
-│   ┌ House ───────┐ ┌ Money ───────┐ ┌ Supplies ────┐ ┌ Self ───┐ │   ambient tiles
-│   │ Garage clear │ │  $12,430  ▲   │ │ 2 low        │ │ 1 fix   │ │
-│   │ 2 chores due │ │  +1.2% today │ │ milk · soap  │ │ ready   │ │
-│   └──────────────┘ └──────────────┘ └──────────────┘ └─────────┘ │
-│                                                                  │
-│        🎤  hold to talk        ·        say “HELIX” to wake       │
+│     You    ·  build me a tip calculator                          │
+│     HELIX  ·  A tip calculator that asks for the bill and        │
+│               percent and shows the tip + total — build it?      │
+│     You    ·  yes                                                 │
+│     HELIX  ·  Built Tip Calculator. It's in your menu now.        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.1 The Presence (the orb)
-A single living indicator, center-stage, that breathes and reacts. It carries the whole JARVIS feeling.
-Its states are the only "status UI" you need:
-
-- **Idle** — slow breathing glow. HELIX is listening for "HELIX."
-- **Listening** — bright pulse tracking your voice level.
-- **Thinking** — a calm shimmer.
-- **Acting** — a focused spin ("Drafting that… / Checking the fridge…").
-- **Speaking** — pulses in time with the reply.
-
-Wake word **"HELIX"** or push-to-talk. The earpiece (Jabra Elite 4) is the primary I/O; the laptop screen
-is the *window*, not the controller.
-
-### 3.2 The conversation
-The center of the screen. What you said, what HELIX said and **did**. Voice-first; type if you prefer.
-This is today's Xpert assistant **promoted to the whole app** — it already drives every faculty through the
-tool router (`helix/ai/actions.py`).
-
-### 3.3 Ambient tiles (glance, don't manage)
-Three or four calm cards. Each is *awareness*, not a menu. Tap to expand; or just **ask** about it.
-
-- **House** — the eyes: who's home / at the door, anything a camera flagged, chores due.
-- **Money** — the part you love: balance, today's P/L, the equity sparkline. Tap → the full Investment
-  console (keep it exactly as it is — it's the reference design). This is the one "deep" view.
-- **Supplies** — the building shopping list: what's low, what HELIX wants to reorder. One tap to approve.
-- **Self** — pending self-improvements (Approve / Reject) + HELIX's health (running, last self-update).
-
-Tiles update themselves on a quiet timer. No refresh buttons in your face.
-
-### 3.4 One settings door
-A single **⚙** holds the rarely-touched config: API keys, cameras (name → source), voice device, project
-repos, grocery account. Everything else is a smart default.
-
-### 3.5 What this replaces
-- The **5 tabs collapse into the Console.** Home / Enterprise / Learning become **tiles + voice intents**,
-  not navigation. **Investment** survives as the deep "Money" view behind its tile (unchanged — it's the
-  gold standard). **Xpert** *becomes the whole app*.
-- The old per-pillar screens stay in the code as deep views, reachable from a tile or a sentence — never
-  the first thing you see.
+- **Menu** — your apps. The cards are the apps you've built; `New app` returns you here to the orb.
+- **Tasks** — run an app (for apps that "do a thing" rather than open a screen).
+- **Archive** — version history + restore + the factory-reset lifeline. Always reachable.
+- **⚙ Settings** — your Claude key, voice, and devices. Everything else is a smart default.
 
 ---
 
-## 4. Architecture — faculties on a thin shell
+## 5. The core loop
 
-HELIX is **one agent (X)** with **faculties**, surfaced by the Console and orchestrated by the tool router.
-Domains (home, money, work) are *things it helps with*, not places you navigate.
+1. **Describe** — you tell the orb what you want.
+2. **Build** — HELIX confirms, then the coding agent writes the app into its own workspace
+   (`data/builds/<app>/`), on a branch, committed.
+3. **Appears** — the app self-registers as a menu card and opens.
+4. **Run / iterate** — open it from the menu, or say "make the streak monthly" to build a new version.
+   Every version is kept; a bad one rolls back in one click.
 
-```
-                         ┌──────────────────────────────┐
-            Console  ──▶  │  Presence (orb) · conversation │  ◀── voice (earpiece) / type
-            (one screen)  │  ambient tiles · ⚙            │
-                         └───────────────┬──────────────┘
-                                         │  intents
-                         ┌───────────────▼──────────────┐
-            The agent X   │   tool router  (ai/actions)  │   the JARVIS "hands"
-                         └───────────────┬──────────────┘
-        ┌──────────┬──────────┬──────────┼──────────┬───────────────┐
-     Hear/Speak   See       Act        Improve     Money          Home
-     ai/transcribe vision/  home+store  selfdev/    investment/    home/
-     ai/speech    (eyes)    (groceries) (self-code) (Alpaca+Claude) (chores)
-        └──────────┴──────────┴──────────┴──────────┴───────────────┘
-                                         │
-                         ┌───────────────▼──────────────┐
-            Foundation    │  Claude (brain) · memory (SQLite) · settings · always-on supervisor │
-                         └──────────────────────────────┘
-```
-
-**Faculties (X's body — most already built):**
-- **Hear / Speak** — local STT (`ai/transcribe`) + neural TTS (`ai/speech`), wake word, earpiece routing. ✅
-- **See** — `helix/vision/`: any camera (USB or RTSP/IP), ask anything (`look`, `look_around`). ✅
-- **Think** — `ai/claude` (Opus brain) + the multi-turn tool loop. ✅
-- **Act** — `ai/actions` tool router: start/stop investing, home tasks, look, self-improve, **(new) order**. ✅/🔨
-- **Improve** — `helix/selfdev/`: talk → it codes itself → email/voice approve → merge → auto-restart. ✅
-- **Remember** — `core/memory` (SQLite) + `core/settings`. ✅
-- **Stay alive** — `scripts/run_helix.py` supervisor, auto-launch, clean exit, crash survival. ✅
-
-**To build for the house-assistant vision:**
-- **The Console shell** — the new single-window UI (Presence + conversation + tiles + ⚙). *(the overhaul)*
-- **Inventory + groceries** — fridge/pantry cams → "what's low" → smart list → **Fry's/Kroger cart** (official
-  Cart API; you tap checkout). A new `helix/home/groceries.py` + a `Supplies` tile. Gated like a trade. 🔨
-- **Ambient awareness loop** — cameras + inventory + chores feed the tiles on a timer; the door/known-face
-  watch alerts proactively. 🔨
-- **Devices (future hardware)** — `helix/devices/` for serial/MQTT when X grows hands. Same concept, new
-  faculty. 🔭
+Conversation → code → a runnable, versioned app → conversation, indefinitely.
 
 ---
 
-## 5. What HELIX does, in plain terms
+## 6. What HELIX is **not** (anymore)
 
-- **Runs the house.** Ask anything; it sees, knows, and handles it. "Who's at the door?" "What's in the
-  garage?" "Is the laundry done?" "What's this tool?"
-- **Keeps you stocked.** Watches the fridge/pantry, builds the shopping list, and on your "yes" puts the
-  order in your Fry's cart.
-- **Improves itself.** "HELIX, add a morning summary" → it writes the code, emails you the diff, and on
-  your "ship it" merges and restarts. It also fixes its own crashes.
-- **Grows the money.** Auto-invests (paper now, gated path to real), shown in the one deep view you love.
-- **Talks the whole time.** Hands-free, anywhere in the house, through a tiny earpiece.
-
-One presence. One screen. Your whole house, handled.
-
----
-
-## 6. Build phases (the overhaul)
-
-Each phase ships and is testable. Keep the engines; rebuild the shell incrementally so HELIX never goes dark.
-
-1. **The Console shell** — new single window: Presence orb (5 states) + the conversation (promote Xpert) +
-   a slim status line. Wire it to the existing router/voice. The old tabs still reachable behind a temporary
-   "More" button so nothing is lost mid-migration.
-2. **Ambient tiles** — House, Money, Supplies, Self. Each reads existing engines on a quiet timer. Money tile
-   opens the current Investment screen verbatim.
-3. **Inventory + groceries** — `groceries.py` (Kroger Cart API), the Supplies tile + voice ("order
-   groceries", "what's low"), confirmation gate + spend cap. Fridge-cam → low-stock → list.
-4. **Ambient awareness** — proactive: door/known-face alerts, "you're low on X," chores due — surfaced by the
-   orb/tiles without being asked.
-5. **Retire the tabs** — once the Console covers daily use, remove the "More" button. Deep views live behind
-   tiles + voice only.
-
-Polish throughout: motion on the orb, sound cues, the HUD palette, large-type readability across the room.
+HELIX began as a personal assistant with built-in Investment, Home, Work, Fabrication, and Vision
+pillars. Those were one person's tools — they needed private accounts, keys, and hardware, and they
+couldn't work for someone who just downloaded the app. They've been removed. HELIX is now one thing
+done well: **the engine that builds apps.** Anything those pillars did, you can now ask HELIX to *build*.
 
 ---
 
 ## 7. Guardrails (non-negotiable)
 
-- **Money & outward actions are always confirmed.** Trades, grocery checkout, code merges, emails — HELIX
-  drafts; you approve by voice or reply. Spend caps on groceries. Reuse the existing spoken-confirmation gate.
-- **Self-modification is branch-first.** Never touches `main` without approval; smoke-checked; one-command
-  rollback; never edits its own safety/approval code unflagged. (Already true — keep it.)
-- **Privacy on people.** Camera person-analysis is **appearance only** (no identity, no web lookup). Online
-  profiling stays a separate, deliberately-gated, later feature — and carries real legal weight (biometric
-  laws); treat with care.
-- **Local-first.** Secrets never leave the machine except for the explicit API calls.
+- **Spending and self-modification are confirmed.** Building uses Claude (confirmed first). Changing
+  HELIX's own code is drafted on a branch and merged only on an explicit yes.
+- **Self-modification is branch-first and reversible.** Never touches the live app without approval;
+  smoke-checked; one-command rollback; never edits its own safety/approval code. (The Twelve
+  Commandments in `helix/selfdev/constitution.py`.)
+- **Apps are sandboxed to their own folder.** A built app lives in its own workspace and is told never
+  to reach outside it.
+- **Local-first.** Your key never leaves the machine except for the Claude API calls you triggered.
 
----
-
-## 8. For the implementing session — how to start
-
-1. Read `DESIGN.md` end to end. The foundation is large and works — **do not rebuild engines.**
-2. Build **Phase 1 (the Console shell)** in `helix/interfaces/` as a new main window; keep `run_qt_app`'s
-   clean-exit + prewarm + supervisor wiring. Promote `XpertTab`'s conversation to the center.
-3. Reuse the HUD stylesheet and the Investment screen as-is (the aesthetic reference).
-4. Move tab by tab into tiles; keep a temporary escape hatch to old views until the Console wins.
-5. Keep every change small, committed, and verified — and let HELIX help build itself.
-
-**The whole point:** make it so simple and so present that running the house is just a conversation.
-Capture that, and HELIX is no longer an app. It's JARVIS.
+**The whole point:** make it so simple that building software is just a conversation.
