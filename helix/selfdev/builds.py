@@ -72,12 +72,26 @@ def create_workspace(name: str, *, request: str = "") -> Path:
 
 
 def delete_build(slug: str) -> bool:
-    """Permanently delete a Build's workspace (its code + git history). Returns True if removed."""
+    """Permanently delete a Build's workspace (its code + git history). Returns True if removed.
+
+    Handles the Windows gotcha where git keeps pack files read-only (which makes a plain rmtree fail):
+    the onerror hook clears the read-only bit and retries, so the delete actually goes through."""
+    import os
     import shutil
+    import stat
+
     ws = workspace_dir(slug)
     if not ws.exists():
         return False
-    shutil.rmtree(ws, ignore_errors=True)
+
+    def _on_error(func, path, _exc):
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except OSError:
+            pass
+
+    shutil.rmtree(ws, onerror=_on_error)
     return not ws.exists()
 
 

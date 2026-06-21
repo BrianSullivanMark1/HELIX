@@ -1672,7 +1672,13 @@ class HelixMainWindow(QMainWindow):
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        selfdev_builds.delete_build(slug)
+        removed = selfdev_builds.delete_build(slug)
+        if not removed:
+            self.statusBar().showMessage(
+                f"Couldn't delete {name} — it may be open in a browser or Explorer. Close it and try again.",
+                9000,
+            )
+            return
         self._build_views.pop(slug, None)
         self._show_home()
         self._rebuild_menu()
