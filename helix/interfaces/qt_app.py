@@ -705,10 +705,11 @@ class TasksView(QWidget):
     `helix.tasks.registry` (append to BUILTIN_TASKS or call register()), so this panel grows with no UI
     edits. Opened by the Tasks button in the Console top bar, mirroring how Menu opens the launcher."""
 
-    def __init__(self, on_home, settings: AppSettings | None = None, parent=None) -> None:
+    def __init__(self, on_home, settings: AppSettings | None = None, on_pick=None, parent=None) -> None:
         super().__init__(parent)
         self._workers: set = set()
         self.settings = settings or AppSettings()
+        self._on_pick = on_pick  # route the permanent New Task / Settings cards to the main window
         outer = QVBoxLayout(self)
         outer.setContentsMargins(48, 34, 48, 40)
         outer.setSpacing(18)
@@ -737,22 +738,28 @@ class TasksView(QWidget):
         return set(raw) if isinstance(raw, list) else set()
 
     def _rebuild(self) -> None:
-        """(Re)build the task grid. Each card carries a ✕ badge (the same _LauncherCard used by the Menu)
-        that removes the task from the list; removals persist in settings, so they stick across restarts."""
+        """(Re)build the task grid. Two permanent cards lead — New Task and Settings, mirroring the Menu —
+        then the registered tasks, each with a ✕ badge to remove it (removals persist in settings)."""
         while self._grid.count():
             item = self._grid.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        n = 0
+        # Permanent cards (no ✕): New Task opens the Console to describe one; Settings opens settings.
+        for key, label, subtitle in (
+            ("new", "New Task", "describe a task and I'll build it"),
+            ("settings", "Settings", "voice · keys · devices"),
+        ):
+            card = _LauncherCard(key, f"{label}\n{subtitle}", permanent=True, allow_rename=False)
+            card.clicked.connect(lambda _=False, k=key: self._pick(k))
+            self._grid.addWidget(card, n // 2, n % 2)
+            n += 1
+        # Registered task apps (removable).
         hidden = self._hidden()
         all_tasks = tasks_registry.all_tasks()
         visible = [t for t in all_tasks if t.key not in hidden]
-        if not visible:
-            # Self-heal: every task ended up hidden (e.g. all three ✕'d away), which would leave the
-            # launcher permanently blank with no way back. Clear the hidden set so the tasks return.
-            self.settings.set(TASKS_HIDDEN_SETTING, [])
-            visible = all_tasks
-        for n, task in enumerate(visible):
+        for task in visible:
             card = _LauncherCard(
                 task.key, f"{task.label}\n{task.subtitle}",
                 badge_tooltip="Remove this task from the list",
@@ -761,6 +768,12 @@ class TasksView(QWidget):
             card.clicked.connect(lambda _=False, t=task: self._run(t))
             card.hide_requested.connect(self._remove)
             self._grid.addWidget(card, n // 2, n % 2)
+            n += 1
+
+    def _pick(self, key: str) -> None:
+        """Route a permanent card (New Task / Settings) to the main window."""
+        if self._on_pick is not None:
+            self._on_pick(key)
 
     def _remove(self, key: str) -> None:
         """The task card ✕: drop the task from the launcher and remember it as hidden in settings.
@@ -1097,7 +1110,7 @@ class HelixMainWindow(QMainWindow):
         for build in selfdev_builds.list_builds():
             self._register_build_view(build)
         self.launcher = self._make_launcher()
-        self.tasks_view = TasksView(on_home=self._show_home, settings=AppSettings())
+        self.tasks_view = TasksView(on_home=self._show_home, settings=AppSettings(), on_pick=self.open_view)
         self.console = ConsoleView(
             self.xpert_tab, memory, self.open_view, self.show_launcher, self.show_tasks
         )
