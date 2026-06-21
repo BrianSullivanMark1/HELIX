@@ -88,6 +88,11 @@ order requirement on Windows), then calls the CLI.
 
 ### `helix/tasks/` — `registry.py`: runnable "action" apps shown in Tasks (ships empty).
 
+### `helix/agents/` — goal-driven automations
+- `registry.py` — settings-backed agent store (goal + trigger + enabled) and `run_agent`, which drives
+  the `ai/actions` tool-loop toward an agent's goal. Anything needing approval pauses instead of
+  auto-running. v1 trigger is manual ("Run now"); scheduled triggers build on the same definitions.
+
 ### `helix/interfaces/`
 - `cli.py` — argparse entry; bare `helix` opens the desktop app (`ui`).
 - `qt_app.py` — the whole desktop UI: `run_qt_app`, `PresenceOrb`, `ConsoleView`, `PanelHost`,

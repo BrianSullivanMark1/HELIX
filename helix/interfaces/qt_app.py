@@ -10,18 +10,15 @@ import sys
 import tempfile
 import wave
 
-from PyQt6.QtCore import Qt, QEasingCurve, QPointF, QPropertyAnimation, QRectF, QTimer, QObject, QRunnable, QThreadPool, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QObject, QRunnable, QThreadPool, QUrl, pyqtSignal
 from PyQt6.QtTextToSpeech import QTextToSpeech, QVoice
 from PyQt6.QtMultimedia import QAudioFormat, QAudioOutput, QAudioSource, QMediaDevices, QMediaPlayer
 from PyQt6.QtGui import (
-    QBrush,
     QColor,
     QFont,
-    QLinearGradient,
+    QIcon,
     QPainter,
-    QPainterPath,
     QPen,
-    QPolygonF,
     QRadialGradient,
 )
 from PyQt6.QtWidgets import (
@@ -30,11 +27,9 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
-    QFormLayout,
     QFrame,
     QGridLayout,
     QGroupBox,
-    QHeaderView,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -51,9 +46,6 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QStackedWidget,
     QStatusBar,
-    QTabWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QTextBrowser,
     QTextEdit,
     QVBoxLayout,
@@ -64,8 +56,6 @@ from helix.ai.claude import (
     CLAUDE_API_KEY_SETTING,
     ClaudeClient,
     ClaudeConfig,
-    ClaudeError,
-    DEFAULT_CLAUDE_MODEL,
     DEFAULT_RESEARCH_MODEL,
     estimate_cost,
 )
@@ -84,24 +74,13 @@ from helix.core.conversation import ConversationStore
 from helix.core.memory import SQLiteMemory
 from helix.core.settings import AppSettings
 from helix.core.reliability import LOGGER_NAME, install_crash_guard, setup_logging
-from helix.selfdev import builds as selfdev_builds, coder as selfdev_coder, constitution as selfdev_constitution, engine as selfdev_engine, mailer as selfdev_mailer, registry as selfdev_registry, restart as selfdev_restart, triggers as selfdev_triggers, versioning as selfdev_versioning
+from helix.selfdev import builds as selfdev_builds, constitution as selfdev_constitution, mailer as selfdev_mailer, restart as selfdev_restart, triggers as selfdev_triggers, versioning as selfdev_versioning
 from helix.tasks import registry as tasks_registry
 from helix.agents import registry as agents_registry
 
 
 _LOG = logging.getLogger(LOGGER_NAME)
 
-DEFAULT_EMERGENCY_MONTHS = 6
-DEFAULT_PRIMARY_GOAL = "Build long-term wealth"
-RISK_RETURN_ASSUMPTIONS = {
-    "conservative": 0.04,
-    "balanced": 0.06,
-    "growth": 0.075,
-    "aggressive": 0.09,
-}
-AI_MODE_SETTING = "learning_ai_mode"
-AI_MODE_MOCK = "Mock Claude"
-AI_MODE_CLAUDE = "Claude API"
 class NoScrollComboBox(QComboBox):
     """A combo box that ignores the scroll wheel, so scrolling the page never changes its value.
 
@@ -113,23 +92,8 @@ class NoScrollComboBox(QComboBox):
         event.ignore()
 
 
-class NoScrollDoubleSpinBox(QDoubleSpinBox):
-    """A spin box that ignores the scroll wheel (same rationale as NoScrollComboBox)."""
-
-    def wheelEvent(self, event) -> None:  # noqa: N802 (Qt override)
-        event.ignore()
 
 
-class ClickFrame(QFrame):
-    """A QFrame that emits `clicked` on a left mouse press — used for the selectable category tiles
-    and vendor result cards on the Components screen."""
-
-    clicked = pyqtSignal()
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt override)
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
 
 
 class WorkerSignals(QObject):
@@ -1444,6 +1408,9 @@ class HelixMainWindow(QMainWindow):
         super().__init__()
         self.memory = memory
         self.setWindowTitle("HELIX")
+        icon_path = load_config().root_dir / "assets" / "helix.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))  # taskbar / title-bar icon
         self.setStatusBar(QStatusBar())
 
         # The Console conversation is the front door; deep views are summoned on request (a sentence,
@@ -1473,7 +1440,7 @@ class HelixMainWindow(QMainWindow):
 
         self.archive_tab = ArchiveTab(memory)
         # The menu starts blank: the only built-in panels are Settings and Archive. Everything else
-        # in the menu is an app the user has built (registered in selfdev_registry.MENU_FEATURES).
+        # in the menu is an app the user has built (from selfdev_builds.list_builds()).
         self.panel_host = PanelHost(
             {
                 "settings": ("App settings", settings_panel),
@@ -3299,37 +3266,12 @@ class XpertTab(QWidget):
             self.tts.stop()
 
 
-ENTERPRISE_SINCE_DAYS_SETTING = "enterprise_since_days"
 
 
-def money_box(default: float = 0.0) -> QDoubleSpinBox:
-    box = QDoubleSpinBox()
-    box.setRange(0.0, 1_000_000_000.0)
-    box.setDecimals(2)
-    box.setSingleStep(100.0)
-    box.setPrefix("$")
-    box.setValue(default)
-    box.setMinimumHeight(42)
-    return box
 
 
-def percent_box(default: float = 0.0) -> QDoubleSpinBox:
-    box = NoScrollDoubleSpinBox()
-    box.setRange(0.0, 100.0)
-    box.setDecimals(2)
-    box.setSingleStep(1.0)
-    box.setSuffix("%")
-    box.setValue(default)
-    box.setMinimumHeight(42)
-    return box
 
 
-def integer_box(minimum: int, maximum: int, default: int) -> QSpinBox:
-    box = QSpinBox()
-    box.setRange(minimum, maximum)
-    box.setValue(default)
-    box.setMinimumHeight(42)
-    return box
 
 
 def apply_hud_style(app: QApplication) -> None:
@@ -3965,26 +3907,7 @@ def apply_hud_style(app: QApplication) -> None:
     )
 
 
-def _to_float(value: object) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
 
 
-def _money_or_blank(value: object) -> str:
-    if value is None or value == "":
-        return ""
-    try:
-        return f"${float(value):,.2f}"
-    except (TypeError, ValueError):
-        return str(value)
 
 
-def _percent_or_blank(value: object) -> str:
-    if value is None or value == "":
-        return ""
-    try:
-        return f"{float(value):.2f}%"
-    except (TypeError, ValueError):
-        return str(value)
