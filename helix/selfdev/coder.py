@@ -354,6 +354,19 @@ def run_coding_task(
     if not files:
         return abort("The coder made no file changes.", summary=summary, cost=cost)
 
+    # IMMUTABLE BACKBONE (Commandments 7 & 8): if a self-change touched protected machinery — the four
+    # nav buttons / front interface, the Forge, or the safety/approval code — refuse the WHOLE draft now
+    # (delete the branch), so it never becomes an approvable pending change. The merge gate in engine.py
+    # is the backstop; this is the early hard stop so HELIX can't even "nearly" change its own structure.
+    # (Builds write only inside their own workspace, so their changed files never match these paths.)
+    violations = constitution.check_change(files)
+    if violations:
+        return abort(
+            "Refused — that change touches HELIX's immutable backbone "
+            f"({', '.join(violations)}). The nav buttons, the front interface, and the Forge cannot be "
+            "changed by commanding HELIX."
+        )
+
     step("Committing the proposed change to the branch")
     try:
         gitops.stage_all(repo)
