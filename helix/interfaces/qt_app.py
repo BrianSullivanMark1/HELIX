@@ -54,6 +54,7 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -749,7 +750,7 @@ class TasksView(QWidget):
         # Permanent cards (no ✕): New Task opens the Console; Settings opens TASK settings (the Menu's
         # Settings opens app settings — the two are deliberately separate).
         for key, label, subtitle in (
-            ("new", "New Task", "describe a task and I'll build it"),
+            ("newtask", "New Task", "design it with me, then build"),
             ("tasksettings", "Settings", "task options"),
         ):
             card = _LauncherCard(key, f"{label}\n{subtitle}", permanent=True, allow_rename=False)
@@ -1063,6 +1064,201 @@ class BuildView(QWidget):
             self._status.setText(f"Couldn't run it: {error}")
 
 
+class DesignDialog(QDialog):
+    """A working editor for designing an app (or task) with the AI before building it.
+
+    A back-and-forth chat (Markdown, clickable links) to shape the idea, a name field, then one
+    'Build it' button that submits the whole design for an uninterrupted build. The build engine writes
+    the app start-to-finish with no further prompts; the result opens when it's done. Voice/orb are
+    untouched — this is the focused, writing-first design surface."""
+
+    step_signal = pyqtSignal(str)  # build progress, marshalled from the worker thread to the UI
+
+    def __init__(self, memory: SQLiteMemory, kind: str = "app", on_built=None, parent=None) -> None:
+        super().__init__(parent)
+        self.memory = memory
+        self.kind = "task" if kind == "task" else "app"
+        self._on_built = on_built
+        self._workers: set = set()
+        self._messages: list = []
+        self._md = ""
+        self._busy = False
+        self._client = ClaudeClient(ClaudeConfig(model=DEFAULT_RESEARCH_MODEL, timeout_seconds=90))
+
+        noun = "task" if self.kind == "task" else "app"
+        self.setWindowTitle(f"Design your {noun}")
+        self.setObjectName("designDialog")
+        self.resize(720, 640)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        title = QLabel(f"Design your {noun}")
+        title.setObjectName("panelTitle")
+        layout.addWidget(title)
+
+        self.name_field = QLineEdit()
+        self.name_field.setPlaceholderText(f"{noun.capitalize()} name (optional)")
+        layout.addWidget(self.name_field)
+
+        self.transcript = QTextBrowser()
+        self.transcript.setOpenExternalLinks(True)  # links the AI gives are clickable
+        self.transcript.setObjectName("designTranscript")
+        layout.addWidget(self.transcript, 1)
+
+        self.status = QLabel("")
+        self.status.setObjectName("xpertHint")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+        input_row = QHBoxLayout()
+        self.input = QPlainTextEdit()
+        self.input.setPlaceholderText(f"Describe the {noun} you want — then refine it with me.")
+        self.input.setFixedHeight(64)
+        input_row.addWidget(self.input, 1)
+        self.send_button = QPushButton("Send")
+        self.send_button.setObjectName("ghostButton")
+        self.send_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.send_button.clicked.connect(self._send)
+        input_row.addWidget(self.send_button)
+        layout.addLayout(input_row)
+
+        button_row = QHBoxLayout()
+        self.build_button = QPushButton(f"Build {noun}")
+        self.build_button.setObjectName("primaryButton")
+        self.build_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.build_button.setEnabled(False)  # enabled once the design has been discussed
+        self.build_button.clicked.connect(self._build)
+        close_button = QPushButton("Close")
+        close_button.setObjectName("ghostButton")
+        close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_button.clicked.connect(self.reject)
+        button_row.addWidget(close_button)
+        button_row.addStretch(1)
+        button_row.addWidget(self.build_button)
+        layout.addLayout(button_row)
+
+        self.step_signal.connect(self.status.setText)
+
+        if not self._client.is_configured():
+            self.status.setText("Add your Claude API key in Settings to design and build.")
+            self.send_button.setEnabled(False)
+        else:
+            self._render_intro(noun)
+
+    def _render_intro(self, noun: str) -> None:
+        self._md = (
+            f"**HELIX** — Tell me what {noun} you'd like and I'll help you design it. "
+            "When it's ready, hit **Build**.\n\n---\n\n"
+        )
+        self.transcript.setMarkdown(self._md)
+
+    def _append(self, who: str, text: str) -> None:
+        self._md += f"**{who}**\n\n{text}\n\n---\n\n"
+        self.transcript.setMarkdown(self._md)
+        bar = self.transcript.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _set_busy(self, busy: bool, message: str = "") -> None:
+        self._busy = busy
+        self.send_button.setEnabled(not busy and self._client.is_configured())
+        self.build_button.setEnabled(not busy and bool(self._messages))
+        self.input.setReadOnly(busy)
+        if message:
+            self.status.setText(message)
+        elif not busy:
+            self.status.setText("")
+
+    def _design_system(self) -> str:
+        noun = "task" if self.kind == "task" else "app"
+        return (
+            f"You are HELIX's design partner, helping the user design a small {noun} before any code is "
+            "written. Have a SHARP, quick back-and-forth: ask only the few questions you truly need, then "
+            "propose a concrete design. You may use Markdown — headings, bold, bullet lists, tables, and "
+            "links — to make the design clear and skimmable. Do NOT write the implementation code now; "
+            "this is the design phase. Keep replies tight. When the design is solid, give a short, "
+            f"build-ready spec of the {noun}. Prefer simple, self-contained {noun}s (a single HTML file "
+            "is ideal)."
+        )
+
+    def _send(self) -> None:
+        if self._busy:
+            return
+        text = self.input.toPlainText().strip()
+        if not text:
+            return
+        self._append("You", text)
+        self._messages.append({"role": "user", "content": text})
+        self.input.clear()
+        self._set_busy(True, "HELIX is thinking…")
+        msgs = list(self._messages)
+        system = self._design_system()
+        spawn_worker(
+            self._workers,
+            lambda: self._client.chat(msgs, system=system, max_tokens=1500),
+            self._reply,
+        )
+
+    def _reply(self, ok: bool, payload) -> None:
+        self._set_busy(False)
+        if not ok:
+            self._append("HELIX", f"_(I hit a problem: {payload})_")
+            return
+        blocks = (payload or {}).get("content", []) or []
+        text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text" and b.get("text")).strip()
+        self._messages.append({"role": "assistant", "content": text or "…"})
+        self._append("HELIX", text or "…")
+        self.build_button.setEnabled(True)
+
+    def _compose_request(self) -> str:
+        lines = []
+        for m in self._messages:
+            who = "User" if m.get("role") == "user" else "HELIX (designer)"
+            lines.append(f"{who}: {m.get('content', '')}")
+        return "Build this from the agreed design.\n\nDesign discussion:\n" + "\n\n".join(lines)
+
+    def _default_name(self) -> str:
+        for m in self._messages:
+            if m.get("role") == "user":
+                return (m.get("content", "").strip().splitlines() or ["App"])[0][:40]
+        return "App"
+
+    def _build(self) -> None:
+        if self._busy or not self._messages:
+            return
+        name = self.name_field.text().strip() or self._default_name()
+        noun = "task" if self.kind == "task" else "app"
+        confirm = QMessageBox.question(
+            self, f"Build {noun}",
+            f"Build “{name}” now? This runs uninterrupted and can take a couple of minutes.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        request = self._compose_request()
+        self._set_busy(True, "Building — this runs uninterrupted…")
+        spawn_worker(
+            self._workers,
+            lambda: selfdev_builds.build_app(name, request, on_step=lambda s: self.step_signal.emit(s)),
+            self._built,
+        )
+
+    def _built(self, ok: bool, payload) -> None:
+        self._set_busy(False)
+        if not ok:
+            self.status.setText(f"Build failed: {payload}")
+            return
+        ws, result = payload
+        if not getattr(result, "ok", False):
+            self.status.setText(f"Build failed: {getattr(result, 'error', 'unknown error')}")
+            return
+        if self._on_built is not None:
+            try:
+                self._on_built(ws.name)
+            except Exception:
+                pass
+        self.accept()
+
+
 class HelixMainWindow(QMainWindow):
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
@@ -1240,7 +1436,7 @@ class HelixMainWindow(QMainWindow):
         """Build the menu: New app + Settings, then a card for each app the user has built."""
         builds_list = selfdev_builds.list_builds()
         core_menu = [
-            ("new", "New app", "describe an app and I'll build it"),
+            ("newapp", "New app", "design it with me, then build"),
             ("settings", "Settings", "voice · keys · devices"),
         ]
         build_menu = [
@@ -1296,9 +1492,13 @@ class HelixMainWindow(QMainWindow):
         self.statusBar().showMessage(f"Deleted {name}.", 6000)
 
     def open_view(self, name: str | None = None) -> None:
-        """Open a screen by key. 'new' → the Console (where you describe an app); 'tasks'/'archive'
-        are special; a built-app key opens its panel. No/unknown name → the menu."""
-        if name in ("new", None):
+        """Open a screen by key. 'newapp'/'newtask' open the design editor; 'tasks'/'archive' are
+        special; a built-app key opens its panel. No/unknown name → the menu."""
+        if name == "newapp":
+            self._open_design("app")
+        elif name == "newtask":
+            self._open_design("task")
+        elif name in ("new", None):
             self._show_home()
         elif name == "tasks":
             self.show_tasks()
@@ -1308,6 +1508,11 @@ class HelixMainWindow(QMainWindow):
             self.stack.setCurrentIndex(1)
         else:
             self.show_launcher()
+
+    def _open_design(self, kind: str) -> None:
+        """Open the design editor for a new app or task; on a finished build, register + open it."""
+        dialog = DesignDialog(self.memory, kind=kind, on_built=self._on_build_created, parent=self)
+        dialog.exec()
 
     def show_launcher(self) -> None:
         self.stack.setCurrentIndex(2)
@@ -3379,6 +3584,19 @@ def apply_hud_style(app: QApplication) -> None:
             background-color: rgba(255,200,87,0.10);
             border: 1px solid #ffc857;
             border-radius: 14px;
+        }
+
+        QDialog#designDialog {
+            background-color: #061013;
+        }
+
+        QTextBrowser#designTranscript {
+            background-color: rgba(10,28,33,0.6);
+            color: #d6f6ff;
+            border: 1px solid #1e5a68;
+            border-radius: 12px;
+            padding: 10px;
+            font-size: 12pt;
         }
 
         QLabel#panelTitle {
