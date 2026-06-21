@@ -72,8 +72,11 @@ LOCKED_SETTINGS: dict = {
     "ai_can_expand_permissions": False,
 }
 
-# Menu keys that can never be hidden or removed (Commandments 8 & 12).
-PERMANENT_MENU_KEYS: frozenset = frozenset({"settings", "archive"})
+# Menu keys that can never be hidden or removed (Commandments 8 & 12) — the immutable UI structure:
+# Settings, Archive, and the three "New …" create buttons (New app / New Task / New Agent).
+PERMANENT_MENU_KEYS: frozenset = frozenset(
+    {"settings", "archive", "newapp", "newtask", "newagent"}
+)
 
 # Files HELIX may never modify through its own self-dev loop — the safety-critical machinery that keeps
 # the commandments enforceable, plus the IMMUTABLE BACKBONE: the front interface (the four nav buttons
