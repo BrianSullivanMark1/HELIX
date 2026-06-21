@@ -1,3 +1,9 @@
+"""Neutral email / text-message primitives, shared by any feature that needs to reach the user.
+
+Extracted from the (personal) Home pillar so the Forge's optional email-approval path
+(`helix/selfdev/mailer.py`) does not depend on Home — letting the personal pillars be removed without
+breaking the self-improvement loop. Pure stdlib (smtplib) with an injectable `smtp_factory` for tests.
+"""
 from __future__ import annotations
 
 import smtplib
@@ -5,7 +11,6 @@ import ssl
 from email.message import EmailMessage
 
 from helix.core.settings import AppSettings
-from helix.home.tasks import due_tasks, reminder_message
 
 SMS_SENDER_SETTING = "sms_sender_email"
 SMS_APP_PASSWORD_SETTING = "sms_app_password"
@@ -99,12 +104,3 @@ def sms_config(settings: AppSettings | None = None) -> dict[str, str]:
 def is_configured(settings: AppSettings | None = None) -> bool:
     cfg = sms_config(settings)
     return bool(cfg["app_password"] and gateway_address(cfg["phone"], cfg["carrier"]))
-
-
-def send_reminder(tasks: list, settings: AppSettings | None = None, *, smtp_factory=None) -> str:
-    """Text the user their due/overdue tasks. Returns a short status string."""
-    settings = settings or AppSettings()
-    cfg = sms_config(settings)
-    recipient = gateway_address(cfg["phone"], cfg["carrier"])
-    send_text_via_email(cfg["sender"], cfg["app_password"], recipient, reminder_message(tasks), smtp_factory=smtp_factory)
-    return f"Texted {len(due_tasks(tasks))} reminder(s) to your phone."
