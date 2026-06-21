@@ -476,9 +476,21 @@ class ConsoleView(QWidget):
         if on:
             self.voice_toggle.setText("⏹  Voice")
             self.voice_toggle.setToolTip("Voice input is on — click to mute the mic")
+            # Green = active/receiving; tint border + text so the live state reads at a glance.
+            self.voice_toggle.setStyleSheet(
+                "QPushButton {color:#7dffb0; border:1px solid #2bd47a;"
+                " background-color:rgba(20,64,44,0.45);}"
+                " QPushButton:hover {color:#caffe0; border-color:#3dff96;}"
+            )
         else:
             self.voice_toggle.setText("▶  Voice")
             self.voice_toggle.setToolTip("Voice input is muted — click to listen")
+            # Red = inactive/muted.
+            self.voice_toggle.setStyleSheet(
+                "QPushButton {color:#ff9b9b; border:1px solid #d44b4b;"
+                " background-color:rgba(64,22,22,0.45);}"
+                " QPushButton:hover {color:#ffd0d0; border-color:#ff6b6b;}"
+            )
 
 
 class PanelHost(QWidget):
