@@ -109,7 +109,7 @@ class ClaudeClient:
     def complete(self, prompt: str, max_tokens: int = 1800) -> str:
         if not self.api_key:
             raise ClaudeError(
-                "Claude is not configured. Save a Claude API key in Learning or set "
+                "Claude is not configured. Save a Claude API key in Settings or set "
                 f"{self.config.api_key_env}."
             )
 
@@ -148,7 +148,7 @@ class ClaudeClient:
         """
         if not self.api_key:
             raise ClaudeError(
-                "Claude is not configured. Save a Claude API key in Learning or set "
+                "Claude is not configured. Save a Claude API key in Settings or set "
                 f"{self.config.api_key_env}."
             )
 
@@ -179,7 +179,7 @@ class ClaudeClient:
         """Describe/answer about an image. `image_b64` is base64-encoded image bytes. Returns the text."""
         if not self.api_key:
             raise ClaudeError(
-                "Claude is not configured. Save a Claude API key in Learning or set "
+                "Claude is not configured. Save a Claude API key in Settings or set "
                 f"{self.config.api_key_env}."
             )
         body = self._post(

@@ -129,23 +129,39 @@ def list_builds() -> list[dict]:
 
 
 def build_app(name: str, request: str, *, on_step=None, merge: bool = True):
-    """Invent a standalone app end-to-end: make its workspace, have the coder write it, land the code.
+    """Invent a standalone app end-to-end: make its workspace, have a coder write it, land the code.
 
-    Returns (workspace_path, CoderResult). The code is written on a work branch inside the workspace;
-    when `merge` is True it is merged to the workspace's `main` (a --no-ff, revertible commit) so the
-    Build's History has a version to show and roll back to."""
+    Uses the Claude Code CLI when it's installed (more capable); otherwise falls back to the API-based
+    coder, so a fresh download builds apps with only an Anthropic API key — no CLI required. Returns
+    (workspace_path, CoderResult). The result is committed to the workspace's `main` so the Build's
+    History has a version to show and roll back to."""
     from helix.selfdev import coder  # lazy: keep this module import-light
 
     ws = create_workspace(name, request=request)
-    result = coder.run_coding_task(
-        task=f"Build app: {name}",
-        repo_dir=str(ws),
-        prompt=build_app_prompt(name, request),
-        on_step=on_step,
-    )
-    if result.ok and merge and result.branch:
+    prompt = build_app_prompt(name, request)
+
+    if coder.resolve_claude_cli():
+        # CLI path: run_coding_task works on a branch then switches back; merge it to main.
+        result = coder.run_coding_task(
+            task=f"Build app: {name}", repo_dir=str(ws), prompt=prompt, on_step=on_step,
+        )
+        if result.ok and merge and result.branch:
+            try:
+                gitops.merge_to(str(ws), result.branch, into=result.base or "main", message=f"build: {name}")
+            except gitops.GitError:
+                pass
+        return ws, result
+
+    # API fallback: the coder writes files directly into the workspace; commit them here.
+    from helix.selfdev import api_coder
+    result = api_coder.run_build(prompt, str(ws), on_step=on_step)
+    if result.ok:
         try:
-            gitops.merge_to(str(ws), result.branch, into=result.base or "main", message=f"build: {name}")
+            if gitops.changed_files(str(ws)):
+                message = f"build: {name}"
+                if result.summary:
+                    message += f"\n\n{result.summary}"
+                gitops.commit_all(str(ws), message)
         except gitops.GitError:
             pass
     return ws, result
