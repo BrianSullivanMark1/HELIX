@@ -381,13 +381,22 @@ class ConsoleView(QWidget):
         archive_button.setCursor(Qt.CursorShape.PointingHandCursor)
         archive_button.setToolTip("Versions · restore · safety")
         archive_button.clicked.connect(lambda: open_view("archive"))
-        # The manual-navigation buttons, stacked vertically: Menu → Tasks → Agents → Archive.
+        # A play/stop toggle for the voice input channel, directly below Archive: a stop icon while the
+        # mic is live (listening for “HELIX”), a play icon while muted. Its state persists across
+        # sessions (XpertTab.set_voice_input writes the setting).
+        self.voice_toggle = QPushButton()
+        self.voice_toggle.setObjectName("ghostButton")
+        self.voice_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.voice_toggle.clicked.connect(self._toggle_voice_input)
+        self._sync_voice_toggle()
+        # The manual-navigation buttons, stacked vertically: Menu → Tasks → Agents → Archive → Voice.
         nav = QVBoxLayout()
         nav.setSpacing(8)
         nav.addWidget(menu_button)
         nav.addWidget(tasks_button)
         nav.addWidget(agents_button)
         nav.addWidget(archive_button)
+        nav.addWidget(self.voice_toggle)
         topbar.addLayout(brand)
         topbar.addStretch(1)
         topbar.addLayout(nav)
@@ -449,6 +458,27 @@ class ConsoleView(QWidget):
     def _toggle_conversation(self) -> None:
         """Left-click on the orb reveals or hides the conversation box."""
         self._xpert.setVisible(not self._xpert.isVisible())
+
+    def _toggle_voice_input(self) -> None:
+        """Flip the hands-free mic channel on/off via the XpertTab (which persists the choice)."""
+        try:
+            self._xpert.set_voice_input(not self._xpert.voice_input_on())
+        except Exception:
+            pass
+        self._sync_voice_toggle()
+
+    def _sync_voice_toggle(self) -> None:
+        """Reflect the current voice-input state on the toggle: stop icon when live, play when muted."""
+        try:
+            on = self._xpert.voice_input_on()
+        except Exception:
+            on = True
+        if on:
+            self.voice_toggle.setText("⏹  Voice")
+            self.voice_toggle.setToolTip("Voice input is on — click to mute the mic")
+        else:
+            self.voice_toggle.setText("▶  Voice")
+            self.voice_toggle.setToolTip("Voice input is muted — click to listen")
 
 
 class PanelHost(QWidget):
@@ -1934,6 +1964,7 @@ XPERT_INPUT_DEVICE_SETTING = "xpert_input_device"    # preferred mic, by descrip
 XPERT_OUTPUT_DEVICE_SETTING = "xpert_output_device"  # preferred speaker, by description
 XPERT_VOICE_SPEED_SETTING = "xpert_voice_speed"      # HELIX's talking rate (×), default 1.5
 XPERT_VOICE_SETTING = "xpert_voice"                  # HELIX's neural voice id (edge-tts)
+XPERT_VOICE_INPUT_SETTING = "xpert_voice_input_on"   # hands-free mic channel on/off, default on
 
 # Energy-based voice-activity detection (VAD). The speech threshold is ADAPTIVE — it tracks the
 # ambient noise floor, so it works across mics (a quiet close-talk headset vs. a noisier array mic)
@@ -2745,11 +2776,37 @@ class XpertTab(QWidget):
             except Exception:
                 pass
 
+    def voice_input_on(self) -> bool:
+        """Whether the hands-free mic channel is enabled. Persisted, defaults on; the Console's
+        play/stop toggle flips it."""
+        return bool(self.settings.get(XPERT_VOICE_INPUT_SETTING, True))
+
+    def set_voice_input(self, on: bool) -> None:
+        """Turn the hands-free voice input channel on (listen) or off (mute), and remember the choice
+        across sessions. Off tears the wake listener down so the mic goes fully quiet."""
+        self.settings.set(XPERT_VOICE_INPUT_SETTING, bool(on))
+        if on:
+            self._enable_handsfree()
+        else:
+            self._disable_handsfree()
+
+    def _disable_handsfree(self) -> None:
+        """Mute the voice input channel: stop the wake listener and hide its live meter. The
+        push-to-talk button and typing stay available."""
+        self._end_session()
+        self._stop_wake()
+        self._handsfree = False
+        self.level_bar.setVisible(False)
+        self.listen_label.setVisible(False)
+        self._set_convo_state("idle")
+
     def _enable_handsfree(self) -> None:
-        """Hands-free is always on (§23): continuously listen for the wake word “HELIX”. Started once
+        """Hands-free is on by default (§23): continuously listen for the wake word “HELIX”. Started once
         at launch; degrades silently to push-to-talk + typing if the mic, the local voice model, or a
         Claude key isn't ready yet (it'll come up on a later launch once those are in place). The
         stt_ready() guard matters — loading the voice model after Qt is up would crash the process."""
+        if not self.voice_input_on():  # the user muted the mic via the Console toggle — stay quiet
+            return
         if self._handsfree:
             return
         if not (self.mic.is_available() and stt_available() and stt_ready() and self._claude_ready()):
