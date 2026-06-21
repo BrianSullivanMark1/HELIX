@@ -714,21 +714,19 @@ class Launcher(QWidget):
 
 
 class TasksView(QWidget):
-    """The Tasks launcher — a grid of runnable task "applications" (the action counterpart to the Menu's
-    app shortcuts). Each card runs its task off-thread and shows the result below. Cards come from
-    `helix.tasks.registry` (append to BUILTIN_TASKS or call register()), so this panel grows with no UI
-    edits. Opened by the Tasks button in the Console top bar, mirroring how Menu opens the launcher."""
+    """The Tasks screen — runnable Tasks (Builds tagged kind="task"). Leads with New Task + Settings
+    (mirroring the Apps menu), then a card per task; clicking a task RUNS it (launches its entry point)
+    and its X deletes it. Opened by the Tasks button in the Console top bar."""
 
     def __init__(self, on_home, settings: AppSettings | None = None, on_pick=None, parent=None) -> None:
         super().__init__(parent)
-        self._workers: set = set()
         self.settings = settings or AppSettings()
         self._on_pick = on_pick  # route the permanent New Task / Settings cards to the main window
         outer = QVBoxLayout(self)
         outer.setContentsMargins(48, 34, 48, 40)
         outer.setSpacing(18)
         header = QHBoxLayout()
-        title = QLabel("Run a task")
+        title = QLabel("Tasks")
         title.setObjectName("launcherTitle")
         close_button = QPushButton("✕")
         close_button.setObjectName("ghostButton")
@@ -738,30 +736,26 @@ class TasksView(QWidget):
         header.addStretch(1)
         header.addWidget(close_button)
         outer.addLayout(header)
+        hint = QLabel("Tasks are quick actions you run on click. Make one with New Task; its ✕ deletes it.")
+        hint.setObjectName("xpertHint")
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
         self._grid = QGridLayout()
         self._grid.setSpacing(18)
         outer.addLayout(self._grid)
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
-        self.output.setPlaceholderText("Pick a task to run — its result appears here.")
+        self.output.setPlaceholderText("Click a task to run it - its status appears here.")
         outer.addWidget(self.output, 1)
         self._rebuild()
 
-    def _hidden(self) -> set[str]:
-        raw = self.settings.get(TASKS_HIDDEN_SETTING, [])
-        return set(raw) if isinstance(raw, list) else set()
-
     def _rebuild(self) -> None:
-        """(Re)build the task grid. Two permanent cards lead — New Task and Settings, mirroring the Menu —
-        then the registered tasks, each with a ✕ badge to remove it (removals persist in settings)."""
         while self._grid.count():
             item = self._grid.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
         n = 0
-        # Permanent cards (no ✕): New Task opens the Console; Settings opens TASK settings (the Menu's
-        # Settings opens app settings — the two are deliberately separate).
         for key, label, subtitle in (
             ("newtask", "New Task", "design it with me, then build"),
             ("tasksettings", "Settings", "task options"),
@@ -770,15 +764,10 @@ class TasksView(QWidget):
             card.clicked.connect(lambda _=False, k=key: self._pick(k))
             self._grid.addWidget(card, n // 2, n % 2)
             n += 1
-        # Registered task apps (removable).
-        hidden = self._hidden()
-        all_tasks = tasks_registry.all_tasks()
-        visible = [t for t in all_tasks if t.key not in hidden]
-        for task in visible:
+        for task in selfdev_builds.list_builds("task"):
             card = _LauncherCard(
-                task.key, f"{task.label}\n{task.subtitle}",
-                badge_tooltip="Remove this task from the list",
-                allow_rename=False,
+                task["slug"], f"{task.get('name', 'Task')}\n{(task.get('request', '') or '')[:46]}",
+                badge_tooltip="Delete this task", allow_rename=False,
             )
             card.clicked.connect(lambda _=False, t=task: self._run(t))
             card.hide_requested.connect(self._remove)
@@ -786,28 +775,24 @@ class TasksView(QWidget):
             n += 1
 
     def _pick(self, key: str) -> None:
-        """Route a permanent card (New Task / Settings) to the main window."""
         if self._on_pick is not None:
             self._on_pick(key)
 
-    def _remove(self, key: str) -> None:
-        """The task card ✕: drop the task from the launcher and remember it as hidden in settings.
-        Refuses to hide the final card so the launcher always keeps at least one runnable task."""
-        hidden = self._hidden()
-        remaining = [t for t in tasks_registry.all_tasks() if t.key != key and t.key not in hidden]
-        if not remaining:
-            self.output.setPlainText("That's the last task, sir — I'll keep it on the launcher.")
+    def _run(self, task: dict) -> None:
+        self.output.setPlainText(f"Running {task.get('name', 'task')}...")
+        self.output.setPlainText(_launch_build(task["path"]))
+
+    def _remove(self, slug: str) -> None:
+        task = next((t for t in selfdev_builds.list_builds("task") if t["slug"] == slug), None)
+        name = (task.get("name", slug) if task else slug)
+        confirm = QMessageBox.question(self, "Delete task", f"Delete the task “{name}” and its files?")
+        if confirm != QMessageBox.StandardButton.Yes:
             return
-        hidden.add(key)
-        self.settings.set(TASKS_HIDDEN_SETTING, sorted(hidden))
+        if selfdev_builds.delete_build(slug):
+            self.output.setPlainText(f"Deleted {name}.")
+        else:
+            self.output.setPlainText(f"Couldn't delete {name} - it may be open. Close it and try again.")
         self._rebuild()
-
-    def _run(self, task) -> None:
-        self.output.setPlainText(f"Running {task.label}…")
-        spawn_worker(self._workers, task.run, lambda ok, payload, t=task: self._done(t, ok, payload))
-
-    def _done(self, task, ok: bool, payload) -> None:
-        self.output.setPlainText(str(payload) if ok else f"{task.label} failed: {payload}")
 
 
 class AgentsView(QWidget):
@@ -1210,24 +1195,29 @@ class BuildView(QWidget):
             self._status.setText(f"Couldn't open the folder: {error}")
 
     def _run(self) -> None:
-        import subprocess
-        from helix.selfdev import builds as _builds
-        entry = _builds.entry_point(self._path)
-        try:
-            if entry["kind"] == "html":
-                os.startfile(entry["path"])
-                self._status.setText("Opened in your browser.")
-            elif entry["kind"] == "python":
-                subprocess.Popen(
-                    [sys.executable, entry["path"]], cwd=self._path,
-                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-                )
-                self._status.setText(f"Running {os.path.basename(entry['path'])} in a new window.")
-            else:
-                os.startfile(self._path)
-                self._status.setText("No obvious entry point — opened the folder; see the README to run it.")
-        except Exception as error:  # noqa: BLE001
-            self._status.setText(f"Couldn't run it: {error}")
+        self._status.setText(_launch_build(self._path))
+
+
+def _launch_build(path: str) -> str:
+    """Run a built App/Task by its best-guess entry point. HTML opens in the browser; a Python script
+    runs in a new console; otherwise the folder opens. Returns a short status message."""
+    import subprocess
+    from helix.selfdev import builds as _builds
+    entry = _builds.entry_point(path)
+    try:
+        if entry["kind"] == "html":
+            os.startfile(entry["path"])
+            return "Opened in your browser."
+        if entry["kind"] == "python":
+            subprocess.Popen(
+                [sys.executable, entry["path"]], cwd=path,
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+            return f"Running {os.path.basename(entry['path'])} in a new window."
+        os.startfile(path)
+        return "No obvious entry point — opened the folder; see the README to run it."
+    except Exception as error:  # noqa: BLE001
+        return f"Couldn't run it: {error}"
 
 
 class DesignDialog(QDialog):
@@ -1424,7 +1414,8 @@ class DesignDialog(QDialog):
         self._set_busy(True, "Building — this runs uninterrupted…")
         spawn_worker(
             self._workers,
-            lambda: selfdev_builds.build_app(name, request, on_step=lambda s: self.step_signal.emit(s)),
+            lambda: selfdev_builds.build_app(name, request, kind=self.kind,
+                                             on_step=lambda s: self.step_signal.emit(s)),
             self._built,
         )
 
@@ -1495,7 +1486,7 @@ class HelixMainWindow(QMainWindow):
         )
         # Register a panel for each app the user has already built, and build the menu from them.
         self._build_views: dict = {}
-        for build in selfdev_builds.list_builds():
+        for build in selfdev_builds.list_builds("app"):
             self._register_build_view(build)
         # Register a panel for each existing agent.
         self._agent_views: dict = {}
@@ -1519,6 +1510,7 @@ class HelixMainWindow(QMainWindow):
         # The Console conversation can open screens and announce a freshly-built app.
         self.xpert_tab.request_show_screen.connect(self.open_view)
         self.xpert_tab.request_build_created.connect(self._on_build_created)
+        self.xpert_tab.request_refresh_creations.connect(self._refresh_all_creations)
         self.archive_tab.restore_requested.connect(self._archive_restore)
         self.archive_tab.setdefault_requested.connect(self._archive_set_default)
         self.archive_tab.purge_requested.connect(self._archive_purge)
@@ -1630,7 +1622,7 @@ class HelixMainWindow(QMainWindow):
 
     def _make_launcher(self) -> "Launcher":
         """Build the menu: New app + Settings, then a card for each app the user has built."""
-        builds_list = selfdev_builds.list_builds()
+        builds_list = selfdev_builds.list_builds("app")
         core_menu = [
             ("newapp", "New app", "design it with me, then build"),
             ("settings", "Settings", "voice · keys · devices"),
@@ -1671,6 +1663,24 @@ class HelixMainWindow(QMainWindow):
         self._rebuild_menu()
         self.statusBar().showMessage(f"Built {build.get('name', slug)} — opening it.", 8000)
         self.open_view(slug)
+
+    def _refresh_all_creations(self) -> None:
+        """Refresh every creation screen — used after a removal done by voice/typed command."""
+        # register any new app panels, drop nothing here (orphan panels are harmless), rebuild the lists
+        for build in selfdev_builds.list_builds("app"):
+            self._register_build_view(build)
+        self._rebuild_menu()
+        self.tasks_view._rebuild()
+        self.agents_view._rebuild()
+        self.statusBar().showMessage("Updated your apps, tasks, and agents.", 5000)
+
+    def _on_task_created(self, slug: str) -> None:
+        """A new task was built via the Console — refresh the Tasks screen and show it."""
+        task = next((t for t in selfdev_builds.list_builds("task") if t.get("slug") == slug), None)
+        self.tasks_view._rebuild()
+        self.statusBar().showMessage(
+            f"Built {task.get('name', 'your task') if task else 'your task'} — it's on the Tasks screen.", 8000)
+        self.show_tasks()
 
     def _remove_build(self, slug: str) -> None:
         """The ✕ on a built-app card: delete its workspace (code + history) after confirmation."""
@@ -1758,7 +1768,8 @@ class HelixMainWindow(QMainWindow):
 
     def _open_design(self, kind: str) -> None:
         """Open the design editor for a new app/task/agent; on finish, register + open the result."""
-        on_built = self._on_agent_created if kind == "agent" else self._on_build_created
+        on_built = {"agent": self._on_agent_created, "task": self._on_task_created}.get(
+            kind, self._on_build_created)
         dialog = DesignDialog(self.memory, kind=kind, on_built=on_built, parent=self)
         dialog.exec()
 
@@ -2307,6 +2318,7 @@ class XpertTab(QWidget):
     convo_step = pyqtSignal(str)            # live "what HELIX is doing now" status during a turn
     request_show_screen = pyqtSignal(str)   # ask the main window to open a screen (menu/tasks/archive/settings)
     request_build_created = pyqtSignal(str) # a new app was built — refresh the menu so its card appears
+    request_refresh_creations = pyqtSignal()  # an app/task/agent was removed by command — refresh all screens
 
     def __init__(self, memory: SQLiteMemory) -> None:
         super().__init__()
@@ -2667,6 +2679,7 @@ class XpertTab(QWidget):
             on_progress=lambda text: self.convo_step.emit(text),
             show_screen=lambda name: self.request_show_screen.emit(name),
             on_build_created=lambda name: self.request_build_created.emit(name),
+            on_creations_changed=lambda: self.request_refresh_creations.emit(),
         )
         return ActionRouter(ctx)
 
@@ -2674,6 +2687,9 @@ class XpertTab(QWidget):
         friendly = {
             "build_app": "Building your app…",
             "list_builds": "Checking your apps…",
+            "remove_app": "Removing that app…",
+            "remove_task": "Removing that task…",
+            "remove_agent": "Removing that agent…",
             "improve_helix": "Drafting your change…",
             "remove_feature": "Drafting the removal…",
             "audit_dead_code": "Auditing the code…",

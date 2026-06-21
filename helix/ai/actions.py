@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from helix.agents import registry as agents_registry
 from helix.selfdev import builds, coder, engine, mailer, triggers
 
 # --------------------------------------------------------------------------- #
@@ -138,6 +139,42 @@ XPERT_TOOLS: list[dict[str, Any]] = [
             "required": ["screen"],
         },
     },
+    {
+        "name": "remove_app",
+        "description": (
+            "Delete one of the user's built APPS by name. Use when they ask to remove/delete/get rid of "
+            "an app they made (e.g. 'delete the tip calculator'). Confirmed before it deletes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "The app's name (or part of it)."}},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "remove_task",
+        "description": (
+            "Delete one of the user's TASKS by name. Use when they ask to remove/delete a task they made. "
+            "Confirmed before it deletes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "The task's name (or part of it)."}},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "remove_agent",
+        "description": (
+            "Delete one of the user's AGENTS by name. Use when they ask to remove/delete an agent. "
+            "Confirmed before it deletes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "The agent's name (or part of it)."}},
+            "required": ["name"],
+        },
+    },
 ]
 
 TOOL_NAMES = {tool["name"] for tool in XPERT_TOOLS}
@@ -191,6 +228,7 @@ class ActionContext:
     on_progress: Callable[[str], None] = lambda _msg: None     # live "what HELIX is doing" step text
     show_screen: Callable[[str], None] = lambda _name: None    # open a screen (menu/tasks/archive/settings)
     on_build_created: Callable[[str], None] = lambda _name: None  # a new Build landed (refresh the menu)
+    on_creations_changed: Callable[[], None] = lambda: None    # an app/task/agent was removed (refresh UI)
 
 
 @dataclass
@@ -239,7 +277,71 @@ class ActionRouter:
                 pass
             summary = (result.summary or "").strip()
             return f"Built {bname}, sir. {summary} It's in your menu now — open it from there."
+        if name in ("remove_app", "remove_task"):
+            slug = str(tool_input.get("slug", ""))
+            label = str(tool_input.get("label", slug))
+            removed = builds.delete_build(slug)
+            self._refresh_creations()
+            return (f"Deleted {label}, sir." if removed
+                    else f"I couldn't delete {label}, sir — it may be open; close it and try again.")
+        if name == "remove_agent":
+            key = str(tool_input.get("slug", ""))
+            label = str(tool_input.get("label", key))
+            removed = agents_registry.delete_agent(self.ctx.settings, key)
+            self._refresh_creations()
+            return f"Deleted the {label} agent, sir." if removed else f"I couldn't find the {label} agent, sir."
         return "Done, sir."
+
+    def _refresh_creations(self) -> None:
+        try:
+            self.ctx.on_creations_changed()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _match(items: list, target: str, name_key: str, key_key: str):
+        """Find an item by (case-insensitive) name, key, or substring. Returns the item or None."""
+        want = (target or "").strip().lower()
+        if not want:
+            return None
+        for it in items:
+            if str(it.get(name_key, "")).lower() == want or str(it.get(key_key, "")).lower() == want:
+                return it
+        for it in items:
+            if want in str(it.get(name_key, "")).lower():
+                return it
+        return None
+
+    # -- removing the user's creations (confirmed) -------------------------- #
+
+    def _tool_remove_app(self, tool_input: dict) -> ToolOutcome:
+        return self._remove_build_outcome(tool_input, "app", "remove_app")
+
+    def _tool_remove_task(self, tool_input: dict) -> ToolOutcome:
+        return self._remove_build_outcome(tool_input, "task", "remove_task")
+
+    def _remove_build_outcome(self, tool_input: dict, kind: str, tool: str) -> ToolOutcome:
+        noun = "task" if kind == "task" else "app"
+        match = self._match(builds.list_builds(kind), str(tool_input.get("name", "")), "name", "slug")
+        if not match:
+            return ToolOutcome(f"I don't see a {noun} by that name, sir.")
+        return ToolOutcome(
+            f"CONFIRMATION REQUIRED: this will permanently delete the {noun} '{match['name']}'. Ask the "
+            "user to confirm before deleting.",
+            requires_confirmation=True,
+            pending=(tool, {"slug": match["slug"], "label": match["name"]}),
+        )
+
+    def _tool_remove_agent(self, tool_input: dict) -> ToolOutcome:
+        match = self._match(agents_registry.list_agents(self.ctx.settings),
+                            str(tool_input.get("name", "")), "name", "key")
+        if not match:
+            return ToolOutcome("I don't see an agent by that name, sir.")
+        return ToolOutcome(
+            f"CONFIRMATION REQUIRED: this will delete the agent '{match['name']}'. Ask the user to confirm.",
+            requires_confirmation=True,
+            pending=("remove_agent", {"slug": match["key"], "label": match["name"]}),
+        )
 
     # -- building apps for the user ----------------------------------------- #
 
@@ -256,7 +358,7 @@ class ActionRouter:
         )
 
     def _tool_list_builds(self, _input: dict) -> ToolOutcome:
-        items = builds.list_builds()
+        items = builds.list_builds("app")
         if not items:
             return ToolOutcome("You haven't built any apps yet, sir — tell me what to make.")
         lines = [b["name"] + (f" — {b['request'][:50]}" if b.get("request") else "") for b in items[:12]]

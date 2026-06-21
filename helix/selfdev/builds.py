@@ -50,18 +50,20 @@ def _unique_slug(name: str) -> str:
     return slug
 
 
-def create_workspace(name: str, *, request: str = "") -> Path:
+def create_workspace(name: str, *, request: str = "", kind: str = "app") -> Path:
     """Create a fresh git-backed workspace for a Build and return its path.
 
-    Lays down a manifest (the Build's name + originating request), `git init`s the folder with `main`
-    as the default branch, and makes an initial commit so the tree is clean and the coder has a base
-    branch to work from. The actual app code is written later by `coder.run_coding_task`."""
+    Lays down a manifest (name + originating request + kind), `git init`s the folder with `main` as the
+    default branch, and makes an initial commit so the tree is clean and the coder has a base branch to
+    work from. `kind` is "app" (opens as a screen in the Apps menu) or "task" (runs on click from the
+    Tasks screen). The actual code is written later by the coder."""
     slug = _unique_slug(name)
     ws = workspace_dir(slug)
     ws.mkdir(parents=True, exist_ok=True)
     manifest = {
         "name": name,
         "slug": slug,
+        "kind": "task" if kind == "task" else "app",
         "request": request,            # the Blueprint: what the human asked for
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
@@ -124,8 +126,9 @@ def read_manifest(ws: Path) -> dict:
         return {}
 
 
-def list_builds() -> list[dict]:
-    """Every Build workspace on disk, newest first: [{slug, name, request, created_at, path}]."""
+def list_builds(kind: str | None = None) -> list[dict]:
+    """Every Build workspace on disk, newest first: [{slug, name, kind, request, created_at, path}].
+    Pass kind="app" or "task" to filter."""
     out: list[dict] = []
     for child in builds_root().iterdir():
         if not child.is_dir():
@@ -134,24 +137,26 @@ def list_builds() -> list[dict]:
         out.append({
             "slug": man.get("slug", child.name),
             "name": man.get("name", child.name),
+            "kind": man.get("kind", "app"),
             "request": man.get("request", ""),
             "created_at": man.get("created_at", ""),
             "path": str(child),
         })
+    if kind is not None:
+        out = [b for b in out if b.get("kind", "app") == kind]
     out.sort(key=lambda b: b.get("created_at", ""), reverse=True)
     return out
 
 
-def build_app(name: str, request: str, *, on_step=None, merge: bool = True):
-    """Invent a standalone app end-to-end: make its workspace, have a coder write it, land the code.
+def build_app(name: str, request: str, *, kind: str = "app", on_step=None, merge: bool = True):
+    """Invent a standalone app or task end-to-end: make its workspace, have a coder write it, land the code.
 
     Uses the Claude Code CLI when it's installed (more capable); otherwise falls back to the API-based
-    coder, so a fresh download builds apps with only an Anthropic API key — no CLI required. Returns
-    (workspace_path, CoderResult). The result is committed to the workspace's `main` so the Build's
-    History has a version to show and roll back to."""
+    coder, so a fresh download builds with only an Anthropic API key — no CLI required. `kind` is "app"
+    (opens as a screen) or "task" (runs on click). Returns (workspace_path, CoderResult)."""
     from helix.selfdev import coder  # lazy: keep this module import-light
 
-    ws = create_workspace(name, request=request)
+    ws = create_workspace(name, request=request, kind=kind)
     prompt = build_app_prompt(name, request)
 
     if coder.resolve_claude_cli():
