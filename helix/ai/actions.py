@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from helix.agents import registry as agents_registry
-from helix.selfdev import builds, coder, engine, mailer, triggers
+from helix.selfdev import builds, coder, constitution, engine, mailer, triggers
 
 # --------------------------------------------------------------------------- #
 # Tool schemas — the commands the Console conversation can act on.
@@ -388,6 +388,15 @@ class ActionRouter:
         feature = str(tool_input.get("feature", "")).strip()
         if not feature:
             return ToolOutcome("Which feature should I remove, sir?")
+        # The Forge's shell is immutable to text or voice (Commandments 8 & 12). Refuse up front rather
+        # than spend Claude drafting a change the approval gate would only reject. The user's own
+        # Apps/Tasks/Agents are data and are removed by name via remove_app/remove_task/remove_agent.
+        if constitution.names_shell_component(feature):
+            return ToolOutcome(
+                "I can't remove that, sir — the navigation, the Archive, the voice toggle, Settings, and "
+                "the Console itself are part of HELIX, not features I can strip out. I can remove an app, "
+                "task, or agent you've built, or change a setting, if you'd like."
+            )
         result = coder.run_coding_task(coder.build_removal_task(feature), on_step=self.ctx.on_progress)
         if not result.ok:
             return ToolOutcome(f"I couldn't draft that removal, sir: {result.error}")
