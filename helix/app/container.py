@@ -11,6 +11,7 @@ from helix.adapters.claude_code_cli import ClaudeCodeCli
 from helix.adapters.coder_select import FallbackCoder
 from helix.adapters.git_repo import GitRepo
 from helix.adapters.json_settings import JsonSettings
+from helix.adapters.restart import Restarter
 from helix.adapters.signal_bus import SignalBus
 from helix.adapters.sqlite_store import SqliteStore
 from helix.adapters.system_clock import SystemClock
@@ -21,6 +22,7 @@ from helix.services.builds import BuildService
 from helix.services.conversation import ConversationService
 from helix.services.forge import ForgeService
 from helix.services.prompts import CONSOLE_SYSTEM
+from helix.services.selfdev import SelfDevService
 from helix.services.tools import ToolRegistry
 
 
@@ -50,8 +52,13 @@ class Container:
         # Services
         self.builds = BuildService(self.paths.builds, self.repo, self.clock)
         self.forge = ForgeService(self.builds, self.coder, self.bus)
-        self.tools = ToolRegistry(self.forge, self.builds)
+        self.selfdev = SelfDevService(
+            self.coder, self.repo, self.settings, self.clock, self.paths.root,
+            worktrees_dir=self.paths.data / "worktrees",
+        )
+        self.tools = ToolRegistry(self.forge, self.builds, self.selfdev)
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM
         )
         self.archive = ArchiveService(self.repo, self.store, self.paths.root)
+        self.restart = Restarter(self.paths.root / "main.py", self.paths.root).restart

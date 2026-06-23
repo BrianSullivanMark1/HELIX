@@ -5,15 +5,19 @@ from helix.ports.coder import ProgressFn
 from helix.ports.llm import ToolSpec
 from helix.services.builds import BuildService
 from helix.services.forge import ForgeService
+from helix.services.selfdev import SelfDevService
 
 
 class ToolRegistry:
-    def __init__(self, forge: ForgeService, builds: BuildService) -> None:
+    def __init__(
+        self, forge: ForgeService, builds: BuildService, selfdev: SelfDevService | None = None
+    ) -> None:
         self._forge = forge
         self._builds = builds
+        self._selfdev = selfdev
 
     def specs(self) -> list[ToolSpec]:
-        return [
+        tools = [
             ToolSpec(
                 name="build_app",
                 description=(
@@ -43,6 +47,30 @@ class ToolRegistry:
                 input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             ),
         ]
+        if self._selfdev is not None:
+            tools.append(
+                ToolSpec(
+                    name="improve_helix",
+                    description=(
+                        "Propose an improvement to HELIX's OWN code (how HELIX looks or works). This "
+                        "DRAFTS the change on a branch for the user to review and approve in Archive — "
+                        "it never applies on its own, and it can never remove HELIX's shell or safety "
+                        "code. Only call after the user confirms, like build_app."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "request": {
+                                "type": "string",
+                                "description": "Plain-language description of the change to HELIX itself.",
+                            }
+                        },
+                        "required": ["request"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
+        return tools
 
     def dispatch(self, name: str, args: dict, *, on_progress: ProgressFn | None = None) -> str:
         if name == "build_app":
@@ -57,4 +85,10 @@ class ToolRegistry:
                 return " ".join(text.split())[:140]
 
             return "\n".join(f"- {a.name}: {clean(a.request)}" for a in apps)
+        if name == "improve_helix" and self._selfdev is not None:
+            change = self._selfdev.propose(args["request"], on_progress=on_progress)
+            return (
+                f"Drafted a change ({change.branch}). Open Archive to review and approve it — "
+                "it won't apply until you do."
+            )
         return f"Unknown tool: {name}"

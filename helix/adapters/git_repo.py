@@ -71,6 +71,10 @@ class GitRepo:
     def restore_to(self, repo_dir: Path, sha: str) -> None:
         self._run(repo_dir, "reset", "--hard", sha)
 
+    def discard_changes(self, repo_dir: Path) -> None:
+        self._run(repo_dir, "reset", "--hard")  # drop staged/unstaged edits
+        self._run(repo_dir, "clean", "-fd")  # drop untracked files (respects .gitignore)
+
     def log(self, repo_dir: Path, limit: int = 100) -> list[Commit]:
         out = self._run(repo_dir, "log", f"-{int(limit)}", f"--pretty={_FMT}")
         return [self._parse_commit(ln) for ln in out.splitlines() if ln.strip()]
@@ -82,6 +86,30 @@ class GitRepo:
     def deleted_paths(self, repo_dir: Path, ref_a: str, ref_b: str) -> list[str]:
         out = self._run(repo_dir, "diff", "--name-only", "--diff-filter=D", ref_a, ref_b)
         return [ln for ln in out.splitlines() if ln.strip()]
+
+    def is_clean(self, repo_dir: Path) -> bool:
+        return not self._run(repo_dir, "status", "--porcelain").strip()
+
+    def stage_all(self, repo_dir: Path) -> None:
+        self._run(repo_dir, "add", "-A")
+
+    def staged_changed(self, repo_dir: Path) -> list[str]:
+        out = self._run(repo_dir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
+        return [ln for ln in out.splitlines() if ln.strip()]
+
+    def staged_deleted(self, repo_dir: Path) -> list[str]:
+        out = self._run(repo_dir, "diff", "--cached", "--name-only", "--diff-filter=D")
+        return [ln for ln in out.splitlines() if ln.strip()]
+
+    def list_branches(self, repo_dir: Path, prefix: str = "") -> list[str]:
+        out = self._run(repo_dir, "branch", "--list", f"{prefix}*", "--format=%(refname:short)")
+        return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+    def delete_branch(self, repo_dir: Path, name: str) -> None:
+        self._run(repo_dir, "branch", "-D", name)
+
+    def branch_head(self, repo_dir: Path, branch: str) -> Commit:
+        return self._parse_commit(self._run(repo_dir, "log", "-1", f"--pretty={_FMT}", branch))
 
     def add_worktree(self, repo_dir: Path, path: Path, ref: str) -> None:
         self._run(repo_dir, "worktree", "add", "-q", str(path), ref)
