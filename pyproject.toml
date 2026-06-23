@@ -1,0 +1,42 @@
+[project]
+name = "helix"
+version = "2.0.0"
+description = "HELIX — a local-first desktop app-builder you talk to."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+    "PyQt6>=6.7",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+voice = [
+    "edge-tts>=6.1",
+    "faster-whisper>=1.0",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+helix = "helix.app.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["helix*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

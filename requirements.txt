@@ -1,0 +1,11 @@
+# HELIX V2 — runtime dependencies.
+# Install:  pip install -r requirements.txt
+# Voice is optional; the app degrades to text-only (and OS voice) if it is absent.
+
+# --- Core (required) ---
+PyQt6>=6.7            # the desktop UI (single runtime)
+anthropic>=0.40       # the model layer: drives the conversation and the API-based coder
+
+# --- Optional: voice ---
+edge-tts>=6.1         # free neural text-to-speech
+faster-whisper>=1.0   # local, private speech-to-text (audio never leaves the machine)
