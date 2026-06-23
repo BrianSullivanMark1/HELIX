@@ -33,5 +33,6 @@ Requirements:
   just opening it — unless the request clearly needs Python.
 - Make it actually work and look clean. No placeholders, no TODOs.
 - Keep everything inside this folder. Do not read or write outside it.
+- Do NOT run git — HELIX handles version control. Just write the files.
 - When done, the entry point should be index.html (web) or main.py (python).
 """

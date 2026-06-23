@@ -6,9 +6,11 @@ one-line change here. This module is a PROTECTED_PATH: the self-coder may never 
 from __future__ import annotations
 
 from helix.adapters.anthropic_chat import AnthropicChat
+from helix.adapters.api_coder import ApiCoder
+from helix.adapters.claude_code_cli import ClaudeCodeCli
+from helix.adapters.coder_select import FallbackCoder
 from helix.adapters.git_repo import GitRepo
 from helix.adapters.json_settings import JsonSettings
-from helix.adapters.placeholder_coder import PlaceholderCoder
 from helix.adapters.signal_bus import SignalBus
 from helix.adapters.sqlite_store import SqliteStore
 from helix.adapters.system_clock import SystemClock
@@ -34,8 +36,16 @@ class Container:
         self.repo = GitRepo()
         self.clock = SystemClock()
         self.bus = SignalBus()
-        self.chat = AnthropicChat(lambda: self.settings.get("claude_api_key"))
-        self.coder = PlaceholderCoder()  # TODO(phase 6): real Claude Code CLI + API coder
+        def _key() -> str | None:
+            return self.settings.get("claude_api_key")
+
+        def _oauth() -> str | None:
+            return self.settings.get("claude_code_oauth_token")
+
+        self.chat = AnthropicChat(_key)
+        coder_chat = AnthropicChat(_key, max_tokens=8000)  # roomier for code generation
+        # Prefer the Claude Code CLI (most capable); fall back to the API coder (key-only, no CLI).
+        self.coder = FallbackCoder(ClaudeCodeCli(_key, _oauth), ApiCoder(coder_chat, _key))
 
         # Services
         self.builds = BuildService(self.paths.builds, self.repo, self.clock)
