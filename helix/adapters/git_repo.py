@@ -24,6 +24,8 @@ class GitRepo:
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",  # git emits UTF-8; don't crash on a non-ASCII app name/path
         )
         if proc.returncode != 0:
             msg = proc.stderr.strip() or proc.stdout.strip()

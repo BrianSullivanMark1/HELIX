@@ -216,3 +216,21 @@ A fresh install creates `data/` empty. Packaging (`build.py` → PyInstaller `--
 | Constitution | logic + data mixed in `selfdev/` | pure rules in `domain/`, enforced by `services/selfdev.py` |
 
 Same product, same guardrails — a structure that can actually grow.
+
+---
+
+## 10. Known limitations & next
+
+- **Coder sandboxing is asymmetric.** The API-fallback coder (`adapters/api_coder.py`) hard-sandboxes
+  every write through `_safe_target` (rejects `..`, drive-absolute, and `.git`/manifest paths,
+  case-insensitively). The preferred Claude Code CLI coder runs with `--permission-mode acceptEdits`
+  and `cwd = workspace`, so its containment is the working directory + the build prompt, not a hard
+  jail — a misbehaving or prompt-injected model with shell access could in principle write outside the
+  workspace. Acceptable for a local, single-user, user-initiated build; a future hardening can pass a
+  restricted tool set / validate the git diff. Untrusted request text is fenced and both system prompts
+  mark it as data, not instructions.
+- **The Constitution is enforced on the self-modification path (Phase 7).** `domain/constitution.py`
+  holds the rules; `services/selfdev.py` (the approval gate) is where `check()` /
+  `locked_setting_violation()` are invoked before any self-change merges.
+- **Frozen-build self-verification** and **cross-platform** (macOS/Linux) are later milestones; today is
+  Windows-first.

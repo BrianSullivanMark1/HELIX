@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from helix.domain.models import App, AppKind
@@ -31,6 +32,7 @@ class BuildService:
             return ws  # iterating an existing app
         ws.mkdir(parents=True, exist_ok=True)
         self._repo.init(ws)
+        app.created_at = app.created_at or self._clock.now()  # stamp once; finalize must not reset it
         self._write_manifest(ws, app)
         (ws / "README.md").write_text(f"# {app.name}\n\n{app.request}\n", encoding="utf-8")
         self._repo.commit_all(ws, "scaffold")
@@ -89,10 +91,12 @@ class BuildService:
 
     def _read_manifest(self, manifest: Path) -> App:
         d = json.loads(manifest.read_text(encoding="utf-8"))
+        created = d.get("created_at")
         return App(
             slug=d["slug"],
             name=d["name"],
             request=d.get("request", ""),
             kind=AppKind(d.get("kind", "unknown")),
             entry_point=d.get("entry_point"),
+            created_at=datetime.fromisoformat(created) if created else None,
         )

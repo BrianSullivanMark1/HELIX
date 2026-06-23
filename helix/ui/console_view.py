@@ -28,7 +28,8 @@ class ConsoleView(QWidget):
         self.setObjectName("Console")
         self._conversation = conversation
         self._settings = settings
-        self._worker: QtWorker | None = None
+        self._workers: set[QtWorker] = set()
+        self._busy = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 18, 28, 22)
@@ -90,38 +91,51 @@ class ConsoleView(QWidget):
     # ----- conversation -----
     def _send(self) -> None:
         text = self._input.text().strip()
-        if not text or self._worker is not None:
+        if not text or self._busy:
             return
         self._input.clear()
         self._add_bubble("you", text)
-        self._set_busy(True)
+        self._busy = True
+        self._input.setEnabled(False)
         self.orb.set_state(OrbState.THINKING)
         self.status.setText("Thinking…")
 
-        self._worker = QtWorker(lambda emit: self._conversation.run_turn(text, on_progress=emit))
-        self._worker.progress.connect(self.status.setText)
-        self._worker.finished_ok.connect(self._on_reply)
-        self._worker.failed.connect(self._on_fail)
-        self._worker.start()
+        worker = QtWorker(lambda emit: self._conversation.run_turn(text, on_progress=emit))
+        # Keep a strong reference until the QThread *actually* finishes. Dropping it inside the
+        # finished_ok/failed slot (which fires while run() is still unwinding) would let the GC
+        # destroy a live QThread and crash the process. Lifetime is gated on the built-in
+        # `finished` signal, which is delivered only after the thread has truly stopped.
+        self._workers.add(worker)
+        worker.progress.connect(self.status.setText)
+        worker.finished_ok.connect(self._on_reply)
+        worker.failed.connect(self._on_fail)
+        worker.finished.connect(lambda w=worker: self._retire(w))
+        worker.start()
 
     def _on_reply(self, text: object) -> None:
         self._add_bubble("helix", str(text))
-        self._finish()
+        self._idle()
 
     def _on_fail(self, err: str) -> None:
         self._add_bubble("helix", f"⚠  {err}")
-        self._finish()
+        self._idle()
 
-    def _finish(self) -> None:
+    def _idle(self) -> None:
         self.orb.set_state(OrbState.IDLE)
         self.status.setText("Ready when you are.")
-        self._set_busy(False)
-        self._worker = None
 
-    def _set_busy(self, busy: bool) -> None:
-        self._input.setEnabled(not busy)
-        if not busy:
-            self._input.setFocus()
+    def _retire(self, worker: QtWorker) -> None:
+        # On QThread.finished — the thread has stopped, so it is safe to drop the reference.
+        self._workers.discard(worker)
+        worker.deleteLater()
+        self._busy = False
+        self._input.setEnabled(True)
+        self._input.setFocus()
+
+    def shutdown(self) -> None:
+        """Wait briefly for any in-flight worker so we never destroy a running QThread on close."""
+        for worker in list(self._workers):
+            worker.wait(3000)
 
     # ----- transcript rendering -----
     def _add_bubble(self, who: str, text: str) -> None:

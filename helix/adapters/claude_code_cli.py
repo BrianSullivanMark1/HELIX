@@ -134,6 +134,7 @@ class ClaudeCodeCli:
             env.pop("ANTHROPIC_API_KEY", None)  # prefer the subscription token
         else:
             env["ANTHROPIC_API_KEY"] = key
+            env.pop(OAUTH_TOKEN_ENV, None)  # don't pass a stale token alongside the key
 
         cmd = [
             cli, "-p", prompt,
@@ -150,6 +151,19 @@ class ClaudeCodeCli:
         except (OSError, subprocess.SubprocessError) as exc:
             return CoderResult(ok=False, summary="", error=f"Could not run the coder: {exc}")
 
+        # Drain stderr concurrently — otherwise a child that fills the stderr pipe buffer while we
+        # block reading stdout would deadlock until the timeout killer fires.
+        stderr_lines: list[str] = []
+
+        def _drain_stderr() -> None:
+            try:
+                for line in proc.stderr:  # type: ignore[union-attr]
+                    stderr_lines.append(line)
+            except Exception:
+                pass
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
         killer = threading.Timer(self._timeout, proc.kill)
         killer.start()
         final = None
@@ -171,15 +185,13 @@ class ClaudeCodeCli:
             proc.wait()
         except Exception as exc:  # a stream failure must not crash the worker
             proc.kill()
+            proc.wait()  # reap so we don't leave a zombie / open FDs
             return CoderResult(ok=False, summary="", error=f"Coder stream failed: {exc}")
         finally:
             killer.cancel()
+            stderr_thread.join(timeout=2)
 
-        stderr = ""
-        try:
-            stderr = proc.stderr.read() or ""  # type: ignore[union-attr]
-        except Exception:
-            pass
+        stderr = "".join(stderr_lines)
 
         summary = str((final or {}).get("result") or "").strip()
         is_error = bool((final or {}).get("is_error"))

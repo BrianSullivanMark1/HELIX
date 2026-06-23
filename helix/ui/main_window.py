@@ -96,6 +96,11 @@ class HelixMainWindow(QMainWindow):
     def _on_build(self, _event: object) -> None:
         self.launcher.refresh()
 
+    def closeEvent(self, event) -> None:
+        # Don't tear down while a worker thread is still running (avoids a QThread crash on quit).
+        self.console.shutdown()
+        super().closeEvent(event)
+
     def _open_app(self, slug: str) -> None:
         app = next((a for a in self._c.builds.list() if a.slug == slug), None)
         if app is None:

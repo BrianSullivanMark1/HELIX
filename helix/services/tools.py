@@ -52,5 +52,9 @@ class ToolRegistry:
             apps = self._builds.list()
             if not apps:
                 return "No apps built yet."
-            return "\n".join(f"- {a.name}: {a.request}" for a in apps)
+
+            def clean(text: str) -> str:  # collapse the (untrusted) request to a one-line label
+                return " ".join(text.split())[:140]
+
+            return "\n".join(f"- {a.name}: {clean(a.request)}" for a in apps)
         return f"Unknown tool: {name}"
