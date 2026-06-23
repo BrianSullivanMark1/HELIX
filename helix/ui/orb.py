@@ -1,0 +1,125 @@
+"""PresenceOrb — the living Presence that *is* HELIX.
+
+Pure QPainter, single runtime, GPU-smooth. A breathing core of cyan with an amber accent; it brightens
+and ripples when listening or speaking, and spins a slow amber arc while thinking. State changes ease in,
+so transitions feel alive rather than switched.
+"""
+from __future__ import annotations
+
+import math
+from enum import Enum
+
+from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer
+from PyQt6.QtGui import QColor, QPainter, QPen, QRadialGradient
+from PyQt6.QtWidgets import QSizePolicy, QWidget
+
+from helix.ui.theme import AMBER, CYAN, CYAN_DIM
+
+
+class OrbState(Enum):
+    IDLE = "idle"
+    LISTENING = "listening"
+    THINKING = "thinking"
+    SPEAKING = "speaking"
+
+
+# Per-state numeric targets the orb eases toward.
+_PARAMS: dict[OrbState, dict[str, float]] = {
+    OrbState.IDLE: {"glow": 0.45, "amp": 0.045, "speed": 0.055, "accent": 0.0},
+    OrbState.LISTENING: {"glow": 0.85, "amp": 0.075, "speed": 0.10, "accent": 0.15},
+    OrbState.THINKING: {"glow": 0.70, "amp": 0.050, "speed": 0.14, "accent": 1.0},
+    OrbState.SPEAKING: {"glow": 1.0, "amp": 0.11, "speed": 0.18, "accent": 0.3},
+}
+
+
+def _col(hex_color: str, alpha: int) -> QColor:
+    c = QColor(hex_color)
+    c.setAlpha(max(0, min(255, alpha)))
+    return c
+
+
+class PresenceOrb(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(160, 160)
+        self._state = OrbState.IDLE
+        self._p = dict(_PARAMS[OrbState.IDLE])
+        self._phase = 0.0
+        self._spin = 0.0
+        self._t = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(33)  # ~30 fps
+
+    def set_state(self, state: OrbState) -> None:
+        self._state = state
+
+    def _tick(self) -> None:
+        target = _PARAMS[self._state]
+        for k in ("glow", "amp", "speed", "accent"):
+            self._p[k] += (target[k] - self._p[k]) * 0.08
+        self._phase += self._p["speed"]
+        self._spin = (self._spin + 3.0) % 360.0
+        self._t += 1.0
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        w, h = self.width(), self.height()
+        cx, cy = w / 2, h / 2
+        center = QPointF(cx, cy)
+        base = min(w, h) * 0.16
+        glow = self._p["glow"]
+        r = base * (1 + self._p["amp"] * math.sin(self._phase))
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Outer glow
+        g = QRadialGradient(center, r * 2.8)
+        g.setColorAt(0.0, _col(CYAN, int(70 * glow)))
+        g.setColorAt(0.5, _col(CYAN, int(22 * glow)))
+        g.setColorAt(1.0, _col(CYAN, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(g)
+        p.drawEllipse(center, r * 2.8, r * 2.8)
+
+        # Expanding ripples while listening / speaking
+        if self._state in (OrbState.LISTENING, OrbState.SPEAKING):
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for k in range(3):
+                frac = ((self._t * 0.012) + k / 3.0) % 1.0
+                rr = r * (1.1 + frac * 1.9)
+                pen = QPen(_col(CYAN, int(120 * glow * (1 - frac))))
+                pen.setWidthF(1.6)
+                p.setPen(pen)
+                p.drawEllipse(center, rr, rr)
+
+        # Inner halo
+        halo = QRadialGradient(center, r * 1.5)
+        halo.setColorAt(0.0, _col(CYAN, int(60 * glow)))
+        halo.setColorAt(1.0, _col(CYAN, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(halo)
+        p.drawEllipse(center, r * 1.5, r * 1.5)
+
+        # Core
+        core = QRadialGradient(center, r)
+        core.setColorAt(0.0, _col("#eaffff", 255))
+        core.setColorAt(0.35, _col(CYAN, 235))
+        core.setColorAt(0.80, _col(CYAN_DIM, 205))
+        core.setColorAt(1.0, _col(CYAN_DIM, 0))
+        p.setBrush(core)
+        p.drawEllipse(center, r, r)
+
+        # Rotating amber arc while thinking
+        if self._state is OrbState.THINKING:
+            rect = QRectF(cx - r * 1.28, cy - r * 1.28, r * 2.56, r * 2.56)
+            pen = QPen(_col(AMBER, int(220 * self._p["accent"])))
+            pen.setWidthF(2.4)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawArc(rect, int(self._spin * 16), 100 * 16)
+
+        p.end()
