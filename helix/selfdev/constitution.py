@@ -17,6 +17,7 @@ Pure stdlib and import-light so the guardrails can never fail to load.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 
 
@@ -78,6 +79,32 @@ PERMANENT_MENU_KEYS: frozenset = frozenset(
     {"settings", "archive", "newapp", "newtask", "newagent"}
 )
 
+# The Forge's SHELL — the immutable front interface. Structure, not content: the navigation that reaches
+# every screen (the Apps / Tasks / Agents buttons), the Archive recovery button, the voice toggle,
+# Settings, and the Console itself (the Presence orb + the conversation). HELIX can build and remove the
+# user's Apps, Tasks, and Agents on command (those are data under data/builds/), but it can never remove
+# or hide the shell that holds them by a text or voice command (Commandments 8 & 12). The hard guarantee
+# is the protected-path scan (qt_app.py is protected); naming the shell here lets HELIX refuse such a
+# request UP FRONT instead of drafting a change the gate would only reject.
+PERMANENT_SHELL: frozenset = frozenset(
+    {"apps", "tasks", "agents", "archive", "voice", "settings", "navigation", "console"}
+)
+
+# Free-text matching so HELIX can recognize a "remove the shell" request in the user's own words.
+_SHELL_STRONG: tuple[str, ...] = (        # phrases that name the shell on their own
+    "archive", "navigation", "nav bar", "navbar", "orb", "the orb", "presence orb",
+    "console", "front interface", "main interface",
+    "voice toggle", "speak toggle", "voice button", "speak button", "mute button",
+)
+_SHELL_NOUNS: tuple[str, ...] = (         # shell nouns — they name structure when paired with a chrome word
+    "apps", "app", "tasks", "task", "agents", "agent",
+    "archive", "settings", "voice", "speak", "menu", "nav",
+)
+_CHROME_WORDS: tuple[str, ...] = (        # words that mark "the UI chrome", not a single data item
+    "button", "buttons", "nav", "navbar", "navigation", "tab", "tabs", "toggle",
+    "bar", "header", "screen", "shell", "interface", "feature", "section", "menu",
+)
+
 # Files HELIX may never modify through its own self-dev loop — the safety-critical machinery that keeps
 # the commandments enforceable, plus the IMMUTABLE BACKBONE: the front interface (the four nav buttons
 # + Console shell) and the Forge engine itself. Commanding HELIX can build Apps/Tasks/Agents (which only
@@ -123,6 +150,24 @@ def is_protected_path(path: str) -> bool:
 
 def is_permanent_menu_key(key: str) -> bool:
     return str(key or "") in PERMANENT_MENU_KEYS
+
+
+def _flatten(text: str) -> str:
+    """Lowercased text, punctuation flattened to single spaces and space-padded, so ' word ' matches edges."""
+    return " " + re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip() + " "
+
+
+def names_shell_component(text: str) -> bool:
+    """True if a removal request targets the immutable shell — the nav buttons, Archive, voice toggle,
+    Settings, or the Console — rather than a user-built app/task/agent. Lets the feature-removal path
+    refuse up front. Deliberately errs toward catching shell requests; the user's own creations are
+    removed by name via the dedicated remove_app / remove_task / remove_agent tools, not this path."""
+    t = _flatten(text)
+    if any(f" {tok} " in t for tok in _SHELL_STRONG):
+        return True
+    has_noun = any(f" {n} " in t for n in _SHELL_NOUNS)
+    has_chrome = any(f" {w} " in t for w in _CHROME_WORDS)
+    return has_noun and has_chrome
 
 
 def check_change(changed_files) -> list[str]:

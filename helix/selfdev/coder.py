@@ -162,7 +162,13 @@ def build_removal_task(feature: str) -> str:
         "_tool_ handler in helix/ai/actions.py, its panel + its entry in HelixMainWindow's `views` dict and "
         "in helix/selfdev/registry.py MENU_FEATURES, any settings keys it owns, and now-unused imports. Do "
         "NOT remove anything shared with other features. Afterward make sure the app still imports and boots "
-        "with no dangling references. Summarize exactly what you deleted."
+        "with no dangling references. Summarize exactly what you deleted.\n\n"
+        "IMMUTABLE SHELL — never remove or alter any of these; they are HELIX's permanent front interface, "
+        "not features: the navigation (the Apps / Tasks / Agents buttons), the Archive button, the voice "
+        "toggle, the Settings screen, and the Console itself (the Presence orb + the conversation). Likewise "
+        "never touch the protected machinery (" + ", ".join(constitution.PROTECTED_PATHS) + "); a change "
+        "touching any protected path is auto-rejected at merge and wasted. If removing '" + feature + "' "
+        "would mean deleting any part of that shell, make NO changes and say it cannot be removed."
     )
 
 
