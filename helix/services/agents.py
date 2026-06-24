@@ -1,0 +1,52 @@
+"""AgentService — goal-driven automations. An agent is a saved goal HELIX can run on demand.
+
+Running an agent drives the same model↔tools loop a typed request does, so anything that spends or
+changes things still surfaces its confirmation in the conversation. Settings-backed (v1 trigger: manual).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from helix.ports.coder import ProgressFn
+from helix.ports.stores import SettingsStore
+from helix.services.conversation import ConversationService
+
+_KEY = "agents"
+
+
+@dataclass
+class Agent:
+    name: str
+    goal: str
+    enabled: bool = True
+
+
+class AgentService:
+    def __init__(self, settings: SettingsStore, conversation: ConversationService) -> None:
+        self._settings = settings
+        self._conversation = conversation
+
+    def list(self) -> list[Agent]:
+        return [
+            Agent(name=a.get("name", ""), goal=a.get("goal", ""), enabled=a.get("enabled", True))
+            for a in (self._settings.get(_KEY) or [])
+        ]
+
+    def add(self, name: str, goal: str) -> Agent:
+        agent = Agent(name=name.strip(), goal=goal.strip())
+        self._save([a for a in self.list() if a.name != agent.name] + [agent])
+        return agent
+
+    def remove(self, name: str) -> None:
+        self._save([a for a in self.list() if a.name != name])
+
+    def run(self, name: str, *, on_progress: ProgressFn | None = None) -> str:
+        agent = next((a for a in self.list() if a.name == name), None)
+        if agent is None:
+            return f"No agent named '{name}'."
+        return self._conversation.run_turn(agent.goal, on_progress=on_progress)
+
+    def _save(self, agents: list[Agent]) -> None:
+        self._settings.set(
+            _KEY, [{"name": a.name, "goal": a.goal, "enabled": a.enabled} for a in agents]
+        )

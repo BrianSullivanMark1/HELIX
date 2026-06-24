@@ -13,14 +13,17 @@ from helix.adapters.git_repo import GitRepo
 from helix.adapters.json_settings import JsonSettings
 from helix.adapters.restart import Restarter
 from helix.adapters.signal_bus import SignalBus
+from helix.adapters.speech import OsSpeechOut, WhisperSpeechIn
 from helix.adapters.sqlite_store import SqliteStore
 from helix.adapters.system_clock import SystemClock
 from helix.config import AppPaths
 from helix.logging_setup import setup_logging
+from helix.services.agents import AgentService
 from helix.services.archive import ArchiveService
 from helix.services.builds import BuildService
 from helix.services.conversation import ConversationService
 from helix.services.forge import ForgeService
+from helix.services.tasks import TaskService
 from helix.services.prompts import CONSOLE_SYSTEM
 from helix.services.selfdev import SelfDevService
 from helix.services.tools import ToolRegistry
@@ -65,4 +68,10 @@ class Container:
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM
         )
         self.archive = ArchiveService(self.repo, self.store, self.paths.root)
+        self.agents = AgentService(self.settings, self.conversation)
+        self.tasks = TaskService(self.builds)
         self.restart = Restarter(self.paths.root / "main.py", self.paths.root).restart
+
+        # Voice (optional; both degrade to text-only / silent if unavailable)
+        self.speech_in = WhisperSpeechIn()
+        self.speech_out = OsSpeechOut()
