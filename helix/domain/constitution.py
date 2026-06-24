@@ -38,11 +38,15 @@ COMMANDMENTS: tuple[str, ...] = (
 PROTECTED_PREFIXES: tuple[str, ...] = (
     "helix/domain/",  # the laws + the core models/contracts
     "helix/ports/",  # the seams the gate trusts
+    "helix/app/",  # composition root, bootstrap (the recovery anchor), cli — all run at startup
 )
 PROTECTED_FILES: tuple[str, ...] = (
     "helix/services/selfdev.py",  # the approval gate
+    "helix/services/forge.py",  # the build sandbox + data guard
     "helix/services/prompts.py",  # the prompts that frame the coder
-    "helix/app/container.py",  # the composition root / wiring
+    "helix/config.py",  # path resolution — imported at startup
+    "helix/logging_setup.py",  # imported at startup (runs before the gate loads)
+    "helix/__init__.py",  # package init — runs on any import
     "helix/adapters/git_repo.py",  # the only code that executes git for the gate
     "helix/adapters/api_coder.py",  # the build sandbox (_safe_target)
     "main.py",  # the launcher
@@ -63,6 +67,9 @@ def is_protected(path: str) -> bool:
     """True if `path` is safety/contract code the coder must never touch."""
     p = _norm(path)
     if any(p.startswith(prefix) for prefix in PROTECTED_PREFIXES):
+        return True
+    # Every package __init__.py runs at import time, before the gate loads — all are immutable.
+    if p.startswith("helix/") and p.rsplit("/", 1)[-1] == "__init__.py":
         return True
     return any(p == _norm(f) for f in PROTECTED_FILES)
 

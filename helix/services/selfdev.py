@@ -47,9 +47,19 @@ def compile_smoke_check(worktree: Path) -> tuple[bool, str]:
     avoiding approve-time code execution matters more.) Dev-mode safeguard: in a frozen build
     sys.executable is the app, not Python — see ARCHITECTURE 'Known limitations'.
     """
+    # -I (isolated) + an explicit sys.path strip so the worktree's cwd is NOT importable: otherwise a
+    # branch could add a root-level `compileall.py` that shadows the stdlib module and runs as code.
+    # compile_dir/compile_file resolve their targets by filesystem path (cwd-relative), unaffected.
+    code = (
+        "import sys; sys.path[:] = [p for p in sys.path if p not in ('', '.')]; "
+        "import compileall; "
+        "ok = compileall.compile_dir('helix', quiet=1, force=True) "
+        "and compileall.compile_file('main.py', quiet=1, force=True); "
+        "sys.exit(0 if ok else 1)"
+    )
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "compileall", "-q", "helix", "main.py"],
+            [sys.executable, "-I", "-c", code],
             cwd=str(worktree), capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=120,
         )
@@ -58,6 +68,38 @@ def compile_smoke_check(worktree: Path) -> tuple[bool, str]:
     if proc.returncode == 0:
         return True, ""
     return False, (proc.stdout or proc.stderr or "compile failed").strip()[:600]
+
+
+def snapshot_files(files: list[Path]) -> dict[str, bytes | None]:
+    """Capture the exact bytes of guarded files (or None if absent) before running the coder."""
+    snap: dict[str, bytes | None] = {}
+    for f in files:
+        try:
+            snap[str(f)] = f.read_bytes() if f.exists() else None
+        except OSError:
+            snap[str(f)] = None
+    return snap
+
+
+def restore_if_changed(snapshot: dict[str, bytes | None]) -> list[str]:
+    """Revert any guarded file the coder touched (writes into gitignored data/ are invisible to git)."""
+    reverted: list[str] = []
+    for path, original in snapshot.items():
+        f = Path(path)
+        try:
+            current = f.read_bytes() if f.exists() else None
+        except OSError:
+            current = None
+        if current != original:
+            reverted.append(f.name)
+            try:
+                if original is None:
+                    f.unlink(missing_ok=True)
+                else:
+                    f.write_bytes(original)
+            except OSError:
+                _LOG.warning("could not revert tampered file %s", f)
+    return reverted
 
 
 class SelfDevService:
@@ -71,6 +113,7 @@ class SelfDevService:
         *,
         worktrees_dir: Path,
         smoke_check: SmokeCheck = compile_smoke_check,
+        guard_files: list[Path] | None = None,
     ) -> None:
         self._coder = coder
         self._repo = repo
@@ -79,6 +122,7 @@ class SelfDevService:
         self._root = root
         self._worktrees = worktrees_dir
         self._smoke = smoke_check
+        self._guard_files = list(guard_files or [])  # reverted if the coder writes into them (data/)
         # Record the Constitution fingerprint on first run; later mismatches pause self-editing.
         if not self._settings.get(FINGERPRINT_SETTING):
             self._settings.set(FINGERPRINT_SETTING, constitution.fingerprint())
@@ -106,10 +150,16 @@ class SelfDevService:
         base = self._repo.current_branch(self._root)
         branch = self._branch_name(request)
         self._repo.create_branch(self._root, branch)
+        guard = snapshot_files(self._guard_files)
         try:
             result = self._coder.run_task(
                 self._root, improve_helix_prompt(request), on_progress=on_progress
             )
+            reverted = restore_if_changed(guard)  # a write into gitignored data/ is invisible to git
+            if reverted:
+                raise ConstitutionViolation(
+                    "refused — the coder wrote into protected data (" + ", ".join(reverted) + ")."
+                )
             if not result.ok:
                 raise BuildError(result.error or "the coder produced no change.")
 

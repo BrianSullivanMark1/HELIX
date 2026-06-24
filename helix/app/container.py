@@ -51,10 +51,13 @@ class Container:
 
         # Services
         self.builds = BuildService(self.paths.builds, self.repo, self.clock)
-        self.forge = ForgeService(self.builds, self.coder, self.bus, self.repo, self.paths.root)
+        guard_files = [self.paths.settings_file]  # reverted if a coder writes into them
+        self.forge = ForgeService(
+            self.builds, self.coder, self.bus, self.repo, self.paths.root, guard_files
+        )
         self.selfdev = SelfDevService(
             self.coder, self.repo, self.settings, self.clock, self.paths.root,
-            worktrees_dir=self.paths.data / "worktrees",
+            worktrees_dir=self.paths.data / "worktrees", guard_files=guard_files,
         )
         self.tools = ToolRegistry(self.forge, self.builds, self.selfdev)
         self.conversation = ConversationService(
