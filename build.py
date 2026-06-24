@@ -27,7 +27,10 @@ def main(argv: list[str] | None = None) -> int:
     if icon.exists():
         args += ["--icon", str(icon)]
     if "--with-voice" in argv:
-        args += ["--collect-all", "faster_whisper", "--collect-all", "edge_tts"]
+        # Collect faster-whisper AND its native deps (ctranslate2; onnxruntime drives the VAD) — without
+        # them the frozen app imports faster_whisper but crashes loading the model.
+        for pkg in ("faster_whisper", "ctranslate2", "onnxruntime", "edge_tts"):
+            args += ["--collect-all", pkg]
     else:  # lean build — local STT off (the OS voice still works), keeps it small + fast
         args += ["--exclude-module", "faster_whisper", "--exclude-module", "edge_tts",
                  "--exclude-module", "torch"]

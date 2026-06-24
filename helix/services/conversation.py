@@ -5,6 +5,8 @@ build_app, so the human always approves a spend in plain language before it happ
 """
 from __future__ import annotations
 
+import threading
+
 from helix.domain.models import Message, Role
 from helix.ports.clock import Clock
 from helix.ports.coder import ProgressFn
@@ -31,8 +33,16 @@ class ConversationService:
         self._memory = memory
         self._clock = clock
         self._system = system
+        # A turn is a read-modify-write over the shared history. The Console and an Agent run on
+        # separate worker threads against this one service, so serialize whole turns — otherwise their
+        # appends interleave and the API gets a malformed (e.g. two-user-in-a-row) turn list.
+        self._lock = threading.Lock()
 
     def run_turn(self, user_text: str, *, on_progress: ProgressFn | None = None) -> str:
+        with self._lock:
+            return self._run_turn_locked(user_text, on_progress=on_progress)
+
+    def _run_turn_locked(self, user_text: str, *, on_progress: ProgressFn | None = None) -> str:
         self._store.append(Message(Role.USER, user_text, self._clock.now()))
         turns = self._history_turns()
         specs = self._tools.specs()

@@ -1,0 +1,57 @@
+"""Voice tests — the pure pieces only (wake-word parsing + VAD segmentation). No Qt, no mic, no model.
+
+These lock the logic that decides 'is HELIX being addressed?' and 'has an utterance finished?' — the two
+places a regression would silently break hands-free voice.
+"""
+from __future__ import annotations
+
+import array
+
+from helix.ui.voice import VadSegmenter, _pcm_rms, is_dismissal, split_wake
+
+
+def _pcm(amplitude: int, samples: int) -> bytes:
+    return array.array("h", [amplitude] * samples).tobytes()
+
+
+def test_split_wake_matches_and_returns_command():
+    assert split_wake("HELIX build me a timer") == (True, "build me a timer")
+    assert split_wake("hey helix, what's the weather") == (True, "what's the weather")
+    assert split_wake("okay helix") == (True, "")  # bare wake, no command
+
+
+def test_split_wake_tolerates_mishearings():
+    matched, command = split_wake("heelix open the menu")
+    assert matched and command == "open the menu"
+
+
+def test_split_wake_ignores_unaddressed_text():
+    assert split_wake("just talking to myself") == (False, "")
+    assert split_wake("") == (False, "")
+
+
+def test_is_dismissal():
+    assert is_dismissal("goodbye")
+    assert is_dismissal("that's all")
+    assert is_dismissal("thanks HELIX")
+    assert not is_dismissal("hello there")
+    assert not is_dismissal("")
+
+
+def test_pcm_rms_constant_signal():
+    assert abs(_pcm_rms(_pcm(3000, 200)) - 3000) < 1.0
+    assert _pcm_rms(b"") == 0.0
+
+
+def test_vad_emits_a_completed_utterance_after_trailing_silence():
+    seg = VadSegmenter()
+    # Loud speech well above the adaptive threshold, longer than the minimum, then >3s of silence.
+    assert seg.push(_pcm(4000, 6000)) is None  # speech started, not yet ended
+    utter = seg.push(_pcm(0, 60000))           # 60000 samples = 120000 bytes ≈ 3.75s of silence
+    assert utter is not None and len(utter) > 0
+
+
+def test_vad_drops_a_too_short_blip():
+    seg = VadSegmenter()
+    seg.push(_pcm(4000, 400))            # ~25 ms — below WAKE_MIN_SPEECH_S
+    assert seg.push(_pcm(0, 60000)) is None

@@ -8,6 +8,8 @@ from typing import Protocol
 class SpeechIn(Protocol):
     def available(self) -> bool: ...
 
+    def ready(self) -> bool: ...  # True once the model is loaded (pre-warmed before Qt)
+
     def transcribe(self, wav_path: Path) -> str: ...
 
 

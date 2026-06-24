@@ -42,8 +42,10 @@ class HelixMainWindow(QMainWindow):
         outer.addWidget(self._build_nav())
 
         self._stack = QStackedWidget()
-        self.console = ConsoleView(container.conversation, container.settings)
-        self.launcher = LauncherView(container.builds)
+        self.console = ConsoleView(
+            container.conversation, container.settings, container.speech_in, container.speech_out
+        )
+        self.launcher = LauncherView(container.builds, container.agents, container.tasks)
         self.settings = SettingsView(container.settings)
         self._stack.addWidget(self.console)  # 0
         self._stack.addWidget(self.launcher)  # 1
@@ -99,6 +101,7 @@ class HelixMainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         # Don't tear down while a worker thread is still running (avoids a QThread crash on quit).
         self.console.shutdown()
+        self.launcher.shutdown()
         super().closeEvent(event)
 
     def _open_app(self, slug: str) -> None:
