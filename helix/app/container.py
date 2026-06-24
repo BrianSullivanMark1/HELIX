@@ -51,7 +51,7 @@ class Container:
 
         # Services
         self.builds = BuildService(self.paths.builds, self.repo, self.clock)
-        self.forge = ForgeService(self.builds, self.coder, self.bus)
+        self.forge = ForgeService(self.builds, self.coder, self.bus, self.repo, self.paths.root)
         self.selfdev = SelfDevService(
             self.coder, self.repo, self.settings, self.clock, self.paths.root,
             worktrees_dir=self.paths.data / "worktrees",

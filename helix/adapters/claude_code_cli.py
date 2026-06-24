@@ -140,6 +140,9 @@ class ClaudeCodeCli:
             cli, "-p", prompt,
             "--output-format", "stream-json", "--verbose",
             "--model", self._model, "--permission-mode", "acceptEdits",
+            # No shell: the coder edits files via Write/Edit only. Denying Bash removes the easiest
+            # path to git-hook injection, `git branch -f`, and writing outside the workspace.
+            "--disallowedTools", "Bash",
         ]
         no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:

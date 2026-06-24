@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -17,10 +18,13 @@ class GitError(RuntimeError):
 class GitRepo:
     def __init__(self, git: str = "git") -> None:
         self._git = git
+        # An empty dir so HELIX-driven git NEVER executes a (possibly planted) repo hook. A hook in
+        # .git/hooks would otherwise fire during merge/checkout — arbitrary code the scan can't see.
+        self._no_hooks = tempfile.mkdtemp(prefix="helix-nohooks-")
 
     def _run(self, repo_dir: Path, *args: str) -> str:
         proc = subprocess.run(
-            [self._git, *args],
+            [self._git, "-c", f"core.hooksPath={self._no_hooks}", *args],
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
@@ -80,12 +84,24 @@ class GitRepo:
         return [self._parse_commit(ln) for ln in out.splitlines() if ln.strip()]
 
     def changed_paths(self, repo_dir: Path, ref_a: str, ref_b: str) -> list[str]:
-        out = self._run(repo_dir, "diff", "--name-only", "--diff-filter=ACMR", ref_a, ref_b)
+        out = self._run(repo_dir, "diff", "--name-only", "--no-renames", "--diff-filter=ACMR", ref_a, ref_b)
         return [ln for ln in out.splitlines() if ln.strip()]
 
     def deleted_paths(self, repo_dir: Path, ref_a: str, ref_b: str) -> list[str]:
-        out = self._run(repo_dir, "diff", "--name-only", "--diff-filter=D", ref_a, ref_b)
+        out = self._run(repo_dir, "diff", "--name-only", "--no-renames", "--diff-filter=D", ref_a, ref_b)
         return [ln for ln in out.splitlines() if ln.strip()]
+
+    def diff(self, repo_dir: Path, ref_a: str, ref_b: str) -> str:
+        return self._run(repo_dir, "diff", "--no-color", "--no-renames", ref_a, ref_b)
+
+    def hooks_dir(self, repo_dir: Path) -> Path:
+        # Use the common-dir (NOT --git-path hooks, which honors our core.hooksPath override) so the
+        # tripwire scans the REAL default hooks location where a planted hook would sit.
+        raw = self._run(repo_dir, "rev-parse", "--git-common-dir")
+        common = Path(raw)
+        if not common.is_absolute():
+            common = repo_dir / common
+        return common / "hooks"
 
     def is_clean(self, repo_dir: Path) -> bool:
         return not self._run(repo_dir, "status", "--porcelain").strip()
@@ -94,11 +110,12 @@ class GitRepo:
         self._run(repo_dir, "add", "-A")
 
     def staged_changed(self, repo_dir: Path) -> list[str]:
-        out = self._run(repo_dir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
+        out = self._run(repo_dir, "diff", "--cached", "--name-only", "--no-renames", "--diff-filter=ACMR")
         return [ln for ln in out.splitlines() if ln.strip()]
 
     def staged_deleted(self, repo_dir: Path) -> list[str]:
-        out = self._run(repo_dir, "diff", "--cached", "--name-only", "--diff-filter=D")
+        # --no-renames so a renamed protected/shell file shows its OLD path as a deletion.
+        out = self._run(repo_dir, "diff", "--cached", "--name-only", "--no-renames", "--diff-filter=D")
         return [ln for ln in out.splitlines() if ln.strip()]
 
     def list_branches(self, repo_dir: Path, prefix: str = "") -> list[str]:

@@ -51,7 +51,8 @@ Requirements:
 
 def improve_helix_prompt(request: str) -> str:
     """Instruction handed to the coder when HELIX edits its OWN code (on a throwaway branch)."""
-    protected = ", ".join(constitution.PROTECTED_PATHS)
+    immutable = ", ".join((*constitution.PROTECTED_PREFIXES, constitution.SHELL_PREFIX))
+    files = ", ".join(constitution.PROTECTED_FILES)
     return f"""\
 You are improving HELIX itself — a local-first desktop app-builder (Python 3.11 + PyQt6, hexagonal
 architecture: domain / ports / adapters / services / ui). The repository is your working directory and
@@ -66,10 +67,10 @@ REQUEST<<<
 Rules (a violation means the change is auto-rejected at review and wasted):
 - Keep the change minimal and consistent with the existing code and the dependency rule
   (ui → services → ports ← adapters; domain depends on nothing). Don't break imports.
-- Do NOT run git — HELIX handles version control. Just edit files.
-- You MUST NOT edit, weaken, or work around these protected safety files: {protected}.
-- You MUST NOT remove HELIX's own shell — the orb, the Apps/Tasks/Agents navigation, Archive, or
-  Settings. Those are permanent. Never weaken the human-approval requirement.
+- Do NOT run git or shell commands — HELIX handles version control. Just edit files.
+- IMMUTABLE — never edit, add to, rename, or delete anything under these paths: {immutable}
+  (the safety core and the entire front-interface shell — the orb, navigation, Archive, Settings).
+- IMMUTABLE — never touch these files: {files}. Never weaken the human-approval requirement.
 - Never touch the data/ directory, secrets, or API keys.
 - When done, briefly summarize what you changed and why.
 """

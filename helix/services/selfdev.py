@@ -15,7 +15,6 @@ module is itself a PROTECTED_PATH — the coder may never edit it.
 """
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import sys
@@ -39,25 +38,26 @@ BRANCH_PREFIX = "selfdev/"
 FINGERPRINT_SETTING = "constitution_fingerprint"
 
 
-def import_smoke_check(worktree: Path) -> tuple[bool, str]:
-    """Default smoke-check: import the app's heavy modules in the worktree. Catches syntax/import breaks.
+def compile_smoke_check(worktree: Path) -> tuple[bool, str]:
+    """Default smoke-check: byte-compile the source WITHOUT importing it.
 
-    Runs offscreen so importing the Qt UI needs no display. (Dev-mode safeguard: in a frozen build
-    sys.executable is the app, not Python — see ARCHITECTURE 'Known limitations'.)
+    Importing a branch's code would execute its module-level statements — arbitrary code, at approve
+    time, in a full-privilege process. `compileall` only parses + compiles, so it catches syntax breaks
+    with zero execution. (Import-time errors slip through, but those are recoverable via Archive restore;
+    avoiding approve-time code execution matters more.) Dev-mode safeguard: in a frozen build
+    sys.executable is the app, not Python — see ARCHITECTURE 'Known limitations'.
     """
-    env = dict(os.environ)
-    env["QT_QPA_PLATFORM"] = "offscreen"
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", "import helix.app.container, helix.ui.main_window"],
+            [sys.executable, "-m", "compileall", "-q", "helix", "main.py"],
             cwd=str(worktree), capture_output=True, text=True,
-            encoding="utf-8", errors="replace", env=env, timeout=120,
+            encoding="utf-8", errors="replace", timeout=120,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"smoke-check could not run: {exc}"
     if proc.returncode == 0:
         return True, ""
-    return False, (proc.stderr or proc.stdout or "import failed").strip()[:600]
+    return False, (proc.stdout or proc.stderr or "compile failed").strip()[:600]
 
 
 class SelfDevService:
@@ -70,7 +70,7 @@ class SelfDevService:
         root: Path,
         *,
         worktrees_dir: Path,
-        smoke_check: SmokeCheck = import_smoke_check,
+        smoke_check: SmokeCheck = compile_smoke_check,
     ) -> None:
         self._coder = coder
         self._repo = repo
@@ -99,6 +99,7 @@ class SelfDevService:
     # ----- propose / approve / reject -----
     def propose(self, request: str, *, on_progress: ProgressFn | None = None) -> PendingChange:
         self._require_intact()
+        self._refuse_if_hooks_present()
         if not self._repo.is_clean(self._root):
             raise BuildError("HELIX's working tree has uncommitted changes; cannot self-edit safely.")
 
@@ -152,10 +153,23 @@ class SelfDevService:
 
     def approve(self, change_id: str) -> str:
         self._require_intact()
+        self._refuse_if_hooks_present()
         if change_id not in self._repo.list_branches(self._root, BRANCH_PREFIX):
             raise BuildError("no such pending change.")
 
-        # Smoke-check the change in an isolated worktree before it can touch the live tree.
+        # Re-scan the ACTUAL branch tip — a commit may have been appended after propose() scanned it.
+        # The content that merges is the content that is scanned.
+        base = self._repo.current_branch(self._root)
+        violations = constitution.check(
+            self._repo.changed_paths(self._root, base, change_id),
+            self._repo.deleted_paths(self._root, base, change_id),
+        )
+        if violations:
+            raise ConstitutionViolation(
+                "refused at approval — this change touches protected/shell code: " + "; ".join(violations)
+            )
+
+        # Smoke-check (non-executing) in an isolated worktree before it can touch the live tree.
         ok, err = self._smoke_in_worktree(change_id)
         if not ok:
             raise BuildError(f"smoke-check failed — not merging: {err}")
@@ -165,11 +179,35 @@ class SelfDevService:
         _LOG.info("approved + merged %s", change_id)
         return "Applied. Restart HELIX to load the new version."
 
+    def diff(self, change_id: str) -> str:
+        """The unified diff of a pending change vs base — for the human to actually review."""
+        base = self._repo.current_branch(self._root)
+        return self._repo.diff(self._root, base, change_id)
+
     def reject(self, change_id: str) -> None:
         self._repo.delete_branch(self._root, change_id)
         _LOG.info("rejected %s", change_id)
 
     # ----- helpers -----
+    def _refuse_if_hooks_present(self) -> None:
+        """A planted git hook is invisible to the staged-diff scan; refuse to operate if any exist.
+
+        Belt-and-suspenders: HELIX's own git calls already run with hooks disabled, but a hook on disk
+        could still fire if the user runs git by hand, so we don't proceed while one is present.
+        """
+        try:
+            hooks = self._repo.hooks_dir(self._root)
+            planted = [
+                p.name for p in hooks.glob("*")
+                if p.is_file() and not p.name.endswith(".sample")
+            ]
+        except OSError:
+            return
+        if planted:
+            raise ConstitutionViolation(
+                f"git hooks are present ({', '.join(planted)}) — refusing to self-modify until removed."
+            )
+
     def _smoke_in_worktree(self, branch: str) -> tuple[bool, str]:
         self._worktrees.mkdir(parents=True, exist_ok=True)
         wt = self._worktrees / branch.replace("/", "_")
