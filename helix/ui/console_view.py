@@ -78,7 +78,8 @@ class ConsoleView(QWidget):
         self.status.setObjectName("Status")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setStyleSheet(
-            "QLabel#Status{background:rgba(8,11,15,0.58);border-radius:11px;padding:4px 14px;}"
+            "QLabel#Status{background:rgba(8,11,15,0.92);color:#d4ecec;"
+            "border:1px solid rgba(63,224,224,0.28);border-radius:11px;padding:5px 16px;}"
         )
         srow = QHBoxLayout()
         srow.addStretch(1)
@@ -176,9 +177,13 @@ class ConsoleView(QWidget):
             return
         on = voice.enabled()
         self._voice_btn.setVisible(True)
-        self._voice_btn.setObjectName("Primary" if on else "")
-        self._voice_btn.style().unpolish(self._voice_btn)
-        self._voice_btn.style().polish(self._voice_btn)
+        # A near-solid dark pill so the label reads over the bright orb (cyan-on-cyan was invisible).
+        edge = "#3fe0e0" if on else "#26323b"
+        txt = "#3fe0e0" if on else "#aebcc3"
+        self._voice_btn.setStyleSheet(
+            f"QPushButton{{background:rgba(8,11,15,0.93);border:1px solid {edge};border-radius:14px;"
+            f"color:{txt};padding:8px 18px;}} QPushButton:hover{{border-color:#3fe0e0;}}"
+        )
         self._voice_btn.setText("🔊 Voice on — say “HELIX”" if on else "🔇 Voice off")
         self._voice_btn.setToolTip(
             "Listening for “HELIX”. Say “goodbye” to end, click the orb or here to mute."
