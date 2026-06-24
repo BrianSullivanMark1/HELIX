@@ -1,8 +1,8 @@
-"""ConsoleView — the orb home + the conversation. The default screen.
+"""ConsoleView — the conversation, floating over the Presence orb (the window's living background).
 
-Voice is layered on but optional: a single Voice toggle arms the hands-free wake word ("HELIX"), each
-reply is spoken back, and a hold-to-talk button gives a manual capture. With no mic / no faster-whisper
-the voice controls simply stay hidden and the Console is a normal text app.
+The orb itself is owned by the main window and sits behind every screen. Here we drive its state and
+mic-level pulse, and let the conversation float over its lower glow. Voice is optional: with no mic /
+no faster-whisper the voice controls stay hidden and it's a normal text app.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from helix.ports.speech import SpeechIn, SpeechOut
 from helix.ports.stores import SettingsStore
 from helix.services.conversation import ConversationService
 from helix.ui.orb import OrbState, PresenceOrb
-from helix.ui.theme import CYAN, LINE, PANEL, PANEL_HI, TEXT
+from helix.ui.theme import CYAN, LINE
 from helix.ui.voice import VoiceController
 from helix.ui.workers import QtWorker
 
@@ -36,6 +36,7 @@ class ConsoleView(QWidget):
         settings: SettingsStore,
         speech_in: SpeechIn | None = None,
         speech_out: SpeechOut | None = None,
+        orb: PresenceOrb | None = None,
     ) -> None:
         super().__init__()
         self.setObjectName("Console")
@@ -43,15 +44,15 @@ class ConsoleView(QWidget):
         self._settings = settings
         self._workers: set[QtWorker] = set()
         self._busy = False
+        self.orb = orb  # shared with the whole window; owned by HelixMainWindow
 
-        # Voice is created only when both speech ports are present; it self-reports what it can do.
         self._voice: VoiceController | None = None
         if speech_in is not None and speech_out is not None:
             self._voice = VoiceController(speech_in, speech_out, settings, self)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(28, 18, 28, 22)
-        root.setSpacing(12)
+        root.setContentsMargins(28, 14, 28, 18)
+        root.setSpacing(10)
 
         # Key banner (only until a key is set)
         self._banner = QFrame()
@@ -68,33 +69,38 @@ class ConsoleView(QWidget):
         brow.addWidget(open_btn)
         root.addWidget(self._banner)
 
-        # Orb — the Presence leads the screen, so give it the most room.
-        self.orb = PresenceOrb()
-        root.addWidget(self.orb, stretch=3)
+        # The orb's bright centre glows through this gap — and it's the clickable "tap to talk" zone.
+        root.addStretch(3)
+
+        # Status + voice toggle, centred over the orb.
         self.status = QLabel("Ready when you are.")
         self.status.setObjectName("Status")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self.status)
 
-        # Voice toggle (centered under the orb) — also the in-app instructions for how voice works.
         self._voice_btn = QPushButton("🔊 Voice")
-        self._voice_btn.clicked.connect(self._toggle_voice)
+        self._voice_btn.clicked.connect(self.toggle_voice)
         vrow = QHBoxLayout()
         vrow.addStretch(1)
         vrow.addWidget(self._voice_btn)
         vrow.addStretch(1)
         root.addLayout(vrow)
 
-        # Transcript
+        root.addStretch(1)
+
+        # Transcript — floats over the orb's lower glow (bubbles are semi-opaque so text stays legible).
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet("background: transparent;")
+        self._scroll.viewport().setStyleSheet("background: transparent;")
         self._transcript = QWidget()
+        self._transcript.setStyleSheet("background: transparent;")
         self._tlayout = QVBoxLayout(self._transcript)
         self._tlayout.setContentsMargins(0, 6, 0, 6)
         self._tlayout.setSpacing(8)
         self._tlayout.addStretch(1)
         self._scroll.setWidget(self._transcript)
-        root.addWidget(self._scroll, stretch=2)
+        root.addWidget(self._scroll, stretch=3)
 
         # Input row: hold-to-talk · text · send
         row = QHBoxLayout()
@@ -112,10 +118,12 @@ class ConsoleView(QWidget):
         row.addWidget(send)
         root.addLayout(row)
 
-        # Voice signals drive the orb, the status line, and the live mic level.
+        # Voice signals drive the orb (state + live mic level), the status line, and recognized commands.
         if self._voice is not None:
             self._voice.recognized.connect(self._on_recognized)
             self._voice.stateChanged.connect(self._on_voice_state)
+            if self.orb is not None:
+                self._voice.level.connect(self.orb.set_level)
             self._voice.start_if_enabled()
 
         self.refresh_key_state()
@@ -126,31 +134,13 @@ class ConsoleView(QWidget):
         has_key = bool((self._settings.get("claude_api_key") or "").strip())
         self._banner.setVisible(not has_key)
 
-    # ----- voice controls -----
-    def _refresh_voice_ui(self) -> None:
-        """Show/enable the voice controls according to what the host actually supports."""
-        voice = self._voice
-        if voice is None or not voice.supported():
-            self._voice_btn.setVisible(False)
-            self._talk.setVisible(False)
-            return
-        on = voice.enabled()
-        self._voice_btn.setVisible(True)
-        self._voice_btn.setObjectName("Primary" if on else "")
-        # Re-polish so the dynamic objectName restyles the button.
-        self._voice_btn.style().unpolish(self._voice_btn)
-        self._voice_btn.style().polish(self._voice_btn)
-        self._voice_btn.setText("🔊 Voice on — say “HELIX”" if on else "🔇 Voice off")
-        self._voice_btn.setToolTip(
-            "Listening for “HELIX”. Say “goodbye” to end the conversation, or click to mute."
-            if on
-            else "Turn on hands-free voice — then just say “HELIX”."
-        )
-        self._talk.setVisible(True)
-        # Enable on capability only — never disable mid-hold, or a held button won't emit 'released'.
-        self._talk.setEnabled(voice.can_listen())
+    def mousePressEvent(self, _event) -> None:
+        # A tap on the Console's empty space is a tap on the orb glowing behind it — toggle voice.
+        # Clicks on the buttons, input, or transcript are consumed by those children and never arrive here.
+        self.toggle_voice()
 
-    def _toggle_voice(self) -> None:
+    def toggle_voice(self) -> None:
+        """Flip hands-free voice on/off. Wired to both the Voice button and a tap on the orb."""
         voice = self._voice
         if voice is None:
             return
@@ -169,19 +159,38 @@ class ConsoleView(QWidget):
         else:
             self.status.setText("Voice unavailable on this machine.")
 
+    # ----- voice controls -----
+    def _refresh_voice_ui(self) -> None:
+        voice = self._voice
+        if voice is None or not voice.supported():
+            self._voice_btn.setVisible(False)
+            self._talk.setVisible(False)
+            return
+        on = voice.enabled()
+        self._voice_btn.setVisible(True)
+        self._voice_btn.setObjectName("Primary" if on else "")
+        self._voice_btn.style().unpolish(self._voice_btn)
+        self._voice_btn.style().polish(self._voice_btn)
+        self._voice_btn.setText("🔊 Voice on — say “HELIX”" if on else "🔇 Voice off")
+        self._voice_btn.setToolTip(
+            "Listening for “HELIX”. Say “goodbye” to end, click the orb or here to mute."
+            if on
+            else "Turn on hands-free voice — then just say “HELIX” (or tap the orb)."
+        )
+        self._talk.setVisible(True)
+        self._talk.setEnabled(voice.can_listen())
+
     def _on_voice_state(self, state: object) -> None:
-        self.orb.set_state(state if isinstance(state, OrbState) else OrbState.IDLE)
+        if self.orb is not None:
+            self.orb.set_state(state if isinstance(state, OrbState) else OrbState.IDLE)
         if state == OrbState.LISTENING:
             self.status.setText("Listening…")
         elif state == OrbState.THINKING:
             self.status.setText("Thinking…")
         elif state == OrbState.SPEAKING:
             self.status.setText("Speaking…")
-        else:  # IDLE
-            self.status.setText(
-                "Listening for “HELIX”…" if self._voice and self._voice.enabled()
-                else "Ready when you are."
-            )
+        else:
+            self._idle_status()
 
     def _talk_start(self) -> None:
         if self._voice is not None and not self._busy:
@@ -192,7 +201,6 @@ class ConsoleView(QWidget):
             self._voice.ptt_stop()
 
     def _on_recognized(self, text: str) -> None:
-        # A command captured by voice — show it and run it through the same path as a typed message.
         self._submit(str(text), from_voice=True)
 
     # ----- conversation -----
@@ -212,13 +220,12 @@ class ConsoleView(QWidget):
         if self._voice is not None:
             if not from_voice:
                 self._voice.begin_turn()  # voice path already went quiet when it captured the command
-        else:
+        elif self.orb is not None:
             self.orb.set_state(OrbState.THINKING)
             self.status.setText("Thinking…")
 
         worker = QtWorker(lambda emit: self._conversation.run_turn(text, on_progress=emit))
-        # Keep a strong reference until the QThread *actually* finishes (see _retire) so the GC can't
-        # destroy a live QThread and crash the process.
+        # Strong ref until the QThread truly finishes (see _retire) so the GC can't kill a live thread.
         self._workers.add(worker)
         worker.progress.connect(self.status.setText)
         worker.finished_ok.connect(self._on_reply)
@@ -245,7 +252,8 @@ class ConsoleView(QWidget):
             self._idle()
 
     def _idle(self) -> None:
-        self.orb.set_state(OrbState.IDLE)
+        if self.orb is not None:
+            self.orb.set_state(OrbState.IDLE)
         self._idle_status()
 
     def _idle_status(self) -> None:
@@ -255,7 +263,6 @@ class ConsoleView(QWidget):
         )
 
     def _retire(self, worker: QtWorker) -> None:
-        # On QThread.finished — the thread has stopped, so it is safe to drop the reference.
         self._workers.discard(worker)
         worker.deleteLater()
         self._busy = False
@@ -277,22 +284,22 @@ class ConsoleView(QWidget):
         bubble.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         bubble.setMaximumWidth(560)
         is_user = who == "you"
-        bg = PANEL_HI if is_user else PANEL
+        # Semi-opaque so the orb glows through behind the words, but text stays readable.
+        bg = "rgba(18,27,36,0.82)" if is_user else "rgba(13,20,27,0.82)"
         edge = LINE if is_user else CYAN
         bubble.setStyleSheet(
-            f"QLabel{{background:{bg};color:{TEXT};border:1px solid {edge};"
+            f"QLabel{{background:{bg};color:#e2edf1;border:1px solid {edge};"
             f"border-radius:12px;padding:10px 14px;}}"
         )
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
+        rowlay = QHBoxLayout()
+        rowlay.setContentsMargins(0, 0, 0, 0)
         if is_user:
-            row.addStretch(1)
-            row.addWidget(bubble)
+            rowlay.addStretch(1)
+            rowlay.addWidget(bubble)
         else:
-            row.addWidget(bubble)
-            row.addStretch(1)
-        # insert before the trailing stretch
-        self._tlayout.insertLayout(self._tlayout.count() - 1, row)
+            rowlay.addWidget(bubble)
+            rowlay.addStretch(1)
+        self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
         QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _scroll_to_bottom(self) -> None:

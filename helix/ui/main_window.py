@@ -1,4 +1,4 @@
-"""HelixMainWindow — the shell: nav + stacked pages, and the bus→UI bridge."""
+"""HelixMainWindow — the shell: the Presence orb as the window background, nav + pages floating on top."""
 from __future__ import annotations
 
 from PyQt6.QtCore import QUrl, pyqtSignal
@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QStackedLayout,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -17,6 +18,7 @@ from helix.domain.events import BuildCreated, BuildIterated
 from helix.domain.models import AppKind
 from helix.ui.console_view import ConsoleView
 from helix.ui.launcher_view import LauncherView
+from helix.ui.orb import PresenceOrb
 from helix.ui.settings_view import SettingsView
 from helix.ui.theme import CYAN, LINE
 
@@ -33,24 +35,40 @@ class HelixMainWindow(QMainWindow):
         self.setWindowTitle("HELIX")
         self.resize(980, 740)
 
-        central = QWidget()
-        central.setObjectName("Console")
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
+        # The orb is the living background of the whole window.
+        self.orb = PresenceOrb()
 
-        outer.addWidget(self._build_nav())
+        # The foreground: nav + pages, all transparent so the orb shows through.
+        overlay = QWidget()
+        overlay.setObjectName("Overlay")
+        ov = QVBoxLayout(overlay)
+        ov.setContentsMargins(0, 0, 0, 0)
+        ov.setSpacing(0)
+        ov.addWidget(self._build_nav())
 
         self._stack = QStackedWidget()
         self.console = ConsoleView(
-            container.conversation, container.settings, container.speech_in, container.speech_out
+            container.conversation, container.settings,
+            container.speech_in, container.speech_out, self.orb,
         )
         self.launcher = LauncherView(container.builds, container.agents, container.tasks)
         self.settings = SettingsView(container.settings)
         self._stack.addWidget(self.console)  # 0
         self._stack.addWidget(self.launcher)  # 1
         self._stack.addWidget(self.settings)  # 2
-        outer.addWidget(self._stack, stretch=1)
+        ov.addWidget(self._stack, stretch=1)
+
+        # Tap-to-talk: the Console handles clicks on its own empty space (the orb glowing behind it),
+        # so there's no fragile click-through. Menu/Settings don't, so their empty space is inert.
+
+        # Layer the orb (bottom) under the overlay (top), both filling the window.
+        central = QWidget()
+        central.setObjectName("Root")
+        layers = QStackedLayout(central)
+        layers.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        layers.addWidget(self.orb)
+        layers.addWidget(overlay)
+        self.orb.lower()
         self.setCentralWidget(central)
 
         # Navigation wiring

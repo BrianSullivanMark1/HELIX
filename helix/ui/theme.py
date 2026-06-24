@@ -21,7 +21,10 @@ _STYLESHEET = f"""
     font-family: "Segoe UI", "Inter", system-ui, sans-serif;
     font-size: 14px;
 }}
-QWidget#Console, QWidget#Panel, QStackedWidget {{ background: {BG}; }}
+/* The orb is the window background; the Root paints the dark field behind it, everything else is
+   transparent so the Presence shows through on every screen. */
+QWidget#Root {{ background: {BG}; }}
+QWidget#Console, QWidget#Panel, QWidget#Overlay, QStackedWidget {{ background: transparent; }}
 QLabel#Title {{ font-size: 18px; font-weight: 600; letter-spacing: 1px; }}
 QLabel#Status {{ color: {MUTED}; font-size: 13px; letter-spacing: 0.5px; }}
 QLabel#Banner {{ color: {AMBER}; }}

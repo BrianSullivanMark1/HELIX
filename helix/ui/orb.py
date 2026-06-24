@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from enum import Enum
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer
+from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QRadialGradient
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
@@ -56,15 +56,25 @@ def _col(c1: str, c2: str, t: float, alpha: int) -> QColor:
 
 
 class PresenceOrb(QWidget):
+    """The Presence. As a full-window background it's clickable (tap to talk) and pulses to the live
+    mic level while listening, so it reads as a single living thing you converse with."""
+
+    clicked = pyqtSignal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumSize(240, 240)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setStyleSheet("background: transparent;")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._state = OrbState.IDLE
         self._p = dict(_PARAMS[OrbState.IDLE])
         self._phase = 0.0
         self._spin = 0.0
         self._t = 0.0
+        self._level = 0.0          # eased live mic level
+        self._level_target = 0.0   # latest mic level, decays so the pulse falls when you stop talking
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(33)  # ~30 fps
@@ -72,10 +82,19 @@ class PresenceOrb(QWidget):
     def set_state(self, state: OrbState) -> None:
         self._state = state
 
+    def set_level(self, level: float) -> None:
+        """Feed the live mic level (0..1) while listening — the orb swells in time with your voice."""
+        self._level_target = max(0.0, min(1.0, float(level)))
+
+    def mousePressEvent(self, _event) -> None:
+        self.clicked.emit()
+
     def _tick(self) -> None:
         target = _PARAMS[self._state]
         for k in _KEYS:
             self._p[k] += (target[k] - self._p[k]) * 0.08
+        self._level += (self._level_target - self._level) * 0.35
+        self._level_target *= 0.82  # decay so the swell relaxes when the room goes quiet
         self._phase += self._p["speed"]
         self._spin = (self._spin + 3.0) % 360.0
         self._t += 1.0
@@ -86,9 +105,10 @@ class PresenceOrb(QWidget):
         cx, cy = w / 2, h / 2
         center = QPointF(cx, cy)
         base = min(w, h) * 0.22
-        glow = self._p["glow"]
+        glow = min(1.0, self._p["glow"] + self._level * 0.5)  # the mic level brightens the orb
         warm = self._p["warm"]
-        r = base * (1 + self._p["amp"] * math.sin(self._phase))
+        amp = self._p["amp"] + self._level * 0.05
+        r = base * (1 + amp * math.sin(self._phase))
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
