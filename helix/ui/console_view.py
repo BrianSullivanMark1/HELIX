@@ -68,9 +68,9 @@ class ConsoleView(QWidget):
         brow.addWidget(open_btn)
         root.addWidget(self._banner)
 
-        # Orb
+        # Orb — the Presence leads the screen, so give it the most room.
         self.orb = PresenceOrb()
-        root.addWidget(self.orb, stretch=2)
+        root.addWidget(self.orb, stretch=3)
         self.status = QLabel("Ready when you are.")
         self.status.setObjectName("Status")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -94,7 +94,7 @@ class ConsoleView(QWidget):
         self._tlayout.setSpacing(8)
         self._tlayout.addStretch(1)
         self._scroll.setWidget(self._transcript)
-        root.addWidget(self._scroll, stretch=3)
+        root.addWidget(self._scroll, stretch=2)
 
         # Input row: hold-to-talk · text · send
         row = QHBoxLayout()
