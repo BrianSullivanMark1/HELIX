@@ -29,10 +29,10 @@ class OrbState(Enum):
 # Per-state numeric targets the orb eases toward. `warm` blends the whole orb cyan→gold (speaking);
 # `accent` drives the amber thinking arc.
 _PARAMS: dict[OrbState, dict[str, float]] = {
-    OrbState.IDLE: {"glow": 0.45, "amp": 0.045, "speed": 0.055, "accent": 0.0, "warm": 0.0},
-    OrbState.LISTENING: {"glow": 0.85, "amp": 0.075, "speed": 0.10, "accent": 0.15, "warm": 0.0},
-    OrbState.THINKING: {"glow": 0.70, "amp": 0.050, "speed": 0.14, "accent": 1.0, "warm": 0.0},
-    OrbState.SPEAKING: {"glow": 1.0, "amp": 0.11, "speed": 0.18, "accent": 0.0, "warm": 1.0},
+    OrbState.IDLE: {"glow": 0.40, "amp": 0.045, "speed": 0.055, "accent": 0.0, "warm": 0.0},
+    OrbState.LISTENING: {"glow": 0.72, "amp": 0.075, "speed": 0.10, "accent": 0.15, "warm": 0.0},
+    OrbState.THINKING: {"glow": 0.58, "amp": 0.050, "speed": 0.14, "accent": 1.0, "warm": 0.0},
+    OrbState.SPEAKING: {"glow": 0.86, "amp": 0.11, "speed": 0.18, "accent": 0.0, "warm": 1.0},
 }
 
 _KEYS = ("glow", "amp", "speed", "accent", "warm")
@@ -102,9 +102,9 @@ class PresenceOrb(QWidget):
 
     def paintEvent(self, _event) -> None:
         w, h = self.width(), self.height()
-        cx, cy = w / 2, h / 2
+        cx, cy = w / 2, h * 0.43  # sit the bright core a touch above centre, so text floats over softer glow
         center = QPointF(cx, cy)
-        base = min(w, h) * 0.22
+        base = min(w, h) * 0.20
         glow = min(1.0, self._p["glow"] + self._level * 0.5)  # the mic level brightens the orb
         warm = self._p["warm"]
         amp = self._p["amp"] + self._level * 0.05
@@ -115,8 +115,8 @@ class PresenceOrb(QWidget):
 
         # Outer glow
         g = QRadialGradient(center, r * 2.8)
-        g.setColorAt(0.0, _col(CYAN, GOLD, warm, int(70 * glow)))
-        g.setColorAt(0.5, _col(CYAN, GOLD, warm, int(22 * glow)))
+        g.setColorAt(0.0, _col(CYAN, GOLD, warm, int(54 * glow)))
+        g.setColorAt(0.5, _col(CYAN, GOLD, warm, int(17 * glow)))
         g.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(g)
@@ -135,7 +135,7 @@ class PresenceOrb(QWidget):
 
         # Inner halo
         halo = QRadialGradient(center, r * 1.5)
-        halo.setColorAt(0.0, _col(CYAN, GOLD, warm, int(60 * glow)))
+        halo.setColorAt(0.0, _col(CYAN, GOLD, warm, int(44 * glow)))
         halo.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(halo)
@@ -143,9 +143,9 @@ class PresenceOrb(QWidget):
 
         # Core — white-hot centre fading to cyan (or gold while speaking)
         core = QRadialGradient(center, r)
-        core.setColorAt(0.0, _col("#eaffff", "#fff7e6", warm, 255))
-        core.setColorAt(0.35, _col(CYAN, GOLD, warm, 235))
-        core.setColorAt(0.80, _col(CYAN_DIM, GOLD_DIM, warm, 205))
+        core.setColorAt(0.0, _col("#d8f7f7", "#fbeccf", warm, 232))
+        core.setColorAt(0.35, _col(CYAN, GOLD, warm, 200))
+        core.setColorAt(0.80, _col(CYAN_DIM, GOLD_DIM, warm, 168))
         core.setColorAt(1.0, _col(CYAN_DIM, GOLD_DIM, warm, 0))
         p.setBrush(core)
         p.drawEllipse(center, r, r)

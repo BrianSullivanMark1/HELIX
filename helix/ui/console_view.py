@@ -72,11 +72,19 @@ class ConsoleView(QWidget):
         # The orb's bright centre glows through this gap — and it's the clickable "tap to talk" zone.
         root.addStretch(3)
 
-        # Status + voice toggle, centred over the orb.
+        # Status + voice toggle, centred over the orb. A translucent pill keeps the text legible
+        # against the orb's glow, and the chip hugs the text rather than spanning the window.
         self.status = QLabel("Ready when you are.")
         self.status.setObjectName("Status")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self.status)
+        self.status.setStyleSheet(
+            "QLabel#Status{background:rgba(8,11,15,0.58);border-radius:11px;padding:4px 14px;}"
+        )
+        srow = QHBoxLayout()
+        srow.addStretch(1)
+        srow.addWidget(self.status)
+        srow.addStretch(1)
+        root.addLayout(srow)
 
         self._voice_btn = QPushButton("🔊 Voice")
         self._voice_btn.clicked.connect(self.toggle_voice)
