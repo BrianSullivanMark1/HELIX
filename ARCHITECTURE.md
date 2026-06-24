@@ -221,14 +221,18 @@ Same product, same guardrails — a structure that can actually grow.
 
 ## 10. Known limitations & next
 
-- **Coder sandboxing is asymmetric.** The API-fallback coder (`adapters/api_coder.py`) hard-sandboxes
-  every write through `_safe_target` (rejects `..`, drive-absolute, and `.git`/manifest paths,
-  case-insensitively). The preferred Claude Code CLI coder runs with `--permission-mode acceptEdits`
-  and `cwd = workspace`, so its containment is the working directory + the build prompt, not a hard
-  jail — a misbehaving or prompt-injected model with shell access could in principle write outside the
-  workspace. Acceptable for a local, single-user, user-initiated build; a future hardening can pass a
-  restricted tool set / validate the git diff. Untrusted request text is fenced and both system prompts
-  mark it as data, not instructions.
+- **Coder containment (hardened over four adversarial red-team rounds — 14→6→5→2 escapes, all criticals
+  closed after round 1).** Self-modification is a **fail-closed allowlist** (a change may only touch
+  `services/`+`adapters/` `.py`; the shell and the whole safety/startup-import surface are immutable),
+  runs with git **hooks disabled** and **Bash denied**, **re-scans the branch at approval**, uses a
+  **non-executing** compile smoke-check, and **verifies the coder wrote nothing outside its workspace**
+  (source, `data/`, `.git/hooks` are snapshot-checked and reverted). The API coder is additionally
+  hard-sandboxed by `_safe_target`. Untrusted request text is fenced and marked as data in every prompt.
+  **Documented residual (low):** a prompt-injected CLI *build* can still scribble into the few gitignored
+  runtime files the scan skips to avoid false positives (the app's own `helix.log`, sqlite `-wal`
+  sidecars) — annoying, not a gate bypass: it cannot alter HELIX's source, the Constitution, settings,
+  the approval flow, or another app's committed state. A future hardening builds in an isolated staging
+  dir outside `data/`.
 - **The Constitution is enforced on the self-modification path (Phase 7).** `domain/constitution.py`
   holds the rules; `services/selfdev.py` (the approval gate) is where `check()` /
   `locked_setting_violation()` are invoked before any self-change merges.

@@ -62,23 +62,36 @@ class ForgeService:
 
     def _revert_escapes(self, escaped: list[str]) -> None:
         root = self._app_root.resolve()
+        builds_root = (self._app_root / "data" / "builds").resolve()
         source_rels: list[str] = []
+        siblings: set[Path] = set()
         for ap in escaped:
-            p = Path(ap)
+            rp = Path(ap).resolve()
             try:
-                rel = str(p.resolve().relative_to(root)).replace("\\", "/")
+                rel = str(rp.relative_to(root)).replace("\\", "/")
             except ValueError:
                 continue
-            if rel.startswith("data/"):
-                continue  # data/ writes are detected + refused (not byte-reverted here)
-            if rel.startswith(".git") or "/.git/" in f"/{rel}":
+            if builds_root in rp.parents:
+                # a write into ANOTHER built app — revert that app's whole working tree to its commit
+                try:
+                    siblings.add(builds_root / rp.relative_to(builds_root).parts[0])
+                except (ValueError, IndexError):
+                    pass
+            elif rel.startswith("data/"):
+                continue  # db/log/settings: detected + refused (settings already byte-reverted)
+            elif ".git" in rp.parts:
                 try:  # a planted hook — remove it
-                    if p.is_file() and not p.name.endswith(".sample"):
-                        p.unlink()
+                    if rp.is_file() and not rp.name.endswith(".sample"):
+                        rp.unlink()
                 except OSError:
                     pass
-                continue
-            source_rels.append(rel)
+            else:
+                source_rels.append(rel)
+        for sibling in siblings:
+            try:
+                self._repo.discard_changes(sibling)  # restore the sibling app to its last commit
+            except Exception:
+                pass
         if source_rels:
             try:
                 self._repo.restore_paths(self._app_root, source_rels)
