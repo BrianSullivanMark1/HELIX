@@ -58,6 +58,7 @@ class Container:
         self.selfdev = SelfDevService(
             self.coder, self.repo, self.settings, self.clock, self.paths.root,
             worktrees_dir=self.paths.data / "worktrees", guard_files=guard_files,
+            data_dir=self.paths.data,
         )
         self.tools = ToolRegistry(self.forge, self.builds, self.selfdev)
         self.conversation = ConversationService(

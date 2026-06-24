@@ -81,6 +81,40 @@ def snapshot_files(files: list[Path]) -> dict[str, bytes | None]:
     return snap
 
 
+def scan_tree(root: Path, skip: tuple[Path, ...] = ()) -> dict[str, tuple[int, int]]:
+    """mtime+size signature of every file under root, skipping given subtrees. Fast containment check."""
+    sig: dict[str, tuple[int, int]] = {}
+    if not root.exists():
+        return sig
+    skip_res = [s.resolve() for s in skip]
+    for p in root.rglob("*"):
+        try:
+            if not p.is_file():
+                continue
+            if (
+                p.suffix in (".pyc", ".pyo", ".log")
+                or "__pycache__" in p.parts
+                or p.name.endswith(("-wal", "-shm", "-journal"))
+            ):
+                continue  # ignore legitimate churn (bytecode, logs, sqlite sidecars)
+            rp = p.resolve()
+            if any(rp == s or s in rp.parents for s in skip_res):
+                continue
+            st = p.stat()
+            sig[str(rp)] = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            continue
+    return sig
+
+
+def tree_changed(root: Path, before: dict[str, tuple[int, int]], skip: tuple[Path, ...] = ()) -> list[str]:
+    """Absolute paths that were added/removed/modified under root since `before`."""
+    after = scan_tree(root, skip)
+    changed = [p for p in after if after[p] != before.get(p)]
+    changed += [p for p in before if p not in after]
+    return changed
+
+
 def restore_if_changed(snapshot: dict[str, bytes | None]) -> list[str]:
     """Revert any guarded file the coder touched (writes into gitignored data/ are invisible to git)."""
     reverted: list[str] = []
@@ -114,6 +148,7 @@ class SelfDevService:
         worktrees_dir: Path,
         smoke_check: SmokeCheck = compile_smoke_check,
         guard_files: list[Path] | None = None,
+        data_dir: Path | None = None,
     ) -> None:
         self._coder = coder
         self._repo = repo
@@ -122,7 +157,8 @@ class SelfDevService:
         self._root = root
         self._worktrees = worktrees_dir
         self._smoke = smoke_check
-        self._guard_files = list(guard_files or [])  # reverted if the coder writes into them (data/)
+        self._guard_files = list(guard_files or [])  # reverted if the coder writes into them
+        self._data_dir = data_dir  # the off-limits data/ tree (db, logs, built apps)
         # Record the Constitution fingerprint on first run; later mismatches pause self-editing.
         if not self._settings.get(FINGERPRINT_SETTING):
             self._settings.set(FINGERPRINT_SETTING, constitution.fingerprint())
@@ -151,14 +187,18 @@ class SelfDevService:
         branch = self._branch_name(request)
         self._repo.create_branch(self._root, branch)
         guard = snapshot_files(self._guard_files)
+        data_sig = scan_tree(self._data_dir) if self._data_dir else {}
         try:
             result = self._coder.run_task(
                 self._root, improve_helix_prompt(request), on_progress=on_progress
             )
-            reverted = restore_if_changed(guard)  # a write into gitignored data/ is invisible to git
-            if reverted:
+            # Writes into gitignored data/ are invisible to git, so detect them on the filesystem.
+            reverted = restore_if_changed(guard)  # settings written by the coder are reverted
+            data_hit = tree_changed(self._data_dir, data_sig) if self._data_dir else []
+            if reverted or data_hit:
+                names = reverted + [Path(p).name for p in data_hit]
                 raise ConstitutionViolation(
-                    "refused — the coder wrote into protected data (" + ", ".join(reverted) + ")."
+                    "refused — the coder wrote into protected data/ (" + ", ".join(names[:8]) + ")."
                 )
             if not result.ok:
                 raise BuildError(result.error or "the coder produced no change.")

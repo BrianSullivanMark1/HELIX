@@ -79,6 +79,19 @@ class GitRepo:
         self._run(repo_dir, "reset", "--hard")  # drop staged/unstaged edits
         self._run(repo_dir, "clean", "-fd")  # drop untracked files (respects .gitignore)
 
+    def restore_paths(self, repo_dir: Path, paths: list[str]) -> None:
+        """Revert specific paths: tracked → checkout; newly-added untracked → remove."""
+        for p in paths:
+            try:
+                self._run(repo_dir, "checkout", "--", p)  # revert a tracked modification
+            except GitError:
+                try:  # untracked (newly added) file — delete it
+                    fp = repo_dir / p
+                    if fp.is_file():
+                        fp.unlink()
+                except OSError:
+                    pass
+
     def log(self, repo_dir: Path, limit: int = 100) -> list[Commit]:
         out = self._run(repo_dir, "log", f"-{int(limit)}", f"--pretty={_FMT}")
         return [self._parse_commit(ln) for ln in out.splitlines() if ln.strip()]

@@ -53,6 +53,10 @@ PROTECTED_FILES: tuple[str, ...] = (
 )
 SHELL_PREFIX = "helix/ui/"  # the entire front interface — the immutable shell
 
+# The ONLY surface a self-improvement may touch (fail-closed allowlist). Anything not matching is
+# refused — protected code, the shell, package inits, root files (sitecustomize/.pth/main), data/, .git.
+EDITABLE_PREFIXES: tuple[str, ...] = ("helix/services/", "helix/adapters/")
+
 # Settings the model may never change. setting_key -> required value.
 LOCKED_SETTINGS: dict[str, object] = {
     "human_approval_required": True,
@@ -83,21 +87,35 @@ def is_immutable(path: str) -> bool:
     return is_protected(path) or is_shell(path)
 
 
-def check(changed_paths: list[str], deleted_paths: list[str] | None = None) -> list[str]:
-    """Return human-readable violations for a proposed self-change. Empty == clean.
+def is_editable(path: str) -> bool:
+    """The narrow self-improvement surface: .py under services/ or adapters/, excluding the protected
+    gate files and package initializers. EVERYTHING ELSE is refused (fail-closed)."""
+    p = _norm(path)
+    if not p.endswith(".py") or p.rsplit("/", 1)[-1] == "__init__.py":
+        return False
+    if not any(p.startswith(prefix) for prefix in EDITABLE_PREFIXES):
+        return False
+    return not any(p == _norm(f) for f in PROTECTED_FILES)
 
-    Any add/modify/rename/delete of protected or shell code is refused. (Renames must be decomposed
-    into add+delete by the caller via --no-renames so the source path is seen as a deletion.)
+
+def check(changed_paths: list[str], deleted_paths: list[str] | None = None) -> list[str]:
+    """Allowlist gate: a self-change may ONLY add/modify/delete editable services/adapters .py.
+
+    Anything else is refused — protected code, the shell, package __init__.py, repo-root files
+    (sitecustomize.py / .pth / main.py), data/, .git. Fail-closed: novel paths are denied by default.
+    (Renames are decomposed into add+delete by the caller via --no-renames, so a moved file is caught.)
     """
     problems: list[str] = []
-    for p in changed_paths or []:
-        if is_protected(p):
-            problems.append(f"protected safety code may not be modified: {_norm(p)}")
-        elif is_shell(p):
-            problems.append(f"the immutable shell may not be modified: {_norm(p)}")
-    for p in deleted_paths or []:
-        if is_immutable(p):
-            problems.append(f"protected/shell code may not be removed: {_norm(p)}")
+    seen: set[str] = set()
+    for p in list(changed_paths or []) + list(deleted_paths or []):
+        n = _norm(p)
+        if n in seen:
+            continue
+        seen.add(n)
+        if not is_editable(p):
+            problems.append(
+                f"outside the editable surface (self-changes are limited to services/ and adapters/ .py): {n}"
+            )
     return problems
 
 
@@ -136,6 +154,7 @@ def fingerprint() -> str:
         + "\n" + "\n".join(PROTECTED_PREFIXES)
         + "\n" + "\n".join(PROTECTED_FILES)
         + "\n" + SHELL_PREFIX
+        + "\n" + "\n".join(EDITABLE_PREFIXES)
         + "\n" + repr(sorted((k, str(v)) for k, v in LOCKED_SETTINGS.items()))
         + "\n" + _enforcement_source_hash()
     )
