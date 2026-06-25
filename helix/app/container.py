@@ -13,7 +13,7 @@ from helix.adapters.git_repo import GitRepo
 from helix.adapters.json_settings import JsonSettings
 from helix.adapters.restart import Restarter
 from helix.adapters.signal_bus import SignalBus
-from helix.adapters.speech import OsSpeechOut, WhisperSpeechIn
+from helix.adapters.speech import EdgeSpeechOut, OsSpeechOut, WhisperSpeechIn
 from helix.adapters.sqlite_store import SqliteStore
 from helix.adapters.system_clock import SystemClock
 from helix.config import AppPaths
@@ -72,6 +72,11 @@ class Container:
         self.tasks = TaskService(self.builds)
         self.restart = Restarter(self.paths.root / "main.py", self.paths.root).restart
 
-        # Voice (optional; both degrade to text-only / silent if unavailable)
+        # Voice (optional; both degrade to text-only / silent if unavailable). TTS uses the chosen
+        # neural accent (edge-tts), falling back to the local OS voice when offline/unavailable.
         self.speech_in = WhisperSpeechIn()
-        self.speech_out = OsSpeechOut()
+        self.speech_out = EdgeSpeechOut(
+            lambda: self.settings.get("tts_voice"),
+            lambda: self.settings.get("tts_rate"),
+            fallback=OsSpeechOut(),
+        )

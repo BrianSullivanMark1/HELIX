@@ -11,10 +11,14 @@ import; the container's WhisperSpeechIn then reuses the already-loaded model.
 """
 from __future__ import annotations
 
+import asyncio
+import os
 import platform
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
+from typing import Callable
 
 from helix.logging_setup import get_logger
 
@@ -167,6 +171,141 @@ class OsSpeechOut:
             except Exception:
                 pass
         self._proc = None
+
+
+# ----- neural speech-out (edge-tts) -----
+DEFAULT_TTS_VOICE = "en-GB-RyanNeural"  # British male — the J.A.R.V.I.S. default, as in HELIX v1
+
+# Curated neural voices: (label, edge-tts id). British first.
+TTS_VOICES: tuple[tuple[str, str], ...] = (
+    ("British — Ryan (male)", "en-GB-RyanNeural"),
+    ("British — Sonia (female)", "en-GB-SoniaNeural"),
+    ("British — Thomas (male)", "en-GB-ThomasNeural"),
+    ("US — Guy (male)", "en-US-GuyNeural"),
+    ("US — Aria (female)", "en-US-AriaNeural"),
+    ("US — Jenny (female)", "en-US-JennyNeural"),
+    ("Australian — William (male)", "en-AU-WilliamNeural"),
+    ("Australian — Natasha (female)", "en-AU-NatashaNeural"),
+    ("Irish — Connor (male)", "en-IE-ConnorNeural"),
+    ("Canadian — Liam (male)", "en-CA-LiamNeural"),
+)
+
+
+def edge_available() -> bool:
+    try:
+        import edge_tts  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _rate_string(multiplier: object) -> str:
+    """A speed multiplier (1.0 = natural) → edge-tts rate, e.g. 1.5 → '+50%', 0.8 → '-20%'."""
+    try:
+        m = float(multiplier)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        m = 1.0
+    pct = round((max(0.5, min(2.0, m)) - 1.0) * 100)
+    return f"+{pct}%" if pct >= 0 else f"{pct}%"
+
+
+class EdgeSpeechOut:
+    """Neural TTS via edge-tts (Microsoft's online voices), so HELIX can speak with a chosen accent.
+
+    edge-tts synthesizes an MP3 from the reply text over the network; we play it blocking through the
+    Windows Media Player COM object (no Qt event loop needed — speak() runs on a worker thread and
+    returns when playback ends, so the mic re-arms only after HELIX finishes). If synthesis or playback
+    fails — offline, no WMP — it falls back to the local OS voice, so a reply is always spoken.
+    """
+
+    def __init__(
+        self,
+        voice_provider: "Callable[[], str | None]",
+        rate_provider: "Callable[[], object]",
+        fallback: object | None = None,
+    ) -> None:
+        self._voice = voice_provider
+        self._rate = rate_provider
+        self._fallback = fallback if fallback is not None else OsSpeechOut()
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+
+    def available(self) -> bool:
+        return edge_available() or self._fallback.available()
+
+    def speak(self, text: str) -> None:
+        text = (text or "").strip()
+        if not text:
+            return
+        path = None
+        try:
+            path = self._synthesize(text)
+            self._play(path)
+        except Exception as exc:  # offline, WMP missing, etc. — still speak, via the OS voice
+            _LOG.warning("neural TTS failed (%s); falling back to the OS voice", exc)
+            self._fallback.speak(text)
+        finally:
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+    def _synthesize(self, text: str) -> str:
+        import edge_tts
+
+        voice = (self._voice() or "").strip() or DEFAULT_TTS_VOICE
+        rate = _rate_string(self._rate())
+        handle, path = tempfile.mkstemp(suffix=".mp3", prefix="helix_tts_")
+        os.close(handle)
+
+        async def _go() -> None:
+            await edge_tts.Communicate(text, voice, rate=rate).save(path)
+
+        asyncio.run(_go())
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            raise RuntimeError("edge-tts produced no audio")
+        return path
+
+    def _play(self, path: str) -> None:
+        if platform.system() != "Windows":
+            raise RuntimeError("MP3 playback here is Windows-only")
+        # Play the MP3 via WPF's MediaPlayer (Media Foundation; present on every Windows) and block for
+        # its natural duration. PowerShell runs STA, which MediaPlayer requires. A non-zero exit (e.g.
+        # the file won't open) propagates so speak() falls back to the OS voice.
+        script = (
+            "Add-Type -AssemblyName PresentationCore;"
+            "$mp=New-Object System.Windows.Media.MediaPlayer;"
+            f"$mp.Open([uri]'{path}');"
+            "$mp.Volume=1.0;"
+            "Start-Sleep -Milliseconds 300;"
+            "$mp.Play();"
+            "$d=$null;"
+            "for($i=0;$i -lt 50;$i++){if($mp.NaturalDuration.HasTimeSpan){$d=$mp.NaturalDuration.TimeSpan;break};Start-Sleep -Milliseconds 100};"
+            "if($d){Start-Sleep -Milliseconds ([int]$d.TotalMilliseconds + 250)}else{Start-Sleep -Seconds 3};"
+            "$mp.Stop();$mp.Close();"
+        )
+        with self._lock:
+            self._proc = subprocess.Popen(
+                ["powershell", "-NoProfile", "-STA", "-Command", script],
+                creationflags=_NO_WINDOW,
+            )
+            proc = self._proc
+        proc.wait()
+        with self._lock:
+            self._proc = None
+        if proc.returncode not in (0, None):
+            raise RuntimeError(f"playback exited {proc.returncode}")
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._proc and self._proc.poll() is None:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            self._proc = None
+        self._fallback.stop()
 
 
 class NullSpeechOut:
