@@ -7,6 +7,7 @@ no faster-whisper the voice controls stay hidden and it's a normal text app.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -44,6 +45,7 @@ class ConsoleView(QWidget):
         self._settings = settings
         self._workers: set[QtWorker] = set()
         self._busy = False
+        self._cancelled = False  # set by a 'stop' — a pending reply is shown but not spoken
         self.orb = orb  # shared with the whole window; owned by HelixMainWindow
 
         self._voice: VoiceController | None = None
@@ -131,9 +133,15 @@ class ConsoleView(QWidget):
         if self._voice is not None:
             self._voice.recognized.connect(self._on_recognized)
             self._voice.stateChanged.connect(self._on_voice_state)
+            self._voice.stopRequested.connect(self._on_voice_stop)
             if self.orb is not None:
                 self._voice.level.connect(self.orb.set_level)
             self._voice.start_if_enabled()
+
+        # Esc interrupts a reply, anywhere in the Console.
+        esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        esc.activated.connect(self._stop)
 
         self.refresh_key_state()
         self._refresh_voice_ui()
@@ -144,9 +152,27 @@ class ConsoleView(QWidget):
         self._banner.setVisible(not has_key)
 
     def mousePressEvent(self, _event) -> None:
-        # A tap on the Console's empty space is a tap on the orb glowing behind it — toggle voice.
-        # Clicks on the buttons, input, or transcript are consumed by those children and never arrive here.
-        self.toggle_voice()
+        # A tap on the Console's empty space is a tap on the orb behind it. While HELIX is busy
+        # (thinking/speaking) that interrupts it; otherwise it toggles voice. (Clicks on the buttons,
+        # input, or transcript are consumed by those children and never arrive here.)
+        if self._voice is not None and self._voice.is_active():
+            self._stop()
+        else:
+            self.toggle_voice()
+
+    def _stop(self) -> None:
+        """Interrupt the current reply: stop speaking now, and don't speak one that's still pending."""
+        if self._voice is not None:
+            self._voice.interrupt()
+        if self._busy:
+            self._cancelled = True
+        self.status.setText("Stopped.")
+
+    def _on_voice_stop(self) -> None:
+        # The user said "stop" — the controller already hushed any speech; cancel a pending reply too.
+        if self._busy:
+            self._cancelled = True
+        self.status.setText("Stopped.")
 
     def toggle_voice(self) -> None:
         """Flip hands-free voice on/off. Wired to both the Voice button and a tap on the orb."""
@@ -186,7 +212,7 @@ class ConsoleView(QWidget):
         )
         self._voice_btn.setText("🔊 Voice on — say “HELIX”" if on else "🔇 Voice off")
         self._voice_btn.setToolTip(
-            "Listening for “HELIX”. Say “goodbye” to end, click the orb or here to mute."
+            "Listening for “HELIX”. Say “stop” to interrupt, “goodbye” to end; tap the orb to stop/mute."
             if on
             else "Turn on hands-free voice — then just say “HELIX” (or tap the orb)."
         )
@@ -226,6 +252,7 @@ class ConsoleView(QWidget):
         text = (text or "").strip()
         if not text or self._busy:
             return
+        self._cancelled = False
         self._add_bubble("you", text)
         self._busy = True
         self._input.setEnabled(False)
@@ -248,6 +275,12 @@ class ConsoleView(QWidget):
 
     def _on_reply(self, text: object) -> None:
         self._add_bubble("helix", str(text))
+        if self._cancelled:  # the user said stop while this was generating — show it, don't speak it
+            self._cancelled = False
+            if self._voice is not None:
+                self._voice.idle()
+            self._idle_status()
+            return
         if self._voice is not None and self._voice.enabled():
             self._voice.speak(str(text))  # speak the reply, then re-arm the mic
         elif self._voice is not None:

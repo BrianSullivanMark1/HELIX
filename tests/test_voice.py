@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import array
 
-from helix.ui.voice import VadSegmenter, _pcm_rms, is_dismissal, speakable, split_wake
+from helix.ui.voice import VadSegmenter, _pcm_rms, is_dismissal, is_stop, speakable, split_wake
 
 
 def _pcm(amplitude: int, samples: int) -> bytes:
@@ -37,6 +37,14 @@ def test_speakable_strips_markdown_and_symbols():
     assert speakable("See [the docs](https://x.com) now") == "See the docs now"
     # ordinary words and punctuation are untouched
     assert speakable("Hello, sir. Ready when you are?") == "Hello, sir. Ready when you are?"
+
+
+def test_is_stop():
+    for phrase in ("stop", "stop talking", "be quiet", "never mind", "cancel that", "shut up", "that's enough"):
+        assert is_stop(phrase), phrase
+    assert not is_stop("build a stopwatch app")  # 'stopwatch' must not trigger
+    assert not is_stop("show me the canceled orders")
+    assert not is_stop("")
 
 
 def test_is_dismissal():

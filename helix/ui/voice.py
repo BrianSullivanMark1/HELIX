@@ -106,6 +106,19 @@ def speakable(text: str) -> str:
     return _WS.sub(" ", t).strip()
 
 
+# Short phrases that interrupt HELIX — "stop talking" / "be quiet" / "never mind".
+_STOP_RE = re.compile(
+    r"\b(?:stop(?:\s+(?:it|talking|now|please))?|be\s+quiet|never\s*mind|cancel\s+that|"
+    r"that'?s\s+enough|shut\s*up|hush|shush)\b",
+    re.IGNORECASE,
+)
+
+
+def is_stop(text: str) -> bool:
+    """True if `text` is a short command to stop the current response."""
+    return bool(_STOP_RE.search(text or ""))
+
+
 def _write_wav16(data: bytes, path: str) -> None:
     with wave.open(path, "wb") as handle:
         handle.setnchannels(1)
@@ -346,6 +359,7 @@ class VoiceController(QObject):
     recognized = pyqtSignal(str)       # a user command captured by voice — the Console runs it
     stateChanged = pyqtSignal(object)  # an OrbState for the orb + status line
     level = pyqtSignal(float)          # 0..1 mic level while listening
+    stopRequested = pyqtSignal()       # the user said "stop" — the Console cancels any pending reply
 
     def __init__(
         self,
@@ -364,6 +378,7 @@ class VoiceController(QObject):
         self._state = "idle"
         self._session = False
         self._ptt = False
+        self._barge_busy = False          # one in-flight 'stop?' transcription at a time while speaking
         self._mic_ok: bool | None = None  # cache the device probe; don't reopen it on every settle
         self._session_timer = QTimer(self)
         self._session_timer.setSingleShot(True)
@@ -456,22 +471,47 @@ class VoiceController(QObject):
                 self._start_wake()
                 return  # _start_wake re-enters _set_state("idle")
         if self._listener is not None:
-            self._listener.set_active(state == "idle" and self.enabled())
+            # Listen while idle (full commands) AND while speaking (barge-in: only "stop" acts).
+            self._listener.set_active(state in ("idle", "speaking") and self.enabled())
         self.stateChanged.emit(_ORB.get(state, OrbState.IDLE))
 
     # ----- wake-word flow -----
-    def _on_utterance(self, pcm: bytes) -> None:
-        if self._state != "idle":  # already mid-turn; ignore
-            return
-        self._set_state("transcribing")
+    @staticmethod
+    def _pcm_to_wav(pcm: bytes) -> str | None:
         try:
             handle, path = tempfile.mkstemp(suffix=".wav", prefix="helix_wake_")
             os.close(handle)
             _write_wav16(pcm, path)
+            return path
         except Exception:
-            self._set_state("idle")
+            return None
+
+    def _on_utterance(self, pcm: bytes) -> None:
+        if self._state == "speaking":  # barge-in: only a "stop" phrase interrupts
+            if self._barge_busy:
+                return
+            path = self._pcm_to_wav(pcm)
+            if path is None:
+                return
+            self._barge_busy = True
+            self._transcribe(path, self._on_barge_text)
             return
+        if self._state != "idle":  # transcribing / thinking — ignore
+            return
+        path = self._pcm_to_wav(pcm)
+        if path is None:
+            return
+        self._set_state("transcribing")
         self._transcribe(path, self._on_wake_text)
+
+    def _on_barge_text(self, text: str) -> None:
+        # While HELIX speaks, only a SHORT stop phrase counts — so its own (longer) reply audio,
+        # picked up by the mic, can't make it cut itself off.
+        self._barge_busy = False
+        t = (text or "").strip()
+        if t and len(t.split()) <= 4 and is_stop(t):
+            self.interrupt()
+            self.stopRequested.emit()
 
     def _on_wake_text(self, text: str) -> None:
         text = (text or "").strip()
@@ -486,6 +526,10 @@ class VoiceController(QObject):
             command = text  # inside an active session the wake word isn't required
         else:
             self._set_state("idle")  # not addressed to HELIX — keep listening
+            return
+        if is_stop(command):  # "stop / be quiet / never mind" — hush and keep listening, no new turn
+            self.interrupt()
+            self.stopRequested.emit()
             return
         self._start_session()
         if not command:
@@ -561,6 +605,18 @@ class VoiceController(QObject):
         self._run(lambda _emit: self._tts.speak(text), lambda *_: self._set_state("idle"))
 
     def idle(self) -> None:
+        self._set_state("idle")
+
+    def is_active(self) -> bool:
+        """True while HELIX is busy (transcribing / thinking / speaking) — i.e. interruptible."""
+        return self._state != "idle"
+
+    def interrupt(self) -> None:
+        """Stop talking right now and return to listening — the 'stop' action."""
+        try:
+            self._tts.stop()
+        except Exception:
+            pass
         self._set_state("idle")
 
     def _say(self, text: str) -> None:
