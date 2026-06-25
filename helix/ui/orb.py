@@ -1,27 +1,27 @@
 """PresenceOrb — the living Presence that *is* HELIX.
 
-Pure QPainter, single runtime, GPU-smooth. A breathing core of cyan: it brightens and ripples while
-listening, spins a slow amber arc while thinking, and warms to gold while speaking — so it's obvious
-HELIX has the floor (the mic is muted then). State changes ease in, so transitions feel alive.
+An electronic 3-D core: a dark sphere with glowing circuitry etched under a glassy surface, a Fresnel
+rim, and radiant energy-smoke streaming off it. Everything shifts cyan (idle/listening) → gold
+(speaking); a sweeping amber arc marks thinking. State eases in, the core breathes, and the live mic
+level swells it. As a full-window background it's clickable (tap to talk) and pulses to your voice.
 """
 from __future__ import annotations
 
 import math
+import random
 from enum import Enum
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QRadialGradient
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
-from helix.ui.theme import AMBER, CYAN, CYAN_DIM
+from helix.ui.theme import AMBER, CYAN
 
-GOLD = "#ffc857"      # the warm "I'm speaking" tone (matches old HELIX's speaking colour)
-GOLD_DIM = "#a87f2c"  # the dim edge of the gold core
-
-# Chrome body — a brushed-silver sphere lit from the upper-left.
-CHROME_HI = "#f4f8ff"    # specular highlight
-CHROME_MID = "#9fb0bd"   # mid metal
-CHROME_EDGE = "#1a2128"  # shadow edge
+GOLD = "#ffc857"      # the warm "I'm speaking" tone
+# Dark electronic body, so the circuitry glows against it.
+BODY_HI = "#2b3b4b"
+BODY_MID = "#14202b"
+BODY_EDGE = "#05090d"
 
 
 class OrbState(Enum):
@@ -31,15 +31,13 @@ class OrbState(Enum):
     SPEAKING = "speaking"
 
 
-# Per-state numeric targets the orb eases toward. `warm` blends the whole orb cyan→gold (speaking);
-# `accent` drives the amber thinking arc.
+# `warm` blends cyan→gold (speaking); `accent` drives the amber thinking arc; `glow` is overall energy.
 _PARAMS: dict[OrbState, dict[str, float]] = {
-    OrbState.IDLE: {"glow": 0.40, "amp": 0.045, "speed": 0.055, "accent": 0.0, "warm": 0.0},
-    OrbState.LISTENING: {"glow": 0.72, "amp": 0.075, "speed": 0.10, "accent": 0.15, "warm": 0.0},
-    OrbState.THINKING: {"glow": 0.58, "amp": 0.050, "speed": 0.14, "accent": 1.0, "warm": 0.0},
-    OrbState.SPEAKING: {"glow": 0.86, "amp": 0.11, "speed": 0.18, "accent": 0.0, "warm": 1.0},
+    OrbState.IDLE: {"glow": 0.42, "amp": 0.045, "speed": 0.055, "accent": 0.0, "warm": 0.0},
+    OrbState.LISTENING: {"glow": 0.78, "amp": 0.075, "speed": 0.10, "accent": 0.15, "warm": 0.0},
+    OrbState.THINKING: {"glow": 0.66, "amp": 0.050, "speed": 0.14, "accent": 1.0, "warm": 0.0},
+    OrbState.SPEAKING: {"glow": 0.95, "amp": 0.10, "speed": 0.16, "accent": 0.0, "warm": 1.0},
 }
-
 _KEYS = ("glow", "amp", "speed", "accent", "warm")
 
 
@@ -54,15 +52,66 @@ def _mix(c1: str, c2: str, t: float) -> QColor:
 
 
 def _col(c1: str, c2: str, t: float, alpha: int) -> QColor:
-    """Blend c1→c2 by t, at the given alpha. (t is the eased cyan→gold 'warm' amount.)"""
     c = _mix(c1, c2, t)
     c.setAlpha(max(0, min(255, alpha)))
     return c
 
 
+def _along(pts: list[tuple[float, float]], prog: float) -> tuple[float, float]:
+    """Point at fractional arc-length `prog` along a polyline (unit coords)."""
+    if len(pts) < 2:
+        return pts[0]
+    segs = [math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]) for i in range(len(pts) - 1)]
+    total = sum(segs) or 1.0
+    target, acc = prog * total, 0.0
+    for i, d in enumerate(segs):
+        if acc + d >= target and d > 0:
+            f = (target - acc) / d
+            return (pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f, pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f)
+        acc += d
+    return pts[-1]
+
+
+def _build_circuits(seed: int = 0x4845) -> tuple[list, list, list, list]:
+    """Deterministic 'arc-reactor' circuitry in unit-circle coords: ring arcs, jogged spokes, pads."""
+    rng = random.Random(seed)
+    rings: list[tuple[float, float, float]] = []  # (radius, start_deg, span_deg)
+    for rad in (0.34, 0.56, 0.78):
+        a = rng.uniform(0, 360)
+        for _ in range(rng.randint(2, 3)):
+            span = rng.uniform(45, 120)
+            rings.append((rad, a, span))
+            a += span + rng.uniform(30, 80)
+    spokes: list[list[tuple[float, float]]] = []
+    nodes: list[tuple[float, float]] = []
+    pulses: list[float] = []
+    for _ in range(11):
+        ang = rng.uniform(0, 2 * math.pi)
+        pts, a2 = [], ang
+        for rr in (0.16, rng.uniform(0.38, 0.5), rng.uniform(0.72, 0.92)):
+            a2 += rng.uniform(-0.16, 0.16)
+            pts.append((rr * math.cos(a2), rr * math.sin(a2)))
+        spokes.append(pts)
+        nodes.append(pts[-1])
+        pulses.append(rng.uniform(0, 1))
+    for _ in range(9):
+        rad = rng.choice((0.34, 0.56, 0.78))
+        a = rng.uniform(0, 2 * math.pi)
+        nodes.append((rad * math.cos(a), rad * math.sin(a)))
+    return rings, spokes, nodes, pulses
+
+
+def _build_smoke(seed: int = 0x536D) -> list[tuple[float, float, float, float]]:
+    """Energy-smoke seeds: (emit_angle, phase, speed, size)."""
+    rng = random.Random(seed)
+    return [
+        (rng.uniform(0, 2 * math.pi), rng.uniform(0, 1), rng.uniform(0.4, 0.9), rng.uniform(0.5, 1.1))
+        for _ in range(14)
+    ]
+
+
 class PresenceOrb(QWidget):
-    """The Presence. As a full-window background it's clickable (tap to talk) and pulses to the live
-    mic level while listening, so it reads as a single living thing you converse with."""
+    """The Presence. Clickable (tap to talk) and reacts to the live mic level while listening."""
 
     clicked = pyqtSignal()
 
@@ -70,7 +119,6 @@ class PresenceOrb(QWidget):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumSize(240, 240)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setStyleSheet("background: transparent;")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._state = OrbState.IDLE
@@ -78,8 +126,10 @@ class PresenceOrb(QWidget):
         self._phase = 0.0
         self._spin = 0.0
         self._t = 0.0
-        self._level = 0.0          # eased live mic level
-        self._level_target = 0.0   # latest mic level, decays so the pulse falls when you stop talking
+        self._level = 0.0
+        self._level_target = 0.0
+        self._rings, self._spokes, self._nodes, self._pulses = _build_circuits()
+        self._smoke = _build_smoke()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(33)  # ~30 fps
@@ -88,7 +138,6 @@ class PresenceOrb(QWidget):
         self._state = state
 
     def set_level(self, level: float) -> None:
-        """Feed the live mic level (0..1) while listening — the orb swells in time with your voice."""
         self._level_target = max(0.0, min(1.0, float(level)))
 
     def mousePressEvent(self, _event) -> None:
@@ -99,7 +148,7 @@ class PresenceOrb(QWidget):
         for k in _KEYS:
             self._p[k] += (target[k] - self._p[k]) * 0.08
         self._level += (self._level_target - self._level) * 0.35
-        self._level_target *= 0.82  # decay so the swell relaxes when the room goes quiet
+        self._level_target *= 0.82
         self._phase += self._p["speed"]
         self._spin = (self._spin + 3.0) % 360.0
         self._t += 1.0
@@ -107,55 +156,124 @@ class PresenceOrb(QWidget):
 
     def paintEvent(self, _event) -> None:
         w, h = self.width(), self.height()
-        cx, cy = w / 2, h * 0.43  # a touch above centre, so the conversation floats over the lower half
+        cx, cy = w / 2, h * 0.43
         center = QPointF(cx, cy)
-        base = min(w, h) * 0.30  # ~50% larger than the old energy orb
-        warm = self._p["warm"]   # 0 = cyan (idle/listening), 1 = gold (speaking)
-        glow = min(1.0, self._p["glow"] + self._level * 0.4)  # mic level swells the aura while listening
+        base = min(w, h) * 0.30
+        warm = self._p["warm"]
+        glow = min(1.0, self._p["glow"] + self._level * 0.4)
         amp = self._p["amp"] + self._level * 0.04
         r = base * (1 + amp * math.sin(self._phase))
+        t = self._t
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
 
-        # State aura — a soft halo around the sphere, cyan warming to gold while speaking.
-        aura = QRadialGradient(center, r * 1.9)
-        aura.setColorAt(0.0, _col(CYAN, GOLD, warm, int(46 * glow)))
-        aura.setColorAt(0.52, _col(CYAN, GOLD, warm, int(40 * glow)))  # ~the sphere's edge
+        # 1. Energy smoke streaming off the orb (drifts outward + up, fades).
+        for theta, phase, speed, sz in self._smoke:
+            prog = (t * speed * 0.01 + phase) % 1.0
+            sx, sy = cx + math.cos(theta) * r * 0.95, cy + math.sin(theta) * r * 0.95
+            px = sx + math.cos(theta) * r * prog
+            py = sy + math.sin(theta) * r * prog - r * 0.85 * prog
+            rad = r * (0.2 + prog * 0.5) * sz
+            a = int(52 * glow * math.sin(prog * math.pi))
+            if a <= 1:
+                continue
+            blob = QRadialGradient(QPointF(px, py), rad)
+            blob.setColorAt(0.0, _col(CYAN, GOLD, warm, a))
+            blob.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+            p.setBrush(blob)
+            p.drawEllipse(QPointF(px, py), rad, rad)
+
+        # 2. Aura.
+        aura = QRadialGradient(center, r * 1.7)
+        aura.setColorAt(0.0, _col(CYAN, GOLD, warm, int(34 * glow)))
+        aura.setColorAt(0.55, _col(CYAN, GOLD, warm, int(30 * glow)))
         aura.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
         p.setBrush(aura)
-        p.drawEllipse(center, r * 1.9, r * 1.9)
+        p.drawEllipse(center, r * 1.7, r * 1.7)
 
-        # Chrome body — a shaded sphere, highlight toward the upper-left.
-        hx, hy = cx - r * 0.34, cy - r * 0.38
+        # 3. Dark electronic body.
+        hx, hy = cx - r * 0.3, cy - r * 0.34
         body = QRadialGradient(QPointF(hx, hy), r * 1.5)
-        body.setColorAt(0.0, QColor(CHROME_HI))
-        body.setColorAt(0.42, QColor(CHROME_MID))
-        body.setColorAt(1.0, QColor(CHROME_EDGE))
+        body.setColorAt(0.0, QColor(BODY_HI))
+        body.setColorAt(0.5, QColor(BODY_MID))
+        body.setColorAt(1.0, QColor(BODY_EDGE))
         p.setBrush(body)
         p.drawEllipse(center, r, r)
 
-        # Reflected rim light on the shadow side, tinted by state — clipped to the sphere.
+        # 4. Circuitry, clipped to the sphere.
         clip = QPainterPath()
         clip.addEllipse(center, r, r)
         p.save()
         p.setClipPath(clip)
-        rim = QRadialGradient(QPointF(cx + r * 0.5, cy + r * 0.55), r)
-        rim.setColorAt(0.0, _col(CYAN, GOLD, warm, int(150 * glow)))
-        rim.setColorAt(0.6, _col(CYAN, GOLD, warm, 0))
-        p.setBrush(rim)
-        p.drawRect(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+        core = QRadialGradient(center, r * 0.5)
+        core.setColorAt(0.0, _col(CYAN, GOLD, warm, int(110 * glow)))
+        core.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+        p.setBrush(core)
+        p.drawEllipse(center, r * 0.5, r * 0.5)
+        lw = max(1.0, r * 0.012)
+        for rad, a0, span in self._rings:
+            pen = QPen(_col(CYAN, GOLD, warm, int(140 * glow)))
+            pen.setWidthF(lw)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawArc(QRectF(cx - r * rad, cy - r * rad, 2 * r * rad, 2 * r * rad), int(a0 * 16), int(span * 16))
+        for pts in self._spokes:
+            pen = QPen(_col(CYAN, GOLD, warm, int(120 * glow)))
+            pen.setWidthF(lw)
+            p.setPen(pen)
+            path = QPainterPath()
+            path.moveTo(cx + pts[0][0] * r, cy + pts[0][1] * r)
+            for ux, uy in pts[1:]:
+                path.lineTo(cx + ux * r, cy + uy * r)
+            p.drawPath(path)
+        p.setPen(Qt.PenStyle.NoPen)
+        for pts, ph in zip(self._spokes, self._pulses):
+            ux, uy = _along(pts, (t * 0.02 + ph) % 1.0)
+            nx, ny = cx + ux * r, cy + uy * r
+            dot = QRadialGradient(QPointF(nx, ny), r * 0.05)
+            dot.setColorAt(0.0, QColor(255, 255, 255, int(230 * glow)))
+            dot.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+            p.setBrush(dot)
+            p.drawEllipse(QPointF(nx, ny), r * 0.05, r * 0.05)
+        for ux, uy in self._nodes:
+            nx, ny = cx + ux * r, cy + uy * r
+            blink = 0.45 + 0.55 * math.sin(t * 0.06 + (ux + uy) * 5.0)
+            nd = QRadialGradient(QPointF(nx, ny), r * 0.035)
+            nd.setColorAt(0.0, _col(CYAN, GOLD, warm, int(190 * glow * blink)))
+            nd.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+            p.setBrush(nd)
+            p.drawEllipse(QPointF(nx, ny), r * 0.035, r * 0.035)
         p.restore()
 
-        # Specular highlight.
-        spec = QRadialGradient(QPointF(hx, hy), r * 0.34)
-        spec.setColorAt(0.0, QColor(255, 255, 255, 190))
+        # 5. Glass overlay — shades the flat circuitry into a 3-D sphere (highlight + darkened rim).
+        p.save()
+        p.setClipPath(clip)
+        glass = QRadialGradient(QPointF(hx, hy), r * 1.6)
+        glass.setColorAt(0.0, QColor(255, 255, 255, 60))
+        glass.setColorAt(0.35, QColor(255, 255, 255, 0))
+        glass.setColorAt(0.82, QColor(0, 0, 0, 0))
+        glass.setColorAt(1.0, QColor(0, 0, 0, 160))
+        p.setBrush(glass)
+        p.drawEllipse(center, r, r)
+        # Fresnel rim light in the state colour.
+        rim = QRadialGradient(center, r)
+        rim.setColorAt(0.80, _col(CYAN, GOLD, warm, 0))
+        rim.setColorAt(0.97, _col(CYAN, GOLD, warm, int(160 * glow)))
+        rim.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+        p.setBrush(rim)
+        p.drawEllipse(center, r, r)
+        p.restore()
+
+        # 6. Specular glint.
+        spec = QRadialGradient(QPointF(hx, hy), r * 0.26)
+        spec.setColorAt(0.0, QColor(255, 255, 255, 140))
         spec.setColorAt(1.0, QColor(255, 255, 255, 0))
         p.setBrush(spec)
-        p.drawEllipse(QPointF(hx, hy), r * 0.34, r * 0.34)
+        p.drawEllipse(QPointF(hx, hy), r * 0.26, r * 0.26)
 
-        # Thinking — the amber arc still sweeps, now around the sphere.
+        # 7. Thinking — the amber arc sweeps around the sphere.
         if self._state is OrbState.THINKING:
             rect = QRectF(cx - r * 1.34, cy - r * 1.34, r * 2.68, r * 2.68)
             amber = QColor(AMBER)
