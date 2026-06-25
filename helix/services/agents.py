@@ -40,6 +40,22 @@ class AgentService:
     def remove(self, name: str) -> None:
         self._save([a for a in self.list() if a.name != name])
 
+    def rename(self, old_name: str, new_name: str) -> Agent | None:
+        """Rename an agent in place (its goal and position are kept). Returns the updated Agent, or
+        None if the name is blank, the agent is missing, or another agent already has that name."""
+        new_name = (new_name or "").strip()
+        if not new_name:
+            return None
+        agents = self.list()
+        target = next((a for a in agents if a.name == old_name), None)
+        if target is None:
+            return None
+        if new_name != old_name and any(a.name == new_name for a in agents):
+            return None  # name already taken
+        renamed = Agent(name=new_name, goal=target.goal, enabled=target.enabled)
+        self._save([renamed if a.name == old_name else a for a in agents])
+        return renamed
+
     def run(self, name: str, *, on_progress: ProgressFn | None = None) -> str:
         agent = next((a for a in self.list() if a.name == name), None)
         if agent is None:

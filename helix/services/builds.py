@@ -6,7 +6,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from helix.domain.models import App, AppKind
+from helix.domain.models import App, AppKind, slugify
 from helix.ports.clock import Clock
 from helix.ports.repo import VersionedRepo
 
@@ -63,6 +63,40 @@ class BuildService:
             return False
         shutil.rmtree(ws, ignore_errors=True)
         return not ws.exists()
+
+    def rename(self, slug: str, new_name: str) -> App | None:
+        """Give a build a new display name, keeping name↔slug consistent so conversational iteration
+        (which finds a build by slugify(name)) still resolves. If the new name slugs to a different
+        folder, move the whole workspace (its git repo travels with it). Returns the updated App, or
+        None if the build is missing, the name is blank, the target slug is already occupied, or the
+        move fails.
+
+        Safe against a concurrent build: the move happens BEFORE any manifest write, so a failed move
+        leaves the build untouched; and on Windows a build in progress holds the workspace open (the
+        coder runs with it as its working directory), so os.rename refuses with OSError instead of
+        moving the folder out from under the coder — the caller just retries once the build finishes."""
+        manifest = self.workspace(slug) / MANIFEST
+        if not manifest.exists():
+            return None
+        new_name = (new_name or "").strip()
+        if not new_name:
+            return None
+        app = self._read_manifest(manifest)
+        ws = self.workspace(slug)
+        new_slug = slugify(new_name)
+        if new_slug != slug:
+            target = self.workspace(new_slug)
+            if target.exists():
+                return None  # a build (or a stray folder) already occupies that slug
+            try:
+                ws.rename(target)  # same-volume move; the build's .git comes along
+            except OSError:
+                return None  # locked (open / mid-build) or cross-volume — leave it untouched
+            ws = target
+        app.name = new_name
+        app.slug = new_slug
+        self._write_manifest(ws, app)
+        return app
 
     # ----- helpers -----
     def _detect_entry(self, ws: Path) -> tuple[AppKind, str | None]:

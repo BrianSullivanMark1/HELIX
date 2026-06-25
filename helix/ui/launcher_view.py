@@ -1,8 +1,8 @@
 """LauncherView — the Menu: three tabs over what you've made.
 
-  • Your Apps   — built apps that open a screen (click a card to launch).
-  • Your Agents — saved goals HELIX runs on demand (Run / Add / Remove).
-  • Your Tasks  — built scripts that *do a thing* when run (click Run).
+  • Apps   — built apps that open a screen (click a card to launch; Open / Rename / Remove).
+  • Agents — saved goals HELIX runs on demand (Run / Add / Remove).
+  • Tasks  — built scripts that *do a thing* when run (Run / Rename / Remove).
 
 Apps and Agents/Tasks are data, not shell: they're freely removable. The tabs, New app, and Settings
 are the immutable shell.
@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -80,7 +81,7 @@ class LauncherView(QWidget):
         # Header: tabs on the left, New app + Settings on the right.
         header = QHBoxLayout()
         self._tabs: dict[int, QPushButton] = {}
-        for idx, label in ((_APPS, "Your Apps"), (_AGENTS, "Your Agents"), (_TASKS, "Your Tasks")):
+        for idx, label in ((_APPS, "Apps"), (_AGENTS, "Agents"), (_TASKS, "Tasks")):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.clicked.connect(lambda _c=False, i=idx: self._show_tab(i))
@@ -188,9 +189,11 @@ class LauncherView(QWidget):
             card = _Card(app.name, app.request)
             open_btn = QPushButton("Open")
             open_btn.clicked.connect(lambda _c=False, s=app.slug: self.openAppRequested.emit(s))
+            rename = QPushButton("✎ Rename")
+            rename.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._rename_build(s, n))
             remove = QPushButton("✕ Remove")
             remove.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._remove_build(s, n))
-            card.add_actions(open_btn, remove)
+            card.add_actions(open_btn, rename, remove)
             app_cards.append(card)
         self._fill_grid(self._apps_grid, self._apps_empty, app_cards)
 
@@ -200,9 +203,11 @@ class LauncherView(QWidget):
             card = _Card(app.name, app.request)
             run = QPushButton("▶ Run")
             run.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._run_task(s, n))
+            rename = QPushButton("✎ Rename")
+            rename.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._rename_build(s, n))
             remove = QPushButton("✕ Remove")
             remove.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._remove_build(s, n))
-            card.add_actions(run, remove)
+            card.add_actions(run, rename, remove)
             task_cards.append(card)
         self._fill_grid(self._tasks_grid, self._tasks_empty, task_cards)
 
@@ -211,9 +216,11 @@ class LauncherView(QWidget):
             card = _Card(agent.name, agent.goal or "—")
             run = QPushButton("▶ Run")
             run.clicked.connect(lambda _c=False, n=agent.name: self._run_agent(n))
+            rename = QPushButton("✎ Rename")
+            rename.clicked.connect(lambda _c=False, n=agent.name: self._rename_agent(n))
             remove = QPushButton("✕ Remove")
             remove.clicked.connect(lambda _c=False, n=agent.name: self._remove_agent(n))
-            card.add_actions(run, remove)
+            card.add_actions(run, rename, remove)
             agent_cards.append(card)
         self._fill_grid(self._agents_grid, self._agents_empty, agent_cards)
 
@@ -242,6 +249,41 @@ class LauncherView(QWidget):
 
     def _remove_agent(self, name: str) -> None:
         self._agents.remove(name)
+        self.refresh()
+
+    def _ask_new_name(self, current: str) -> str | None:
+        """Prompt for a new name; return it only if the user confirmed a non-empty, changed value."""
+        new_name, ok = QInputDialog.getText(self, "Rename", "New name:", text=current)
+        if not ok:
+            return None
+        new_name = new_name.strip()
+        return new_name if new_name and new_name != current else None
+
+    def _rename_build(self, slug: str, current: str) -> None:
+        new_name = self._ask_new_name(current)
+        if new_name is None:
+            return
+        if self._builds.rename(slug, new_name) is None:
+            QMessageBox.warning(
+                self,
+                "Rename",
+                f"Couldn’t rename to “{new_name}”. That name may already be in use, or it’s open or "
+                "building right now — close it (or wait a moment) and try again.",
+            )
+            return
+        self.refresh()
+
+    def _rename_agent(self, current: str) -> None:
+        new_name = self._ask_new_name(current)
+        if new_name is None:
+            return
+        if self._agents.rename(current, new_name) is None:
+            QMessageBox.warning(
+                self,
+                "Rename",
+                f"Couldn’t rename to “{new_name}” — that name may already be in use.",
+            )
+            return
         self.refresh()
 
     def _remove_build(self, slug: str, name: str) -> None:
