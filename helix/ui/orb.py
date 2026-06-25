@@ -196,14 +196,28 @@ def paint_orb(
             path.lineTo(cx + ux * r, cy + uy * r)
         p.drawPath(path)
     p.setPen(Qt.PenStyle.NoPen)
+    # Impulses fire down the spoke buses (inner core → rim): a white-hot head with a fading comet tail.
     for pts, ph in zip(spokes, pulses):
-        ux, uy = _along(pts, (t * 0.02 + ph) % 1.0)
-        nx, ny = cx + ux * r, cy + uy * r
-        dot = QRadialGradient(QPointF(nx, ny), r * 0.05)
-        dot.setColorAt(0.0, QColor(255, 255, 255, int(230 * glow)))
-        dot.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
-        p.setBrush(dot)
-        p.drawEllipse(QPointF(nx, ny), r * 0.05, r * 0.05)
+        for k in range(2):  # two impulses per bus, offset half a cycle apart
+            head = (t * 0.026 + ph + 0.5 * k) % 1.0
+            for j in range(6):  # head + 5 trailing samples
+                prog = head - 0.045 * j
+                if prog <= 0.02 or prog >= 1.0:
+                    continue
+                ux, uy = _along(pts, prog)
+                nx, ny = cx + ux * r, cy + uy * r
+                f = 1.0 - j / 6.0
+                rad = r * (0.012 + 0.038 * f)
+                a = int(245 * glow * f * f)
+                if a <= 1:
+                    continue
+                comet = QRadialGradient(QPointF(nx, ny), rad)
+                comet.setColorAt(
+                    0.0, _col("#ffffff", GOLD, warm * 0.5, a) if j == 0 else _col(CYAN, GOLD, warm, a)
+                )
+                comet.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+                p.setBrush(comet)
+                p.drawEllipse(QPointF(nx, ny), rad, rad)
     for ux, uy in nodes:
         nx, ny = cx + ux * r, cy + uy * r
         blink = 0.45 + 0.55 * math.sin(t * 0.06 + (ux + uy) * 5.0)
