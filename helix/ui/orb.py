@@ -10,13 +10,18 @@ import math
 from enum import Enum
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QRadialGradient
+from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QRadialGradient
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
 from helix.ui.theme import AMBER, CYAN, CYAN_DIM
 
 GOLD = "#ffc857"      # the warm "I'm speaking" tone (matches old HELIX's speaking colour)
 GOLD_DIM = "#a87f2c"  # the dim edge of the gold core
+
+# Chrome body — a brushed-silver sphere lit from the upper-left.
+CHROME_HI = "#f4f8ff"    # specular highlight
+CHROME_MID = "#9fb0bd"   # mid metal
+CHROME_EDGE = "#1a2128"  # shadow edge
 
 
 class OrbState(Enum):
@@ -102,61 +107,61 @@ class PresenceOrb(QWidget):
 
     def paintEvent(self, _event) -> None:
         w, h = self.width(), self.height()
-        cx, cy = w / 2, h * 0.43  # sit the bright core a touch above centre, so text floats over softer glow
+        cx, cy = w / 2, h * 0.43  # a touch above centre, so the conversation floats over the lower half
         center = QPointF(cx, cy)
-        base = min(w, h) * 0.20
-        glow = min(1.0, self._p["glow"] + self._level * 0.5)  # the mic level brightens the orb
-        warm = self._p["warm"]
-        amp = self._p["amp"] + self._level * 0.05
+        base = min(w, h) * 0.30  # ~50% larger than the old energy orb
+        warm = self._p["warm"]   # 0 = cyan (idle/listening), 1 = gold (speaking)
+        glow = min(1.0, self._p["glow"] + self._level * 0.4)  # mic level swells the aura while listening
+        amp = self._p["amp"] + self._level * 0.04
         r = base * (1 + amp * math.sin(self._phase))
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # Outer glow
-        g = QRadialGradient(center, r * 2.8)
-        g.setColorAt(0.0, _col(CYAN, GOLD, warm, int(54 * glow)))
-        g.setColorAt(0.5, _col(CYAN, GOLD, warm, int(17 * glow)))
-        g.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(g)
-        p.drawEllipse(center, r * 2.8, r * 2.8)
 
-        # Expanding ripples while listening / speaking
-        if self._state in (OrbState.LISTENING, OrbState.SPEAKING):
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            for k in range(3):
-                frac = ((self._t * 0.012) + k / 3.0) % 1.0
-                rr = r * (1.1 + frac * 1.9)
-                pen = QPen(_col(CYAN, GOLD, warm, int(120 * glow * (1 - frac))))
-                pen.setWidthF(1.6)
-                p.setPen(pen)
-                p.drawEllipse(center, rr, rr)
+        # State aura — a soft halo around the sphere, cyan warming to gold while speaking.
+        aura = QRadialGradient(center, r * 1.9)
+        aura.setColorAt(0.0, _col(CYAN, GOLD, warm, int(46 * glow)))
+        aura.setColorAt(0.52, _col(CYAN, GOLD, warm, int(40 * glow)))  # ~the sphere's edge
+        aura.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+        p.setBrush(aura)
+        p.drawEllipse(center, r * 1.9, r * 1.9)
 
-        # Inner halo
-        halo = QRadialGradient(center, r * 1.5)
-        halo.setColorAt(0.0, _col(CYAN, GOLD, warm, int(44 * glow)))
-        halo.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(halo)
-        p.drawEllipse(center, r * 1.5, r * 1.5)
-
-        # Core — white-hot centre fading to cyan (or gold while speaking)
-        core = QRadialGradient(center, r)
-        core.setColorAt(0.0, _col("#d8f7f7", "#fbeccf", warm, 232))
-        core.setColorAt(0.35, _col(CYAN, GOLD, warm, 200))
-        core.setColorAt(0.80, _col(CYAN_DIM, GOLD_DIM, warm, 168))
-        core.setColorAt(1.0, _col(CYAN_DIM, GOLD_DIM, warm, 0))
-        p.setBrush(core)
+        # Chrome body — a shaded sphere, highlight toward the upper-left.
+        hx, hy = cx - r * 0.34, cy - r * 0.38
+        body = QRadialGradient(QPointF(hx, hy), r * 1.5)
+        body.setColorAt(0.0, QColor(CHROME_HI))
+        body.setColorAt(0.42, QColor(CHROME_MID))
+        body.setColorAt(1.0, QColor(CHROME_EDGE))
+        p.setBrush(body)
         p.drawEllipse(center, r, r)
 
-        # Rotating amber arc while thinking
+        # Reflected rim light on the shadow side, tinted by state — clipped to the sphere.
+        clip = QPainterPath()
+        clip.addEllipse(center, r, r)
+        p.save()
+        p.setClipPath(clip)
+        rim = QRadialGradient(QPointF(cx + r * 0.5, cy + r * 0.55), r)
+        rim.setColorAt(0.0, _col(CYAN, GOLD, warm, int(150 * glow)))
+        rim.setColorAt(0.6, _col(CYAN, GOLD, warm, 0))
+        p.setBrush(rim)
+        p.drawRect(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+        p.restore()
+
+        # Specular highlight.
+        spec = QRadialGradient(QPointF(hx, hy), r * 0.34)
+        spec.setColorAt(0.0, QColor(255, 255, 255, 190))
+        spec.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.setBrush(spec)
+        p.drawEllipse(QPointF(hx, hy), r * 0.34, r * 0.34)
+
+        # Thinking — the amber arc still sweeps, now around the sphere.
         if self._state is OrbState.THINKING:
-            rect = QRectF(cx - r * 1.28, cy - r * 1.28, r * 2.56, r * 2.56)
+            rect = QRectF(cx - r * 1.34, cy - r * 1.34, r * 2.68, r * 2.68)
             amber = QColor(AMBER)
             amber.setAlpha(max(0, min(255, int(220 * self._p["accent"]))))
             pen = QPen(amber)
-            pen.setWidthF(2.4)
+            pen.setWidthF(2.6)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
