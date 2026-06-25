@@ -92,8 +92,11 @@ class WhisperSpeechIn:
             if model is None:
                 model = _build_model(self._model_size, self._device)
                 _MODELS[self._model_size] = model
-            # beam_size=1 (greedy) is fastest and plenty for short spoken commands.
-            segments, _info = model.transcribe(str(wav_path), language="en", beam_size=1)
+            # beam_size=1 (greedy) is fastest and plenty for short spoken commands. initial_prompt
+            # biases the decoder toward the wake word so "HELIX" is mis-heard less often.
+            segments, _info = model.transcribe(
+                str(wav_path), language="en", beam_size=1, initial_prompt="HELIX."
+            )
             return " ".join(seg.text for seg in segments).strip()
         except Exception as exc:
             _LOG.warning("transcription failed: %s", exc)
@@ -286,11 +289,11 @@ class EdgeSpeechOut:
             "$mp=New-Object System.Windows.Media.MediaPlayer;"
             f"$mp.Open([uri]'{path}');"
             "$mp.Volume=1.0;"
-            "Start-Sleep -Milliseconds 300;"
+            "Start-Sleep -Milliseconds 60;"
             "$mp.Play();"
             "$d=$null;"
             "for($i=0;$i -lt 50;$i++){if($mp.NaturalDuration.HasTimeSpan){$d=$mp.NaturalDuration.TimeSpan;break};Start-Sleep -Milliseconds 100};"
-            "if($d){Start-Sleep -Milliseconds ([int]$d.TotalMilliseconds + 250)}else{Start-Sleep -Seconds 3};"
+            "if($d){Start-Sleep -Milliseconds ([int]$d.TotalMilliseconds + 80)}else{Start-Sleep -Seconds 3};"
             "$mp.Stop();$mp.Close();"
         )
         with self._lock:

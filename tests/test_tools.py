@@ -62,3 +62,23 @@ def test_build_app_still_uses_the_default_prompt():
     assert forge.calls[0]["prompt"] is None  # default app-builder path is untouched
     # build_app doesn't pass is_model — the Forge decides (new build -> app; iteration -> preserved).
     assert forge.calls[0]["is_model"] is None
+
+
+def test_think_harder_routes_to_the_deep_thinker_when_wired():
+    forge = _FakeForge()
+    asked: list[str] = []
+
+    def deep(question, on_progress=None):
+        asked.append(question)
+        return "a carefully reasoned answer"
+
+    reg = ToolRegistry(forge, _FakeBuilds(), deep_think=deep)
+    assert "think_harder" in {t.name for t in reg.specs()}
+    out = reg.dispatch("think_harder", {"question": "why is the sky blue?"})
+    assert asked == ["why is the sky blue?"]
+    assert out == "a carefully reasoned answer"
+
+
+def test_think_harder_absent_without_a_deep_thinker():
+    reg, _ = _registry()  # no deep_think wired
+    assert "think_harder" not in {t.name for t in reg.specs()}

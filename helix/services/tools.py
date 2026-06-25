@@ -1,6 +1,8 @@
 """ToolRegistry — the model's hands. Maps tool calls to service methods."""
 from __future__ import annotations
 
+from typing import Callable
+
 from helix.ports.coder import ProgressFn
 from helix.ports.llm import ToolSpec
 from helix.services.builds import BuildService
@@ -8,14 +10,22 @@ from helix.services.forge import ForgeService
 from helix.services.prompts import build_3d_model_prompt
 from helix.services.selfdev import SelfDevService
 
+# Escalation: hand a hard question to a deeper model and get back its spoken answer.
+DeepThink = Callable[[str, ProgressFn | None], str]
+
 
 class ToolRegistry:
     def __init__(
-        self, forge: ForgeService, builds: BuildService, selfdev: SelfDevService | None = None
+        self,
+        forge: ForgeService,
+        builds: BuildService,
+        selfdev: SelfDevService | None = None,
+        deep_think: DeepThink | None = None,
     ) -> None:
         self._forge = forge
         self._builds = builds
         self._selfdev = selfdev
+        self._deep_think = deep_think
 
     def specs(self) -> list[ToolSpec]:
         tools = [
@@ -80,6 +90,33 @@ class ToolRegistry:
                 input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             ),
         ]
+        if self._deep_think is not None:
+            tools.append(
+                ToolSpec(
+                    name="think_harder",
+                    description=(
+                        "Escalate a genuinely hard question to a more capable, deeper-thinking model and "
+                        "get back its answer. Use ONLY when the question needs real reasoning, comparison, "
+                        "planning, or careful analysis — not for quick facts, chit-chat, or builds. Pass "
+                        "the FULL question with any needed context; the deep model can't see this "
+                        "conversation. Then relay its answer briefly in your own voice."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "question": {
+                                "type": "string",
+                                "description": (
+                                    "The complete question to reason about, including all relevant "
+                                    "context from the conversation."
+                                ),
+                            }
+                        },
+                        "required": ["question"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
         if self._selfdev is not None:
             tools.append(
                 ToolSpec(
@@ -118,6 +155,8 @@ class ToolRegistry:
                 on_progress=on_progress,
             )
             return f"Modeled '{app.name}'. Open it from the Models tab to explore it in 3D."
+        if name == "think_harder" and self._deep_think is not None:
+            return self._deep_think(args["question"], on_progress)
         if name == "list_apps":
             apps = self._builds.list()
             if not apps:

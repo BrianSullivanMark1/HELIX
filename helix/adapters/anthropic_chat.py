@@ -30,21 +30,28 @@ _WEB_TOOLS = (
     {"type": "web_fetch_20260209", "name": "web_fetch"},
 )
 
-# Opus 4.8 list price, USD per token (input $5 / output $25 per 1M; cache write ~1.25x, read ~0.1x).
-_PRICE_IN = 5.0 / 1_000_000
-_PRICE_OUT = 25.0 / 1_000_000
-_PRICE_CACHE_WRITE = 6.25 / 1_000_000
-_PRICE_CACHE_READ = 0.5 / 1_000_000
+# Per-model list price, USD per 1M tokens: (input, output). Cache write ~1.25x input, read ~0.1x input.
+# Tiering uses Sonnet for the conversation and Opus for builds / deep reasoning, so cost must be
+# model-aware — a flat Opus rate would over-report the cheap conversational turns.
+_PRICING: dict[str, tuple[float, float]] = {
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
+_DEFAULT_PRICING = (5.0, 25.0)
 
 
-def _estimate_cost(usage: Any) -> float:
+def _estimate_cost(model: str, usage: Any) -> float:
+    price_in, price_out = _PRICING.get(model, _DEFAULT_PRICING)
+    price_in /= 1_000_000
+    price_out /= 1_000_000
     cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
     return (
-        usage.input_tokens * _PRICE_IN
-        + usage.output_tokens * _PRICE_OUT
-        + cache_write * _PRICE_CACHE_WRITE
-        + cache_read * _PRICE_CACHE_READ
+        usage.input_tokens * price_in
+        + usage.output_tokens * price_out
+        + cache_write * price_in * 1.25
+        + cache_read * price_in * 0.1
     )
 
 
@@ -58,11 +65,15 @@ class AnthropicChat:
         model: str = DEFAULT_MODEL,
         max_tokens: int = 4096,
         web_search: bool = False,
+        thinking: str | None = None,   # "adaptive" (deep) | "disabled" (fast) | None (model default)
+        effort: str | None = None,     # "low" | "medium" | "high" | "max"; None leaves it at the default
     ) -> None:
         self._key_provider = api_key_provider
         self._model = model
         self._max_tokens = max_tokens
         self._web_search = web_search  # let Claude search/fetch the web (the conversation; not the coder)
+        self._thinking = thinking      # the conversation runs "disabled" for speed; the deep tier "adaptive"
+        self._effort = effort
         self._client: anthropic.Anthropic | None = None
         self._client_key: str | None = None
 
@@ -93,6 +104,12 @@ class AnthropicChat:
             kwargs["system"] = [
                 {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
             ]
+        # Thinking + effort: "disabled"/low keeps the conversation snappy; "adaptive"/high lets the deep
+        # tier reason. Both are GA on Opus 4.8 and Sonnet 4.6 (no beta header).
+        if self._thinking in ("adaptive", "disabled"):
+            kwargs["thinking"] = {"type": self._thinking}
+        if self._effort:
+            kwargs["output_config"] = {"effort": self._effort}
         # Web search/fetch (server tools) sit first; the app's own tools follow. Claude runs the web
         # tools server-side and returns the answer text, so HELIX has nothing to execute for them.
         encoded = list(_WEB_TOOLS) if self._web_search else []
@@ -102,7 +119,7 @@ class AnthropicChat:
             kwargs["tools"] = encoded
 
         resp = client.messages.create(**kwargs)
-        return self._decode(resp)
+        return self._decode(resp, self._model)
 
     # ----- translation: port types <-> Anthropic wire format -----
     @staticmethod
@@ -130,7 +147,7 @@ class AnthropicChat:
         return {"role": role, "content": content}
 
     @staticmethod
-    def _decode(resp: Any) -> Reply:
+    def _decode(resp: Any, model: str) -> Reply:
         blocks: list[Any] = []
         for b in resp.content:
             if b.type == "text":
@@ -143,6 +160,6 @@ class AnthropicChat:
         usage = Usage(
             input_tokens=u.input_tokens,
             output_tokens=u.output_tokens,
-            cost_usd=_estimate_cost(u),
+            cost_usd=_estimate_cost(model, u),
         )
         return Reply(blocks=tuple(blocks), usage=usage)

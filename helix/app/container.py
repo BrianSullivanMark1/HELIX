@@ -17,14 +17,16 @@ from helix.adapters.speech import EdgeSpeechOut, OsSpeechOut, WhisperSpeechIn
 from helix.adapters.sqlite_store import SqliteStore
 from helix.adapters.system_clock import SystemClock
 from helix.config import AppPaths
+from helix.domain.models import Role
 from helix.logging_setup import setup_logging
+from helix.ports.llm import Text, Turn
 from helix.services.agents import AgentService
 from helix.services.archive import ArchiveService
 from helix.services.builds import BuildService
 from helix.services.conversation import ConversationService
 from helix.services.forge import ForgeService
 from helix.services.tasks import TaskService
-from helix.services.prompts import CONSOLE_SYSTEM
+from helix.services.prompts import CONSOLE_SYSTEM, DEEP_THINK_SYSTEM
 from helix.services.selfdev import SelfDevService
 from helix.services.tools import ToolRegistry
 
@@ -47,8 +49,21 @@ class Container:
         def _oauth() -> str | None:
             return self.settings.get("claude_code_oauth_token")
 
-        self.chat = AnthropicChat(_key, web_search=True)  # the conversation can research the web
-        coder_chat = AnthropicChat(_key, max_tokens=8000)  # roomier for code generation
+        # Model tiering: the conversation runs on Sonnet (fast — thinking off, low effort) for snappy
+        # routing/confirming/chat; a hard question escalates to Opus with deep thinking via think_harder;
+        # builds use the most capable coder. All can research the web.
+        self.chat = AnthropicChat(
+            _key, model="claude-sonnet-4-6", web_search=True, thinking="disabled", effort="low",
+        )
+        deep_chat = AnthropicChat(
+            _key, model="claude-opus-4-8", web_search=True, thinking="adaptive", effort="high",
+        )
+
+        def _deep_think(question: str, on_progress=None) -> str:
+            reply = deep_chat.chat([Turn(Role.USER, (Text(question),))], system=DEEP_THINK_SYSTEM)
+            return reply.text or "I couldn't reason that through just now — try rephrasing?"
+
+        coder_chat = AnthropicChat(_key, max_tokens=8000)  # roomier for code generation (Opus default)
         # Prefer the Claude Code CLI (most capable); fall back to the API coder (key-only, no CLI).
         self.coder = FallbackCoder(ClaudeCodeCli(_key, _oauth), ApiCoder(coder_chat, _key))
 
@@ -63,7 +78,7 @@ class Container:
             worktrees_dir=self.paths.data / "worktrees", guard_files=guard_files,
             data_dir=self.paths.data,
         )
-        self.tools = ToolRegistry(self.forge, self.builds, self.selfdev)
+        self.tools = ToolRegistry(self.forge, self.builds, self.selfdev, deep_think=_deep_think)
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM
         )

@@ -91,4 +91,6 @@ class ConversationService:
             return f"Building {args.get('name', 'your app')}…"
         if tool == "build_3d_model":
             return f"Modeling {args.get('name', 'it')}…"
+        if tool == "think_harder":
+            return "Thinking it through…"
         return "Working…"

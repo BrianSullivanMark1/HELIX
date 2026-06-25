@@ -46,17 +46,20 @@ VOICE_SETTING = "voice_input_on"  # hands-free mic on/off; persisted, default of
 WAKE_RMS_FLOOR = 260.0       # absolute minimum speech threshold (int16 RMS)
 WAKE_SPEECH_FACTOR = 3.2     # speech must be this many× the running ambient noise floor
 WAKE_NOISE_INIT = 200.0      # starting noise-floor estimate
-WAKE_END_SILENCE_S = 3.0     # this much trailing quiet ends an utterance (allow natural pauses)
+WAKE_END_SILENCE_S = 0.8     # trailing quiet that ends an utterance — short, so a turn starts fast
+                             # (the single biggest latency win; was 3.0s and felt sluggish)
 WAKE_MIN_SPEECH_S = 0.3      # ignore shorter blips (clicks, coughs)
 WAKE_MAX_UTTER_S = 12.0      # hard cap per utterance
-WAKE_PREROLL_S = 0.25        # keep this much pre-speech audio so the wake word isn't clipped
+WAKE_PREROLL_S = 0.5         # keep this much pre-speech audio so the "H" onset of HELIX isn't clipped
 
 SESSION_IDLE_MS = 5 * 60 * 1000  # end the conversation session after this much inactivity (5 min)
 PTT_MAX_MS = 20 * 1000           # hard cap on one push-to-talk capture (safety if 'released' is missed)
 
 # Accept the obvious mis-hearings of "HELIX" so a clear command still lands.
 _WAKE_RE = re.compile(
-    r"\b(?:hey\s+|ok\s+|okay\s+)?(?:he+lix|helics|healix|helex|heelux)\b[\s,.:;!?-]*", re.IGNORECASE
+    r"\b(?:hey\s+|ok\s+|okay\s+)?"
+    r"(?:he+l+ix|helics?|helicks|heli[ckx]s?|healix|healex|hel[eu]x|heelux|hilux)\b[\s,.:;!?-]*",
+    re.IGNORECASE,
 )
 # Phrases that close an active conversation session immediately (no wake word needed).
 _DISMISSAL_RE = re.compile(
