@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import array
 
-from helix.ui.voice import VadSegmenter, _pcm_rms, is_dismissal, split_wake
+from helix.ui.voice import VadSegmenter, _pcm_rms, is_dismissal, speakable, split_wake
 
 
 def _pcm(amplitude: int, samples: int) -> bytes:
@@ -28,6 +28,15 @@ def test_split_wake_tolerates_mishearings():
 def test_split_wake_ignores_unaddressed_text():
     assert split_wake("just talking to myself") == (False, "")
     assert split_wake("") == (False, "")
+
+
+def test_speakable_strips_markdown_and_symbols():
+    assert speakable("Here's the **plan**: ship it") == "Here's the plan: ship it"
+    assert speakable("use `code` and a # heading") == "use code and a heading"
+    assert speakable("- one\n- two\n- three") == "one two three"
+    assert speakable("See [the docs](https://x.com) now") == "See the docs now"
+    # ordinary words and punctuation are untouched
+    assert speakable("Hello, sir. Ready when you are?") == "Hello, sir. Ready when you are?"
 
 
 def test_is_dismissal():

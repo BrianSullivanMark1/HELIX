@@ -91,6 +91,21 @@ def is_dismissal(text: str) -> bool:
     return bool(_DISMISSAL_RE.search(text or ""))
 
 
+_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")  # [label](url) -> label
+_MD_SYMS = re.compile(r"[*_`#~>|]+")              # markdown emphasis / headings / code / quotes / tables
+_BULLET = re.compile(r"(?m)^\s*[-•·]\s+")         # list bullets at line start
+_WS = re.compile(r"\s+")
+
+
+def speakable(text: str) -> str:
+    """Strip markdown and symbols so the voice never reads punctuation as words (e.g. '*' → 'asterisk').
+    A safety net behind the system prompt, which already asks for plain spoken sentences."""
+    t = _MD_LINK.sub(r"\1", text or "")
+    t = _BULLET.sub("", t)
+    t = _MD_SYMS.sub("", t)
+    return _WS.sub(" ", t).strip()
+
+
 def _write_wav16(data: bytes, path: str) -> None:
     with wave.open(path, "wb") as handle:
         handle.setnchannels(1)
@@ -538,7 +553,7 @@ class VoiceController(QObject):
         self._set_state("thinking")
 
     def speak(self, text: str) -> None:
-        text = (text or "").strip()
+        text = speakable(text)  # strip markdown/symbols so they aren't read aloud as words
         if not text or not self._tts.available():
             self._set_state("idle")
             return
