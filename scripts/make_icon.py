@@ -28,11 +28,11 @@ def render(size: int) -> Image.Image:
     p = QPainter(img)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setPen(Qt.PenStyle.NoPen)
-    rings, spokes, nodes, pulses = _build_circuits()
+    rings, traces, nodes = _build_circuits()
     paint_orb(
         p, size / 2, size / 2, size * 0.36,  # centred; sphere ~72% of the frame
         warm=0.0, glow=0.9, t=120.0,         # cyan, bright, a nice static frame
-        rings=rings, spokes=spokes, nodes=nodes, pulses=pulses, smoke=_build_smoke(),
+        rings=rings, traces=traces, nodes=nodes, smoke=_build_smoke(),
     )
     p.end()
     rgba = img.convertToFormat(QImage.Format.Format_RGBA8888)

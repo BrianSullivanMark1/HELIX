@@ -1,12 +1,12 @@
 """PresenceOrb — the living Presence that *is* HELIX.
 
-An electronic 3-D core: a dark sphere with glowing circuitry etched under a glassy surface, a Fresnel
-rim, and radiant energy-smoke streaming off it. Everything shifts cyan (idle/listening) → gold
-(speaking); a sweeping amber arc marks thinking. State eases in, the core breathes, and the live mic
-level swells it. As a full-window background it's clickable (tap to talk) and pulses to your voice.
+An electronic 3-D core: a dark sphere with a dense circuit-city etched under a glassy surface, a Fresnel
+rim, and radiant energy-smoke streaming off it. Impulses fire down the bus traces. Everything shifts
+cyan (idle/listening) → gold (speaking); a sweeping amber arc marks thinking. State eases in, the core
+breathes, and the live mic level swells it. As a full-window background it's clickable (tap to talk).
 
-The drawing lives in the module-level `paint_orb()` so the app icon (scripts/make_icon.py) renders the
-exact same orb.
+The drawing lives in module-level `paint_orb()` so the app icon (scripts/make_icon.py) renders the exact
+same orb.
 """
 from __future__ import annotations
 
@@ -75,33 +75,44 @@ def _along(pts: list[tuple[float, float]], prog: float) -> tuple[float, float]:
     return pts[-1]
 
 
-def _build_circuits(seed: int = 0x4845) -> tuple[list, list, list, list]:
-    """Deterministic 'arc-reactor' circuitry in unit-circle coords: ring arcs, jogged spokes, pads."""
+def _build_circuits(seed: int = 0x4845) -> tuple[list, list, list]:
+    """A dense 'circuit-city' in unit-circle coords: concentric ring buses, many Manhattan-routed
+    traces (a third of them flagged as buses that fire impulses), and junction pads."""
     rng = random.Random(seed)
-    rings: list[tuple[float, float, float]] = []  # (radius, start_deg, span_deg)
-    for rad in (0.34, 0.56, 0.78):
+
+    def clamp(x: float, y: float, m: float = 0.93) -> tuple[float, float]:
+        d = math.hypot(x, y)
+        return (x * m / d, y * m / d) if d > m else (x, y)
+
+    rings: list[tuple[float, float, float]] = []
+    for rad in (0.30, 0.46, 0.62, 0.78, 0.90):
         a = rng.uniform(0, 360)
-        for _ in range(rng.randint(2, 3)):
-            span = rng.uniform(45, 120)
+        for _ in range(rng.randint(1, 2)):
+            span = rng.uniform(28, 85)
             rings.append((rad, a, span))
-            a += span + rng.uniform(30, 80)
-    spokes: list[list[tuple[float, float]]] = []
+            a += span + rng.uniform(40, 110)
+
+    traces: list[tuple[list[tuple[float, float]], bool, float]] = []  # (polyline, is_bus, phase)
     nodes: list[tuple[float, float]] = []
-    pulses: list[float] = []
-    for _ in range(11):
+    for i in range(36):
         ang = rng.uniform(0, 2 * math.pi)
-        pts, a2 = [], ang
-        for rr in (0.16, rng.uniform(0.38, 0.5), rng.uniform(0.72, 0.92)):
-            a2 += rng.uniform(-0.16, 0.16)
-            pts.append((rr * math.cos(a2), rr * math.sin(a2)))
-        spokes.append(pts)
-        nodes.append(pts[-1])
-        pulses.append(rng.uniform(0, 1))
-    for _ in range(9):
-        rad = rng.choice((0.34, 0.56, 0.78))
-        a = rng.uniform(0, 2 * math.pi)
-        nodes.append((rad * math.cos(a), rad * math.sin(a)))
-    return rings, spokes, nodes, pulses
+        r0 = rng.uniform(0.0, 0.5)
+        x, y = clamp(r0 * math.cos(ang), r0 * math.sin(ang))
+        pts = [(x, y)]
+        horiz = rng.random() < 0.5
+        for _ in range(rng.randint(2, 5)):  # right-angle (Manhattan) routing
+            step = rng.uniform(0.12, 0.32) * rng.choice((-1, 1))
+            x, y = clamp(*((x + step, y) if horiz else (x, y + step)))
+            if (x, y) != pts[-1]:
+                pts.append((x, y))
+            horiz = not horiz
+        if len(pts) >= 2:
+            traces.append((pts, i % 3 == 0, rng.uniform(0, 1)))
+            nodes.append(pts[-1])
+    for _ in range(12):  # extra scattered pads
+        rr, a = rng.uniform(0.15, 0.85), rng.uniform(0, 2 * math.pi)
+        nodes.append((rr * math.cos(a), rr * math.sin(a)))
+    return rings, traces, nodes
 
 
 def _build_smoke(seed: int = 0x536D) -> list[tuple[float, float, float, float]]:
@@ -123,9 +134,8 @@ def paint_orb(
     glow: float,
     t: float,
     rings: list,
-    spokes: list,
+    traces: list,
     nodes: list,
-    pulses: list,
     smoke: list,
     thinking: bool = False,
     accent: float = 0.0,
@@ -169,25 +179,25 @@ def paint_orb(
     p.setBrush(body)
     p.drawEllipse(center, r, r)
 
-    # 4. Circuitry, clipped to the sphere.
+    # 4. Circuit-city, clipped to the sphere.
     clip = QPainterPath()
     clip.addEllipse(center, r, r)
     p.save()
     p.setClipPath(clip)
     core = QRadialGradient(center, r * 0.5)
-    core.setColorAt(0.0, _col(CYAN, GOLD, warm, int(110 * glow)))
+    core.setColorAt(0.0, _col(CYAN, GOLD, warm, int(90 * glow)))
     core.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
     p.setBrush(core)
     p.drawEllipse(center, r * 0.5, r * 0.5)
-    lw = max(1.0, r * 0.012)
-    for rad, a0, span in rings:
-        pen = QPen(_col(CYAN, GOLD, warm, int(140 * glow)))
+    lw = max(1.0, r * 0.009)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    for rad, a0, span in rings:  # concentric ring buses
+        pen = QPen(_col(CYAN, GOLD, warm, int(80 * glow)))
         pen.setWidthF(lw)
         p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawArc(QRectF(cx - r * rad, cy - r * rad, 2 * r * rad, 2 * r * rad), int(a0 * 16), int(span * 16))
-    for pts in spokes:
-        pen = QPen(_col(CYAN, GOLD, warm, int(120 * glow)))
+    for pts, is_bus, _ph in traces:  # the streets / wiring
+        pen = QPen(_col(CYAN, GOLD, warm, int((125 if is_bus else 66) * glow)))
         pen.setWidthF(lw)
         p.setPen(pen)
         path = QPainterPath()
@@ -196,46 +206,45 @@ def paint_orb(
             path.lineTo(cx + ux * r, cy + uy * r)
         p.drawPath(path)
     p.setPen(Qt.PenStyle.NoPen)
-    # Impulses fire down the spoke buses (inner core → rim): a white-hot head with a fading comet tail.
-    for pts, ph in zip(spokes, pulses):
-        for k in range(2):  # two impulses per bus, offset half a cycle apart
-            head = (t * 0.026 + ph + 0.5 * k) % 1.0
-            for j in range(6):  # head + 5 trailing samples
-                prog = head - 0.045 * j
-                if prog <= 0.02 or prog >= 1.0:
-                    continue
-                ux, uy = _along(pts, prog)
-                nx, ny = cx + ux * r, cy + uy * r
-                f = 1.0 - j / 6.0
-                rad = r * (0.012 + 0.038 * f)
-                a = int(245 * glow * f * f)
-                if a <= 1:
-                    continue
-                comet = QRadialGradient(QPointF(nx, ny), rad)
-                comet.setColorAt(
-                    0.0, _col("#ffffff", GOLD, warm * 0.5, a) if j == 0 else _col(CYAN, GOLD, warm, a)
-                )
-                comet.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
-                p.setBrush(comet)
-                p.drawEllipse(QPointF(nx, ny), rad, rad)
-    for ux, uy in nodes:
+    for ux, uy in nodes:  # junction pads
         nx, ny = cx + ux * r, cy + uy * r
-        blink = 0.45 + 0.55 * math.sin(t * 0.06 + (ux + uy) * 5.0)
-        nd = QRadialGradient(QPointF(nx, ny), r * 0.035)
-        nd.setColorAt(0.0, _col(CYAN, GOLD, warm, int(190 * glow * blink)))
-        nd.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
-        p.setBrush(nd)
-        p.drawEllipse(QPointF(nx, ny), r * 0.035, r * 0.035)
+        pad = QRadialGradient(QPointF(nx, ny), r * 0.026)
+        pad.setColorAt(0.0, _col(CYAN, GOLD, warm, int(160 * glow)))
+        pad.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+        p.setBrush(pad)
+        p.drawEllipse(QPointF(nx, ny), r * 0.026, r * 0.026)
+    for pts, is_bus, ph in traces:  # impulses fire down the bus traces (a comet head + fading trail)
+        if not is_bus:
+            continue
+        head = (t * 0.03 + ph) % 1.0
+        for j in range(6):
+            prog = head - 0.05 * j
+            if prog <= 0.02 or prog >= 1.0:
+                continue
+            ux, uy = _along(pts, prog)
+            nx, ny = cx + ux * r, cy + uy * r
+            f = 1.0 - j / 6.0
+            rad = r * (0.01 + 0.03 * f)
+            a = int(245 * glow * f * f)
+            if a <= 1:
+                continue
+            comet = QRadialGradient(QPointF(nx, ny), rad)
+            comet.setColorAt(
+                0.0, _col("#ffffff", GOLD, warm * 0.5, a) if j == 0 else _col(CYAN, GOLD, warm, a)
+            )
+            comet.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+            p.setBrush(comet)
+            p.drawEllipse(QPointF(nx, ny), rad, rad)
     p.restore()
 
     # 5. Glass overlay — shades the flat circuitry into a 3-D sphere (highlight + darkened rim).
     p.save()
     p.setClipPath(clip)
     glass = QRadialGradient(QPointF(hx, hy), r * 1.6)
-    glass.setColorAt(0.0, QColor(255, 255, 255, 60))
+    glass.setColorAt(0.0, QColor(255, 255, 255, 55))
     glass.setColorAt(0.35, QColor(255, 255, 255, 0))
     glass.setColorAt(0.82, QColor(0, 0, 0, 0))
-    glass.setColorAt(1.0, QColor(0, 0, 0, 160))
+    glass.setColorAt(1.0, QColor(0, 0, 0, 150))
     p.setBrush(glass)
     p.drawEllipse(center, r, r)
     rim = QRadialGradient(center, r)
@@ -248,7 +257,7 @@ def paint_orb(
 
     # 6. Specular glint.
     spec = QRadialGradient(QPointF(hx, hy), r * 0.26)
-    spec.setColorAt(0.0, QColor(255, 255, 255, 140))
+    spec.setColorAt(0.0, QColor(255, 255, 255, 130))
     spec.setColorAt(1.0, QColor(255, 255, 255, 0))
     p.setBrush(spec)
     p.drawEllipse(QPointF(hx, hy), r * 0.26, r * 0.26)
@@ -285,7 +294,7 @@ class PresenceOrb(QWidget):
         self._t = 0.0
         self._level = 0.0
         self._level_target = 0.0
-        self._rings, self._spokes, self._nodes, self._pulses = _build_circuits()
+        self._rings, self._traces, self._nodes = _build_circuits()
         self._smoke = _build_smoke()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -325,8 +334,7 @@ class PresenceOrb(QWidget):
         paint_orb(
             p, cx, cy, r,
             warm=self._p["warm"], glow=glow, t=self._t,
-            rings=self._rings, spokes=self._spokes, nodes=self._nodes,
-            pulses=self._pulses, smoke=self._smoke,
+            rings=self._rings, traces=self._traces, nodes=self._nodes, smoke=self._smoke,
             thinking=(self._state is OrbState.THINKING), accent=self._p["accent"], spin=self._spin,
         )
         p.end()
