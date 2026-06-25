@@ -1,10 +1,25 @@
-"""BuildService.rename — keeps name↔slug consistent, moves the folder, refuses collisions."""
+"""BuildService — rename keeps name↔slug consistent; legacy manifests get an is_model classification."""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from helix.domain.models import App
 from helix.services.builds import BuildService
+
+
+def _legacy_build(tmp_path, slug: str, html: str) -> None:
+    """Write a build with a pre-is_model manifest (no flag) + an index.html, like an old install."""
+    ws = tmp_path / slug
+    ws.mkdir()
+    (ws / "index.html").write_text(html, encoding="utf-8")
+    (ws / ".helixbuild.json").write_text(
+        json.dumps({
+            "slug": slug, "name": slug.replace("-", " ").title(), "request": "r",
+            "kind": "html", "entry_point": "index.html", "created_at": "2026-06-25T12:00:00",
+        }),
+        encoding="utf-8",
+    )
 
 
 class _NoRepo:
@@ -67,6 +82,33 @@ def test_rename_same_slug_just_updates_name(tmp_path):
     out = svc.rename("notes", "Notes!")  # slugifies back to "notes" — no move
     assert out is not None and out.slug == "notes" and out.name == "Notes!"
     assert svc.workspace("notes").exists()
+
+
+def test_is_model_round_trips_through_the_manifest(tmp_path):
+    svc = _svc(tmp_path)
+    app = App.from_request("Battery", "show how a battery works")
+    app.is_model = True
+    svc.create_workspace(app)
+    (svc.workspace("battery") / "index.html").write_text("<html></html>", encoding="utf-8")
+    svc.finalize(app)
+    listed = {a.slug: a.is_model for a in svc.list()}
+    assert listed == {"battery": True}
+    # a renamed model stays a model
+    out = svc.rename("battery", "Battery Cell")
+    assert out is not None and out.is_model is True
+    assert {a.slug: a.is_model for a in svc.list()} == {"battery-cell": True}
+
+
+def test_legacy_manifests_are_classified_and_persisted_on_read(tmp_path):
+    svc = _svc(tmp_path)
+    _legacy_build(tmp_path, "old-model", '<script type="importmap">{"imports":'
+                  '{"three":"x/three.module.js"}}</script>')
+    _legacy_build(tmp_path, "old-app", "<h1>hello</h1>")
+    listed = {a.slug: a.is_model for a in svc.list()}
+    assert listed == {"old-model": True, "old-app": False}
+    # the classification was written back, so it isn't re-detected next time
+    data = json.loads((tmp_path / "old-model" / ".helixbuild.json").read_text(encoding="utf-8"))
+    assert data["is_model"] is True
 
 
 def test_rename_blank_or_missing_returns_none(tmp_path):

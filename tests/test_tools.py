@@ -17,8 +17,10 @@ class _FakeForge:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def build(self, name, request, *, prompt=None, on_progress=None):
-        self.calls.append({"name": name, "request": request, "prompt": prompt})
+    def build(self, name, request, *, prompt=None, is_model=None, on_progress=None):
+        self.calls.append(
+            {"name": name, "request": request, "prompt": prompt, "is_model": is_model}
+        )
         return _App(name)
 
 
@@ -50,6 +52,7 @@ def test_build_3d_model_routes_with_the_model_prompt():
     # Routed with the 3D-model instruction, not the default app-builder prompt.
     assert call["prompt"] == build_3d_model_prompt("Wall Camera Unit", "camera, speaker and mic")
     assert "3D MODEL" in call["prompt"]
+    assert call["is_model"] is True  # so it lands in the Models tab
     assert "Modeled" in out
 
 
@@ -57,3 +60,5 @@ def test_build_app_still_uses_the_default_prompt():
     reg, forge = _registry()
     reg.dispatch("build_app", {"name": "Tip Calc", "request": "a tip calculator"})
     assert forge.calls[0]["prompt"] is None  # default app-builder path is untouched
+    # build_app doesn't pass is_model — the Forge decides (new build -> app; iteration -> preserved).
+    assert forge.calls[0]["is_model"] is None

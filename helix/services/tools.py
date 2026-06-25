@@ -114,9 +114,10 @@ class ToolRegistry:
                 args["name"],
                 args["request"],
                 prompt=build_3d_model_prompt(args["name"], args["request"]),
+                is_model=True,
                 on_progress=on_progress,
             )
-            return f"Modeled '{app.name}'. Open it from the menu to explore it in 3D."
+            return f"Modeled '{app.name}'. Open it from the Models tab to explore it in 3D."
         if name == "list_apps":
             apps = self._builds.list()
             if not apps:

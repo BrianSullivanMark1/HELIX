@@ -37,12 +37,21 @@ class ForgeService:
         request: str,
         *,
         prompt: str | None = None,
+        is_model: bool | None = None,
         on_progress: ProgressFn | None = None,
     ) -> App:
         # `prompt` overrides the default app-builder instruction so the same sandboxed loop can also
-        # drive a different kind of build (e.g. a 3D model). The sandbox/guard is identical either way.
+        # drive a different kind of build (e.g. a 3D model). `is_model` tags the result so it lands in
+        # the Models tab instead of Apps. The sandbox/guard is identical either way.
         app = App.from_request(name, request)
         iterating = self._builds.exists(app.slug)
+        if is_model is None:
+            # Caller didn't classify: keep an existing build's class on iteration (so a plain rebuild
+            # never silently moves a model out of the Models tab); new builds default to a plain app.
+            prior = next((a for a in self._builds.list() if a.slug == app.slug), None) if iterating else None
+            app.is_model = bool(prior and prior.is_model)
+        else:
+            app.is_model = is_model
         workspace = self._builds.create_workspace(app)
 
         # A build may ONLY write inside its own workspace. Snapshot everything else — source, data/

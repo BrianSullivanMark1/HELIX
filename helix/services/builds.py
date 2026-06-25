@@ -120,11 +120,18 @@ class BuildService:
             "kind": app.kind.value,
             "entry_point": app.entry_point,
             "created_at": (app.created_at or self._clock.now()).isoformat(),
+            "is_model": app.is_model,
         }
         (ws / MANIFEST).write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def _read_manifest(self, manifest: Path) -> App:
         d = json.loads(manifest.read_text(encoding="utf-8"))
+        if "is_model" not in d:  # legacy build (predates the flag): classify once, then persist
+            d["is_model"] = self._looks_like_model(manifest.parent, d.get("entry_point"))
+            try:
+                manifest.write_text(json.dumps(d, indent=2), encoding="utf-8")
+            except OSError:
+                pass  # read-only/locked — fall back to the in-memory value, retry next load
         created = d.get("created_at")
         return App(
             slug=d["slug"],
@@ -133,4 +140,15 @@ class BuildService:
             kind=AppKind(d.get("kind", "unknown")),
             entry_point=d.get("entry_point"),
             created_at=datetime.fromisoformat(created) if created else None,
+            is_model=bool(d.get("is_model", False)),
         )
+
+    @staticmethod
+    def _looks_like_model(ws: Path, entry: str | None) -> bool:
+        """Heuristic for legacy builds with no is_model flag: a 3D model embeds a Three.js viewer."""
+        target = ws / entry if entry else ws / "index.html"
+        try:
+            html = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return "three.module.js" in html or "three@0" in html or "THREE." in html

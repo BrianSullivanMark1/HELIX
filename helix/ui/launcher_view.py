@@ -1,11 +1,12 @@
-"""LauncherView — the Menu: three tabs over what you've made.
+"""LauncherView — the Menu: four tabs over what you've made.
 
-  • Apps   — built apps that open a screen (click a card to launch; Open / Rename / Remove).
-  • Agents — saved goals HELIX runs on demand (Run / Add / Remove).
+  • Apps   — built apps that open a screen (Open / Rename / Remove).
+  • Models — 3D models and animations the orb made to show you (build_3d_model) (Open / Rename / Remove).
+  • Agents — saved goals HELIX runs on demand (Run / Rename / Remove).
   • Tasks  — built scripts that *do a thing* when run (Run / Rename / Remove).
 
-Apps and Agents/Tasks are data, not shell: they're freely removable. The tabs, New app, and Settings
-are the immutable shell.
+Apps/Models and Agents/Tasks are data, not shell: they're freely removable. The tabs, New app, and
+Settings are the immutable shell.
 """
 from __future__ import annotations
 
@@ -32,7 +33,7 @@ from helix.services.tasks import TaskService
 from helix.ui.theme import CYAN, MUTED
 from helix.ui.workers import QtWorker
 
-_APPS, _AGENTS, _TASKS = 0, 1, 2
+_APPS, _MODELS, _AGENTS, _TASKS = 0, 1, 2, 3
 
 
 class _Card(QFrame):
@@ -81,7 +82,9 @@ class LauncherView(QWidget):
         # Header: tabs on the left, New app + Settings on the right.
         header = QHBoxLayout()
         self._tabs: dict[int, QPushButton] = {}
-        for idx, label in ((_APPS, "Apps"), (_AGENTS, "Agents"), (_TASKS, "Tasks")):
+        for idx, label in (
+            (_APPS, "Apps"), (_MODELS, "Models"), (_AGENTS, "Agents"), (_TASKS, "Tasks")
+        ):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.clicked.connect(lambda _c=False, i=idx: self._show_tab(i))
@@ -101,12 +104,16 @@ class LauncherView(QWidget):
         self._apps_grid, apps_page, self._apps_empty = self._grid_page(
             "No apps yet — go to the orb and describe one."
         )
+        self._models_grid, models_page, self._models_empty = self._grid_page(
+            "No models yet — ask the orb to show you something in 3D."
+        )
         self._tasks_grid, tasks_page, self._tasks_empty = self._grid_page(
             "No tasks yet. Ask the orb to build a script that does something, and it'll show here."
         )
         self._stack.addWidget(apps_page)            # 0
-        self._stack.addWidget(self._agents_page())  # 1
-        self._stack.addWidget(tasks_page)           # 2
+        self._stack.addWidget(models_page)          # 1
+        self._stack.addWidget(self._agents_page())  # 2
+        self._stack.addWidget(tasks_page)           # 3
         root.addWidget(self._stack, stretch=1)
 
         self._show_tab(_APPS)
@@ -183,19 +190,16 @@ class LauncherView(QWidget):
 
     # ----- refresh -----
     def refresh(self) -> None:
-        apps = [a for a in self._builds.list() if a.kind != AppKind.PYTHON]
-        app_cards = []
-        for app in apps:
-            card = _Card(app.name, app.request)
-            open_btn = QPushButton("Open")
-            open_btn.clicked.connect(lambda _c=False, s=app.slug: self.openAppRequested.emit(s))
-            rename = QPushButton("✎ Rename")
-            rename.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._rename_build(s, n))
-            remove = QPushButton("✕ Remove")
-            remove.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._remove_build(s, n))
-            card.add_actions(open_btn, rename, remove)
-            app_cards.append(card)
-        self._fill_grid(self._apps_grid, self._apps_empty, app_cards)
+        builds = self._builds.list()
+        # Apps and Models both open in the browser; Models are the 3D ones (build_3d_model). Tasks are
+        # the Python builds (handled below). Everything else with a screen is an App.
+        apps = [a for a in builds if not a.is_model and a.kind != AppKind.PYTHON]
+        self._fill_grid(self._apps_grid, self._apps_empty, [self._openable_card(a) for a in apps])
+
+        models = [a for a in builds if a.is_model and a.kind != AppKind.PYTHON]
+        self._fill_grid(
+            self._models_grid, self._models_empty, [self._openable_card(a) for a in models]
+        )
 
         runnable = self._tasks.runnable()
         task_cards = []
@@ -223,6 +227,18 @@ class LauncherView(QWidget):
             card.add_actions(run, rename, remove)
             agent_cards.append(card)
         self._fill_grid(self._agents_grid, self._agents_empty, agent_cards)
+
+    def _openable_card(self, app) -> _Card:
+        """A card for something that opens in the browser — an app or a 3D model (Open/Rename/Remove)."""
+        card = _Card(app.name, app.request)
+        open_btn = QPushButton("Open")
+        open_btn.clicked.connect(lambda _c=False, s=app.slug: self.openAppRequested.emit(s))
+        rename = QPushButton("✎ Rename")
+        rename.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._rename_build(s, n))
+        remove = QPushButton("✕ Remove")
+        remove.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._remove_build(s, n))
+        card.add_actions(open_btn, rename, remove)
+        return card
 
     def _fill_grid(self, grid: QGridLayout, empty: QLabel, cards: list[QWidget]) -> None:
         while grid.count():

@@ -47,6 +47,7 @@ class App:
     kind: AppKind = AppKind.UNKNOWN
     entry_point: str | None = None
     created_at: datetime | None = None
+    is_model: bool = False  # a 3D model/animation (build_3d_model) — shown in the Models tab, not Apps
 
     @classmethod
     def from_request(cls, name: str, request: str) -> "App":
