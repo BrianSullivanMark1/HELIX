@@ -47,7 +47,7 @@ class Container:
         def _oauth() -> str | None:
             return self.settings.get("claude_code_oauth_token")
 
-        self.chat = AnthropicChat(_key)
+        self.chat = AnthropicChat(_key, web_search=True)  # the conversation can research the web
         coder_chat = AnthropicChat(_key, max_tokens=8000)  # roomier for code generation
         # Prefer the Claude Code CLI (most capable); fall back to the API coder (key-only, no CLI).
         self.coder = FallbackCoder(ClaudeCodeCli(_key, _oauth), ApiCoder(coder_chat, _key))

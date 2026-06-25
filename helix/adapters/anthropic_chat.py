@@ -22,6 +22,14 @@ _LOG = get_logger("anthropic")
 # not long-form generation.
 DEFAULT_MODEL = "claude-opus-4-8"
 
+# Anthropic server-side tools: Claude runs the searches/fetches itself and answers with the results
+# folded in (no search-API key, no client executor). The result blocks come back as server-tool types
+# that _decode ignores — HELIX only reads the answer text. Supported on Opus 4.8 (dynamic filtering).
+_WEB_TOOLS = (
+    {"type": "web_search_20260209", "name": "web_search"},
+    {"type": "web_fetch_20260209", "name": "web_fetch"},
+)
+
 # Opus 4.8 list price, USD per token (input $5 / output $25 per 1M; cache write ~1.25x, read ~0.1x).
 _PRICE_IN = 5.0 / 1_000_000
 _PRICE_OUT = 25.0 / 1_000_000
@@ -49,10 +57,12 @@ class AnthropicChat:
         *,
         model: str = DEFAULT_MODEL,
         max_tokens: int = 4096,
+        web_search: bool = False,
     ) -> None:
         self._key_provider = api_key_provider
         self._model = model
         self._max_tokens = max_tokens
+        self._web_search = web_search  # let Claude search/fetch the web (the conversation; not the coder)
         self._client: anthropic.Anthropic | None = None
         self._client_key: str | None = None
 
@@ -83,8 +93,13 @@ class AnthropicChat:
             kwargs["system"] = [
                 {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
             ]
+        # Web search/fetch (server tools) sit first; the app's own tools follow. Claude runs the web
+        # tools server-side and returns the answer text, so HELIX has nothing to execute for them.
+        encoded = list(_WEB_TOOLS) if self._web_search else []
         if tools:
-            kwargs["tools"] = [self._encode_tool(t) for t in tools]
+            encoded += [self._encode_tool(t) for t in tools]
+        if encoded:
+            kwargs["tools"] = encoded
 
         resp = client.messages.create(**kwargs)
         return self._decode(resp)
