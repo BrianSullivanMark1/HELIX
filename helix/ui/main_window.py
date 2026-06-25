@@ -16,12 +16,14 @@ from PyQt6.QtWidgets import (
 
 from helix.domain.events import BuildCreated, BuildIterated
 from helix.domain.models import AppKind
+from helix.logging_setup import get_logger
 from helix.ui.console_view import ConsoleView
 from helix.ui.launcher_view import LauncherView
 from helix.ui.orb import PresenceOrb
 from helix.ui.settings_view import SettingsView
 from helix.ui.theme import CYAN, LINE
 
+_LOG = get_logger("ui")
 _CONSOLE, _MENU, _SETTINGS = 0, 1, 2
 
 
@@ -117,9 +119,13 @@ class HelixMainWindow(QMainWindow):
         self.launcher.refresh()
 
     def closeEvent(self, event) -> None:
-        # Don't tear down while a worker thread is still running (avoids a QThread crash on quit).
-        self.console.shutdown()
-        self.launcher.shutdown()
+        # Stop voice (TTS + mic) and any workers BEFORE the window goes, so nothing keeps running
+        # after the close. Each step is guarded so a hiccup can't block the close.
+        for teardown in (self.console.shutdown, self.launcher.shutdown):
+            try:
+                teardown()
+            except Exception:
+                _LOG.exception("shutdown step failed during close")
         super().closeEvent(event)
 
     def _open_app(self, slug: str) -> None:

@@ -229,6 +229,7 @@ class EdgeSpeechOut:
         self._fallback = fallback if fallback is not None else OsSpeechOut()
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
+        self._stopped = False  # set by stop()/close so a KILLED playback isn't mistaken for a failure
 
     def available(self) -> bool:
         return edge_available() or self._fallback.available()
@@ -237,11 +238,16 @@ class EdgeSpeechOut:
         text = (text or "").strip()
         if not text:
             return
+        self._stopped = False
         path = None
         try:
             path = self._synthesize(text)
+            if self._stopped:  # stopped during synthesis — don't start playing
+                return
             self._play(path)
         except Exception as exc:  # offline, WMP missing, etc. — still speak, via the OS voice
+            if self._stopped:  # we were told to stop; a killed proc is NOT a failure — never fall back
+                return
             _LOG.warning("neural TTS failed (%s); falling back to the OS voice", exc)
             self._fallback.speak(text)
         finally:
@@ -270,6 +276,8 @@ class EdgeSpeechOut:
     def _play(self, path: str) -> None:
         if platform.system() != "Windows":
             raise RuntimeError("MP3 playback here is Windows-only")
+        if self._stopped:
+            return
         # Play the MP3 via WPF's MediaPlayer (Media Foundation; present on every Windows) and block for
         # its natural duration. PowerShell runs STA, which MediaPlayer requires. A non-zero exit (e.g.
         # the file won't open) propagates so speak() falls back to the OS voice.
@@ -294,10 +302,11 @@ class EdgeSpeechOut:
         proc.wait()
         with self._lock:
             self._proc = None
-        if proc.returncode not in (0, None):
+        if not self._stopped and proc.returncode not in (0, None):
             raise RuntimeError(f"playback exited {proc.returncode}")
 
     def stop(self) -> None:
+        self._stopped = True  # so the in-flight speak() treats the kill as intentional, not a failure
         with self._lock:
             if self._proc and self._proc.poll() is None:
                 try:
