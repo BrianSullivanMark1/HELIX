@@ -5,6 +5,7 @@ from helix.ports.coder import ProgressFn
 from helix.ports.llm import ToolSpec
 from helix.services.builds import BuildService
 from helix.services.forge import ForgeService
+from helix.services.prompts import build_3d_model_prompt
 from helix.services.selfdev import SelfDevService
 
 
@@ -35,6 +36,38 @@ class ToolRegistry:
                         "request": {
                             "type": "string",
                             "description": "The full plain-language description of what to build.",
+                        },
+                    },
+                    "required": ["name", "request"],
+                    "additionalProperties": False,
+                },
+            ),
+            ToolSpec(
+                name="build_3d_model",
+                description=(
+                    "Conjure an interactive 3D model to SHOW the user what you're discussing — a device, "
+                    "a part, a layout, a concept. It opens in their browser; they orbit and explore it. "
+                    "Use this to visualize an idea when a picture communicates faster than words. To "
+                    "CHANGE a model, call this again with the SAME name and the change (e.g. 'make it "
+                    "taller', 'show the inside') and HELIX updates that model in place. Only call after "
+                    "the user confirms — building spends Claude time, like build_app."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "A short, human name for the model, e.g. 'Wall Camera Unit'. Reuse the "
+                                "exact same name to modify an existing model."
+                            ),
+                        },
+                        "request": {
+                            "type": "string",
+                            "description": (
+                                "Plain-language description of what to visualize — or, when modifying an "
+                                "existing model, the change to make."
+                            ),
                         },
                     },
                     "required": ["name", "request"],
@@ -76,6 +109,14 @@ class ToolRegistry:
         if name == "build_app":
             app = self._forge.build(args["name"], args["request"], on_progress=on_progress)
             return f"Built '{app.name}'. It's in the menu now."
+        if name == "build_3d_model":
+            app = self._forge.build(
+                args["name"],
+                args["request"],
+                prompt=build_3d_model_prompt(args["name"], args["request"]),
+                on_progress=on_progress,
+            )
+            return f"Modeled '{app.name}'. Open it from the menu to explore it in 3D."
         if name == "list_apps":
             apps = self._builds.list()
             if not apps:

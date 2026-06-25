@@ -89,4 +89,6 @@ class ConversationService:
     def _progress_label(tool: str, args: dict) -> str:
         if tool == "build_app":
             return f"Building {args.get('name', 'your app')}…"
+        if tool == "build_3d_model":
+            return f"Modeling {args.get('name', 'it')}…"
         return "Working…"

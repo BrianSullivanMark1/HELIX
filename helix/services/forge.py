@@ -31,7 +31,16 @@ class ForgeService:
         self._app_root = app_root
         self._guard_files = list(guard_files or [])
 
-    def build(self, name: str, request: str, *, on_progress: ProgressFn | None = None) -> App:
+    def build(
+        self,
+        name: str,
+        request: str,
+        *,
+        prompt: str | None = None,
+        on_progress: ProgressFn | None = None,
+    ) -> App:
+        # `prompt` overrides the default app-builder instruction so the same sandboxed loop can also
+        # drive a different kind of build (e.g. a 3D model). The sandbox/guard is identical either way.
         app = App.from_request(name, request)
         iterating = self._builds.exists(app.slug)
         workspace = self._builds.create_workspace(app)
@@ -45,7 +54,7 @@ class ForgeService:
         hooks_sig = scan_tree(hooks)
 
         result = self._coder.run_task(
-            workspace, build_app_prompt(app.name, request), on_progress=on_progress
+            workspace, prompt or build_app_prompt(app.name, request), on_progress=on_progress
         )
         restore_if_changed(guard)
         if not result.ok:
