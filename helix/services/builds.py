@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +13,15 @@ from helix.ports.clock import Clock
 from helix.ports.repo import VersionedRepo
 
 MANIFEST = ".helixbuild.json"
+
+
+def _force_remove(func, path, _exc) -> None:
+    """rmtree onerror: clear the read-only bit (git's loose objects) and retry the removal once."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
 
 
 class BuildService:
@@ -61,7 +72,9 @@ class BuildService:
         ws = self.workspace(slug)
         if not ws.exists():
             return False
-        shutil.rmtree(ws, ignore_errors=True)
+        # git marks loose object files read-only, so a plain rmtree silently leaves .git behind on
+        # Windows. Clear the read-only bit on any file that refuses to go, then retry the unlink.
+        shutil.rmtree(ws, onerror=_force_remove)
         return not ws.exists()
 
     def rename(self, slug: str, new_name: str) -> App | None:

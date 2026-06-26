@@ -5,6 +5,15 @@
 # --- Core (required) ---
 PyQt6>=6.7            # the desktop UI (single runtime)
 anthropic>=0.40       # the model layer: drives the conversation and the API-based coder
+httpx>=0.27           # HTTP client for the Tripo neural-3D adapter (also a transitive anthropic dep)
+
+# --- 3D models (required) ---
+# build_3d_model bakes a declarative model.json into a real polygon mesh (assets/model.glb), in-process.
+trimesh>=4.4          # geometry kernel + GLB export (MIT)
+numpy>=1.26           # trimesh's array backend
+manifold3d>=2.5       # robust boolean ops for cutaways / holes (Apache-2.0)
+shapely>=2.0          # 2D polygons for extrude footprints (BSD)
+mapbox-earcut>=1.0    # polygon triangulation used by extrude/revolve (ISC)
 
 # --- Optional: voice ---
 edge-tts>=6.1         # free neural text-to-speech

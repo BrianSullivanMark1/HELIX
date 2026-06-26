@@ -17,9 +17,9 @@ class _FakeForge:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def build(self, name, request, *, prompt=None, is_model=None, on_progress=None):
+    def build(self, name, request, *, prompt=None, is_model=None, on_progress=None, cancel=None):
         self.calls.append(
-            {"name": name, "request": request, "prompt": prompt, "is_model": is_model}
+            {"name": name, "request": request, "prompt": prompt, "is_model": is_model, "cancel": cancel}
         )
         return _App(name)
 

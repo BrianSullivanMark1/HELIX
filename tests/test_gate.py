@@ -51,7 +51,7 @@ class _Coder:
     def available(self):
         return True
 
-    def run_task(self, repo_dir, prompt, *, on_progress=None):
+    def run_task(self, repo_dir, prompt, *, on_progress=None, cancel=None):
         self._fn(Path(repo_dir))
         return CoderResult(ok=True, summary="ok")
 

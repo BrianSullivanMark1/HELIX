@@ -142,9 +142,11 @@ class ToolRegistry:
             )
         return tools
 
-    def dispatch(self, name: str, args: dict, *, on_progress: ProgressFn | None = None) -> str:
+    def dispatch(self, name: str, args: dict, *, on_progress: ProgressFn | None = None, cancel=None) -> str:
         if name == "build_app":
-            app = self._forge.build(args["name"], args["request"], on_progress=on_progress)
+            app = self._forge.build(
+                args["name"], args["request"], on_progress=on_progress, cancel=cancel
+            )
             return f"Built '{app.name}'. It's in the menu now."
         if name == "build_3d_model":
             app = self._forge.build(
@@ -153,6 +155,7 @@ class ToolRegistry:
                 prompt=build_3d_model_prompt(args["name"], args["request"]),
                 is_model=True,
                 on_progress=on_progress,
+                cancel=cancel,
             )
             return f"Modeled '{app.name}'. Open it from the Models tab to explore it in 3D."
         if name == "think_harder" and self._deep_think is not None:

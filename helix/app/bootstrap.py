@@ -6,8 +6,19 @@ shell. This module is a PROTECTED_PATH (under helix/app/); the coder may never e
 """
 from __future__ import annotations
 
+import os
 import sys
 
+# Let QtWebEngine render heavier WebGL (high-poly 3D models) without the GPU process being killed — the
+# "sandbox limit" symptom: a blank viewer on a big mesh. Force GPU use even on blocklisted/integrated
+# chips, enable GPU rasterization, and drop the GPU-PROCESS sandbox (the renderer sandbox stays). Must be
+# set before QtWebEngine initializes (i.e. before importing the UI below). A user env override wins.
+os.environ.setdefault(
+    "QTWEBENGINE_CHROMIUM_FLAGS",
+    "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --disable-gpu-sandbox",
+)
+
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from helix.adapters.git_repo import GitRepo
@@ -25,6 +36,9 @@ _HEALING = "healing_in_progress"
 
 
 def run_app(argv: list[str] | None = None) -> int:
+    # QtWebEngine (the in-app viewer for built apps/models) needs shared GL contexts, set before the
+    # QApplication is created. Harmless when WebEngine isn't installed.
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("HELIX")
     apply_theme(app)

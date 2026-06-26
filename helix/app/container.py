@@ -5,6 +5,8 @@ one-line change here. This module is a PROTECTED_PATH: the self-coder may never 
 """
 from __future__ import annotations
 
+import os
+
 from helix.adapters.anthropic_chat import AnthropicChat
 from helix.adapters.api_coder import ApiCoder
 from helix.adapters.claude_code_cli import ClaudeCodeCli
@@ -25,6 +27,7 @@ from helix.services.archive import ArchiveService
 from helix.services.builds import BuildService
 from helix.services.conversation import ConversationService
 from helix.services.forge import ForgeService
+from helix.services.model_baker import ModelBaker
 from helix.services.tasks import TaskService
 from helix.services.prompts import CONSOLE_SYSTEM, DEEP_THINK_SYSTEM
 from helix.services.selfdev import SelfDevService
@@ -70,8 +73,34 @@ class Container:
         # Services
         self.builds = BuildService(self.paths.builds, self.repo, self.clock)
         guard_files = [self.paths.settings_file]  # reverted if a coder writes into them
+        # The model baker turns a built model.json into a real polygon mesh (assets/model.glb) + viewer,
+        # in-process. If a Tripo key is present (env var or settings), it also gets a neural backend —
+        # the high-detail "turbo" path for organic/character subjects. Opt-in: no key → local-only.
+        def _tripo_key() -> str | None:
+            # Settings first (set in-app), then the env var. Either enables the high-detail neural path.
+            return (
+                (self.settings.get("tripo_api_key") or os.environ.get("TRIPO_API_KEY") or "").strip()
+                or None
+            )
+
+        def _neural(prompt, image):
+            # The backend is ALWAYS wired and the key is read PER build — so setting the key in Settings
+            # (or fixing the env var) takes effect on the next model with no restart needed. Detail is
+            # likewise live: "high" = native polygon count + detailed textures.
+            from helix.adapters.tripo3d import Tripo3D, TripoError
+            if not _tripo_key():
+                raise TripoError("Add your Tripo API key in Settings to build high-detail 3D models.")
+            high = (self.settings.get("model_detail") or "balanced").lower() == "high"
+            return Tripo3D(
+                _tripo_key,
+                face_limit=0 if high else 100000,
+                texture_quality="detailed" if high else "standard",
+            ).generate(prompt, image)
+
+        self.model_baker = ModelBaker(neural_backend=_neural)
         self.forge = ForgeService(
-            self.builds, self.coder, self.bus, self.repo, self.paths.root, guard_files
+            self.builds, self.coder, self.bus, self.repo, self.paths.root, guard_files,
+            model_baker=self.model_baker,
         )
         self.selfdev = SelfDevService(
             self.coder, self.repo, self.settings, self.clock, self.paths.root,

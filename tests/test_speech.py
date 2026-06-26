@@ -64,3 +64,18 @@ def test_real_playback_failure_still_falls_back():
     e._play = boom  # type: ignore[method-assign]
     e.speak("hello")
     assert fb.spoke == ["hello"]  # genuine failure → OS voice, as intended
+
+
+def test_narration_never_switches_to_the_os_voice():
+    # Progress narration passes allow_fallback=False: a transient neural-TTS failure must SKIP the note,
+    # not speak it in the desktop voice — otherwise consecutive notes flip between voices mid-build.
+    fb = _Fallback()
+    e = _edge(fb)
+
+    def boom(_p):
+        raise RuntimeError("transient blip")
+
+    e._synthesize = lambda text: "x.mp3"  # type: ignore[method-assign]
+    e._play = boom  # type: ignore[method-assign]
+    e.speak("shaping the body", allow_fallback=False)
+    assert fb.spoke == []  # stayed in one voice (skipped), never the OS voice

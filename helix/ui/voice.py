@@ -68,6 +68,13 @@ _DISMISSAL_RE = re.compile(
     r"that'?s\s+all|thank(?:s| you)\s*,?\s*he+lix)\b",
     re.IGNORECASE,
 )
+# An action verb means the utterance is a REQUEST, not a sign-off — so "build a goodbye card" or
+# "that's all wrong, fix the layout" never end the session just because they contain 'goodbye'/'that's all'.
+_ACTION_RE = re.compile(
+    r"\b(?:build|make|create|add|fix|change|generate|design|open|show|set|turn|play|delete|remove|"
+    r"update|put|write|draw|model|edit|rename|move|connect|install)\b",
+    re.IGNORECASE,
+)
 
 
 def _pcm_rms(pcm: bytes) -> float:
@@ -91,8 +98,11 @@ def split_wake(text: str) -> tuple[bool, str]:
 
 
 def is_dismissal(text: str) -> bool:
-    """True if `text` closes an active conversation session (e.g. 'goodbye', 'that's all')."""
-    return bool(_DISMISSAL_RE.search(text or ""))
+    """True if `text` closes an active conversation session (e.g. 'goodbye', 'that's all') — but NOT when
+    it's actually a request that merely contains such a word ('build a goodbye card', 'that's all wrong,
+    fix it'), which must reach the model instead of silently ending the session."""
+    text = text or ""
+    return bool(_DISMISSAL_RE.search(text)) and not _ACTION_RE.search(text)
 
 
 _MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")  # [label](url) -> label
@@ -131,17 +141,24 @@ def speakable(text: str) -> str:
     return _WS.sub(" ", t).strip()
 
 
-# Short phrases that interrupt HELIX — "stop talking" / "be quiet" / "never mind".
-_STOP_RE = re.compile(
-    r"\b(?:stop(?:\s+(?:it|talking|now|please))?|be\s+quiet|never\s*mind|cancel\s+that|"
-    r"that'?s\s+enough|shut\s*up|hush|shush)\b",
+# Short phrases that interrupt HELIX — "stop" / "stop talking" / "be quiet" / "never mind". Matched only
+# as a WHOLE short utterance (after stripping fillers), so a real instruction that merely contains the
+# word — "stop the timer at zero", "add a stop button", "cancel that order screen" — is NOT swallowed.
+_STOP_FILLERS = re.compile(r"\b(?:um+|uh+|okay|ok|please|yeah|yep|hey|helix|now|just|like)\b", re.IGNORECASE)
+_STOP_FORMS = re.compile(
+    r"^(?:no\s+)*"  # 'no no stop'
+    r"(?:stop(?:\s+stop)*(?:\s+(?:it|talking))?|be\s+quiet|never\s*mind|cancel\s+that|"
+    r"that'?s\s+enough|enough|shut\s*up|hush|shush|quiet)$",
     re.IGNORECASE,
 )
 
 
 def is_stop(text: str) -> bool:
-    """True if `text` is a short command to stop the current response."""
-    return bool(_STOP_RE.search(text or ""))
+    """True only when the WHOLE short utterance is a stop/hush command (fillers ignored)."""
+    t = re.sub(r"[.!,?]+", " ", (text or "").lower())
+    t = _STOP_FILLERS.sub(" ", t)
+    t = " ".join(t.split())
+    return bool(_STOP_FORMS.match(t))
 
 
 def _write_wav16(data: bytes, path: str) -> None:
@@ -404,6 +421,7 @@ class VoiceController(QObject):
         self._session = False
         self._ptt = False
         self._barge_busy = False          # one in-flight 'stop?' transcription at a time while speaking
+        self._narrating = False           # a progress note is being spoken (skip new ones until it ends)
         self._mic_ok: bool | None = None  # cache the device probe; don't reopen it on every settle
         self._session_timer = QTimer(self)
         self._session_timer.setSingleShot(True)
@@ -444,6 +462,7 @@ class VoiceController(QObject):
         self._settings.set(VOICE_SETTING, bool(on))
         if on:
             return self._start_wake()
+        self.interrupt()  # stop any in-flight speech right away — toggling off goes quiet immediately
         self._stop_wake()
         self._end_session()
         self._set_state("idle")
@@ -496,8 +515,9 @@ class VoiceController(QObject):
                 self._start_wake()
                 return  # _start_wake re-enters _set_state("idle")
         if self._listener is not None:
-            # Listen while idle (full commands) AND while speaking (barge-in: only "stop" acts).
-            self._listener.set_active(state in ("idle", "speaking") and self.enabled())
+            # Listen while idle (full commands) AND while busy (speaking OR thinking/building) — during
+            # 'busy' only a short "stop" acts (barge-in), so the user can halt a long build by voice.
+            self._listener.set_active(state in ("idle", "speaking", "thinking") and self.enabled())
         self.stateChanged.emit(_ORB.get(state, OrbState.IDLE))
 
     # ----- wake-word flow -----
@@ -512,7 +532,7 @@ class VoiceController(QObject):
             return None
 
     def _on_utterance(self, pcm: bytes) -> None:
-        if self._state == "speaking":  # barge-in: only a "stop" phrase interrupts
+        if self._state in ("speaking", "thinking"):  # barge-in: only a "stop" phrase interrupts/halts
             if self._barge_busy:
                 return
             path = self._pcm_to_wav(pcm)
@@ -530,12 +550,18 @@ class VoiceController(QObject):
         self._transcribe(path, self._on_wake_text)
 
     def _on_barge_text(self, text: str) -> None:
-        # While HELIX speaks, only a SHORT stop phrase counts — so its own (longer) reply audio,
-        # picked up by the mic, can't make it cut itself off.
+        # While HELIX is busy (speaking a reply OR building), only a SHORT stop phrase counts — so its
+        # own reply/narration audio, picked up by the mic, can't make it cut itself off.
         self._barge_busy = False
         t = (text or "").strip()
         if t and len(t.split()) <= 4 and is_stop(t):
-            self.interrupt()
+            try:
+                self._tts.stop()  # hush any speech/narration now
+            except Exception:
+                pass
+            self._narrating = False
+            # Don't force idle here: the Console cancels the running turn/build and drives the orb state
+            # when the worker actually unwinds (stopping TTS ends a speaking turn on its own).
             self.stopRequested.emit()
 
     def _on_wake_text(self, text: str) -> None:
@@ -622,12 +648,36 @@ class VoiceController(QObject):
         self._set_state("thinking")
 
     def speak(self, text: str) -> None:
+        if self._narrating:  # a progress note is still talking — cut it for the real reply
+            self._narrating = False
+            try:
+                self._tts.stop()
+            except Exception:
+                pass
         text = speakable(text)  # strip markdown/symbols so they aren't read aloud as words
         if not text or not self._tts.available():
             self._set_state("idle")
             return
         self._set_state("speaking")
         self._run(lambda _emit: self._tts.speak(text), lambda *_: self._set_state("idle"))
+
+    def narrate(self, text: str) -> None:
+        """Speak a short progress note as HELIX works, WITHOUT changing the turn state (the mic stays
+        gated, the orb keeps 'thinking'). Skips while a previous note is still speaking, so notes pace
+        themselves to speech and never stack up — turning a stream of steps into spoken milestones."""
+        if self._narrating or not self.enabled():
+            return
+        text = speakable(text)
+        if not text or not self._tts.available():
+            return
+        self._narrating = True
+        # allow_fallback=False: progress notes stay in ONE voice — a transient neural-TTS failure skips
+        # the note instead of speaking it in the OS voice (which made consecutive notes flip voices).
+        self._run(lambda _emit: self._tts.speak(text, allow_fallback=False),
+                  lambda *_: self._clear_narrating())
+
+    def _clear_narrating(self) -> None:
+        self._narrating = False
 
     def idle(self) -> None:
         self._set_state("idle")
@@ -642,6 +692,7 @@ class VoiceController(QObject):
             self._tts.stop()
         except Exception:
             pass
+        self._narrating = False
         self._set_state("idle")
 
     def _say(self, text: str) -> None:

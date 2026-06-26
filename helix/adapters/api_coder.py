@@ -109,7 +109,7 @@ class ApiCoder:
         return bool((self._key_provider() or "").strip())
 
     def run_task(
-        self, repo_dir: Path, prompt: str, *, on_progress: ProgressFn | None = None
+        self, repo_dir: Path, prompt: str, *, on_progress: ProgressFn | None = None, cancel=None
     ) -> CoderResult:
         ws = Path(repo_dir)
         written: list[str] = []
@@ -117,6 +117,8 @@ class ApiCoder:
         turns: list[Turn] = [Turn(Role.USER, (Text(prompt),))]
 
         for _ in range(self._max_iters):
+            if cancel is not None and cancel.is_set():  # user stopped between model steps
+                return CoderResult(ok=False, summary=summary, error="cancelled")
             try:
                 reply = self._chat.chat(turns, system=_SYSTEM, tools=_FILE_TOOLS)
             except MissingApiKey as exc:

@@ -49,6 +49,37 @@ class SettingsView(QWidget):
         self._key.setPlaceholderText("sk-ant-…")
         root.addWidget(self._key)
 
+        # Tripo API key — enables film-quality (neural) 3D models. Optional; without it, models use the
+        # local primitive builder. Lives on this machine; only sent to Tripo when you build a model.
+        root.addSpacing(8)
+        root.addWidget(QLabel("Tripo API key (high-detail 3D models)"))
+        thint = QLabel(
+            "Optional. Enables recognizable, film-quality 3D models (your description is sent to Tripo "
+            "to generate them). Get a key at platform.tripo3d.ai. Without it, models use basic shapes."
+        )
+        thint.setObjectName("Status")
+        thint.setWordWrap(True)
+        root.addWidget(thint)
+        self._tripo = QLineEdit()
+        self._tripo.setEchoMode(QLineEdit.EchoMode.Password)
+        self._tripo.setPlaceholderText("tsk_…")
+        root.addWidget(self._tripo)
+
+        # 3D model detail — High keeps native polygon counts + detailed textures (no forced low-poly).
+        root.addSpacing(8)
+        root.addWidget(QLabel("3D model detail"))
+        dhint = QLabel(
+            "High = native polygon count and detailed textures — best quality, heavier to render. "
+            "Balanced is lighter and faster, and renders on any machine."
+        )
+        dhint.setObjectName("Status")
+        dhint.setWordWrap(True)
+        root.addWidget(dhint)
+        self._detail = QComboBox()
+        self._detail.addItem("Balanced — faster, lighter", "balanced")
+        self._detail.addItem("High — native poly + detailed textures", "high")
+        root.addWidget(self._detail)
+
         # Voice (only meaningful when the neural-TTS engine is present).
         self._voice = QComboBox()
         for label, voice_id in TTS_VOICES:
@@ -97,6 +128,10 @@ class SettingsView(QWidget):
 
     def reload(self) -> None:
         self._key.setText(self._settings.get("claude_api_key", "") or "")
+        self._tripo.setText(self._settings.get("tripo_api_key", "") or "")
+        detail = (self._settings.get("model_detail") or "balanced").lower()
+        didx = self._detail.findData(detail)
+        self._detail.setCurrentIndex(didx if didx >= 0 else 0)
         voice = self._settings.get("tts_voice") or DEFAULT_TTS_VOICE
         idx = self._voice.findData(voice)
         self._voice.setCurrentIndex(idx if idx >= 0 else 0)
@@ -109,6 +144,8 @@ class SettingsView(QWidget):
 
     def _save(self) -> None:
         self._settings.set("claude_api_key", self._key.text().strip())
+        self._settings.set("tripo_api_key", self._tripo.text().strip())
+        self._settings.set("model_detail", self._detail.currentData())
         self._settings.set("tts_voice", self._voice.currentData())
         self._settings.set("tts_rate", round(self._speed.value() / 10, 1))
         self._status.setText("Saved.")

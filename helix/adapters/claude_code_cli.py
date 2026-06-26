@@ -80,13 +80,17 @@ def _describe_tool(name: str, tool_input: dict) -> str:
 def _describe_event(event: dict) -> str | None:
     if event.get("type") != "assistant":
         return None
-    for block in (event.get("message", {}) or {}).get("content", []) or []:
-        if block.get("type") == "tool_use":
-            return _describe_tool(block.get("name", ""), block.get("input", {}) or {})
+    blocks = (event.get("message", {}) or {}).get("content", []) or []
+    # Prefer the model's own words — the fluent, plain-language progress narration — over a mechanical
+    # tool label, so the user hears "adding the camera lens", not "Editing model.js".
+    for block in blocks:
         if block.get("type") == "text":
             text = (block.get("text") or "").strip()
             if text:
                 return text.split("\n", 1)[0][:90]
+    for block in blocks:
+        if block.get("type") == "tool_use":
+            return _describe_tool(block.get("name", ""), block.get("input", {}) or {})
     return None
 
 
@@ -119,7 +123,7 @@ class ClaudeCodeCli:
         return self._cli() is not None and bool(token or key)
 
     def run_task(
-        self, repo_dir: Path, prompt: str, *, on_progress: ProgressFn | None = None
+        self, repo_dir: Path, prompt: str, *, on_progress: ProgressFn | None = None, cancel=None
     ) -> CoderResult:
         cli = self._cli()
         if not cli:
@@ -169,6 +173,25 @@ class ClaudeCodeCli:
         stderr_thread.start()
         killer = threading.Timer(self._timeout, proc.kill)
         killer.start()
+
+        # Stop watcher: if the user cancels mid-build, kill the child so its stdout closes and the read
+        # loop unwinds at once (instead of waiting out the whole build).
+        watch_stop = threading.Event()
+
+        def _watch_cancel() -> None:
+            while not watch_stop.wait(0.2):
+                if cancel is not None and cancel.is_set():
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return
+
+        cancel_thread = None
+        if cancel is not None:
+            cancel_thread = threading.Thread(target=_watch_cancel, daemon=True)
+            cancel_thread.start()
+
         final = None
         try:
             for line in proc.stdout:  # type: ignore[union-attr]
@@ -192,7 +215,13 @@ class ClaudeCodeCli:
             return CoderResult(ok=False, summary="", error=f"Coder stream failed: {exc}")
         finally:
             killer.cancel()
+            watch_stop.set()
+            if cancel_thread is not None:
+                cancel_thread.join(timeout=1)
             stderr_thread.join(timeout=2)
+
+        if cancel is not None and cancel.is_set():
+            return CoderResult(ok=False, summary="", error="cancelled")
 
         stderr = "".join(stderr_lines)
 

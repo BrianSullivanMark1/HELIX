@@ -6,6 +6,7 @@ no faster-whisper the voice controls stay hidden and it's a normal text app.
 """
 from __future__ import annotations
 
+import re
 from html import escape
 
 from PyQt6.QtCore import QEvent, QRectF, Qt, QTimer, pyqtSignal
@@ -21,13 +22,39 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from typing import TYPE_CHECKING
+
 from helix.ports.speech import SpeechIn, SpeechOut
 from helix.ports.stores import SettingsStore
+from helix.services.cancel import CancelToken
 from helix.services.conversation import ConversationService
 from helix.ui.orb import OrbState, PresenceOrb
 from helix.ui.theme import CYAN, LINE, MUTED
-from helix.ui.voice import VoiceController, split_visuals
+from helix.ui.voice import VoiceController, is_stop, split_visuals
 from helix.ui.workers import QtWorker
+
+if TYPE_CHECKING:
+    from helix.services.cancel import BuildHandle
+    from helix.services.forge import ForgeService
+
+# Recognize a yes / no when HELIX asks whether to remove half-built work after a stop.
+_YES = re.compile(r"\b(?:yes|yeah|yep|yup|sure|ok(?:ay)?|please|do\s+it|go\s+ahead|remove|delete|"
+                  r"discard|get\s+rid|trash|scrap)\b", re.IGNORECASE)
+_NO = re.compile(r"\b(?:no|nope|nah|keep|leave\s+it|don'?t|cancel|never\s*mind)\b", re.IGNORECASE)
+_NEG = re.compile(r"\b(?:not|never)\b|n'?t\b", re.IGNORECASE)  # a negation is never a 'remove'
+
+
+def _cleanup_answer(text: str) -> str:
+    """Classify a reply to 'remove the half-built X?' as 'yes' / 'no' / 'neither'. Safe by default: a
+    negation ("not sure", "don't") or anything unclear NEVER means remove — only a clean yes does."""
+    text = text or ""
+    if _NEG.search(text):
+        return "no" if _NO.search(text) else "neither"
+    if _YES.search(text) and not _NO.search(text):
+        return "yes"
+    if _NO.search(text):
+        return "no"
+    return "neither"
 
 
 class _BarChart(QWidget):
@@ -86,6 +113,7 @@ class _BarChart(QWidget):
 
 class ConsoleView(QWidget):
     openSettingsRequested = pyqtSignal()
+    restartRequested = pyqtSignal()  # user asked to restart so voice can pre-warm and start listening
 
     def __init__(
         self,
@@ -94,14 +122,18 @@ class ConsoleView(QWidget):
         speech_in: SpeechIn | None = None,
         speech_out: SpeechOut | None = None,
         orb: PresenceOrb | None = None,
+        forge: "ForgeService | None" = None,
     ) -> None:
         super().__init__()
         self.setObjectName("Console")
         self._conversation = conversation
         self._settings = settings
+        self._forge = forge  # for removing/rolling back work a 'stop' interrupted
         self._workers: set[QtWorker] = set()
         self._busy = False
         self._cancelled = False  # set by a 'stop' — a pending reply is shown but not spoken
+        self._cancel: CancelToken | None = None  # the running turn's stop signal
+        self._pending_cleanup: "BuildHandle | None" = None  # awaiting yes/no to remove half-built work
         self.orb = orb  # shared with the whole window; owned by HelixMainWindow
 
         self._voice: VoiceController | None = None
@@ -226,18 +258,23 @@ class ConsoleView(QWidget):
         return super().eventFilter(obj, event)
 
     def _stop(self) -> None:
-        """Interrupt the current reply: stop speaking now, and don't speak one that's still pending."""
+        """Interrupt the current turn: hush speech now, and actually halt a running build."""
         if self._voice is not None:
             self._voice.interrupt()
-        if self._busy:
-            self._cancelled = True
-        self.status.setText("Stopped.")
+        self._cancel_active()
 
     def _on_voice_stop(self) -> None:
-        # The user said "stop" — the controller already hushed any speech; cancel a pending reply too.
+        # The user said "stop" — the controller already hushed any speech; halt the running build too.
+        self._cancel_active()
+
+    def _cancel_active(self) -> None:
+        """Signal the in-flight turn/build to stop. The build unwinds and (if one was in progress) the
+        cleanup offer fires when the worker finishes."""
         if self._busy:
             self._cancelled = True
-        self.status.setText("Stopped.")
+            if self._cancel is not None:
+                self._cancel.cancel()  # kills the coder subprocess / breaks the build loop
+        self.status.setText("Stopping…" if self._busy else "Stopped.")
 
     def toggle_voice(self) -> None:
         """Flip hands-free voice on/off. Wired to both the Voice button and a tap on the orb."""
@@ -255,7 +292,11 @@ class ConsoleView(QWidget):
         elif started:
             self.status.setText("Listening — say “HELIX”.")
         elif voice.restart_required():
-            self.status.setText("Voice saved — restart HELIX to start hands-free listening.")
+            # Honest about the real state: it's saved on, but the speech model only pre-warms at launch,
+            # so it isn't actually listening yet. Offer a one-click restart instead of a silent "on".
+            self.status.setText("Voice needs a restart to start listening.")
+            self._add_bubble("helix", "Voice is on, but I need a quick restart to start listening.")
+            self._add_actions([("Restart now", self.restartRequested.emit), ("Later", lambda: None)])
         else:
             self.status.setText("Voice unavailable on this machine.")
 
@@ -267,19 +308,27 @@ class ConsoleView(QWidget):
             self._talk.setVisible(False)
             return
         on = voice.enabled()
+        listening = on and voice.can_listen()          # actually hearing you right now
+        needs_restart = on and not voice.can_listen()  # saved on, but not pre-warmed this run
         self._voice_btn.setVisible(True)
         # A near-solid dark pill so the label reads over the bright orb (cyan-on-cyan was invisible).
-        edge = "#3fe0e0" if on else "#26323b"
-        txt = "#3fe0e0" if on else "#aebcc3"
+        edge = "#3fe0e0" if listening else ("#e0a13f" if needs_restart else "#26323b")
+        txt = "#3fe0e0" if listening else ("#e0a13f" if needs_restart else "#aebcc3")
         self._voice_btn.setStyleSheet(
             f"QPushButton{{background:rgba(8,11,15,0.93);border:1px solid {edge};border-radius:14px;"
             f"color:{txt};padding:8px 18px;}} QPushButton:hover{{border-color:#3fe0e0;}}"
         )
-        self._voice_btn.setText("🔊 Voice on — say “HELIX”" if on else "🔇 Voice off")
+        # Tell the truth: never say "say HELIX" when it isn't actually listening.
+        self._voice_btn.setText(
+            "🔊 Voice on — say “HELIX”" if listening
+            else ("🔊 Voice on · restart to listen" if needs_restart else "🔇 Voice off")
+        )
         self._voice_btn.setToolTip(
             "Listening for “HELIX”. Say “stop” to interrupt, “goodbye” to end; tap the orb to stop/mute."
-            if on
-            else "Turn on hands-free voice — then just say “HELIX” (or tap the orb)."
+            if listening else
+            "Voice is on but needs a restart to start listening (the speech model loads at launch)."
+            if needs_restart else
+            "Turn on hands-free voice — then just say “HELIX” (or tap the orb)."
         )
         self._talk.setVisible(True)
         self._talk.setEnabled(voice.can_listen())
@@ -315,9 +364,19 @@ class ConsoleView(QWidget):
 
     def _submit(self, text: str, *, from_voice: bool) -> None:
         text = (text or "").strip()
-        if not text or self._busy:
+        if not text:
+            return
+        if self._pending_cleanup is not None:  # we asked "remove the half-built X?" — this is the answer
+            self._answer_cleanup(text)
+            return
+        if self._busy:
+            # Already working. If it's a short "stop", treat the typed/spoken word as a stop command.
+            if is_stop(text):
+                self._add_bubble("you", text)
+                self._stop()
             return
         self._cancelled = False
+        self._cancel = CancelToken()
         self._add_bubble("you", text)
         self._busy = True
         self._input.setEnabled(False)
@@ -329,14 +388,22 @@ class ConsoleView(QWidget):
             self.orb.set_state(OrbState.THINKING)
             self.status.setText("Thinking…")
 
-        worker = QtWorker(lambda emit: self._conversation.run_turn(text, on_progress=emit))
+        token = self._cancel
+        worker = QtWorker(lambda emit: self._conversation.run_turn(text, on_progress=emit, cancel=token))
         # Strong ref until the QThread truly finishes (see _retire) so the GC can't kill a live thread.
         self._workers.add(worker)
-        worker.progress.connect(self.status.setText)
+        worker.progress.connect(self._on_progress)
         worker.finished_ok.connect(self._on_reply)
         worker.failed.connect(self._on_fail)
         worker.finished.connect(lambda w=worker: self._retire(w))
         worker.start()
+
+    def _on_progress(self, line: str) -> None:
+        # Live commentary as HELIX works: show every step on the status line, and (voice on) speak the
+        # milestones — narrate() paces them to speech so it's a fluent "doing this, next that", not chatter.
+        self.status.setText(line)
+        if self._voice is not None:
+            self._voice.narrate(line)
 
     def _on_reply(self, text: object) -> None:
         # Split the prose from any table/chart blocks: prose is shown AND spoken; visuals are only shown.
@@ -347,9 +414,12 @@ class ConsoleView(QWidget):
             self._add_visual(spec)
         if self._cancelled:  # the user said stop while this was generating — show it, don't speak it
             self._cancelled = False
+            handle = self._cancel.build if self._cancel is not None else None
             if self._voice is not None:
                 self._voice.idle()
             self._idle_status()
+            if handle is not None:  # a build was interrupted — offer to remove the half-finished work
+                self._offer_cleanup(handle)
             return
         if self._voice is not None and self._voice.enabled():
             self._voice.speak(spoken)  # speak the prose only — the table/chart is shown, never read
@@ -377,6 +447,66 @@ class ConsoleView(QWidget):
             "Listening for “HELIX”…" if self._voice and self._voice.enabled()
             else "Ready when you are."
         )
+
+    # ----- cleanup after a stopped build -----
+    def _offer_cleanup(self, handle: "BuildHandle") -> None:
+        """A build was stopped mid-run — ask whether to remove (new) or roll back (iteration) the work."""
+        if self._forge is None:
+            return  # nothing we can do without the forge; leave the partial work in place
+        self._pending_cleanup = handle
+        verb = "roll back" if handle.iterating else "remove"
+        q = f"I stopped. Want me to {verb} the half-built “{handle.name}”?"
+        self._add_bubble("helix", q)
+        self._add_actions([
+            ("Roll back" if handle.iterating else "Remove", self._cleanup_remove),
+            ("Keep it", self._cleanup_keep),
+        ])
+        if self._voice is not None and self._voice.enabled():
+            self._voice.speak(q)  # spoken too, so the user can answer "yes"/"no" by voice
+
+    def _answer_cleanup(self, text: str) -> None:
+        answer = _cleanup_answer(text)
+        if answer == "yes":
+            self._cleanup_remove()
+        elif answer == "no":
+            self._cleanup_keep()
+        else:  # neither a clear yes nor no — keep the work and treat the words as a fresh request
+            self._pending_cleanup = None
+            self._submit(text, from_voice=False)
+
+    def _cleanup_remove(self) -> None:
+        handle = self._pending_cleanup
+        self._pending_cleanup = None
+        if handle is None or self._forge is None:
+            return
+        try:
+            self._forge.discard_build(handle)
+            msg = f"{'Rolled back' if handle.iterating else 'Removed'} “{handle.name}”."
+        except Exception as exc:
+            msg = f"I couldn't remove it: {exc}"
+        self._announce(msg)
+
+    def _cleanup_keep(self) -> None:
+        self._pending_cleanup = None
+        self._announce("Okay, I kept it.")
+
+    def _announce(self, msg: str) -> None:
+        self._add_bubble("helix", msg)
+        self.status.setText(msg)
+        if self._voice is not None and self._voice.enabled():
+            self._voice.speak(msg)
+
+    def _add_actions(self, buttons: list[tuple[str, object]]) -> None:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        for label, cb in buttons:
+            btn = QPushButton(label)
+            btn.setObjectName("Nav")
+            btn.clicked.connect(lambda _checked=False, f=cb: f())
+            row.addWidget(btn)
+        row.addStretch(1)
+        self._tlayout.insertLayout(self._tlayout.count() - 1, row)
+        QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _retire(self, worker: QtWorker) -> None:
         self._workers.discard(worker)

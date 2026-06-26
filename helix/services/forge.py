@@ -2,16 +2,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from helix.domain.errors import BuildError
-from helix.domain.events import BuildCreated, BuildIterated
+from helix.domain.errors import BuildCancelled, BuildError
+from helix.domain.events import BuildCreated, BuildDeleted, BuildIterated
 from helix.domain.models import App
 from helix.ports.coder import CoderAgent, ProgressFn
 from helix.ports.events import EventBus
 from helix.ports.repo import VersionedRepo
 from helix.services.builds import BuildService
+from helix.services.cancel import BuildHandle, CancelToken
 from helix.services.prompts import build_app_prompt
 from helix.services.selfdev import restore_if_changed, scan_tree, snapshot_files, tree_changed
+
+if TYPE_CHECKING:
+    from helix.services.model_baker import ModelBaker
 
 
 class ForgeService:
@@ -23,6 +28,7 @@ class ForgeService:
         repo: VersionedRepo,
         app_root: Path,
         guard_files: list[Path] | None = None,
+        model_baker: "ModelBaker | None" = None,
     ) -> None:
         self._builds = builds
         self._coder = coder
@@ -30,6 +36,7 @@ class ForgeService:
         self._repo = repo
         self._app_root = app_root
         self._guard_files = list(guard_files or [])
+        self._baker = model_baker  # turns a built model.json into assets/model.glb + a viewer
 
     def build(
         self,
@@ -39,6 +46,7 @@ class ForgeService:
         prompt: str | None = None,
         is_model: bool | None = None,
         on_progress: ProgressFn | None = None,
+        cancel: CancelToken | None = None,
     ) -> App:
         # `prompt` overrides the default app-builder instruction so the same sandboxed loop can also
         # drive a different kind of build (e.g. a 3D model). `is_model` tags the result so it lands in
@@ -53,6 +61,9 @@ class ForgeService:
         else:
             app.is_model = is_model
         workspace = self._builds.create_workspace(app)
+        # Record what's being built so a mid-run 'stop' can offer to remove/roll back this exact work.
+        if cancel is not None:
+            cancel.build = BuildHandle(app.slug, app.name, iterating, bool(app.is_model))
 
         # A build may ONLY write inside its own workspace. Snapshot everything else — source, data/
         # (db, settings, sibling apps), and the git hooks dir — and verify it's untouched afterward.
@@ -63,9 +74,13 @@ class ForgeService:
         hooks_sig = scan_tree(hooks)
 
         result = self._coder.run_task(
-            workspace, prompt or build_app_prompt(app.name, request), on_progress=on_progress
+            workspace, prompt or build_app_prompt(app.name, request),
+            on_progress=on_progress, cancel=cancel,
         )
         restore_if_changed(guard)
+        if cancel is not None and cancel.is_set():
+            # Stopped mid-build: don't finalize. The token carries the handle so the UI can offer cleanup.
+            raise BuildCancelled(app.slug, app.name, iterating, bool(app.is_model))
         if not result.ok:
             raise BuildError(result.error or result.summary or "the build failed")
 
@@ -74,9 +89,30 @@ class ForgeService:
             self._revert_escapes(escaped)
             raise BuildError("the build wrote outside its workspace and was blocked.")
 
+        # A model is delivered as a small model.json the coder wrote; HELIX itself bakes it into a real
+        # mesh + viewer here (in-process — the coder never gets a shell). Runs AFTER the escape check
+        # (the coder's output is validated first) and only writes inside the workspace, which the guard
+        # skips. bake() never raises: a bad spec becomes a friendly in-viewer message.
+        if app.is_model and self._baker is not None:
+            self._baker.bake(workspace)
+
         app = self._builds.finalize(app)
         self._bus.publish(BuildIterated(app) if iterating else BuildCreated(app))
         return app
+
+    def discard_build(self, handle: BuildHandle) -> None:
+        """Remove the work a stopped build left behind: delete a brand-new build outright, or roll an
+        interrupted iteration back to its last committed (good) version. Announces BuildDeleted so the
+        menu refreshes."""
+        ws = self._builds.workspace(handle.slug)
+        if handle.iterating:
+            try:
+                self._repo.discard_changes(ws)  # keep the prior good version; drop the partial edit
+            except Exception:
+                pass
+        else:
+            self._builds.delete(handle.slug)  # a new build that never finished — remove it entirely
+        self._bus.publish(BuildDeleted(handle.slug))
 
     def _revert_escapes(self, escaped: list[str]) -> None:
         root = self._app_root.resolve()

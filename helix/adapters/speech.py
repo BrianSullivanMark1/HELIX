@@ -131,7 +131,7 @@ class OsSpeechOut:
     def available(self) -> bool:
         return platform.system() in ("Windows", "Darwin")
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, allow_fallback: bool = True) -> None:
         text = (text or "").strip()
         if not text:
             self.stop()
@@ -237,7 +237,7 @@ class EdgeSpeechOut:
     def available(self) -> bool:
         return edge_available() or self._fallback.available()
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, allow_fallback: bool = True) -> None:
         text = (text or "").strip()
         if not text:
             return
@@ -248,8 +248,13 @@ class EdgeSpeechOut:
             if self._stopped:  # stopped during synthesis — don't start playing
                 return
             self._play(path)
-        except Exception as exc:  # offline, WMP missing, etc. — still speak, via the OS voice
+        except Exception as exc:  # offline, WMP missing, etc.
             if self._stopped:  # we were told to stop; a killed proc is NOT a failure — never fall back
+                return
+            if not allow_fallback:
+                # Progress narration: stay in ONE voice. Skip this note rather than speak it in the OS
+                # voice, which would make consecutive notes flip between the neural and desktop voices.
+                _LOG.warning("neural TTS failed (%s); skipping this narration note", exc)
                 return
             _LOG.warning("neural TTS failed (%s); falling back to the OS voice", exc)
             self._fallback.speak(text)
@@ -271,10 +276,20 @@ class EdgeSpeechOut:
         async def _go() -> None:
             await edge_tts.Communicate(text, voice, rate=rate).save(path)
 
-        asyncio.run(_go())
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
-            raise RuntimeError("edge-tts produced no audio")
-        return path
+        # Retry transient network blips so a single failed request doesn't drop us to the OS voice — the
+        # main cause of consecutive lines coming out in different voices during a build.
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            if self._stopped:
+                raise RuntimeError("stopped")
+            try:
+                asyncio.run(_go())
+                if os.path.getsize(path) > 0:
+                    return path
+                last_exc = RuntimeError("edge-tts produced no audio")
+            except Exception as exc:
+                last_exc = exc
+        raise last_exc or RuntimeError("edge-tts produced no audio")
 
     def _play(self, path: str) -> None:
         if platform.system() != "Windows":
@@ -324,7 +339,7 @@ class NullSpeechOut:
     def available(self) -> bool:
         return False
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, allow_fallback: bool = True) -> None:
         pass
 
     def stop(self) -> None:

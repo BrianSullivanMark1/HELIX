@@ -10,12 +10,30 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 NAME = "HELIX"
+
+
+def _force_rmtree(path: Path) -> None:
+    """Remove dist/<name> even when it holds read-only files — built apps keep a git repo, and git marks
+    loose objects read-only, which PyInstaller's own --clean cannot delete on Windows (it crashes). We
+    clear the read-only bit and retry. (Data under dist/<name>/data is NOT bundled; back it up first.)"""
+    if not path.exists():
+        return
+
+    def _onerror(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onerror=_onerror)
 
 # Standard MSVC runtime DLLs. PyQt6 bundles an OLD copy (14.26); ctranslate2/onnxruntime want a newer
 # one. Windows loads Qt's copy first, then the voice stack calls into it and access-violates on launch.
@@ -53,6 +71,10 @@ def main(argv: list[str] | None = None) -> int:
         "--name", NAME, "--onedir", "--windowed",
         "--collect-submodules", "helix",
     ]
+    # The 3D baker loads these lazily at runtime (trimesh.boolean -> manifold3d; extrude -> shapely /
+    # mapbox_earcut), so PyInstaller's static scan misses them — collect each in full.
+    for pkg in ("trimesh", "shapely", "manifold3d", "mapbox_earcut"):
+        args += ["--collect-all", pkg]
     if icon.exists():
         args += ["--icon", str(icon)]
     if "--with-voice" in argv:
@@ -64,6 +86,9 @@ def main(argv: list[str] | None = None) -> int:
         args += ["--exclude-module", "faster_whisper", "--exclude-module", "edge_tts",
                  "--exclude-module", "torch"]
     args.append(str(ROOT / "main.py"))
+
+    # Pre-clean dist/<name> ourselves (read-only-aware) so PyInstaller doesn't choke on built apps' .git.
+    _force_rmtree(ROOT / "dist" / NAME)
 
     print("Running:", " ".join(args))
     result = subprocess.run(args, cwd=str(ROOT))

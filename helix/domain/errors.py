@@ -31,3 +31,15 @@ class MissingApiKey(HelixError):
 
 class BuildError(HelixError):
     """A build (or coder run) failed."""
+
+
+class BuildCancelled(HelixError):
+    """A build was stopped by the user mid-run. Carries what was being built so the UI can offer to
+    remove (a new build) or roll back (an iteration) the half-finished work."""
+
+    def __init__(self, slug: str, name: str, iterating: bool, is_model: bool = False):
+        super().__init__(f"build of {name!r} was stopped")
+        self.slug = slug
+        self.name = name
+        self.iterating = iterating
+        self.is_model = is_model

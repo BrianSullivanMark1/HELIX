@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import threading
 
+from helix.domain.errors import BuildCancelled
 from helix.domain.models import Message, Role
 from helix.ports.clock import Clock
 from helix.ports.coder import ProgressFn
 from helix.ports.llm import ChatModel, Text, ToolResult, Turn
 from helix.ports.stores import ConversationStore, MemoryStore
+from helix.services.cancel import CancelToken
 from helix.services.tools import ToolRegistry
+
+STOPPED_REPLY = "Okay, I stopped."  # shown (not spoken) when the user halts a turn; UI may offer cleanup
 
 MAX_STEPS = 6  # guard against a runaway tool loop
 
@@ -38,17 +42,25 @@ class ConversationService:
         # appends interleave and the API gets a malformed (e.g. two-user-in-a-row) turn list.
         self._lock = threading.Lock()
 
-    def run_turn(self, user_text: str, *, on_progress: ProgressFn | None = None) -> str:
+    def run_turn(
+        self, user_text: str, *, on_progress: ProgressFn | None = None,
+        cancel: CancelToken | None = None,
+    ) -> str:
         with self._lock:
-            return self._run_turn_locked(user_text, on_progress=on_progress)
+            return self._run_turn_locked(user_text, on_progress=on_progress, cancel=cancel)
 
-    def _run_turn_locked(self, user_text: str, *, on_progress: ProgressFn | None = None) -> str:
+    def _run_turn_locked(
+        self, user_text: str, *, on_progress: ProgressFn | None = None,
+        cancel: CancelToken | None = None,
+    ) -> str:
         self._store.append(Message(Role.USER, user_text, self._clock.now()))
         turns = self._history_turns()
         specs = self._tools.specs()
 
         reply = None
         for _ in range(MAX_STEPS):
+            if cancel is not None and cancel.is_set():
+                return self._remember(STOPPED_REPLY)
             reply = self._chat.chat(turns, system=self._system, tools=specs)
             u = reply.usage
             self._memory.record_usage(u.input_tokens, u.output_tokens, u.cost_usd)
@@ -62,10 +74,16 @@ class ConversationService:
                 if on_progress:
                     on_progress(self._progress_label(call.name, call.args))
                 try:
-                    out = self._tools.dispatch(call.name, call.args, on_progress=on_progress)
+                    out = self._tools.dispatch(
+                        call.name, call.args, on_progress=on_progress, cancel=cancel
+                    )
                     results.append(ToolResult(call.id, out))
+                except BuildCancelled:  # the user stopped mid-build — end the turn (don't loop the model)
+                    return self._remember(STOPPED_REPLY)
                 except Exception as exc:  # surface to the model so it can recover gracefully
                     results.append(ToolResult(call.id, f"Error: {exc}", is_error=True))
+            if cancel is not None and cancel.is_set():
+                return self._remember(STOPPED_REPLY)
             turns.append(Turn(Role.USER, tuple(results)))
 
         return self._remember((reply.text if reply else "") or "I got stuck — could you rephrase?")
