@@ -111,6 +111,7 @@ class Container:
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM
         )
         self.agents = AgentService(self.settings, self.conversation)
+        self.tools.bind_agents(self.agents)  # late-bind: agents → conversation → tools, so it can't be ctor-passed
         self.tasks = TaskService(self.builds)
         self.restart = Restarter(self.paths.root / "main.py", self.paths.root).restart
 

@@ -8,7 +8,7 @@ import stat
 from datetime import datetime
 from pathlib import Path
 
-from helix.domain.models import App, AppKind, slugify
+from helix.domain.models import App, AppKind, BuildKind, slugify
 from helix.ports.clock import Clock
 from helix.ports.repo import VersionedRepo
 
@@ -67,6 +67,16 @@ class BuildService:
             if manifest.exists():
                 apps.append(self._read_manifest(manifest))
         return apps
+
+    def categorized(self) -> dict[str, list[App]]:
+        """Partition every workspace build by its canonical BuildKind — the single source of truth the
+        menu and the orb's list both render, so they always agree. (Agents are a separate substrate and
+        are folded in by the caller.) Classification lives here, never in the view."""
+        buckets: dict[str, list[App]] = {"apps": [], "tasks": [], "models": []}
+        by_kind = {BuildKind.APP: "apps", BuildKind.TASK: "tasks", BuildKind.MODEL: "models"}
+        for app in self.list():
+            buckets[by_kind.get(app.build_kind, "apps")].append(app)
+        return buckets
 
     def delete(self, slug: str) -> bool:
         ws = self.workspace(slug)
@@ -131,16 +141,28 @@ class BuildService:
             "name": app.name,
             "request": app.request,
             "kind": app.kind.value,
+            "build_kind": app.build_kind.value,
             "entry_point": app.entry_point,
             "created_at": (app.created_at or self._clock.now()).isoformat(),
-            "is_model": app.is_model,
+            "is_model": app.is_model,  # legacy mirror of build_kind == MODEL (back-compat reads)
         }
         (ws / MANIFEST).write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def _read_manifest(self, manifest: Path) -> App:
         d = json.loads(manifest.read_text(encoding="utf-8"))
-        if "is_model" not in d:  # legacy build (predates the flag): classify once, then persist
+        changed = False
+        if "is_model" not in d:  # very old build (predates the flag): classify by the viewer heuristic
             d["is_model"] = self._looks_like_model(manifest.parent, d.get("entry_point"))
+            changed = True
+        if "build_kind" not in d:  # derive the canonical taxonomy once from the legacy fields, then persist
+            if d.get("is_model"):
+                d["build_kind"] = BuildKind.MODEL.value
+            elif d.get("kind") == AppKind.PYTHON.value:
+                d["build_kind"] = BuildKind.TASK.value
+            else:
+                d["build_kind"] = BuildKind.APP.value
+            changed = True
+        if changed:
             try:
                 manifest.write_text(json.dumps(d, indent=2), encoding="utf-8")
             except OSError:
@@ -151,9 +173,9 @@ class BuildService:
             name=d["name"],
             request=d.get("request", ""),
             kind=AppKind(d.get("kind", "unknown")),
+            build_kind=BuildKind(d.get("build_kind", "app")),
             entry_point=d.get("entry_point"),
             created_at=datetime.fromisoformat(created) if created else None,
-            is_model=bool(d.get("is_model", False)),
         )
 
     @staticmethod

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from helix.domain.errors import BuildCancelled, BuildError
 from helix.domain.events import BuildCreated, BuildDeleted, BuildIterated
-from helix.domain.models import App
+from helix.domain.models import App, BuildKind, slugify
 from helix.ports.coder import CoderAgent, ProgressFn
 from helix.ports.events import EventBus
 from helix.ports.repo import VersionedRepo
@@ -44,22 +44,22 @@ class ForgeService:
         request: str,
         *,
         prompt: str | None = None,
-        is_model: bool | None = None,
+        kind: BuildKind | None = None,
         on_progress: ProgressFn | None = None,
         cancel: CancelToken | None = None,
     ) -> App:
         # `prompt` overrides the default app-builder instruction so the same sandboxed loop can also
-        # drive a different kind of build (e.g. a 3D model). `is_model` tags the result so it lands in
-        # the Models tab instead of Apps. The sandbox/guard is identical either way.
+        # drive a different kind of build (a task, a 3D model). `kind` tags the result so it lands in the
+        # right menu tab. The sandbox/guard is identical for every kind.
         app = App.from_request(name, request)
         iterating = self._builds.exists(app.slug)
-        if is_model is None:
-            # Caller didn't classify: keep an existing build's class on iteration (so a plain rebuild
+        if kind is None:
+            # Caller didn't classify: keep an existing build's kind on iteration (so a plain rebuild
             # never silently moves a model out of the Models tab); new builds default to a plain app.
             prior = next((a for a in self._builds.list() if a.slug == app.slug), None) if iterating else None
-            app.is_model = bool(prior and prior.is_model)
+            app.build_kind = prior.build_kind if prior else BuildKind.APP
         else:
-            app.is_model = is_model
+            app.build_kind = kind
         workspace = self._builds.create_workspace(app)
         # Record what's being built so a mid-run 'stop' can offer to remove/roll back this exact work.
         if cancel is not None:
@@ -99,6 +99,20 @@ class ForgeService:
         app = self._builds.finalize(app)
         self._bus.publish(BuildIterated(app) if iterating else BuildCreated(app))
         return app
+
+    def remove_build(self, name: str) -> bool:
+        """Delete a build the user named in conversation (app/task/model) and refresh the menu. Matches
+        by slug first, then by display name (case-insensitive). Returns True if something was removed."""
+        target = name.strip().lower()
+        slug = slugify(name)
+        app = next(
+            (a for a in self._builds.list() if a.slug == slug or a.name.strip().lower() == target),
+            None,
+        )
+        if app is None or not self._builds.delete(app.slug):
+            return False
+        self._bus.publish(BuildDeleted(app.slug))
+        return True
 
     def discard_build(self, handle: BuildHandle) -> None:
         """Remove the work a stopped build left behind: delete a brand-new build outright, or roll an

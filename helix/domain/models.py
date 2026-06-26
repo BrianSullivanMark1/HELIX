@@ -15,11 +15,25 @@ class Role(str, Enum):
 
 
 class AppKind(str, Enum):
-    """How a built app runs."""
+    """How a built app runs (the run mechanism — NOT the taxonomy; see BuildKind)."""
 
     HTML = "html"  # open in a webview / browser
     PYTHON = "python"  # run in a console
     UNKNOWN = "unknown"
+
+
+class BuildKind(str, Enum):
+    """The taxonomy of a Build — WHAT the Forge made, independent of how it runs.
+
+    Apps, tasks, and models are workspace builds (data/builds/<slug>/). Agents are a lighter
+    substrate (a saved goal, no workspace — see AgentService) but share the taxonomy so every kind
+    is conjurable by the orb and the menu can present them uniformly.
+    """
+
+    APP = "app"  # an interactive thing that opens a screen
+    TASK = "task"  # a headless script that does a thing when run (console)
+    AGENT = "agent"  # a saved goal HELIX runs on demand
+    MODEL = "model"  # a 3D model/animation conjured to show the user (build_3d_model)
 
 
 def slugify(name: str) -> str:
@@ -44,10 +58,15 @@ class App:
     slug: str
     name: str
     request: str  # the originating plain-language description
-    kind: AppKind = AppKind.UNKNOWN
+    kind: AppKind = AppKind.UNKNOWN  # run mechanism (HTML/PYTHON/UNKNOWN)
+    build_kind: BuildKind = BuildKind.APP  # taxonomy (app/task/model) — the canonical kind
     entry_point: str | None = None
     created_at: datetime | None = None
-    is_model: bool = False  # a 3D model/animation (build_3d_model) — shown in the Models tab, not Apps
+
+    @property
+    def is_model(self) -> bool:
+        """Back-compat convenience: a 3D model build is shown in the Models tab, not Apps."""
+        return self.build_kind == BuildKind.MODEL
 
     @classmethod
     def from_request(cls, name: str, request: str) -> "App":

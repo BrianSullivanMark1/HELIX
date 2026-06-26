@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from helix.domain.models import App
+from helix.domain.models import App, BuildKind
 from helix.services.builds import BuildService
 
 
@@ -87,7 +87,7 @@ def test_rename_same_slug_just_updates_name(tmp_path):
 def test_is_model_round_trips_through_the_manifest(tmp_path):
     svc = _svc(tmp_path)
     app = App.from_request("Battery", "show how a battery works")
-    app.is_model = True
+    app.build_kind = BuildKind.MODEL
     svc.create_workspace(app)
     (svc.workspace("battery") / "index.html").write_text("<html></html>", encoding="utf-8")
     svc.finalize(app)
@@ -116,3 +116,37 @@ def test_rename_blank_or_missing_returns_none(tmp_path):
     _make(svc, "Thing")
     assert svc.rename("thing", "   ") is None
     assert svc.rename("does-not-exist", "Whatever") is None
+
+
+def _make_kind(svc: BuildService, name: str, kind: BuildKind, entry: str) -> App:
+    app = App.from_request(name, "x")
+    app.build_kind = kind
+    svc.create_workspace(app)
+    (svc.workspace(app.slug) / entry).write_text("x", encoding="utf-8")
+    return svc.finalize(app)
+
+
+def test_categorized_partitions_by_build_kind(tmp_path):
+    svc = _svc(tmp_path)
+    _make_kind(svc, "Tip Calc", BuildKind.APP, "index.html")
+    _make_kind(svc, "Battery", BuildKind.MODEL, "index.html")
+    _make_kind(svc, "Cleanup", BuildKind.TASK, "main.py")
+    cat = svc.categorized()
+    assert {a.slug for a in cat["apps"]} == {"tip-calc"}
+    assert {a.slug for a in cat["models"]} == {"battery"}
+    assert {a.slug for a in cat["tasks"]} == {"cleanup"}
+
+
+def test_legacy_python_build_categorizes_as_a_task(tmp_path):
+    # A pre-BuildKind manifest with a python entry must derive BuildKind.TASK on read (back-compat),
+    # so old python builds keep showing under Tasks.
+    ws = tmp_path / "old-script"
+    ws.mkdir()
+    (ws / "main.py").write_text("print('hi')", encoding="utf-8")
+    (ws / ".helixbuild.json").write_text(
+        json.dumps({"slug": "old-script", "name": "Old Script", "request": "r",
+                    "kind": "python", "entry_point": "main.py", "created_at": "2026-06-25T12:00:00"}),
+        encoding="utf-8",
+    )
+    svc = _svc(tmp_path)
+    assert {a.slug for a in svc.categorized()["tasks"]} == {"old-script"}

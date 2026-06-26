@@ -107,8 +107,14 @@ class ConversationService:
     def _progress_label(tool: str, args: dict) -> str:
         if tool == "build_app":
             return f"Building {args.get('name', 'your app')}…"
+        if tool == "build_task":
+            return f"Building the {args.get('name', 'task')} task…"
         if tool == "build_3d_model":
             return f"Modeling {args.get('name', 'it')}…"
+        if tool == "create_agent":
+            return f"Saving the {args.get('name', 'agent')} agent…"
+        if tool == "delete_build":
+            return f"Removing {args.get('name', 'it')}…"
         if tool == "think_harder":
             return "Thinking it through…"
         return "Working…"

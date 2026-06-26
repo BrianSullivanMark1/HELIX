@@ -26,7 +26,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from helix.domain.models import AppKind
 from helix.services.agents import AgentService
 from helix.services.builds import BuildService
 from helix.services.tasks import TaskService
@@ -190,20 +189,18 @@ class LauncherView(QWidget):
 
     # ----- refresh -----
     def refresh(self) -> None:
-        builds = self._builds.list()
-        # Apps and Models both open in the browser; Models are the 3D ones (build_3d_model). Tasks are
-        # the Python builds (handled below). Everything else with a screen is an App.
-        apps = [a for a in builds if not a.is_model and a.kind != AppKind.PYTHON]
-        self._fill_grid(self._apps_grid, self._apps_empty, [self._openable_card(a) for a in apps])
-
-        models = [a for a in builds if a.is_model and a.kind != AppKind.PYTHON]
+        # Classification lives in the service (BuildService.categorized), never here — the menu just
+        # renders the pre-sorted buckets, so the tabs and the orb's list always agree.
+        cat = self._builds.categorized()
         self._fill_grid(
-            self._models_grid, self._models_empty, [self._openable_card(a) for a in models]
+            self._apps_grid, self._apps_empty, [self._openable_card(a) for a in cat["apps"]]
+        )
+        self._fill_grid(
+            self._models_grid, self._models_empty, [self._openable_card(a) for a in cat["models"]]
         )
 
-        runnable = self._tasks.runnable()
         task_cards = []
-        for app in runnable:
+        for app in cat["tasks"]:
             card = _Card(app.name, app.request)
             run = QPushButton("▶ Run")
             run.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._run_task(s, n))

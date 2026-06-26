@@ -8,7 +8,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from helix.domain.models import App, AppKind
+from helix.domain.models import App, AppKind, BuildKind
 from helix.services.builds import BuildService
 
 
@@ -17,7 +17,7 @@ class TaskService:
         self._builds = builds
 
     def runnable(self) -> list[App]:
-        return [a for a in self._builds.list() if a.kind == AppKind.PYTHON]
+        return [a for a in self._builds.list() if a.build_kind == BuildKind.TASK]
 
     def run(self, slug: str) -> bool:
         app = next((a for a in self._builds.list() if a.slug == slug), None)
