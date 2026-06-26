@@ -23,7 +23,6 @@ from helix.domain.models import Role
 from helix.logging_setup import setup_logging
 from helix.ports.llm import Text, Turn
 from helix.services.agents import AgentService
-from helix.services.archive import ArchiveService
 from helix.services.builds import BuildService
 from helix.services.conversation import ConversationService
 from helix.services.forge import ForgeService
@@ -111,7 +110,6 @@ class Container:
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM
         )
-        self.archive = ArchiveService(self.repo, self.store, self.paths.root)
         self.agents = AgentService(self.settings, self.conversation)
         self.tasks = TaskService(self.builds)
         self.restart = Restarter(self.paths.root / "main.py", self.paths.root).restart

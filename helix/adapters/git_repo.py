@@ -68,10 +68,6 @@ class GitRepo:
         self._run(repo_dir, "merge", "--no-ff", "-q", "-m", message, branch)
         return self._head(repo_dir)
 
-    def revert(self, repo_dir: Path, sha: str) -> Commit:
-        self._run(repo_dir, "revert", "--no-edit", sha)
-        return self._head(repo_dir)
-
     def restore_to(self, repo_dir: Path, sha: str) -> None:
         self._run(repo_dir, "reset", "--hard", sha)
 

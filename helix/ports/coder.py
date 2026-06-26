@@ -18,7 +18,6 @@ class Cancellable(Protocol):
 class CoderResult:
     ok: bool
     summary: str
-    branch: str | None = None
     changed_paths: tuple[str, ...] = ()
     error: str | None = None
 

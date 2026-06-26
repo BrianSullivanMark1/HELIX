@@ -37,7 +37,7 @@ MANIFEST = ".helixbuild.json"  # mirrors BuildService.MANIFEST; read only, for t
 DEFAULT_BG = "#080b0f"
 DEFAULT_ACCENT = "#3fe0e0"
 
-_AXIS_SHAPES = {"cylinder", "cone", "capsule", "lathe", "extrude", "tube"}
+_AXIS_SHAPES = {"cylinder", "cone", "capsule", "lathe", "extrude"}
 
 
 class SpecError(Exception):

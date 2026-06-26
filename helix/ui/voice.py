@@ -453,9 +453,6 @@ class VoiceController(QObject):
     def enabled(self) -> bool:
         return bool(self._settings.get(VOICE_SETTING, False))
 
-    def speaks(self) -> bool:
-        return self._tts.available()
-
     # ----- on/off -----
     def set_enabled(self, on: bool) -> bool:
         """Turn hands-free on/off and remember it. Returns True if it actually started listening."""
@@ -590,9 +587,6 @@ class VoiceController(QObject):
         self.recognized.emit(command)
 
     # ----- push-to-talk (manual capture; works whenever voice is ready) -----
-    def ptt_available(self) -> bool:
-        return self.can_listen() and self._state in ("idle", "listening")
-
     def ptt_start(self) -> bool:
         if self._state != "idle" or not self.can_listen():
             return False

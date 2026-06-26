@@ -83,10 +83,6 @@ def is_shell(path: str) -> bool:
     return _norm(path).startswith(SHELL_PREFIX)
 
 
-def is_immutable(path: str) -> bool:
-    return is_protected(path) or is_shell(path)
-
-
 def is_editable(path: str) -> bool:
     """The narrow self-improvement surface: .py under services/ or adapters/, excluding the protected
     gate files and package initializers. EVERYTHING ELSE is refused (fail-closed)."""

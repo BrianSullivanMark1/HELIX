@@ -59,11 +59,6 @@ class SqliteStore:
             )
             self._conn.commit()
 
-    def total_cost(self) -> float:
-        with self._lock:
-            row = self._conn.execute("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM usage").fetchone()
-        return float(row["c"])
-
     def add_version(self, version: Version) -> None:
         with self._lock:
             self._conn.execute(
@@ -109,11 +104,6 @@ class SqliteStore:
             Message(role=Role(r["role"]), text=r["text"], at=datetime.fromisoformat(r["at"]))
             for r in reversed(rows)
         ]
-
-    def clear(self) -> None:
-        with self._lock:
-            self._conn.execute("DELETE FROM messages")
-            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:

@@ -103,17 +103,6 @@ class WhisperSpeechIn:
             return ""
 
 
-class NullSpeechIn:
-    def available(self) -> bool:
-        return False
-
-    def ready(self) -> bool:
-        return False
-
-    def transcribe(self, wav_path: Path) -> str:
-        return ""
-
-
 # ----- speech-out (TTS) -----
 class OsSpeechOut:
     """The built-in OS voice. Local, no network, no extra dependency. Text is piped via stdin.
@@ -333,14 +322,3 @@ class EdgeSpeechOut:
                     pass
             self._proc = None
         self._fallback.stop()
-
-
-class NullSpeechOut:
-    def available(self) -> bool:
-        return False
-
-    def speak(self, text: str, allow_fallback: bool = True) -> None:
-        pass
-
-    def stop(self) -> None:
-        pass

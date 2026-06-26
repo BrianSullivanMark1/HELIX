@@ -34,7 +34,3 @@ class JsonSettings:
         with self._lock:
             self._data[key] = value
             self._save()
-
-    def all(self) -> dict[str, Any]:
-        with self._lock:
-            return dict(self._data)

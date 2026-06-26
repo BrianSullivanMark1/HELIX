@@ -142,7 +142,7 @@ class HelixMainWindow(QMainWindow):
                 self._viewer.clear()  # blank the web view so its render process stops cleanly
             except Exception:
                 _LOG.exception("viewer teardown failed during close")
-        for teardown in (self.console.shutdown, self.launcher.shutdown):
+        for teardown in (self.console.shutdown, self.launcher.shutdown, self._c.store.close):
             try:
                 teardown()
             except Exception:
