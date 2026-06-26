@@ -14,6 +14,7 @@ unavailable and the Console stays a normal text app.
 from __future__ import annotations
 
 import array
+import json
 import math
 import os
 import re
@@ -98,12 +99,33 @@ _MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")  # [label](url) -> label
 _MD_SYMS = re.compile(r"[*_`#~>|]+")              # markdown emphasis / headings / code / quotes / tables
 _BULLET = re.compile(r"(?m)^\s*[-•·]\s+")         # list bullets at line start
 _WS = re.compile(r"\s+")
+# A ```viz block carries a table/chart spec the orb DISPLAYS but must never read aloud.
+_VIZ_RE = re.compile(r"```viz\s*\n?(.*?)```", re.DOTALL)
+
+
+def split_visuals(text: str) -> tuple[str, list[dict]]:
+    """Split a reply into its spoken prose and any ```viz table/chart specs. The visuals are shown in the
+    transcript; only the prose is spoken — so the data itself is seen, never read aloud."""
+    specs: list[dict] = []
+
+    def _take(match: "re.Match[str]") -> str:
+        try:
+            spec = json.loads(match.group(1).strip())
+        except Exception:
+            return ""  # malformed block — drop it from speech and from display
+        if isinstance(spec, dict) and spec.get("type") in ("table", "chart"):
+            specs.append(spec)
+        return ""
+
+    spoken = _VIZ_RE.sub(_take, text or "").strip()
+    return spoken, specs
 
 
 def speakable(text: str) -> str:
-    """Strip markdown and symbols so the voice never reads punctuation as words (e.g. '*' → 'asterisk').
-    A safety net behind the system prompt, which already asks for plain spoken sentences."""
-    t = _MD_LINK.sub(r"\1", text or "")
+    """Strip viz blocks, markdown, and symbols so the voice never reads a table/chart or punctuation as
+    words (e.g. '*' → 'asterisk'). A safety net behind the system prompt's plain-spoken instruction."""
+    t = _VIZ_RE.sub("", text or "")  # never read a table/chart block aloud
+    t = _MD_LINK.sub(r"\1", t)
     t = _BULLET.sub("", t)
     t = _MD_SYMS.sub("", t)
     return _WS.sub(" ", t).strip()

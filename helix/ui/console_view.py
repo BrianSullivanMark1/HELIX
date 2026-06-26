@@ -6,8 +6,10 @@ no faster-whisper the voice controls stay hidden and it's a normal text app.
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeySequence, QShortcut
+from html import escape
+
+from PyQt6.QtCore import QEvent, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QKeySequence, QPainter, QShortcut
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -23,9 +25,63 @@ from helix.ports.speech import SpeechIn, SpeechOut
 from helix.ports.stores import SettingsStore
 from helix.services.conversation import ConversationService
 from helix.ui.orb import OrbState, PresenceOrb
-from helix.ui.theme import CYAN, LINE
-from helix.ui.voice import VoiceController
+from helix.ui.theme import CYAN, LINE, MUTED
+from helix.ui.voice import VoiceController, split_visuals
 from helix.ui.workers import QtWorker
+
+
+class _BarChart(QWidget):
+    """A small horizontal bar chart painted in the HELIX cyan, for a chart viz the orb shows inline."""
+
+    def __init__(self, spec: dict) -> None:
+        super().__init__()
+        self._title = str(spec.get("title") or "")
+        self._unit = str(spec.get("unit") or "")
+        items: list[tuple[str, float]] = []
+        for d in spec.get("data") or []:
+            if isinstance(d, dict):
+                try:
+                    items.append((str(d.get("label", "")), float(d.get("value", 0) or 0)))
+                except (TypeError, ValueError):
+                    pass
+        self._items = items[:20]
+        self.setStyleSheet("background: transparent;")
+        self._row_h = 26
+        head = 26 if self._title else 4
+        self.setMinimumHeight(head + self._row_h * max(1, len(self._items)) + 4)
+        self.setMinimumWidth(380)  # else the left-aligned card collapses and the bars have no room
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self.width()
+        y = 2
+        if self._title:
+            p.setPen(QColor(CYAN))
+            f = p.font(); f.setBold(True); p.setFont(f)
+            p.drawText(2, y, w - 4, 22, Qt.AlignmentFlag.AlignVCenter, self._title)
+            f.setBold(False); p.setFont(f)
+            y += 24
+        if not self._items:
+            p.end()
+            return
+        maxv = max((v for _, v in self._items), default=0.0) or 1.0
+        label_w = 104
+        bar_x = label_w + 6
+        bar_max = max(40, w - bar_x - 64)
+        for label, val in self._items:
+            p.setPen(QColor(MUTED))
+            p.drawText(0, y, label_w, self._row_h,
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, label)
+            bw = max(2, int(bar_max * (val / maxv)))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(63, 224, 224, 205))
+            p.drawRoundedRect(QRectF(bar_x, y + 5.0, float(bw), self._row_h - 10.0), 3.0, 3.0)
+            p.setPen(QColor("#d4ecec"))
+            p.drawText(bar_x + bw + 6, y, 60, self._row_h,
+                       Qt.AlignmentFlag.AlignVCenter, f"{self._unit}{val:g}")
+            y += self._row_h
+        p.end()
 
 
 class ConsoleView(QWidget):
@@ -71,11 +127,26 @@ class ConsoleView(QWidget):
         brow.addWidget(open_btn)
         root.addWidget(self._banner)
 
-        # The orb's bright centre glows through this gap — and it's the clickable "tap to talk" zone.
-        root.addStretch(3)
+        # The conversation fills the full height — text scrolls all the way up — floating over the orb's
+        # glow (bubbles are semi-opaque so they stay legible). The controls sit beneath it.
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet("background: transparent;")
+        self._scroll.viewport().setStyleSheet("background: transparent;")
+        self._transcript = QWidget()
+        self._transcript.setStyleSheet("background: transparent;")
+        self._tlayout = QVBoxLayout(self._transcript)
+        self._tlayout.setContentsMargins(0, 6, 0, 6)
+        self._tlayout.setSpacing(8)
+        self._tlayout.addStretch(1)
+        self._scroll.setWidget(self._transcript)
+        # A tap on the empty conversation area is a tap on the orb behind it (tap to talk); clicks on a
+        # bubble are consumed by it for text selection and never reach these filters.
+        self._transcript.installEventFilter(self)
+        self._scroll.viewport().installEventFilter(self)
+        root.addWidget(self._scroll, stretch=1)
 
-        # Status + voice toggle, centred over the orb. A translucent pill keeps the text legible
-        # against the orb's glow, and the chip hugs the text rather than spanning the window.
+        # Status pill + voice toggle, beneath the conversation, over the orb's lower glow.
         self.status = QLabel("Ready when you are.")
         self.status.setObjectName("Status")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -96,22 +167,6 @@ class ConsoleView(QWidget):
         vrow.addWidget(self._voice_btn)
         vrow.addStretch(1)
         root.addLayout(vrow)
-
-        root.addStretch(1)
-
-        # Transcript — floats over the orb's lower glow (bubbles are semi-opaque so text stays legible).
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setStyleSheet("background: transparent;")
-        self._scroll.viewport().setStyleSheet("background: transparent;")
-        self._transcript = QWidget()
-        self._transcript.setStyleSheet("background: transparent;")
-        self._tlayout = QVBoxLayout(self._transcript)
-        self._tlayout.setContentsMargins(0, 6, 0, 6)
-        self._tlayout.setSpacing(8)
-        self._tlayout.addStretch(1)
-        self._scroll.setWidget(self._transcript)
-        root.addWidget(self._scroll, stretch=3)
 
         # Input row: hold-to-talk · text · send
         row = QHBoxLayout()
@@ -151,14 +206,24 @@ class ConsoleView(QWidget):
         has_key = bool((self._settings.get("claude_api_key") or "").strip())
         self._banner.setVisible(not has_key)
 
-    def mousePressEvent(self, _event) -> None:
-        # A tap on the Console's empty space is a tap on the orb behind it. While HELIX is busy
-        # (thinking/speaking) that interrupts it; otherwise it toggles voice. (Clicks on the buttons,
-        # input, or transcript are consumed by those children and never arrive here.)
+    def _on_tap(self) -> None:
+        # A tap on empty space is a tap on the orb behind it: interrupt while HELIX is busy, else toggle
+        # voice. Clicks on buttons/input/bubbles are consumed by those children and never get here.
         if self._voice is not None and self._voice.is_active():
             self._stop()
         else:
             self.toggle_voice()
+
+    def mousePressEvent(self, _event) -> None:
+        self._on_tap()
+
+    def eventFilter(self, obj, event) -> bool:
+        # The full-height transcript covers the orb, so route taps on its empty area to the orb too.
+        if event.type() == QEvent.Type.MouseButtonPress and obj in (
+            self._transcript, self._scroll.viewport()
+        ):
+            self._on_tap()
+        return super().eventFilter(obj, event)
 
     def _stop(self) -> None:
         """Interrupt the current reply: stop speaking now, and don't speak one that's still pending."""
@@ -274,7 +339,12 @@ class ConsoleView(QWidget):
         worker.start()
 
     def _on_reply(self, text: object) -> None:
-        self._add_bubble("helix", str(text))
+        # Split the prose from any table/chart blocks: prose is shown AND spoken; visuals are only shown.
+        spoken, visuals = split_visuals(str(text))
+        if spoken or not visuals:
+            self._add_bubble("helix", spoken or str(text))
+        for spec in visuals:
+            self._add_visual(spec)
         if self._cancelled:  # the user said stop while this was generating — show it, don't speak it
             self._cancelled = False
             if self._voice is not None:
@@ -282,7 +352,7 @@ class ConsoleView(QWidget):
             self._idle_status()
             return
         if self._voice is not None and self._voice.enabled():
-            self._voice.speak(str(text))  # speak the reply, then re-arm the mic
+            self._voice.speak(spoken)  # speak the prose only — the table/chart is shown, never read
         elif self._voice is not None:
             self._voice.idle()
             self._idle_status()
@@ -345,6 +415,61 @@ class ConsoleView(QWidget):
         else:
             rowlay.addWidget(bubble)
             rowlay.addStretch(1)
+        self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
+        QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def _add_visual(self, spec: dict) -> None:
+        """Render a table or chart inline in the transcript (shown, never spoken)."""
+        kind = spec.get("type")
+        if kind == "chart":
+            card = QFrame()
+            card.setStyleSheet(
+                f"QFrame{{background:rgba(13,20,27,0.86);border:1px solid {CYAN};border-radius:12px;}}"
+            )
+            lay = QVBoxLayout(card)
+            lay.setContentsMargins(14, 12, 14, 12)
+            lay.addWidget(_BarChart(spec))
+            self._insert_visual(card)
+        elif kind == "table":
+            self._insert_visual(self._table_widget(spec))
+
+    def _table_widget(self, spec: dict) -> QLabel:
+        cols = spec.get("columns") or []
+        rows = spec.get("rows") or []
+        title = str(spec.get("title") or "")
+        parts: list[str] = []
+        if title:
+            parts.append(
+                f"<div style='color:{CYAN};font-weight:600;margin-bottom:6px'>{escape(title)}</div>"
+            )
+        parts.append("<table border='1' cellspacing='0' cellpadding='6' style='border-color:#26323b'>")
+        if cols:
+            parts.append(
+                "<tr>"
+                + "".join(f"<th style='color:{CYAN};text-align:left'>{escape(str(c))}</th>" for c in cols)
+                + "</tr>"
+            )
+        for r in rows:
+            cells = r if isinstance(r, (list, tuple)) else [r]
+            parts.append(
+                "<tr>" + "".join(f"<td style='color:#e2edf1'>{escape(str(c))}</td>" for c in cells) + "</tr>"
+            )
+        parts.append("</table>")
+        lbl = QLabel("".join(parts))
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lbl.setStyleSheet(
+            f"QLabel{{background:rgba(13,20,27,0.86);border:1px solid {CYAN};"
+            "border-radius:12px;padding:10px 14px;}}"
+        )
+        lbl.setMaximumWidth(560)
+        return lbl
+
+    def _insert_visual(self, widget: QWidget) -> None:
+        rowlay = QHBoxLayout()
+        rowlay.setContentsMargins(0, 0, 0, 0)
+        rowlay.addWidget(widget)
+        rowlay.addStretch(1)
         self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
         QTimer.singleShot(0, self._scroll_to_bottom)
 

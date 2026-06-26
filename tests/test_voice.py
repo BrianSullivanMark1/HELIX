@@ -7,7 +7,15 @@ from __future__ import annotations
 
 import array
 
-from helix.ui.voice import VadSegmenter, _pcm_rms, is_dismissal, is_stop, speakable, split_wake
+from helix.ui.voice import (
+    VadSegmenter,
+    _pcm_rms,
+    is_dismissal,
+    is_stop,
+    speakable,
+    split_visuals,
+    split_wake,
+)
 
 
 def _pcm(amplitude: int, samples: int) -> bytes:
@@ -37,6 +45,28 @@ def test_speakable_strips_markdown_and_symbols():
     assert speakable("See [the docs](https://x.com) now") == "See the docs now"
     # ordinary words and punctuation are untouched
     assert speakable("Hello, sir. Ready when you are?") == "Hello, sir. Ready when you are?"
+
+
+def test_split_visuals_extracts_table_and_leaves_spoken_prose():
+    reply = 'Here are the quarters.\n```viz\n{"type":"table","columns":["Q"],"rows":[["Q1"]]}\n```'
+    spoken, specs = split_visuals(reply)
+    assert spoken == "Here are the quarters."
+    assert len(specs) == 1 and specs[0]["type"] == "table"
+
+
+def test_split_visuals_chart_inline_and_never_spoken():
+    reply = 'Revenue climbed.\n```viz {"type":"chart","data":[{"label":"Q1","value":10}]} ```'
+    spoken, specs = split_visuals(reply)
+    assert spoken == "Revenue climbed."
+    assert specs[0]["type"] == "chart"
+    # speakable also strips a stray viz block, so the numbers are never read aloud
+    spoken_aloud = speakable(reply)
+    assert "value" not in spoken_aloud and "viz" not in spoken_aloud
+
+
+def test_split_visuals_ignores_malformed_or_unknown_blocks():
+    assert split_visuals('Oops.\n```viz\nnot json\n```') == ("Oops.", [])
+    assert split_visuals("just a normal answer") == ("just a normal answer", [])
 
 
 def test_is_stop():
