@@ -9,8 +9,26 @@ from __future__ import annotations
 import re
 from html import escape
 
-from PyQt6.QtCore import QEvent, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QKeySequence, QPainter, QShortcut
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QPointF,
+    QRectF,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    pyqtSignal,
+)
+from PyQt6.QtGui import (
+    QColor,
+    QKeySequence,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPolygonF,
+    QShortcut,
+)
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -29,7 +47,7 @@ from helix.ports.stores import SettingsStore
 from helix.services.cancel import CancelToken
 from helix.services.conversation import ConversationService
 from helix.ui.orb import OrbState, PresenceOrb
-from helix.ui.theme import CYAN, LINE, MUTED
+from helix.ui.theme import CYAN, CYAN_DIM, LINE, MUTED, TEXT
 from helix.ui.voice import VoiceController, is_stop, split_visuals
 from helix.ui.workers import QtWorker
 
@@ -57,13 +75,30 @@ def _cleanup_answer(text: str) -> str:
     return "neither"
 
 
-class _BarChart(QWidget):
-    """A small horizontal bar chart painted in the HELIX cyan, for a chart viz the orb shows inline."""
+_VLABEL = int(Qt.AlignmentFlag.AlignVCenter)
+_RLABEL = int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+_HCENTER = int(Qt.AlignmentFlag.AlignHCenter)
+# A small HUD palette for multi-segment charts (pie/donut), cycled in order.
+_SEGMENTS = (
+    (63, 224, 224), (245, 166, 35), (120, 200, 255),
+    (46, 196, 150), (200, 120, 255), (255, 120, 150), (150, 220, 120),
+)
+
+
+class _ChartWidget(QWidget):
+    """An inline HUD chart the orb SHOWS (never speaks): bar (default), line, area, or pie/donut —
+    painted in QPainter with a cyan glow and an eased grow-in. The kind comes from the optional
+    spec["kind"]; anything unknown (or a painter error) falls back to bars, so the channel never breaks.
+    """
+
+    _KINDS = {"bar", "column", "line", "area", "pie", "donut"}
 
     def __init__(self, spec: dict) -> None:
         super().__init__()
         self._title = str(spec.get("title") or "")
         self._unit = str(spec.get("unit") or "")
+        kind = str(spec.get("kind") or "bar").lower()
+        self._kind = kind if kind in self._KINDS else "bar"
         items: list[tuple[str, float]] = []
         for d in spec.get("data") or []:
             if isinstance(d, dict):
@@ -71,43 +106,169 @@ class _BarChart(QWidget):
                     items.append((str(d.get("label", "")), float(d.get("value", 0) or 0)))
                 except (TypeError, ValueError):
                     pass
-        self._items = items[:20]
+        self._items = items[:24]
         self.setStyleSheet("background: transparent;")
-        self._row_h = 26
-        head = 26 if self._title else 4
-        self.setMinimumHeight(head + self._row_h * max(1, len(self._items)) + 4)
-        self.setMinimumWidth(380)  # else the left-aligned card collapses and the bars have no room
+        self._row_h = 28
+        self._head = 28 if self._title else 6
+        n = max(1, len(self._items))
+        if self._kind in ("pie", "donut"):
+            self.setMinimumHeight(self._head + 206)
+            self.setMinimumWidth(400)
+        elif self._kind in ("line", "area"):
+            self.setMinimumHeight(self._head + 172)
+            self.setMinimumWidth(440)
+        else:
+            self.setMinimumHeight(self._head + self._row_h * n + 8)
+            self.setMinimumWidth(400)
+        # Eased grow-in: values rise from zero the first time the card is shown.
+        self._t = 0.0
+        self._started = False
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(640)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._set_t)
 
+    def _set_t(self, v: object) -> None:
+        self._t = float(v)  # type: ignore[arg-type]
+        self.update()
+
+    def showEvent(self, event) -> None:
+        if not self._started:
+            self._started = True
+            self._anim.start()
+        super().showEvent(event)
+
+    def render_now(self) -> None:
+        """Skip the animation and paint at full value — used by the offscreen render test."""
+        self._started = True
+        self._t = 1.0
+        self.update()
+
+    # ----- painting -----
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w = self.width()
-        y = 2
-        if self._title:
-            p.setPen(QColor(CYAN))
-            f = p.font(); f.setBold(True); p.setFont(f)
-            p.drawText(2, y, w - 4, 22, Qt.AlignmentFlag.AlignVCenter, self._title)
-            f.setBold(False); p.setFont(f)
-            y += 24
-        if not self._items:
-            p.end()
-            return
+        top = self._draw_title(p)
+        if self._items:
+            area = QRectF(0.0, float(top), float(self.width()), float(self.height() - top))
+            try:
+                if self._kind in ("pie", "donut"):
+                    self._paint_pie(p, area, donut=self._kind == "donut")
+                elif self._kind in ("line", "area"):
+                    self._paint_line(p, area, fill=self._kind == "area")
+                else:
+                    self._paint_bars(p, area)
+            except Exception:  # a chart must never crash the transcript — fall back to bars
+                self._paint_bars(p, area)
+        p.end()
+
+    def _draw_title(self, p: QPainter) -> int:
+        if not self._title:
+            return 4
+        p.setPen(QColor(CYAN))
+        f = p.font(); f.setBold(True); p.setFont(f)
+        p.drawText(2, 2, self.width() - 4, 22, _VLABEL, self._title)
+        f.setBold(False); p.setFont(f)
+        return self._head
+
+    def _paint_bars(self, p: QPainter, area: QRectF) -> None:
         maxv = max((v for _, v in self._items), default=0.0) or 1.0
-        label_w = 104
-        bar_x = label_w + 6
-        bar_max = max(40, w - bar_x - 64)
+        x0, w = int(area.left()), self.width()
+        label_w, gap = 108, 8
+        bar_x = x0 + label_w + gap
+        bar_max = max(40, w - bar_x - 66)
+        y = int(area.top())
+        rh = self._row_h
         for label, val in self._items:
             p.setPen(QColor(MUTED))
-            p.drawText(0, y, label_w, self._row_h,
-                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, label)
-            bw = max(2, int(bar_max * (val / maxv)))
+            p.drawText(x0, y, label_w, rh, _RLABEL, label)
+            full = bar_max * (val / maxv)
+            bw = max(2.0, full * self._t)
+            rect = QRectF(float(bar_x), y + 6.0, bw, rh - 12.0)
+            grad = QLinearGradient(rect.topLeft(), rect.topRight())
+            grad.setColorAt(0.0, QColor(CYAN_DIM))
+            grad.setColorAt(1.0, QColor(CYAN))
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(63, 224, 224, 205))
-            p.drawRoundedRect(QRectF(bar_x, y + 5.0, float(bw), self._row_h - 10.0), 3.0, 3.0)
+            p.setBrush(QColor(63, 224, 224, 38))  # soft outer glow
+            p.drawRoundedRect(rect.adjusted(-1.5, -1.5, 1.5, 1.5), 4.0, 4.0)
+            p.setBrush(grad)
+            p.drawRoundedRect(rect, 3.0, 3.0)
             p.setPen(QColor("#d4ecec"))
-            p.drawText(bar_x + bw + 6, y, 60, self._row_h,
-                       Qt.AlignmentFlag.AlignVCenter, f"{self._unit}{val:g}")
-            y += self._row_h
+            p.drawText(int(bar_x + bw) + 8, y, 64, rh, _VLABEL, f"{self._unit}{val:g}")
+            y += rh
+
+    def _paint_line(self, p: QPainter, area: QRectF, fill: bool) -> None:
+        vals = [v for _, v in self._items]
+        maxv = max(vals, default=0.0)
+        minv = min(vals + [0.0])
+        span = (maxv - minv) or 1.0
+        pl, pr, pt_, pb = 10.0, 14.0, 8.0, 22.0
+        plot = QRectF(area.left() + pl, area.top() + pt_,
+                      area.width() - pl - pr, area.height() - pt_ - pb)
+        p.setPen(QPen(QColor(LINE), 1))  # gridlines
+        for i in range(4):
+            gy = plot.top() + plot.height() * i / 3.0
+            p.drawLine(QPointF(plot.left(), gy), QPointF(plot.right(), gy))
+        n = len(self._items)
+        pts = []
+        for i, (_label, val) in enumerate(self._items):
+            x = plot.left() + (plot.width() * i / (n - 1) if n > 1 else plot.width() / 2)
+            frac = (val - minv) / span
+            y = plot.bottom() - plot.height() * frac * self._t
+            pts.append(QPointF(x, y))
+        if fill:
+            path = QPainterPath(QPointF(pts[0].x(), plot.bottom()))
+            for q in pts:
+                path.lineTo(q)
+            path.lineTo(pts[-1].x(), plot.bottom())
+            path.closeSubpath()
+            g = QLinearGradient(plot.topLeft(), plot.bottomLeft())
+            g.setColorAt(0.0, QColor(63, 224, 224, 110))
+            g.setColorAt(1.0, QColor(63, 224, 224, 0))
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(g); p.drawPath(path)
+        poly = QPolygonF(pts)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(63, 224, 224, 70), 5)); p.drawPolyline(poly)  # glow
+        p.setPen(QPen(QColor(CYAN), 2)); p.drawPolyline(poly)  # crisp line
+        p.setPen(Qt.PenStyle.NoPen)
+        for i, (label, _v) in enumerate(self._items):
+            p.setBrush(QColor(CYAN)); p.drawEllipse(pts[i], 2.6, 2.6)
+            if n <= 8 or i % 2 == 0:
+                p.setPen(QColor(MUTED))
+                p.drawText(int(pts[i].x()) - 30, int(plot.bottom()) + 3, 60, 18, _HCENTER, label)
+                p.setPen(Qt.PenStyle.NoPen)
+
+    def _paint_pie(self, p: QPainter, area: QRectF, donut: bool) -> None:
+        total = sum(max(0.0, v) for _, v in self._items) or 1.0
+        size = max(120.0, min(area.width() - 150, area.height() - 12))
+        cx = area.left() + size / 2 + 6
+        cy = area.top() + area.height() / 2
+        rect = QRectF(cx - size / 2, cy - size / 2, size, size)
+        sweep_total = 360.0 * self._t
+        p.setPen(QPen(QColor("#080b0f"), 1))  # thin dark separators between slices
+        start, acc = 90.0, 0.0  # start at 12 o'clock
+        for i, (_label, val) in enumerate(self._items):
+            span = 360.0 * (max(0.0, val) / total)
+            draw = max(0.0, min(span, sweep_total - acc))
+            if draw > 0:
+                p.setBrush(QColor(*_SEGMENTS[i % len(_SEGMENTS)]))
+                p.drawPie(rect, int(start * 16), int(-draw * 16))
+            start -= span
+            acc += span
+        if donut:
+            hole = size * 0.52
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor("#0d141b"))
+            p.drawEllipse(QRectF(cx - hole / 2, cy - hole / 2, hole, hole))
+        lx, ly = int(rect.right()) + 14, int(area.top()) + 6  # legend
+        for i, (label, val) in enumerate(self._items[:8]):
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(*_SEGMENTS[i % len(_SEGMENTS)]))
+            p.drawRoundedRect(QRectF(lx, ly + 3, 10, 10), 2, 2)
+            p.setPen(QColor(TEXT))
+            pct = 100.0 * max(0.0, val) / total
+            p.drawText(lx + 16, ly, self.width() - lx - 16, 16, _VLABEL, f"{label}  {pct:.0f}%")
+            ly += 20
         p.end()
 
 
@@ -558,10 +719,19 @@ class ConsoleView(QWidget):
             )
             lay = QVBoxLayout(card)
             lay.setContentsMargins(14, 12, 14, 12)
-            lay.addWidget(_BarChart(spec))
+            lay.addWidget(_ChartWidget(spec))
             self._insert_visual(card)
         elif kind == "table":
             self._insert_visual(self._table_widget(spec))
+
+    @staticmethod
+    def _looks_numeric(s: str) -> bool:
+        t = s.strip().lstrip("$€£+-").replace(",", "").rstrip("%")
+        try:
+            float(t)
+            return True
+        except ValueError:
+            return False
 
     def _table_widget(self, spec: dict) -> QLabel:
         cols = spec.get("columns") or []
@@ -570,29 +740,38 @@ class ConsoleView(QWidget):
         parts: list[str] = []
         if title:
             parts.append(
-                f"<div style='color:{CYAN};font-weight:600;margin-bottom:6px'>{escape(title)}</div>"
+                f"<div style='color:{CYAN};font-weight:600;letter-spacing:.5px;"
+                f"margin-bottom:8px'>{escape(title)}</div>"
             )
-        parts.append("<table border='1' cellspacing='0' cellpadding='6' style='border-color:#26323b'>")
+        parts.append("<table cellspacing='0' cellpadding='7' style='border-collapse:collapse'>")
         if cols:
             parts.append(
                 "<tr>"
-                + "".join(f"<th style='color:{CYAN};text-align:left'>{escape(str(c))}</th>" for c in cols)
+                + "".join(
+                    f"<th style='color:{CYAN};text-align:left;padding:4px 12px;"
+                    f"border-bottom:1px solid {CYAN}'>{escape(str(c))}</th>"
+                    for c in cols
+                )
                 + "</tr>"
             )
-        for r in rows:
+        for ri, r in enumerate(rows):
             cells = r if isinstance(r, (list, tuple)) else [r]
-            parts.append(
-                "<tr>" + "".join(f"<td style='color:#e2edf1'>{escape(str(c))}</td>" for c in cells) + "</tr>"
+            bg = "rgba(63,224,224,0.05)" if ri % 2 else "transparent"  # zebra striping
+            tds = "".join(
+                f"<td style='color:{TEXT};text-align:{'right' if self._looks_numeric(str(c)) else 'left'};"
+                f"padding:4px 12px;border-bottom:1px solid #14202a'>{escape(str(c))}</td>"
+                for c in cells
             )
+            parts.append(f"<tr style='background:{bg}'>{tds}</tr>")
         parts.append("</table>")
         lbl = QLabel("".join(parts))
         lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lbl.setStyleSheet(
-            f"QLabel{{background:rgba(13,20,27,0.86);border:1px solid {CYAN};"
-            "border-radius:12px;padding:10px 14px;}}"
+            f"QLabel{{background:rgba(13,20,27,0.86);border:1px solid {CYAN_DIM};"
+            "border-radius:12px;padding:12px 16px;}"
         )
-        lbl.setMaximumWidth(560)
+        lbl.setMaximumWidth(620)
         return lbl
 
     def _insert_visual(self, widget: QWidget) -> None:
