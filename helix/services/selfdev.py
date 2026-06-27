@@ -64,6 +64,7 @@ def compile_smoke_check(worktree: Path) -> tuple[bool, str]:
             [sys.executable, "-I", "-c", code],
             cwd=str(worktree), capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=120,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # no console flash in a frozen build
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"smoke-check could not run: {exc}"

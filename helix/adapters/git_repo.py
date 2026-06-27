@@ -9,6 +9,9 @@ from pathlib import Path
 from helix.ports.repo import Commit
 
 _FMT = "%H%x1f%s%x1f%cI"  # sha, subject, committer-date(ISO) joined by 0x1f
+# In a --windowed (frozen) build, a child process with no console flag flashes a console window. HELIX
+# fires many git calls (startup recovery, every build/iterate commit), so suppress the window every time.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class GitError(RuntimeError):
@@ -38,6 +41,7 @@ class GitRepo:
                 text=True,
                 encoding="utf-8",
                 errors="replace",  # git emits UTF-8; don't crash on a non-ASCII app name/path
+                creationflags=_NO_WINDOW,  # no flashing console window in the packaged (--windowed) app
             )
         except FileNotFoundError as exc:
             # Git isn't installed/on PATH — the most common first-build wall on a clean consumer machine.
