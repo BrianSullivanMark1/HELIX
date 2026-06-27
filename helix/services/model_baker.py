@@ -503,6 +503,10 @@ _VIEWER_HTML = """<!doctype html>
   import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
   import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
   import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
+  import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+  import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+  import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+  import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
   const fail = (m) => { const e = document.getElementById("msg");
     e.textContent = m; e.style.display = "flex"; };
@@ -530,6 +534,19 @@ _VIEWER_HTML = """<!doctype html>
     const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(3, 5, 4); scene.add(key);
     const fill = new THREE.DirectionalLight(0x88ccff, 0.8); fill.position.set(-4, 2, -3); scene.add(fill);
     scene.add(new THREE.HemisphereLight(0xbfe9ea, 0x0a0e12, 0.5));
+
+    // Post-processing: a soft UnrealBloom so emissive parts (arc reactors, screens, glowing edges)
+    // actually bloom — the futuristic touch. Follows the official three.js bloom example (RenderPass +
+    // UnrealBloomPass + OutputPass, keeping ACES tone mapping). Guarded: if it can't initialise we fall
+    // straight back to direct rendering, so a model is never lost to a post-processing hiccup.
+    let composer = null;
+    try {
+      composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+      composer.addPass(new UnrealBloomPass(
+        new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.4, 0.85));
+      composer.addPass(new OutputPass());
+    } catch (e) { composer = null; }
 
     let model = null, grid = null, radius = 1, mixer = null, playing = true;
     const clock = new THREE.Clock();
@@ -576,6 +593,7 @@ _VIEWER_HTML = """<!doctype html>
     addEventListener("resize", () => {
       camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
+      if (composer) composer.setSize(window.innerWidth, window.innerHeight);
     });
 
     const spinBtn = document.getElementById("spin");
@@ -593,7 +611,7 @@ _VIEWER_HTML = """<!doctype html>
       const dt = clock.getDelta();
       if (mixer && playing) mixer.update(dt);
       controls.update();
-      renderer.render(scene, camera);
+      if (composer) composer.render(dt); else renderer.render(scene, camera);
     })();
   } catch (err) {
     fail("Couldn't start the 3D view: " + (err && err.message ? err.message : err));
