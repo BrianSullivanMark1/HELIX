@@ -11,6 +11,7 @@ PANEL_HI = "#121b24"
 CYAN = "#3fe0e0"
 CYAN_DIM = "#1d6b6b"
 AMBER = "#f5a623"
+GOLD = "#ffc857"  # the orb's warm "I'm speaking" tone
 TEXT = "#e2edf1"
 MUTED = "#7a8a93"
 LINE = "#1b2730"

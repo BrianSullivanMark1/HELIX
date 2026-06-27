@@ -18,9 +18,8 @@ from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QRadialGradient
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
-from helix.ui.theme import AMBER, CYAN
+from helix.ui.theme import AMBER, CYAN, GOLD
 
-GOLD = "#ffc857"      # the warm "I'm speaking" tone
 # Dark electronic body, so the circuitry glows against it.
 BODY_HI = "#2b3b4b"
 BODY_MID = "#14202b"
