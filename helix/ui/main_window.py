@@ -31,6 +31,7 @@ from helix.domain.events import (
 )
 from helix.domain.models import AppKind
 from helix.logging_setup import get_logger
+from helix.ui.commands_view import CommandsDialog
 from helix.ui.console_view import ConsoleView
 from helix.ui.launcher_view import LauncherView
 from helix.ui.orb import PresenceOrb
@@ -159,12 +160,24 @@ class HelixMainWindow(QMainWindow):
         brand.setGraphicsEffect(glow)
         row.addWidget(brand)
         row.addStretch(1)
-        for label, idx in (("◉ Console", _CONSOLE), ("☰ Menu", _MENU), ("⚙ Settings", _SETTINGS)):
+        for label, idx in (("◉ Console", _CONSOLE), ("☰ Menu", _MENU)):
             btn = QPushButton(label)
             btn.setObjectName("Nav")
             btn.clicked.connect(lambda _checked=False, i=idx: self._nav(i))
             row.addWidget(btn)
+        # Commands reference — a pop-up of the keywords + controls (part of the Forge shell).
+        commands_btn = QPushButton("❔ Commands")
+        commands_btn.setObjectName("Nav")
+        commands_btn.clicked.connect(self._show_commands)
+        row.addWidget(commands_btn)
+        settings_btn = QPushButton("⚙ Settings")
+        settings_btn.setObjectName("Nav")
+        settings_btn.clicked.connect(lambda _checked=False: self._nav(_SETTINGS))
+        row.addWidget(settings_btn)
         return bar
+
+    def _show_commands(self) -> None:
+        CommandsDialog(self).exec()
 
     # ----- navigation -----
     def _nav(self, index: int) -> None:

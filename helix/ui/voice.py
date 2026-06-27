@@ -169,20 +169,48 @@ def speakable(text: str) -> str:
 # as a WHOLE short utterance (after stripping fillers), so a real instruction that merely contains the
 # word — "stop the timer at zero", "add a stop button", "cancel that order screen" — is NOT swallowed.
 _STOP_FILLERS = re.compile(r"\b(?:um+|uh+|okay|ok|please|yeah|yep|hey|helix|now|just|like)\b", re.IGNORECASE)
+# Stop / cancel a build (or hush speech). Includes explicit "stop build" forms so a build is reliably
+# halted by voice — distinct from MUTE below, which only pauses the mic and never touches a build.
 _STOP_FORMS = re.compile(
     r"^(?:no\s+)*"  # 'no no stop'
-    r"(?:stop(?:\s+stop)*(?:\s+(?:it|talking))?|be\s+quiet|never\s*mind|cancel\s+that|"
-    r"that'?s\s+enough|enough|shut\s*up|hush|shush|quiet)$",
+    r"(?:stop(?:\s+stop)*(?:\s+(?:it|talking|build|building|the\s+build))?|"
+    r"cancel(?:\s+(?:that|build|building|the\s+build))?|abort|halt|"
+    r"be\s+quiet|never\s*mind|that'?s\s+enough|enough|shut\s*up|hush|shush|quiet)$",
+    re.IGNORECASE,
+)
+# MUTE / UNMUTE — pause/resume the user's mic WITHOUT stopping a build (the opposite of a stop command).
+# Whole-utterance matches only, so "mute the alarm app" or "stop listening to the radio build" don't fire.
+_MUTE_FORMS = re.compile(
+    r"^(?:mute(?:\s+(?:yourself|me|the\s+mic|my\s+mic|mic))?|stop\s+listening|pause\s+listening|"
+    r"stop\s+the\s+mic|mic\s+off)$",
+    re.IGNORECASE,
+)
+_UNMUTE_FORMS = re.compile(
+    r"^(?:unmute(?:\s+(?:yourself|me|the\s+mic|mic))?|start\s+listening|resume\s+listening|"
+    r"listen\s+again|mic\s+on|you\s+can\s+listen(?:\s+again)?)$",
     re.IGNORECASE,
 )
 
 
-def is_stop(text: str) -> bool:
-    """True only when the WHOLE short utterance is a stop/hush command (fillers ignored)."""
+def _clean_command(text: str) -> str:
     t = re.sub(r"[.!,?]+", " ", (text or "").lower())
     t = _STOP_FILLERS.sub(" ", t)
-    t = " ".join(t.split())
-    return bool(_STOP_FORMS.match(t))
+    return " ".join(t.split())
+
+
+def is_stop(text: str) -> bool:
+    """True only when the WHOLE short utterance is a stop/cancel/hush command (fillers ignored)."""
+    return bool(_STOP_FORMS.match(_clean_command(text)))
+
+
+def is_mute(text: str) -> bool:
+    """True when the whole utterance asks to pause the mic (mute the user), not stop a build."""
+    return bool(_MUTE_FORMS.match(_clean_command(text)))
+
+
+def is_unmute(text: str) -> bool:
+    """True when the whole utterance asks to resume listening (unmute the user)."""
+    return bool(_UNMUTE_FORMS.match(_clean_command(text)))
 
 
 def _write_wav16(data: bytes, path: str) -> None:
@@ -429,6 +457,7 @@ class VoiceController(QObject):
     level = pyqtSignal(float)          # 0..1 mic level while listening
     bands = pyqtSignal(list)           # per-band FFT energies for the orb's spectral ring
     stopRequested = pyqtSignal()       # the user said "stop" — the Console cancels any pending reply
+    mutedChanged = pyqtSignal(bool)    # the mic was muted/unmuted — the Console updates its control
 
     def __init__(
         self,
@@ -449,6 +478,7 @@ class VoiceController(QObject):
         self._ptt = False
         self._barge_busy = False          # one in-flight 'stop?' transcription at a time while speaking
         self._narrating = False           # a progress note is being spoken (skip new ones until it ends)
+        self._muted = False               # user paused the mic: ignore all speech except unmute/stop
         self._mic_ok: bool | None = None  # cache the device probe; don't reopen it on every settle
         self._session_timer = QTimer(self)
         self._session_timer.setSingleShot(True)
@@ -487,6 +517,7 @@ class VoiceController(QObject):
         if on:
             return self._start_wake()
         self.interrupt()  # stop any in-flight speech right away — toggling off goes quiet immediately
+        self._muted = False  # turning voice off clears any mute state, so re-enabling starts listening
         self._stop_wake()
         self._end_session()
         self._set_state("idle")
@@ -556,7 +587,59 @@ class VoiceController(QObject):
         except Exception:
             return None
 
+    # ----- mute (pause the mic without stopping a build) -----
+    def is_muted(self) -> bool:
+        return self._muted
+
+    def set_muted(self, on: bool) -> None:
+        """Pause/resume listening. Muting does NOT end the session or stop a build — it only changes what
+        HELIX acts on; the listener stays live (when enabled) so an 'unmute'/'stop' still works by voice.
+        Mute is refused when nothing is actually listening (so we never advertise a muted mic that wasn't
+        live, leaving an escape-less state); UNMUTE is always honored, so recovery is never blocked."""
+        on = bool(on)
+        if on and not self.can_listen():
+            return
+        if on == self._muted:
+            return
+        self._muted = on
+        if on:  # going quiet — hush any in-flight narration so a mute feels immediate
+            self._narrating = False
+            try:
+                self._tts.stop()
+            except Exception:
+                pass
+        self.mutedChanged.emit(on)
+
+    def toggle_muted(self) -> None:
+        self.set_muted(not self._muted)
+
+    def _on_muted_text(self, text: str) -> None:
+        # While muted, ignore everything EXCEPT a short unmute or stop phrase — so you can always come back
+        # (or halt a build) by voice, but HELIX never starts a turn or build from your muted speech.
+        self._barge_busy = False
+        t = (text or "").strip()
+        if not t or len(t.split()) > 5:
+            return
+        if is_unmute(t):
+            self.set_muted(False)
+        elif is_stop(t):
+            try:
+                self._tts.stop()
+            except Exception:
+                pass
+            self.stopRequested.emit()
+
     def _on_utterance(self, pcm: bytes) -> None:
+        # Muted: route to the mute handler — only an unmute/stop phrase acts; all other speech is dropped.
+        if self._muted:
+            if self._barge_busy:
+                return
+            path = self._pcm_to_wav(pcm)
+            if path is None:
+                return
+            self._barge_busy = True
+            self._transcribe(path, self._on_muted_text)
+            return
         # While speaking/thinking — OR while a background build is narrating (state is 'idle' then) — only
         # a short "stop" counts. Otherwise HELIX's own narration, picked up by the open mic, would be
         # transcribed as a brand-new (billed) command.
@@ -594,6 +677,10 @@ class VoiceController(QObject):
 
     def _on_wake_text(self, text: str) -> None:
         text = (text or "").strip()
+        if self._muted:  # a mute landed WHILE this was transcribing — honor only unmute/stop, drop the rest
+            self._on_muted_text(text)
+            self._set_state("idle")
+            return
         matched, after = split_wake(text)
         if self._session and is_dismissal(text):
             self._end_session()
@@ -605,6 +692,10 @@ class VoiceController(QObject):
             command = text  # inside an active session the wake word isn't required
         else:
             self._set_state("idle")  # not addressed to HELIX — keep listening
+            return
+        if is_mute(command):  # "mute / stop listening" — pause the mic; never a turn, never a build-stop
+            self.set_muted(True)
+            self._set_state("idle")
             return
         if is_stop(command):  # "stop / be quiet / never mind" — hush and keep listening, no new turn
             self.interrupt()
@@ -663,6 +754,14 @@ class VoiceController(QObject):
         if not text:
             self._set_state("idle")
             return
+        if self._muted:  # paused (incl. a mute that landed mid-capture): only unmute/stop, never a turn
+            self._on_muted_text(text)
+            self._set_state("idle")
+            return
+        if is_mute(text):  # push-to-talk "mute" pauses the mic instead of starting a turn
+            self.set_muted(True)
+            self._set_state("idle")
+            return
         self._start_session()
         self._set_state("thinking")
         self.recognized.emit(text)
@@ -691,8 +790,8 @@ class VoiceController(QObject):
         """Speak a short progress note as HELIX works, WITHOUT changing the turn state (the mic stays
         gated, the orb keeps 'thinking'). Skips while a previous note is still speaking, so notes pace
         themselves to speech and never stack up — turning a stream of steps into spoken milestones."""
-        if self._narrating or not self.enabled():
-            return
+        if self._narrating or self._muted or not self.enabled():
+            return  # muted means quiet: don't speak progress notes (HELIX would also hear itself)
         text = speakable(text)
         if not text or not self._tts.available():
             return

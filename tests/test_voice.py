@@ -11,7 +11,9 @@ from helix.ui.voice import (
     VadSegmenter,
     _pcm_rms,
     is_dismissal,
+    is_mute,
     is_stop,
+    is_unmute,
     speakable,
     split_visuals,
     split_wake,
@@ -75,6 +77,25 @@ def test_is_stop():
     assert not is_stop("build a stopwatch app")  # 'stopwatch' must not trigger
     assert not is_stop("show me the canceled orders")
     assert not is_stop("")
+
+
+def test_is_stop_includes_explicit_build_stop_phrases():
+    for phrase in ("stop build", "stop the build", "stop building", "cancel build", "cancel the build",
+                   "abort", "halt"):
+        assert is_stop(phrase), phrase
+    assert not is_stop("build a halting problem demo")  # not a whole-utterance stop
+
+
+def test_is_mute_and_unmute():
+    for phrase in ("mute", "mute yourself", "mute the mic", "stop listening", "pause listening", "mic off"):
+        assert is_mute(phrase), phrase
+    for phrase in ("unmute", "unmute yourself", "resume listening", "start listening", "mic on",
+                   "you can listen again"):
+        assert is_unmute(phrase), phrase
+    # mute/unmute and stop never cross-fire (mute must NOT stop a build, stop must NOT mute)
+    assert not is_mute("stop") and not is_stop("mute")
+    assert not is_mute("build a mute button app")  # not a whole-utterance mute
+    assert not is_unmute("") and not is_mute("")
 
 
 def test_is_dismissal():

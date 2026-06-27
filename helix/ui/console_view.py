@@ -58,7 +58,7 @@ from helix.services.cancel import CancelToken
 from helix.services.conversation import ConversationService
 from helix.ui.orb import OrbState, PresenceOrb
 from helix.ui.theme import CYAN, CYAN_DIM, LINE, MUTED, TEXT
-from helix.ui.voice import VoiceController, is_stop, split_visuals
+from helix.ui.voice import VoiceController, is_mute, is_stop, is_unmute, split_visuals
 from helix.ui.workers import QtWorker
 
 if TYPE_CHECKING:
@@ -609,12 +609,19 @@ class ConsoleView(QWidget):
         self._input = QLineEdit()
         self._input.setPlaceholderText("Tell HELIX what to build…")
         self._input.returnPressed.connect(self._send)
+        # Mute: pause/resume the mic without stopping a build — the intuitive manual control, right by the
+        # input. Shown only when hands-free voice is on. (Stopping a build is a separate "stop" action.)
+        self._mute_btn = QPushButton("🎙 Mute")
+        self._mute_btn.setToolTip("Pause the mic — HELIX stops listening (your build keeps running)")
+        self._mute_btn.clicked.connect(self._toggle_mute)
+        self._mute_btn.setVisible(False)
         send = QPushButton("Send")
         send.setObjectName("Primary")
         send.clicked.connect(self._send)
         row.addWidget(self._talk)
         row.addWidget(self._attach_btn)
         row.addWidget(self._input)
+        row.addWidget(self._mute_btn)
         row.addWidget(send)
         root.addLayout(row)
 
@@ -623,6 +630,7 @@ class ConsoleView(QWidget):
             self._voice.recognized.connect(self._on_recognized)
             self._voice.stateChanged.connect(self._on_voice_state)
             self._voice.stopRequested.connect(self._on_voice_stop)
+            self._voice.mutedChanged.connect(self._on_muted_changed)
             if self.orb is not None:
                 self._voice.level.connect(self.orb.set_level)
                 self._voice.bands.connect(self.orb.set_bands)
@@ -725,16 +733,42 @@ class ConsoleView(QWidget):
         else:
             self.status.setText("Voice unavailable on this machine.")
 
+    def _toggle_mute(self) -> None:
+        """Manual mute toggle (the button by the input). Pauses/resumes the mic — NEVER stops a build."""
+        if self._voice is not None:
+            self._voice.toggle_muted()
+
+    def _on_muted_changed(self, muted: object) -> None:
+        self._refresh_voice_ui()
+        self.status.setText(
+            "Mic muted — I'm not listening. Tap Resume (or type/say “unmute”)." if muted
+            else "Listening again."
+        )
+
     # ----- voice controls -----
     def _refresh_voice_ui(self) -> None:
         voice = self._voice
         if voice is None or not voice.supported():
             self._voice_btn.setVisible(False)
             self._talk.setVisible(False)
+            self._mute_btn.setVisible(False)
             return
         on = voice.enabled()
         listening = on and voice.can_listen()          # actually hearing you right now
         needs_restart = on and not voice.can_listen()  # saved on, but not pre-warmed this run
+        # Mute toggle: only relevant when voice is actually listening (or currently muted, to resume).
+        muted = voice.is_muted()
+        self._mute_btn.setVisible(listening or muted)
+        self._mute_btn.setText("▶ Resume" if muted else "🎙 Mute")
+        medge = "#e0a13f" if muted else "#3fe0e0"
+        self._mute_btn.setStyleSheet(
+            f"QPushButton{{background:rgba(8,11,15,0.93);border:1px solid {medge};border-radius:14px;"
+            f"color:{medge};padding:8px 14px;}} QPushButton:hover{{border-color:#3fe0e0;}}"
+        )
+        self._mute_btn.setToolTip(
+            "Mic muted — HELIX isn't listening. Click to resume (your build kept running)." if muted
+            else "Pause the mic — HELIX stops listening. Your build keeps running; say “stop” to halt it."
+        )
         self._voice_btn.setVisible(True)
         # A near-solid dark pill so the label reads over the bright orb (cyan-on-cyan was invisible).
         edge = "#3fe0e0" if listening else ("#e0a13f" if needs_restart else "#26323b")
@@ -840,6 +874,16 @@ class ConsoleView(QWidget):
                 return
             # neither a clean yes nor no — leave the offer (its buttons stay live) and treat this as a
             # normal message instead of swallowing it as the answer.
+        if self._voice is not None and (is_mute(text) or is_unmute(text)):
+            # "mute" / "unmute" pause/resume the mic — never a build request, never a build-stop.
+            self._add_bubble("you", text)
+            if is_unmute(text):
+                self._voice.set_muted(False)  # unmute always works, so recovery is never blocked
+            elif self._voice.can_listen():
+                self._voice.set_muted(True)   # only mute when the mic is actually live
+            else:
+                self._add_bubble("helix", "Voice isn't listening right now, so there's nothing to mute.")
+            return
         if is_stop(text):  # "stop" works any time — halts the running build and/or a generating reply
             self._add_bubble("you", text)
             self._stop()

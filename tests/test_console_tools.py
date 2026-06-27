@@ -96,6 +96,100 @@ class _FakeSettings:
         pass
 
 
+class _FakeSTT:
+    def available(self):
+        return True
+
+    def ready(self):
+        return True
+
+    def transcribe(self, path):
+        return ""
+
+
+class _FakeTTS:
+    def __init__(self):
+        self.stopped = 0
+
+    def available(self):
+        return True
+
+    def speak(self, text, allow_fallback=True):
+        pass
+
+    def stop(self):
+        self.stopped += 1
+
+
+def _live_voice():
+    from helix.ui.voice import VoiceController
+
+    vc = VoiceController(_FakeSTT(), _FakeTTS(), _FakeSettings())
+    vc.can_listen = lambda: True  # headless has no mic; pretend the listener is live so mute is allowed
+    return vc
+
+
+def test_voice_mute_toggle_emits_signal_idempotently(_app):
+    vc = _live_voice()
+    events: list = []
+    vc.mutedChanged.connect(events.append)
+    assert not vc.is_muted()
+    vc.set_muted(True)
+    assert vc.is_muted() and events == [True]
+    vc.set_muted(True)  # idempotent — no duplicate signal
+    assert events == [True]
+    vc.toggle_muted()
+    assert not vc.is_muted() and events == [True, False]
+
+
+def test_set_muted_refused_when_nothing_is_listening(_app):
+    from helix.ui.voice import VoiceController
+
+    vc = VoiceController(_FakeSTT(), _FakeTTS(), _FakeSettings())
+    vc.can_listen = lambda: False  # nothing is listening
+    vc.set_muted(True)
+    assert not vc.is_muted()  # never arm a muted state with no live mic / no Resume path
+
+
+def test_muted_mic_acts_only_on_unmute_or_stop(_app):
+    vc = _live_voice()
+    vc.set_muted(True)
+    stops: list = []
+    vc.stopRequested.connect(lambda: stops.append(1))
+    vc._on_muted_text("what's the weather in paris tomorrow")  # ordinary speech → ignored while muted
+    assert vc.is_muted() and stops == []
+    vc._on_muted_text("stop")  # a build-stop still works while muted…
+    assert stops == [1] and vc.is_muted()  # …and stop does NOT unmute
+    vc._on_muted_text("unmute")  # unmute resumes listening
+    assert not vc.is_muted()
+
+
+def test_ptt_and_wake_while_muted_never_start_a_turn(_app):
+    # The PTT-bypass + transcription-race fixes: a command that resolves while muted must NOT be emitted.
+    vc = _live_voice()
+    vc.set_muted(True)
+    recognized: list = []
+    vc.recognized.connect(recognized.append)
+    vc._on_ptt_text("build me a clock app")   # PTT release while muted
+    vc._on_wake_text("build me a clock app")  # a pre-mute capture resolving after mute
+    assert recognized == [] and vc.is_muted()
+    vc._on_wake_text("unmute")  # a leaked utterance that IS unmute is still honored
+    assert not vc.is_muted()
+
+
+def test_narrate_is_silent_while_muted(_app):
+    vc = _live_voice()
+    vc.enabled = lambda: True  # narrate only speaks when voice is enabled
+    ran: list = []
+    vc._run = lambda fn, done: ran.append(1)  # spy: narrate dispatches TTS via _run
+    vc.narrate("shaping the body")
+    assert ran == [1]  # speaks a progress note when live
+    ran.clear()
+    vc.set_muted(True)
+    vc.narrate("adding the arc reactor")
+    assert ran == []  # muted → no spoken progress note (HELIX would otherwise hear itself)
+
+
 def test_console_attachment_chips_toggle_host_visibility(_app, tmp_path):
     view = ConsoleView(object(), _FakeSettings())
     p = tmp_path / "a.txt"
