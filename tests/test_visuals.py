@@ -115,3 +115,16 @@ def test_transcript_fade_in_applies_an_effect_without_crashing(_app):
     lbl = QLabel("hello")
     ConsoleView._animate_in(lbl)  # staticmethod: applies an opacity effect + fade animation
     assert lbl.graphicsEffect() is not None
+
+
+def test_bundled_display_font_loads(_app):
+    from helix.ui.theme import load_display_font
+
+    assert load_display_font() == "Orbitron"  # the bundled sci-fi face is present and Qt-loadable
+
+
+def test_apply_theme_runs_with_the_display_font(_app):
+    from helix.ui.theme import apply_theme
+
+    apply_theme(_app)  # sets palette + stylesheet (incl. the display-font rules); must not raise
+    assert "Orbitron" in _app.styleSheet()

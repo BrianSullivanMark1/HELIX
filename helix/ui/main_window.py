@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtGui import QColor, QDesktopServices
 from PyQt6.QtWidgets import (
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -109,6 +110,11 @@ class HelixMainWindow(QMainWindow):
         brand = QLabel("◉  HELIX")
         brand.setObjectName("Title")
         brand.setStyleSheet(f"color:{CYAN};")
+        glow = QGraphicsDropShadowEffect(brand)  # a soft cyan halo on the wordmark
+        glow.setColor(QColor(CYAN))
+        glow.setBlurRadius(20)
+        glow.setOffset(0, 0)
+        brand.setGraphicsEffect(glow)
         row.addWidget(brand)
         row.addStretch(1)
         for label, idx in (("◉ Console", _CONSOLE), ("☰ Menu", _MENU), ("⚙ Settings", _SETTINGS)):

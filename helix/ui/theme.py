@@ -1,7 +1,9 @@
 """The HUD theme — a dark cyan/amber palette. One place owns the look."""
 from __future__ import annotations
 
-from PyQt6.QtGui import QColor, QPalette
+from pathlib import Path
+
+from PyQt6.QtGui import QColor, QFontDatabase, QPalette
 from PyQt6.QtWidgets import QApplication
 
 # Palette
@@ -70,6 +72,19 @@ QFrame#Card:hover {{ border-color: {CYAN_DIM}; }}
 """
 
 
+def load_display_font() -> str:
+    """Load the bundled sci-fi display face (Orbitron). Returns its family, or '' if unavailable so
+    callers fall back to the system UI font. The path is package-relative, so it resolves in dev AND in
+    the PyInstaller-frozen build (where the assets are collected next to this module)."""
+    path = Path(__file__).resolve().parent / "assets" / "fonts" / "Orbitron.ttf"
+    try:
+        fid = QFontDatabase.addApplicationFont(str(path))
+        fams = QFontDatabase.applicationFontFamilies(fid)
+        return fams[0] if fams else ""
+    except Exception:
+        return ""
+
+
 def apply_theme(app: QApplication) -> None:
     app.setStyle("Fusion")
     pal = QPalette()
@@ -81,4 +96,13 @@ def apply_theme(app: QApplication) -> None:
     pal.setColor(QPalette.ColorRole.ButtonText, QColor(TEXT))
     pal.setColor(QPalette.ColorRole.Highlight, QColor(CYAN_DIM))
     app.setPalette(pal)
-    app.setStyleSheet(_STYLESHEET)
+    # The HELIX wordmark + section titles wear the geometric display face (a quiet JARVIS signature);
+    # everything else stays in the clean UI font. Falls back gracefully if the font didn't load.
+    family = load_display_font()
+    sheet = _STYLESHEET
+    if family:
+        sheet += (
+            f'\nQLabel#Title {{ font-family: "{family}"; letter-spacing: 3px; }}\n'
+            f'QLabel#Brand {{ font-family: "{family}"; letter-spacing: 3px; }}\n'
+        )
+    app.setStyleSheet(sheet)

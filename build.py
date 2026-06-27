@@ -71,6 +71,11 @@ def main(argv: list[str] | None = None) -> int:
         "--name", NAME, "--onedir", "--windowed",
         "--collect-submodules", "helix",
     ]
+    # Bundle static UI assets (the Orbitron display font) next to the package so the frozen app loads
+    # them via the same package-relative path it uses in dev.
+    assets = ROOT / "helix" / "ui" / "assets"
+    if assets.exists():
+        args += ["--add-data", f"{assets}{os.pathsep}helix/ui/assets"]
     # The 3D baker loads these lazily at runtime (trimesh.boolean -> manifold3d; extrude -> shapely /
     # mapbox_earcut), so PyInstaller's static scan misses them — collect each in full.
     for pkg in ("trimesh", "shapely", "manifold3d", "mapbox_earcut"):
