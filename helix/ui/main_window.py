@@ -44,10 +44,13 @@ class HelixMainWindow(QMainWindow):
         self.setWindowTitle("HELIX")
         self.resize(980, 740)
 
-        # The orb is the living background of the whole window. The GPU-shader ShaderOrb auto-falls back
-        # to the QPainter PresenceOrb if WebGL/WebEngine isn't available; a settings flag forces the
-        # classic orb for anyone who prefers it (or if the shader misbehaves on their GPU).
-        use_shader = bool(container.settings.get("shader_orb", True))
+        # The orb is the living background of the whole window. Default is the dark QPainter PresenceOrb
+        # (audio-reactive, on-brand). The GPU-shader ShaderOrb is OPT-IN (shader_orb=true) because a
+        # transparent QWebEngine background isn't reliable across GPUs/the frozen build — when it fails it
+        # paints an opaque (white) rectangle as the window background, which the transparent overlays then
+        # show through, washing the whole app out. Keep it behind the flag until its transparency is
+        # verified live on this machine.
+        use_shader = bool(container.settings.get("shader_orb", False))
         self.orb = ShaderOrb() if use_shader else PresenceOrb()
 
         # The foreground: nav + pages, all transparent so the orb shows through.
