@@ -463,10 +463,26 @@ _VIEWER_HTML = """<!doctype html>
   #panel button.on { color: var(--accent); border-color: var(--accent); }
   #msg { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
     text-align: center; padding: 24px; font-size: 15px; color: #9fc7c8; }
+  /* Futuristic HUD frame — pure CSS over the canvas, never intercepts pointer events (so the
+     OrbitControls + buttons keep working) and never touches the WebGL render. */
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 1; }
+  #hud .vignette { position: absolute; inset: 0;
+    background: radial-gradient(ellipse at center, transparent 56%, rgba(0,0,0,.55) 100%); }
+  #hud .scan { position: absolute; inset: 0; opacity: .05; mix-blend-mode: screen;
+    background: repeating-linear-gradient(0deg, #3fe0e0 0, #3fe0e0 1px, transparent 1px, transparent 3px); }
+  #hud .corner { position: absolute; width: 26px; height: 26px; border: 1.5px solid rgba(63,224,224,.5); }
+  #hud .tl { top: 16px; left: 16px; border-right: none; border-bottom: none; }
+  #hud .tr { top: 16px; right: 16px; border-left: none; border-bottom: none; }
+  #hud .bl { bottom: 16px; left: 16px; border-right: none; border-top: none; }
+  #hud .br { bottom: 16px; right: 16px; border-left: none; border-top: none; }
+  @keyframes hud-in { from { opacity: 0; } to { opacity: 1; } }
+  #app, #hud, #title, #panel { animation: hud-in .6s ease both; }
 </style>
 </head>
 <body>
   <div id="app"></div>
+  <div id="hud"><div class="vignette"></div><div class="scan"></div>
+    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i></div>
   <div id="title">__TITLE__</div>
   <div id="panel">
     <button id="play" style="display:none">Pause</button>
