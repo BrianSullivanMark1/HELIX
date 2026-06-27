@@ -63,6 +63,10 @@ class Container:
 
         def _deep_think(question: str, on_progress=None) -> str:
             reply = deep_chat.chat([Turn(Role.USER, (Text(question),))], system=DEEP_THINK_SYSTEM)
+            # Meter the Opus escalation like the main loop does — it's the most expensive call path, and
+            # was previously invisible to the usage ledger.
+            u = reply.usage
+            self.store.record_usage(u.input_tokens, u.output_tokens, u.cost_usd)
             return reply.text or "I couldn't reason that through just now — try rephrasing?"
 
         coder_chat = AnthropicChat(_key, max_tokens=8000)  # roomier for code generation (Opus default)

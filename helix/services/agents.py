@@ -1,7 +1,8 @@
 """AgentService — goal-driven automations. An agent is a saved goal HELIX can run on demand.
 
-Running an agent drives the same model↔tools loop a typed request does, so anything that spends or
-changes things still surfaces its confirmation in the conversation. Settings-backed (v1 trigger: manual).
+Running an agent drives the same model↔tools loop a typed request does, but with the build/spend/
+self-mod/delete tools DENIED: an agent runs autonomously (no human in the loop), so it may read, think,
+search, and report — but never build or change things on its own. Settings-backed (v1 trigger: manual).
 """
 from __future__ import annotations
 
@@ -60,7 +61,11 @@ class AgentService:
         agent = next((a for a in self.list() if a.name == name), None)
         if agent is None:
             return f"No agent named '{name}'."
-        return self._conversation.run_turn(agent.goal, on_progress=on_progress)
+        # An agent runs autonomously (no human in the loop), so it may NOT build, spend, self-modify, or
+        # delete — only read, think, search, and report. Human-approved building stays in the Console.
+        return self._conversation.run_turn(
+            agent.goal, on_progress=on_progress, allow_builds=False
+        )
 
     def _save(self, agents: list[Agent]) -> None:
         self._settings.set(

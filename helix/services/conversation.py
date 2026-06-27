@@ -20,6 +20,12 @@ STOPPED_REPLY = "Okay, I stopped."  # shown (not spoken) when the user halts a t
 
 MAX_STEPS = 6  # guard against a runaway tool loop
 
+# Tools that build, spend, self-modify, or delete the user's stuff. An AGENT run is autonomous (no human
+# in the loop), so it is denied these — it can read, think, search, and report, but never build or change.
+BUILD_TOOLS = frozenset(
+    {"build_app", "build_task", "build_3d_model", "create_agent", "delete_build", "improve_helix"}
+)
+
 
 class ConversationService:
     def __init__(
@@ -44,18 +50,22 @@ class ConversationService:
 
     def run_turn(
         self, user_text: str, *, on_progress: ProgressFn | None = None,
-        cancel: CancelToken | None = None,
+        cancel: CancelToken | None = None, allow_builds: bool = True,
     ) -> str:
         with self._lock:
-            return self._run_turn_locked(user_text, on_progress=on_progress, cancel=cancel)
+            return self._run_turn_locked(
+                user_text, on_progress=on_progress, cancel=cancel, allow_builds=allow_builds
+            )
 
     def _run_turn_locked(
         self, user_text: str, *, on_progress: ProgressFn | None = None,
-        cancel: CancelToken | None = None,
+        cancel: CancelToken | None = None, allow_builds: bool = True,
     ) -> str:
         self._store.append(Message(Role.USER, user_text, self._clock.now()))
         turns = self._history_turns()
         specs = self._tools.specs()
+        if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete tools
+            specs = [s for s in specs if s.name not in BUILD_TOOLS]
 
         reply = None
         for _ in range(MAX_STEPS):

@@ -4,8 +4,12 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
+import pytest
+
+from helix.domain.errors import BuildError
 from helix.domain.models import App, BuildKind
 from helix.services.builds import BuildService
+from helix.services.forge import ForgeService
 
 
 def _legacy_build(tmp_path, slug: str, html: str) -> None:
@@ -135,6 +139,23 @@ def test_categorized_partitions_by_build_kind(tmp_path):
     assert {a.slug for a in cat["apps"]} == {"tip-calc"}
     assert {a.slug for a in cat["models"]} == {"battery"}
     assert {a.slug for a in cat["tasks"]} == {"cleanup"}
+
+
+def test_forge_refuses_a_kind_conflict_on_a_taken_name(tmp_path):
+    # A model named "Battery" exists; asking to build a TASK of the same name must refuse (not silently
+    # flip the model into a task and overwrite its workspace). The conflict is caught before any coder runs.
+    builds = BuildService(tmp_path, _NoRepo(), _FixedClock())
+    model = App.from_request("Battery", "show how a battery works")
+    model.build_kind = BuildKind.MODEL
+    builds.create_workspace(model)
+    (builds.workspace("battery") / "index.html").write_text("<html></html>", encoding="utf-8")
+    builds.finalize(model)
+
+    forge = ForgeService(builds, coder=None, bus=None, repo=_NoRepo(), app_root=tmp_path)
+    with pytest.raises(BuildError):
+        forge.build("Battery", "now make it a task", kind=BuildKind.TASK)
+    # the original model is untouched
+    assert builds.categorized()["models"][0].slug == "battery"
 
 
 def test_legacy_python_build_categorizes_as_a_task(tmp_path):

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from helix.domain.errors import BuildCancelled, BuildError
 from helix.domain.events import BuildCreated, BuildDeleted, BuildIterated
 from helix.domain.models import App, BuildKind, slugify
+from helix.logging_setup import get_logger
 from helix.ports.coder import CoderAgent, ProgressFn
 from helix.ports.events import EventBus
 from helix.ports.repo import VersionedRepo
@@ -17,6 +18,8 @@ from helix.services.selfdev import restore_if_changed, scan_tree, snapshot_files
 
 if TYPE_CHECKING:
     from helix.services.model_baker import ModelBaker
+
+_LOG = get_logger("forge")
 
 
 class ForgeService:
@@ -53,11 +56,18 @@ class ForgeService:
         # right menu tab. The sandbox/guard is identical for every kind.
         app = App.from_request(name, request)
         iterating = self._builds.exists(app.slug)
+        prior = next((a for a in self._builds.list() if a.slug == app.slug), None) if iterating else None
         if kind is None:
             # Caller didn't classify: keep an existing build's kind on iteration (so a plain rebuild
             # never silently moves a model out of the Models tab); new builds default to a plain app.
-            prior = next((a for a in self._builds.list() if a.slug == app.slug), None) if iterating else None
             app.build_kind = prior.build_kind if prior else BuildKind.APP
+        elif prior is not None and prior.build_kind != kind:
+            # The name is taken by a DIFFERENT kind — refuse instead of silently flipping a model into a
+            # task (or vice versa) and overwriting its workspace. Ask the user to pick another name.
+            raise BuildError(
+                f"There's already a {prior.build_kind.value} called '{prior.name}'. "
+                f"Choose a different name for the new {kind.value}."
+            )
         else:
             app.build_kind = kind
         workspace = self._builds.create_workspace(app)
@@ -152,16 +162,16 @@ class ForgeService:
                     if rp.is_file() and not rp.name.endswith(".sample"):
                         rp.unlink()
                 except OSError:
-                    pass
+                    _LOG.critical("could not remove planted git hook: %s", rp, exc_info=True)
             else:
                 source_rels.append(rel)
         for sibling in siblings:
             try:
                 self._repo.discard_changes(sibling)  # restore the sibling app to its last commit
             except Exception:
-                pass
+                _LOG.critical("could not revert escaped write to sibling build: %s", sibling, exc_info=True)
         if source_rels:
             try:
                 self._repo.restore_paths(self._app_root, source_rels)
             except Exception:
-                pass
+                _LOG.critical("could not revert escaped writes to source: %s", source_rels, exc_info=True)
