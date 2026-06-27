@@ -15,7 +15,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from helix.domain.events import BuildCreated, BuildDeleted, BuildIterated
+from helix.domain.events import (
+    BuildCreated,
+    BuildDeleted,
+    BuildFinished,
+    BuildIterated,
+    BuildProgress,
+)
 from helix.domain.models import AppKind
 from helix.logging_setup import get_logger
 from helix.ui.console_view import ConsoleView
@@ -35,8 +41,10 @@ _CONSOLE, _MENU, _SETTINGS, _VIEWER = 0, 1, 2, 3
 
 
 class HelixMainWindow(QMainWindow):
-    # Bridges bus events (published on a worker thread) onto the UI thread via a queued signal.
+    # Bridges bus events (published on a worker/queue thread) onto the UI thread via queued signals.
     _buildSignal = pyqtSignal(object)
+    _buildProgressSignal = pyqtSignal(object)
+    _buildFinishedSignal = pyqtSignal(object)
 
     def __init__(self, container) -> None:
         super().__init__()
@@ -65,7 +73,7 @@ class HelixMainWindow(QMainWindow):
         self.console = ConsoleView(
             container.conversation, container.settings,
             container.speech_in, container.speech_out, self.orb,
-            forge=container.forge,
+            forge=container.forge, build_queue=container.build_queue,
         )
         self.launcher = LauncherView(container.builds, container.agents, container.tasks)
         self.settings = SettingsView(container.settings)
@@ -108,6 +116,11 @@ class HelixMainWindow(QMainWindow):
         container.bus.subscribe(BuildIterated, self._buildSignal.emit)
         container.bus.subscribe(BuildDeleted, self._buildSignal.emit)  # cleanup after a stopped build
         self._buildSignal.connect(self._on_build)
+        # Background-build commentary + completion → the Console (status line / spoken announcement).
+        container.bus.subscribe(BuildProgress, self._buildProgressSignal.emit)
+        container.bus.subscribe(BuildFinished, self._buildFinishedSignal.emit)
+        self._buildProgressSignal.connect(self._on_build_progress)
+        self._buildFinishedSignal.connect(self._on_build_finished)
 
     def _build_nav(self) -> QWidget:
         bar = QWidget()
@@ -146,6 +159,12 @@ class HelixMainWindow(QMainWindow):
 
     def _on_build(self, _event: object) -> None:
         self.launcher.refresh()
+
+    def _on_build_progress(self, ev: object) -> None:
+        self.console.on_build_progress(ev.name, ev.line)
+
+    def _on_build_finished(self, ev: object) -> None:
+        self.console.on_build_finished(ev.name, ev.ok, ev.error, ev.stopped, ev.handle)
 
     def closeEvent(self, event) -> None:
         # Stop voice (TTS + mic) and any workers BEFORE the window goes, so nothing keeps running

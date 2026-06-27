@@ -286,14 +286,17 @@ class ConsoleView(QWidget):
         speech_out: SpeechOut | None = None,
         orb: PresenceOrb | None = None,
         forge: "ForgeService | None" = None,
+        build_queue=None,
     ) -> None:
         super().__init__()
         self.setObjectName("Console")
         self._conversation = conversation
         self._settings = settings
         self._forge = forge  # for removing/rolling back work a 'stop' interrupted
+        self._queue = build_queue  # background build jobs — cancel/status the running build
         self._workers: set[QtWorker] = set()
-        self._busy = False
+        self._busy = False  # a CONVERSATIONAL turn is running (now short — builds left the turn)
+        self._pending_msgs: list[tuple[str, bool]] = []  # follow-ups typed while a turn runs (never dropped)
         self._cancelled = False  # set by a 'stop' — a pending reply is shown but not spoken
         self._cancel: CancelToken | None = None  # the running turn's stop signal
         self._pending_cleanup: "BuildHandle | None" = None  # awaiting yes/no to remove half-built work
@@ -432,13 +435,18 @@ class ConsoleView(QWidget):
         self._cancel_active()
 
     def _cancel_active(self) -> None:
-        """Signal the in-flight turn/build to stop. The build unwinds and (if one was in progress) the
-        cleanup offer fires when the worker finishes."""
-        if self._busy:
+        """Stop now: cancel a generating reply (the conversational turn) AND halt the running background
+        build. The build's cleanup offer fires later via on_build_finished(stopped)."""
+        if self._busy and self._cancel is not None:
             self._cancelled = True
-            if self._cancel is not None:
-                self._cancel.cancel()  # kills the coder subprocess / breaks the build loop
-        self.status.setText("Stopping…" if self._busy else "Stopped.")
+            self._cancel.cancel()  # break a mid-flight reply loop
+        stopped = self._queue.cancel_active() if self._queue is not None else None  # kill the coder
+        if stopped:
+            self.status.setText(f"Stopping {stopped}…")
+        elif self._busy:
+            self.status.setText("Stopping…")
+        else:
+            self.status.setText("Stopped.")
 
     def toggle_voice(self) -> None:
         """Flip hands-free voice on/off. Wired to both the Voice button and a tap on the orb."""
@@ -533,18 +541,22 @@ class ConsoleView(QWidget):
         if self._pending_cleanup is not None:  # we asked "remove the half-built X?" — this is the answer
             self._answer_cleanup(text)
             return
-        if self._busy:
-            # Already working. If it's a short "stop", treat the typed/spoken word as a stop command.
-            if is_stop(text):
-                self._add_bubble("you", text)
-                self._stop()
+        if is_stop(text):  # "stop" works any time — halts the running build and/or a generating reply
+            self._add_bubble("you", text)
+            self._stop()
             return
+        self._add_bubble("you", text)
+        if self._busy:
+            # A conversational turn is mid-flight. Turns are short now (builds run in the background), so
+            # queue this follow-up and run it the moment the current turn finishes — never drop it.
+            self._pending_msgs.append((text, from_voice))
+            return
+        self._start_turn(text, from_voice)
+
+    def _start_turn(self, text: str, from_voice: bool) -> None:
         self._cancelled = False
         self._cancel = CancelToken()
-        self._add_bubble("you", text)
         self._busy = True
-        self._input.setEnabled(False)
-        self._talk.setEnabled(False)
         if self._voice is not None:
             if not from_voice:
                 self._voice.begin_turn()  # voice path already went quiet when it captured the command
@@ -612,6 +624,23 @@ class ConsoleView(QWidget):
             else "Ready when you are."
         )
 
+    # ----- background build announcements (bridged from the event bus by the main window) -----
+    def on_build_progress(self, name: str, line: str) -> None:
+        """Live commentary from a background build — status line, and (voice on) the spoken milestones."""
+        self.status.setText(line)
+        if self._voice is not None:
+            self._voice.narrate(line)
+
+    def on_build_finished(self, name: str, ok: bool, error: str | None, stopped: bool, handle) -> None:
+        """A background build ended — announce it tersely, or offer cleanup if it was stopped mid-run."""
+        if stopped:
+            if handle is not None:
+                self._offer_cleanup(handle)
+            else:
+                self._announce("Stopped.")
+            return
+        self._announce(f"Done — {name} is in the menu." if ok else f"The {name} build didn't go through.")
+
     # ----- cleanup after a stopped build -----
     def _offer_cleanup(self, handle: "BuildHandle") -> None:
         """A build was stopped mid-run — ask whether to remove (new) or roll back (iteration) the work."""
@@ -676,9 +705,10 @@ class ConsoleView(QWidget):
         self._workers.discard(worker)
         worker.deleteLater()
         self._busy = False
-        self._input.setEnabled(True)
-        self._input.setFocus()
         self._refresh_voice_ui()
+        if self._pending_msgs:  # run the next follow-up the user queued while this turn was running
+            text, from_voice = self._pending_msgs.pop(0)
+            self._start_turn(text, from_voice)
 
     def shutdown(self) -> None:
         """Wait briefly for any in-flight worker so we never destroy a running QThread on close."""

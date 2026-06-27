@@ -1,4 +1,5 @@
-"""ToolRegistry tests — build_3d_model is exposed and routed through the Forge with the 3D prompt."""
+"""ToolRegistry tests — build tools ENQUEUE on the background BuildQueue (with the right kind/prompt),
+and the queue-status tools (list_builds / prioritize_build / cancel_build) route correctly."""
 from __future__ import annotations
 
 from helix.domain.models import BuildKind
@@ -13,17 +14,6 @@ class _App:
 
 
 class _FakeForge:
-    """Records build() calls so we can assert which prompt + kind the tool routed with."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    def build(self, name, request, *, prompt=None, kind=None, on_progress=None, cancel=None):
-        self.calls.append(
-            {"name": name, "request": request, "prompt": prompt, "kind": kind, "cancel": cancel}
-        )
-        return _App(name)
-
     def remove_build(self, name) -> bool:
         return False  # no workspace build by that name — let the agent path handle deletes in tests
 
@@ -33,9 +23,46 @@ class _FakeBuilds:
         return []
 
 
-class _FakeAgents:
-    """Stand-in AgentService: records add/remove and answers list() from a seed of names."""
+class _FakeQueue:
+    """Records enqueue() and the control calls so we can assert how a tool routed."""
 
+    def __init__(self, ahead: int = 0, active=None, queued=()) -> None:
+        self.enqueued: list[dict] = []
+        self._ahead = ahead
+        self._active = active
+        self._queued = list(queued)
+        self.moved: list[str] = []
+        self.cancelled_queued: list[str] = []
+        self.cancelled_active = 0
+
+    def enqueue(self, name, request, *, kind, prompt=None):
+        self.enqueued.append({"name": name, "request": request, "kind": kind, "prompt": prompt})
+        return self._ahead
+
+    def status_line(self):
+        return f"Building now: {self._active}." if self._active else "Nothing building right now."
+
+    def active_name(self):
+        return self._active
+
+    def move_first(self, name):
+        if name in self._queued:
+            self.moved.append(name)
+            return True
+        return False
+
+    def cancel_queued(self, name):
+        if name in self._queued:
+            self.cancelled_queued.append(name)
+            return True
+        return False
+
+    def cancel_active(self):
+        self.cancelled_active += 1
+        return self._active
+
+
+class _FakeAgents:
     def __init__(self, existing=()) -> None:
         self.added: list[tuple[str, str]] = []
         self.removed: list[str] = []
@@ -52,54 +79,84 @@ class _FakeAgents:
         self.removed.append(name)
 
 
-def _registry() -> tuple[ToolRegistry, _FakeForge]:
-    forge = _FakeForge()
-    return ToolRegistry(forge, _FakeBuilds()), forge
+def _registry(ahead: int = 0, active=None, queued=()):
+    queue = _FakeQueue(ahead=ahead, active=active, queued=queued)
+    return ToolRegistry(_FakeForge(), _FakeBuilds(), queue=queue), queue
 
 
-def test_build_3d_model_is_exposed():
+def test_build_tools_are_exposed():
     reg, _ = _registry()
     names = {t.name for t in reg.specs()}
-    assert "build_3d_model" in names
-    assert "build_app" in names  # the new faculty sits alongside the existing ones
+    assert {"build_app", "build_task", "build_3d_model", "list_builds"} <= names
 
 
-def test_build_3d_model_routes_with_the_model_prompt():
-    reg, forge = _registry()
-    out = reg.dispatch(
-        "build_3d_model", {"name": "Wall Camera Unit", "request": "camera, speaker and mic"}
-    )
-    assert len(forge.calls) == 1
-    call = forge.calls[0]
-    assert call["name"] == "Wall Camera Unit"
-    # Routed with the 3D-model instruction, not the default app-builder prompt.
-    assert call["prompt"] == build_3d_model_prompt("Wall Camera Unit", "camera, speaker and mic")
-    assert "3D MODEL" in call["prompt"]
-    assert call["kind"] == BuildKind.MODEL  # so it lands in the Models tab
-    assert "Modeled" in out
+def test_build_3d_model_enqueues_with_the_model_prompt_and_kind():
+    reg, queue = _registry()
+    out = reg.dispatch("build_3d_model", {"name": "Wall Camera Unit", "request": "camera, speaker and mic"})
+    assert len(queue.enqueued) == 1
+    job = queue.enqueued[0]
+    assert job["name"] == "Wall Camera Unit"
+    assert job["kind"] == BuildKind.MODEL
+    assert job["prompt"] == build_3d_model_prompt("Wall Camera Unit", "camera, speaker and mic")
+    assert "Starting" in out and "model" in out  # fast acknowledgement, not "Built"
 
 
-def test_build_app_still_uses_the_default_prompt():
-    reg, forge = _registry()
-    reg.dispatch("build_app", {"name": "Tip Calc", "request": "a tip calculator"})
-    assert forge.calls[0]["prompt"] is None  # default app-builder path is untouched
-    # build_app doesn't pass a kind — the Forge decides (new build -> app; iteration -> preserved).
-    assert forge.calls[0]["kind"] is None
+def test_build_app_enqueues_with_no_prompt_and_app_kind():
+    reg, queue = _registry()
+    out = reg.dispatch("build_app", {"name": "Tip Calc", "request": "a tip calculator"})
+    assert queue.enqueued[0]["prompt"] is None
+    assert queue.enqueued[0]["kind"] == BuildKind.APP
+    assert "Starting" in out
 
 
-def test_build_task_routes_with_the_task_prompt_and_kind():
-    reg, forge = _registry()
-    assert "build_task" in {t.name for t in reg.specs()}
+def test_build_task_enqueues_with_the_task_prompt():
+    reg, queue = _registry()
     out = reg.dispatch("build_task", {"name": "Rename Downloads", "request": "tidy my downloads"})
-    call = forge.calls[0]
-    assert call["prompt"] == build_task_prompt("Rename Downloads", "tidy my downloads")
-    assert call["kind"] == BuildKind.TASK  # lands in the Tasks tab
+    job = queue.enqueued[0]
+    assert job["kind"] == BuildKind.TASK
+    assert job["prompt"] == build_task_prompt("Rename Downloads", "tidy my downloads")
     assert "task" in out.lower()
+
+
+def test_second_build_while_one_runs_is_queued_not_started():
+    reg, _ = _registry(ahead=1)  # something already building
+    out = reg.dispatch("build_app", {"name": "Habit Tracker", "request": "track habits"})
+    assert "Queued" in out and "Habit Tracker" in out
+
+
+def test_list_builds_is_read_only_status():
+    reg, _ = _registry(active="Tip Calculator")
+    out = reg.dispatch("list_builds", {})
+    assert "Tip Calculator" in out  # reports status, starts/stops nothing
+
+
+def test_prioritize_moves_a_queued_build():
+    reg, queue = _registry(active="Weather", queued=["To-Do List"])
+    out = reg.dispatch("prioritize_build", {"name": "To-Do List"})
+    assert queue.moved == ["To-Do List"] and "next" in out.lower()
+
+
+def test_prioritize_cannot_reorder_the_running_build():
+    reg, _ = _registry(active="Weather", queued=[])
+    out = reg.dispatch("prioritize_build", {"name": "Weather"})
+    assert "already building" in out.lower()
+
+
+def test_cancel_build_drops_a_queued_one():
+    reg, queue = _registry(active="Weather", queued=["To-Do List"])
+    out = reg.dispatch("cancel_build", {"name": "To-Do List"})
+    assert queue.cancelled_queued == ["To-Do List"] and "Dropped" in out
+
+
+def test_cancel_build_stops_the_active_one():
+    reg, queue = _registry(active="Weather", queued=[])
+    out = reg.dispatch("cancel_build", {"name": "Weather"})
+    assert queue.cancelled_active == 1 and "Stopping" in out
 
 
 def test_create_agent_is_exposed_only_once_agents_are_bound():
     reg, _ = _registry()
-    assert "create_agent" not in {t.name for t in reg.specs()}  # not wired yet
+    assert "create_agent" not in {t.name for t in reg.specs()}
     reg.bind_agents(_FakeAgents())
     assert "create_agent" in {t.name for t in reg.specs()}
 
@@ -117,26 +174,23 @@ def test_delete_build_falls_through_to_a_matching_agent():
     reg, _ = _registry()  # _FakeForge.remove_build returns False, so the agent path handles it
     agents = _FakeAgents(existing=["Morning Brief"])
     reg.bind_agents(agents)
-    out = reg.dispatch("delete_build", {"name": "morning brief"})  # case-insensitive match
-    assert agents.removed == ["Morning Brief"]
-    assert "Morning Brief" in out
+    out = reg.dispatch("delete_build", {"name": "morning brief"})
+    assert agents.removed == ["Morning Brief"] and "Morning Brief" in out
 
 
 def test_think_harder_routes_to_the_deep_thinker_when_wired():
-    forge = _FakeForge()
     asked: list[str] = []
 
     def deep(question, on_progress=None):
         asked.append(question)
         return "a carefully reasoned answer"
 
-    reg = ToolRegistry(forge, _FakeBuilds(), deep_think=deep)
+    reg = ToolRegistry(_FakeForge(), _FakeBuilds(), deep_think=deep, queue=_FakeQueue())
     assert "think_harder" in {t.name for t in reg.specs()}
     out = reg.dispatch("think_harder", {"question": "why is the sky blue?"})
-    assert asked == ["why is the sky blue?"]
-    assert out == "a carefully reasoned answer"
+    assert asked == ["why is the sky blue?"] and out == "a carefully reasoned answer"
 
 
 def test_think_harder_absent_without_a_deep_thinker():
-    reg, _ = _registry()  # no deep_think wired
+    reg, _ = _registry()
     assert "think_harder" not in {t.name for t in reg.specs()}

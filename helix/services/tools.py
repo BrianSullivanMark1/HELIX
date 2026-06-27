@@ -13,9 +13,20 @@ from helix.services.selfdev import SelfDevService
 
 if TYPE_CHECKING:  # AgentService -> ConversationService -> ToolRegistry would be a runtime import cycle
     from helix.services.agents import AgentService
+    from helix.services.build_queue import BuildQueue
 
 # Escalation: hand a hard question to a deeper model and get back its spoken answer.
 DeepThink = Callable[[str, ProgressFn | None], str]
+
+
+def _enqueued_msg(name: str, ahead: int, label: str) -> str:
+    """The terse acknowledgement the model relays after a build is enqueued. label: '', 'task', 'model'."""
+    thing = f"the {name} {label}".rstrip() if label else name
+    if ahead == 0:
+        return f"Starting {thing} now."
+    if ahead == 1:
+        return f"Queued {thing} — it'll run right after the current build."
+    return f"Queued {thing} — {ahead} builds ahead of it."
 
 
 class ToolRegistry:
@@ -26,12 +37,14 @@ class ToolRegistry:
         selfdev: SelfDevService | None = None,
         deep_think: DeepThink | None = None,
         agents: "AgentService | None" = None,
+        queue: "BuildQueue | None" = None,
     ) -> None:
         self._forge = forge
         self._builds = builds
         self._selfdev = selfdev
         self._deep_think = deep_think
         self._agents = agents
+        self._queue = queue
 
     def bind_agents(self, agents: "AgentService") -> None:
         """Wire the agent store after construction (it depends on ConversationService, which depends on
@@ -149,6 +162,48 @@ class ToolRegistry:
                 },
             ),
         ]
+        if self._queue is not None:
+            tools += [
+                ToolSpec(
+                    name="list_builds",
+                    description=(
+                        "Report what's building right now and what's queued behind it. READ-ONLY — use "
+                        "it to answer 'what are you doing', 'how's it going', 'what's in the queue'. It "
+                        "never starts, stops, pauses, or reorders anything. A build runs in the "
+                        "background, so call this to give an honest status without disturbing the work."
+                    ),
+                    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                ),
+                ToolSpec(
+                    name="prioritize_build",
+                    description=(
+                        "Move a QUEUED build to the front so it runs next. Use when the user wants a "
+                        "waiting build done sooner ('do the to-do list first'). You cannot reorder the "
+                        "one already running — if they name that, say it's already mid-build."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {"name": {"type": "string", "description": "The queued build to bump up."}},
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="cancel_build",
+                    description=(
+                        "Cancel a build that is queued or currently running, by name. Use when the user "
+                        "wants to stop a specific in-progress or waiting build (not delete a finished "
+                        "one — that's delete_build). Confirm if it's the one actively building, since "
+                        "partial work may be discarded."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {"name": {"type": "string", "description": "The build to cancel."}},
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                ),
+            ]
         if self._deep_think is not None:
             tools.append(
                 ToolSpec(
@@ -230,31 +285,40 @@ class ToolRegistry:
         return tools
 
     def dispatch(self, name: str, args: dict, *, on_progress: ProgressFn | None = None, cancel=None) -> str:
-        if name == "build_app":
-            app = self._forge.build(
-                args["name"], args["request"], on_progress=on_progress, cancel=cancel
-            )
-            return f"Built '{app.name}'. It's in the menu now."
-        if name == "build_3d_model":
-            app = self._forge.build(
-                args["name"],
-                args["request"],
+        # Builds run in the BACKGROUND via the queue: enqueue and return a fast acknowledgement so the
+        # orb keeps talking. Completion is announced separately (BuildFinished), never from this return.
+        if name == "build_app" and self._queue is not None:
+            ahead = self._queue.enqueue(args["name"], args["request"], kind=BuildKind.APP)
+            return _enqueued_msg(args["name"], ahead, "")
+        if name == "build_3d_model" and self._queue is not None:
+            ahead = self._queue.enqueue(
+                args["name"], args["request"], kind=BuildKind.MODEL,
                 prompt=build_3d_model_prompt(args["name"], args["request"]),
-                kind=BuildKind.MODEL,
-                on_progress=on_progress,
-                cancel=cancel,
             )
-            return f"Modeled '{app.name}'. Open it from the Models tab to explore it in 3D."
-        if name == "build_task":
-            app = self._forge.build(
-                args["name"],
-                args["request"],
+            return _enqueued_msg(args["name"], ahead, "model")
+        if name == "build_task" and self._queue is not None:
+            ahead = self._queue.enqueue(
+                args["name"], args["request"], kind=BuildKind.TASK,
                 prompt=build_task_prompt(args["name"], args["request"]),
-                kind=BuildKind.TASK,
-                on_progress=on_progress,
-                cancel=cancel,
             )
-            return f"Built the task '{app.name}'. Run it any time from the Tasks tab."
+            return _enqueued_msg(args["name"], ahead, "task")
+        if name == "list_builds" and self._queue is not None:
+            return self._queue.status_line()
+        if name == "prioritize_build" and self._queue is not None:
+            target = args["name"]
+            if self._queue.move_first(target):
+                return f"Moved {target} to the front — it runs next."
+            if (self._queue.active_name() or "").lower() == target.strip().lower():
+                return f"{target} is already building — can't reorder the one in progress."
+            return f"I don't see {target} in the queue."
+        if name == "cancel_build" and self._queue is not None:
+            target = args["name"]
+            if self._queue.cancel_queued(target):
+                return f"Dropped {target} from the queue."
+            if (self._queue.active_name() or "").lower() == target.strip().lower():
+                self._queue.cancel_active()
+                return f"Stopping {target}."
+            return f"I don't see {target} building or queued."
         if name == "think_harder" and self._deep_think is not None:
             return self._deep_think(args["question"], on_progress)
         if name == "list_apps":

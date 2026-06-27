@@ -23,6 +23,7 @@ from helix.domain.models import Role
 from helix.logging_setup import setup_logging
 from helix.ports.llm import Text, Turn
 from helix.services.agents import AgentService
+from helix.services.build_queue import BuildQueue
 from helix.services.builds import BuildService
 from helix.services.conversation import ConversationService
 from helix.services.forge import ForgeService
@@ -105,12 +106,16 @@ class Container:
             self.builds, self.coder, self.bus, self.repo, self.paths.root, guard_files,
             model_baker=self.model_baker,
         )
+        # Builds run as background jobs so the orb keeps talking while it works (single worker thread).
+        self.build_queue = BuildQueue(self.forge, self.bus)
         self.selfdev = SelfDevService(
             self.coder, self.repo, self.settings, self.clock, self.paths.root,
             worktrees_dir=self.paths.data / "worktrees", guard_files=guard_files,
             data_dir=self.paths.data,
         )
-        self.tools = ToolRegistry(self.forge, self.builds, self.selfdev, deep_think=_deep_think)
+        self.tools = ToolRegistry(
+            self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue
+        )
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM
         )

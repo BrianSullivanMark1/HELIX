@@ -52,17 +52,13 @@ class ConversationService:
         self, user_text: str, *, on_progress: ProgressFn | None = None,
         cancel: CancelToken | None = None, allow_builds: bool = True,
     ) -> str:
+        # Only the brief history read-modify-writes are locked — NOT the model/tool loop. Builds run in
+        # the background (the build tools just enqueue), so a turn is now milliseconds plus model latency;
+        # narrowing the lock lets a Console turn and an Agent turn (or a quick follow-up) interleave
+        # instead of one freezing the other.
         with self._lock:
-            return self._run_turn_locked(
-                user_text, on_progress=on_progress, cancel=cancel, allow_builds=allow_builds
-            )
-
-    def _run_turn_locked(
-        self, user_text: str, *, on_progress: ProgressFn | None = None,
-        cancel: CancelToken | None = None, allow_builds: bool = True,
-    ) -> str:
-        self._store.append(Message(Role.USER, user_text, self._clock.now()))
-        turns = self._history_turns()
+            self._store.append(Message(Role.USER, user_text, self._clock.now()))
+            turns = self._history_turns()
         specs = self._tools.specs()
         if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete tools
             specs = [s for s in specs if s.name not in BUILD_TOOLS]
@@ -100,7 +96,8 @@ class ConversationService:
 
     # ----- helpers -----
     def _remember(self, text: str) -> str:
-        self._store.append(Message(Role.ASSISTANT, text, self._clock.now()))
+        with self._lock:
+            self._store.append(Message(Role.ASSISTANT, text, self._clock.now()))
         return text
 
     def _history_turns(self) -> list[Turn]:

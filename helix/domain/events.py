@@ -27,3 +27,24 @@ class BuildIterated(Event):
 @dataclass(frozen=True)
 class BuildDeleted(Event):
     slug: str
+
+
+@dataclass(frozen=True)
+class BuildProgress(Event):
+    """A live step from a background build, for the status line / spoken narration."""
+
+    name: str
+    line: str
+
+
+@dataclass(frozen=True)
+class BuildFinished(Event):
+    """A background build ended — for the spoken announcement (separate from BuildCreated, which the
+    menu listens to). `handle` is the BuildHandle of a stopped/half-built job, for the cleanup offer
+    (typed loosely as object so the domain doesn't import the services layer)."""
+
+    name: str
+    ok: bool
+    error: str | None = None
+    stopped: bool = False
+    handle: object | None = None
