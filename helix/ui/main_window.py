@@ -22,6 +22,7 @@ from helix.ui.console_view import ConsoleView
 from helix.ui.launcher_view import LauncherView
 from helix.ui.orb import PresenceOrb
 from helix.ui.settings_view import SettingsView
+from helix.ui.shader_orb import ShaderOrb
 from helix.ui.theme import CYAN, LINE
 
 try:  # the in-app web view needs PyQt6-WebEngine; without it, apps open in the system browser
@@ -43,8 +44,11 @@ class HelixMainWindow(QMainWindow):
         self.setWindowTitle("HELIX")
         self.resize(980, 740)
 
-        # The orb is the living background of the whole window.
-        self.orb = PresenceOrb()
+        # The orb is the living background of the whole window. The GPU-shader ShaderOrb auto-falls back
+        # to the QPainter PresenceOrb if WebGL/WebEngine isn't available; a settings flag forces the
+        # classic orb for anyone who prefers it (or if the shader misbehaves on their GPU).
+        use_shader = bool(container.settings.get("shader_orb", True))
+        self.orb = ShaderOrb() if use_shader else PresenceOrb()
 
         # The foreground: nav + pages, all transparent so the orb shows through.
         overlay = QWidget()

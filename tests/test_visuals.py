@@ -128,3 +128,24 @@ def test_apply_theme_runs_with_the_display_font(_app):
 
     apply_theme(_app)  # sets palette + stylesheet (incl. the display-font rules); must not raise
     assert "Orbitron" in _app.styleSheet()
+
+
+def test_shader_orb_exposes_the_orb_interface():
+    from helix.ui.shader_orb import ShaderOrb
+
+    for m in ("set_state", "set_level", "set_bands"):
+        assert callable(getattr(ShaderOrb, m))
+    assert hasattr(ShaderOrb, "clicked")
+
+
+def test_shader_orb_falls_back_to_the_painter_orb_without_webengine(_app, monkeypatch):
+    # Force the no-WebEngine path: ShaderOrb must construct, drive, and paint via the QPainter fallback.
+    import helix.ui.shader_orb as so
+
+    monkeypatch.setattr(so, "_HAVE_WEBENGINE", False)
+    orb = so.ShaderOrb()
+    orb.resize(300, 300)
+    orb.set_state(OrbState.SPEAKING)
+    orb.set_level(0.6)
+    orb.set_bands([0.5] * 16)  # forwarded to the fallback; the (absent) WebGL layer is a no-op
+    assert orb._view is None and not orb.grab().isNull()
