@@ -27,8 +27,10 @@ If a feature needs a form, a config file, and three clicks, we've failed the hea
 
 1. **The Forge** — the engine. The conversation (the orb) plus the coding agent behind it. This is the
    product: it turns a sentence into working code.
-2. **Your apps** — what the Forge makes. Each one is a self-contained project in its own folder, shown
-   as a card in your menu, runnable, and versioned. (We call one an *app*; internally a *Build*.)
+2. **Your Builds** — what the Forge makes. A Build comes in four kinds, and you create, change, and
+   delete every one of them just by talking: an **app** (opens a screen), a **task** (a script that does
+   a thing when run), an **agent** (a saved goal HELIX runs on demand), or a **3D model**. Each is a
+   self-contained project in its own folder, shown as a card in your menu, runnable, and versioned.
 
 Everything else is just the chrome around those two things: a menu of your apps, a place to run them,
 and a history you can roll back.
@@ -54,10 +56,13 @@ and a history you can roll back.
 One screen. Its signature element is the **Presence** — a living orb that *is* HELIX. You talk to the
 orb; the conversation sits beneath it; everything deep is one sentence or one tap away.
 
-- **Menu** — your apps. Cards are the apps you've built; `New app` returns you to the orb.
-- **Tasks** — run an app that "does a thing" rather than opening a screen.
-- **Archive** — version history + restore + the factory-reset lifeline. Always reachable.
-- **⚙ Settings** — your Claude key, voice, devices. Everything else is a smart default.
+- **Menu** — your Builds, in four tabs: **Apps** (open a screen), **Models** (3D things the orb made),
+  **Agents** (saved goals you run on demand), and **Tasks** (scripts that do a thing). `New` returns you
+  to the orb. Everything here is conjured, changed, and removed by talking.
+- **⚙ Settings** — your Claude key, voice, devices, 3D detail. Everything else is a smart default.
+
+> *Archive (version history + restore + factory-reset) is planned; today a bad self-change auto-rolls
+> back on next launch via the built-in self-heal (`bootstrap._self_heal`).*
 
 ---
 
@@ -80,9 +85,9 @@ Conversation → code → a runnable, versioned app → conversation, indefinite
   HELIX's own code is drafted on a branch and merged only on an explicit yes.
 - **Self-modification is branch-first and reversible.** Never touches the live app without approval;
   smoke-checked; one-command rollback; never edits its own safety/approval code (the Constitution).
-- **The shell is immutable to text/voice.** The Forge's own shell — the orb, the Apps/Tasks/Agents
-  navigation, Archive, Settings — cannot be removed by a typed or spoken command. Built apps are data
-  and stay removable; the shell is not.
+- **The shell is immutable to text/voice.** The Forge's own shell — the orb, the Apps/Models/Agents/Tasks
+  navigation, Settings — cannot be removed by a typed or spoken command. Builds are data and stay
+  removable; the shell is not.
 - **Apps are sandboxed to their own folder.** A built app lives in its own workspace and is told never
   to reach outside it.
 - **Local-first.** Your key never leaves the machine except for the Claude API calls you triggered.

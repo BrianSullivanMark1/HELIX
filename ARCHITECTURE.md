@@ -17,8 +17,9 @@ Qt widgets interleaved. V2 keeps the *ideas* and discards the *structure*.
 2. **The dependency rule.** Dependencies point inward only:
    `ui → services → ports ← adapters`, and everything may depend on `domain`. The domain depends on
    nothing. (Enforced by review and import discipline; the domain package imports no other helix layer.)
-3. **MVVM in the UI.** Views are dumb (layout + signal wiring). ViewModels hold presentation state and
-   call services. No business logic in a widget, ever.
+3. **Thin views, no business logic.** Views handle layout + signal wiring and call services on a
+   `QtWorker` thread; classification and rules live in services (e.g. `BuildService.categorized()`),
+   never in a widget. There is no separate ViewModel layer today — the QtWorker bridge plays that role.
 4. **One runtime, all Python.** A single PyQt6 process. This is deliberate: HELIX edits its *own* source
    to improve itself, and that story is only clean when everything it edits is Python it can re-run.
 5. **Nothing blocks the orb.** Every Claude call, coder run, or git operation happens on a worker
@@ -62,61 +63,68 @@ helix/
   logging_setup.py     # rotating file log + crash-guard excepthook
 
   domain/              # PURE. No Qt, no I/O, no other helix layer.
-    models.py          #   App (a Build), Version, Message/Role, Conversation, PendingChange, AppKind
-    constitution.py    #   The Commandments, PROTECTED_PATHS, LOCKED_SETTINGS, IMMUTABLE_SHELL + validators
-    errors.py          #   Domain exceptions (ConfirmationRequired, ConstitutionViolation, ...)
+    models.py          #   App (a Build), AppKind (run mechanism), BuildKind (app/task/agent/model),
+                       #   Version, Message/Role, PendingChange, slugify
+    constitution.py    #   The Commandments, PROTECTED_PREFIXES/PROTECTED_FILES, SHELL_PREFIX,
+                       #   EDITABLE_PREFIXES, LOCKED_SETTINGS + validators + fingerprint
+    errors.py          #   Domain exceptions (ConfirmationRequired, ConstitutionViolation, BuildError, ...)
+    events.py          #   EventBus payloads (BuildCreated / BuildIterated / BuildDeleted)
 
   ports/               # Protocols only — the seams.
-    llm.py             #   ChatModel: chat(messages, tools) -> Reply (tool-use + caching aware)
+    llm.py             #   ChatModel: chat(turns, *, system, tools) -> Reply (tool-use + caching aware)
     coder.py           #   CoderAgent: run_task(repo_dir, prompt) -> CoderResult
-    repo.py            #   VersionedRepo: init/branch/commit/merge(--no-ff)/revert/worktree/restore
+    repo.py            #   VersionedRepo: init/branch/commit/merge(--no-ff)/worktree/restore/diff
     stores.py          #   SettingsStore, MemoryStore, ConversationStore
     speech.py          #   SpeechIn (STT), SpeechOut (TTS)
     clock.py           #   Clock (now()) — no scattered datetime.now()
-    events.py          #   EventBus: publish/subscribe (build_created, version_added, ...)
+    events.py          #   EventBus: publish/subscribe
 
   adapters/            # Concrete implementations of the ports.
     anthropic_chat.py  #   ChatModel via the Anthropic SDK (prompt caching + tool use)
     claude_code_cli.py #   CoderAgent via the Claude Code CLI (headless subprocess, streaming)
     api_coder.py       #   CoderAgent fallback via the Anthropic API (no CLI needed)
+    coder_select.py    #   FallbackCoder — prefer the CLI, fall back to the API coder
     git_repo.py        #   VersionedRepo via the git CLI
     sqlite_store.py    #   MemoryStore + ConversationStore (one SQLite file)
     json_settings.py   #   SettingsStore (one JSON file)
-    speech_whisper.py  #   SpeechIn via faster-whisper        (optional import)
-    speech_edge.py     #   SpeechOut via edge-tts / OS voice  (optional import)
+    speech.py          #   WhisperSpeechIn (faster-whisper) + EdgeSpeechOut/OsSpeechOut  (optional)
+    tripo3d.py         #   Tripo3D — hosted neural text/image→3D backend (optional, key-gated)
     system_clock.py    #   Clock via datetime
     signal_bus.py      #   EventBus via a tiny thread-safe pub/sub
+    restart.py         #   Restarter — relaunch the app after an approved self-change
 
   services/            # The use-cases. This is where the product behaviour lives.
-    conversation.py    #   ConversationService — the model↔tools loop + the confirmation gate
+    conversation.py    #   ConversationService — the model↔tools loop (prose confirm; agent runs capped)
     forge.py           #   ForgeService — the core loop: describe → confirm → build → register
-    builds.py          #   BuildService — workspace lifecycle (create/list/delete/entry_point/run)
-    archive.py         #   ArchiveService — version index, restore-to-version, factory reset
+    builds.py          #   BuildService — workspace lifecycle (create/list/categorized/delete/rename)
+    sandbox.py         #   shared containment guards (snapshot/scan/restore) used by forge + selfdev
     selfdev.py         #   SelfDevService — improve HELIX itself, behind the Constitution gate
-    agents.py          #   AgentService — goal-driven automations
-    tasks.py           #   TaskService — runnable "action" apps
+    agents.py          #   AgentService — saved-goal automations (run autonomously; build tools denied)
+    tasks.py           #   TaskService — run a headless 'task' build in its own console
+    model_baker.py     #   ModelBaker — bake a declarative model.json into assets/model.glb + a viewer
     tools.py           #   ToolRegistry — maps model tool-calls to service methods (the "hands")
+    prompts.py         #   the system + coder prompts, in one place
+    cancel.py          #   CancelToken / BuildHandle — cooperative stop for a running build
+    # Archive is planned (no UI yet); the live rollback lifeline is bootstrap._self_heal (git restore).
 
-  ui/                  # PyQt6 — MVVM.
-    theme.py           #   HUD palette (cyan/amber, dark) + apply_theme()
-    orb.py             #   PresenceOrb — animated QGraphics/QPainter presence
+  ui/                  # PyQt6 — views + a QtWorker thread bridge (no separate ViewModel layer).
+    theme.py           #   HUD palette (cyan/amber/gold, dark) + apply_theme()
+    orb.py             #   PresenceOrb — animated QPainter presence (paint_orb is shared with the icon)
     workers.py         #   QtWorker — run a callable on a QThread, emit result/error/progress
-    console_view.py    #   the orb home + the conversation transcript + input
-    conversation_vm.py #   ConversationViewModel — presentation state, talks to ConversationService
-    launcher_view.py   #   the menu of apps (cards)
-    tasks_view.py      #   the run list
-    archive_view.py    #   version history + restore
-    build_view.py      #   open/run/iterate a single built app
-    settings_view.py   #   the one ⚙ (Claude key, voice, devices)
-    main_window.py     #   the shell: stacked pages, nav, background beats
+    voice.py           #   VoiceController — wake word, push-to-talk, TTS (optional)
+    console_view.py    #   the orb home + transcript + inline animated charts/tables + input
+    launcher_view.py   #   the Menu — Apps / Models / Agents / Tasks cards
+    settings_view.py   #   the one ⚙ (Claude key, voice, devices, model detail)
+    app_viewer.py      #   in-app web view for built HTML apps + 3D models (optional WebEngine)
+    main_window.py     #   the shell: stacked pages, nav, the orb background
 
   app/                 # Composition root.
     container.py       #   Container — constructs every adapter + service. The ONLY wiring point.
-    bootstrap.py       #   run_app() — build container, create MainWindow, run the Qt loop
+    bootstrap.py       #   run_app() — build container, self-heal check, create MainWindow, run Qt loop
     cli.py             #   argparse entry; bare `helix` opens the desktop app
 
 main.py                # thin launcher: pre-warm STT before Qt imports, then app.cli.main()
-tests/                 # pytest — domain + services are pure and fast to test
+tests/                 # pytest — domain + services (and headless UI render) are fast to test
 ```
 
 ---
@@ -125,17 +133,18 @@ tests/                 # pytest — domain + services are pure and fast to test
 
 Ports are `typing.Protocol`s so adapters need no inheritance and the domain stays import-clean.
 
-- **`ChatModel.chat(messages, tools=None, system=None) -> Reply`** — one model turn. `Reply` carries
-  either assistant text or a list of tool calls, plus token/cost usage. Prompt caching and tool-use are
-  handled inside the adapter; the service just sees messages and tool calls.
+- **`ChatModel.chat(turns, *, system=None, tools=None) -> Reply`** — one model turn. `Reply` carries
+  assistant text and/or a list of tool calls, plus token/cost usage. Prompt caching and tool-use are
+  handled inside the adapter; the service just sees turns and tool calls.
 - **`CoderAgent.run_task(repo_dir, prompt, *, on_progress=None) -> CoderResult`** — write/modify files
   in `repo_dir` on a branch and report success + a summary. Two adapters: the Claude Code CLI (preferred)
   and an API-only fallback so a fresh install with just a key can still build.
 - **`VersionedRepo`** — the git verbs the Forge needs: `init`, `branch`, `commit`, `merge` (revertible
-  `--no-ff`), `revert`, `worktree`, `restore`, `log`. No raw git anywhere else.
+  `--no-ff`), `worktree`, `restore`, `diff`, `log`. No raw git anywhere else.
 - **`SettingsStore` / `MemoryStore` / `ConversationStore`** — persistence seams. Settings is a JSON
   file; the two stores share one SQLite file (usage/cost, the version index, chat history).
-- **`SpeechIn` / `SpeechOut`** — optional; both have null implementations so voice is purely additive.
+- **`SpeechIn` / `SpeechOut`** — optional; the real adapters report `available() == False` when STT/TTS
+  isn't present, so voice is purely additive (no null implementations needed).
 - **`EventBus`** — decouples "a build finished" from "the menu refreshes." Services publish; the UI
   subscribes on the UI thread.
 
@@ -156,19 +165,28 @@ Long coder runs stream `progress` so the orb can show "Building…" without free
 
 ---
 
-## 6. The core loop (building an app)
+## 6. The core loop (building)
 
-1. The user describes an app in the Console. `ConversationService.run_turn` lets the model call the
-   `build_app(name, request)` tool.
-2. `build_app` is **confirm-gated** (it spends Claude time). On "yes", the tool dispatches to
-   `ForgeService.build`.
-3. `BuildService.create_workspace` makes `data/builds/<slug>/`, `git init`s it, commits a scaffold.
-4. The chosen `CoderAgent` runs in the workspace with a build prompt; files are written and committed on
-   a branch, then merged to the workspace's `main` with a revertible `--no-ff` commit.
-5. `EventBus.publish(BuildCreated)` → `MainWindow` adds a menu card + a `BuildView` and opens it.
-   `BuildView` runs the app (HTML → inline/browser, Python → console) or opens its folder.
+A **Build** is one of four kinds — **app, task, agent, or 3D model** — and the user conjures every one by
+talking to the orb. `ConversationService.run_turn` runs the model↔tools loop and offers the build tools
+(`build_app`, `build_task`, `build_3d_model`, `create_agent`, plus `delete_build`).
 
-Iterating ("make the streak monthly") is the same path: a new branch + version on the existing workspace.
+1. The user describes what they want in the Console. The model proposes and **confirms in plain language**
+   first — the spend gate is conversational (the system prompt has the model ask before it builds).
+2. On "yes", the tool dispatches to `ForgeService.build(name, request, kind=…)`. (Agents skip the coder
+   entirely — `create_agent` just saves a goal; it costs nothing to create.)
+3. `BuildService.create_workspace` makes `data/builds/<slug>/`, `git init`s it, writes the
+   `.helixbuild.json` manifest (carrying its `BuildKind`), and commits a scaffold.
+4. The chosen `CoderAgent` runs in the workspace; the Forge snapshots the rest of the tree and reverts any
+   write that escaped, then `BuildService.finalize` detects the entry point and **commits the result
+   directly to the workspace repo** — no branch/merge. (That revertible `--no-ff` flow is the
+   *self-modification* path in §7, not the build path.)
+5. `EventBus.publish(BuildCreated / BuildIterated)` → `MainWindow` refreshes the Menu, whose four tabs are
+   rendered straight from `BuildService.categorized()`. Opening a build loads it in the in-app `AppViewer`
+   (HTML app / 3D model) or opens its folder; a task runs in its own console.
+
+Iterating ("make the streak monthly"), renaming, and deleting are the same path on the existing
+workspace — all reachable by conversation.
 
 ---
 
@@ -178,10 +196,13 @@ HELIX can improve its *own* code through the same `CoderAgent`, but every self-c
 `SelfDevService`, which enforces `domain/constitution.py`:
 
 - **The Commandments** — the laws a self-writing program may not rewrite.
-- **`PROTECTED_PATHS`** — the safety/approval machinery the coder may never edit (the Constitution
-  itself, the approval gate, the container).
-- **`IMMUTABLE_SHELL`** — the Forge's own shell (orb, Apps/Tasks/Agents nav, Archive, Settings) cannot
-  be removed by a typed/spoken command. Refused up front *and* at the gate.
+- **`PROTECTED_PREFIXES` + `PROTECTED_FILES`** — the safety/approval machinery the coder may never edit
+  (the Constitution, the approval gate, the build sandbox + its shared `sandbox.py` guards, the prompts,
+  the composition root, the startup-import surface).
+- **`SHELL_PREFIX`** (`helix/ui/`) — the Forge's own shell (orb, the Apps/Models/Agents/Tasks nav,
+  Settings) cannot be removed by a typed/spoken command. Refused up front *and* at the gate.
+- **`EDITABLE_PREFIXES`** — the only surface a self-change may touch (`.py` under `services/`/`adapters/`,
+  minus the protected files): a fail-closed allowlist; anything else is refused.
 - **`LOCKED_SETTINGS`** — e.g. `human_approval_required`, which cannot be toggled off by the model.
 
 The gate: record pending → scan the diff against protected paths/shell → smoke-check (import the app in

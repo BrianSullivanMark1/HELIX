@@ -32,8 +32,8 @@ pip install -r requirements.txt edge-tts faster-whisper   # or: pip install -e "
 helix/domain    pure models + the Constitution (no Qt, no I/O)
 helix/ports     Protocols — the contracts
 helix/adapters  Anthropic · Claude Code · git · SQLite · voice
-helix/services  the use-cases (the Forge, builds, archive, self-dev)
-helix/ui        PyQt6 — views + viewmodels (MVVM)
+helix/services  the use-cases (the Forge, builds, self-dev, agents, tasks, the 3D baker)
+helix/ui        PyQt6 — views + a QtWorker thread bridge
 helix/app       the composition root + CLI
 main.py         launcher
 ```
