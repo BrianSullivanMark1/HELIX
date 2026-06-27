@@ -52,6 +52,27 @@ def run_app(argv: list[str] | None = None) -> int:
             return 0  # a fresh, restored process was spawned
         raise
 
+    # Clean up anything a previous crash/kill/power-loss left half-done before the menu is shown: partial
+    # builds, and leaked self-change draft worktrees/branches.
+    try:
+        container.forge.recover_interrupted()
+    except Exception:
+        _LOG.exception("interrupted-build recovery failed")
+    try:
+        container.selfdev.recover_interrupted()
+    except Exception:
+        _LOG.exception("interrupted self-change recovery failed")
+
+    # Belt-and-suspenders: tear down on ANY exit path — including a restart's quit() / OS logoff, which
+    # bypass the window's closeEvent. Order matters (release the mic + join workers and reap the coder
+    # BEFORE closing the DB). All steps are idempotent, so a normal closeEvent close runs them twice
+    # harmlessly. console.shutdown releases the microphone + joins QtWorker threads — essential on the
+    # restart path so the old process frees the mic before the new one opens it.
+    app.aboutToQuit.connect(container.build_queue.shutdown)
+    app.aboutToQuit.connect(container.selfdev_lane.shutdown)
+    app.aboutToQuit.connect(window.console.shutdown)
+    app.aboutToQuit.connect(container.store.close)
+
     window.show()
     _record_good(container)
     return app.exec()
@@ -60,6 +81,12 @@ def run_app(argv: list[str] | None = None) -> int:
 def _record_good(container: Container) -> None:
     """Remember this commit as the last that booted cleanly, and clear the heal flag."""
     try:
+        # Never record a self-change branch as last-good — self-heal must always restore to a real base
+        # commit, not a half-approved selfdev branch. (Worktree-isolated drafts shouldn't leave the live
+        # tree here, but guard anyway.)
+        if container.repo.current_branch(container.paths.root).startswith("selfdev/"):
+            _LOG.warning("on a selfdev branch at startup — not recording it as last-good")
+            return
         head = container.repo.branch_head(container.paths.root, "HEAD")
         container.settings.set(_LAST_GOOD, head.sha)
         container.settings.set(_HEALING, False)

@@ -86,6 +86,48 @@ def test_propose_allowed_then_approve_merges():
     assert pc.branch not in GIT.list_branches(repo, "selfdev/")
 
 
+def test_propose_refuses_a_live_source_escape():
+    # The shared coder can target ABSOLUTE paths; a write into the LIVE deployed source (outside the draft
+    # worktree) must be caught, reverted, and the draft aborted — the worktree's staged diff can't see it.
+    repo = _helix_repo()
+    svc = _selfdev(repo, lambda wt: _w(repo / "helix/ui/orb.py", "# escaped via absolute path"))
+    with pytest.raises(ConstitutionViolation):
+        svc.propose("write into the live tree")
+    assert not GIT.list_branches(repo, "selfdev/")  # the draft branch was cleaned up
+    assert (repo / "helix/ui/orb.py").read_text(encoding="utf-8") == "# orb"  # live file reverted to base
+    assert GIT.is_clean(repo)
+
+
+def test_recover_interrupted_sweeps_phantom_branches_but_keeps_real_ones():
+    repo = _helix_repo()
+    base = GIT.current_branch(repo)
+    svc = _selfdev(repo, lambda wt: _w(wt / "helix/services/conversation.py", "# real change"))
+    pc = svc.propose("a real change")  # a genuine committed pending change (non-empty diff vs base)
+    # a PHANTOM: a selfdev branch sitting at base with no commit (a draft killed before it committed)
+    ph = repo.parent / "phantom-wt"
+    GIT.add_worktree_branch(repo, ph, "selfdev/phantom-0101-000000", base)
+    GIT.remove_worktree(repo, ph)
+    assert any("phantom" in b for b in GIT.list_branches(repo, "selfdev/"))
+    svc.recover_interrupted()
+    branches = GIT.list_branches(repo, "selfdev/")
+    assert pc.branch in branches  # the real, reviewable pending change is preserved
+    assert not any("phantom" in b for b in branches)  # the phantom is swept
+
+
+def test_propose_isolates_the_draft_in_a_worktree_leaving_the_live_tree_untouched():
+    # #9: the draft must NEVER move the live deployed tree onto the selfdev branch (a crash mid-draft
+    # would otherwise strand it there). The change lives only on its branch until approved.
+    repo = _helix_repo()
+    base = GIT.current_branch(repo)
+    svc = _selfdev(repo, lambda r: _w(r / "helix/services/conversation.py", "# improved"))
+    pc = svc.propose("improve conversation")
+    assert GIT.current_branch(repo) == base  # live tree never left base
+    assert GIT.is_clean(repo)  # and is clean (the draft happened in an isolated worktree)
+    assert pc.branch in GIT.list_branches(repo, "selfdev/")
+    # the live working copy is unchanged; the edit exists only on the branch
+    assert (repo / "helix/services/conversation.py").read_text(encoding="utf-8") == "# conversation"
+
+
 @pytest.mark.parametrize("fn", [
     lambda r: _w(r / "helix/ui/orb.py", "# x"),               # shell edit
     lambda r: _w(r / "helix/domain/models.py", "# x"),        # protected edit

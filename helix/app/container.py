@@ -6,6 +6,8 @@ one-line change here. This module is a PROTECTED_PATH: the self-coder may never 
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 
 from helix.adapters.anthropic_chat import AnthropicChat
 from helix.adapters.api_coder import ApiCoder
@@ -31,6 +33,7 @@ from helix.services.model_baker import ModelBaker
 from helix.services.tasks import TaskService
 from helix.services.prompts import CONSOLE_SYSTEM, DEEP_THINK_SYSTEM
 from helix.services.selfdev import SelfDevService
+from helix.services.selfdev_lane import SelfDevLane
 from helix.services.tools import ToolRegistry
 
 
@@ -62,7 +65,9 @@ class Container:
             _key, model="claude-opus-4-8", web_search=True, thinking="adaptive", effort="high",
         )
 
-        def _deep_think(question: str, on_progress=None) -> str:
+        def _deep_think(question: str, on_progress=None, cancel=None) -> str:
+            if cancel is not None and getattr(cancel, "is_set", lambda: False)():
+                return ""  # the user already stopped — don't fire the (expensive) Opus escalation
             reply = deep_chat.chat([Turn(Role.USER, (Text(question),))], system=DEEP_THINK_SYSTEM)
             # Meter the Opus escalation like the main loop does — it's the most expensive call path, and
             # was previously invisible to the usage ledger.
@@ -108,20 +113,25 @@ class Container:
         )
         # Builds run as background jobs so the orb keeps talking while it works (single worker thread).
         self.build_queue = BuildQueue(self.forge, self.bus)
+        # Self-dev worktrees live OUTSIDE the app tree (a temp dir) so a concurrent background build's
+        # escape-scan never mistakes an in-progress self-change draft for an escaped write.
         self.selfdev = SelfDevService(
             self.coder, self.repo, self.settings, self.clock, self.paths.root,
-            worktrees_dir=self.paths.data / "worktrees", guard_files=guard_files,
+            worktrees_dir=Path(tempfile.gettempdir()) / "helix-worktrees", guard_files=guard_files,
             data_dir=self.paths.data,
         )
+        # Background lane so drafting a self-change doesn't freeze the orb.
+        self.selfdev_lane = SelfDevLane(self.selfdev, self.bus)
+        self.tasks = TaskService(self.builds)
         self.tools = ToolRegistry(
-            self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue
+            self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue,
+            tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane,
         )
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM
         )
-        self.agents = AgentService(self.settings, self.conversation)
+        self.agents = AgentService(self.settings, self.conversation, bus=self.bus)
         self.tools.bind_agents(self.agents)  # late-bind: agents → conversation → tools, so it can't be ctor-passed
-        self.tasks = TaskService(self.builds)
         self.restart = Restarter(self.paths.root / "main.py", self.paths.root).restart
 
         # Voice (optional; both degrade to text-only / silent if unavailable). TTS uses the chosen

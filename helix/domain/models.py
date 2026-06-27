@@ -1,6 +1,7 @@
 """Core domain models — plain data + tiny pure helpers. No I/O, no framework."""
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -37,9 +38,21 @@ class BuildKind(str, Enum):
 
 
 def slugify(name: str) -> str:
-    """A filesystem- and git-safe slug for an app name."""
-    s = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
-    return s or "app"
+    """A filesystem- and git-safe slug for an app name.
+
+    A name made entirely of non-ASCII characters (emoji, CJK, accents) would otherwise collapse to the
+    same literal 'app' and silently overwrite earlier builds — so fall back to a stable content hash that
+    stays unique per name. Cap the length so a very long name can't push the workspace path past the
+    filesystem limit."""
+    cleaned = name.strip()
+    s = re.sub(r"[^a-z0-9]+", "-", cleaned.lower()).strip("-")
+    if s:
+        return s[:80].rstrip("-")
+    if not cleaned:
+        return "app"  # a truly empty / whitespace-only name (degenerate)
+    # Non-empty but all non-ASCII (emoji, CJK, accents-only) → a stable per-name hash, so two such names
+    # don't both collapse to one slug and silently overwrite each other.
+    return "build-" + hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:8]
 
 
 @dataclass(frozen=True)

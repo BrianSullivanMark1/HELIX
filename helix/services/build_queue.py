@@ -46,6 +46,7 @@ class BuildQueue:
         self._pending: deque[BuildJob] = deque()
         self._active: BuildJob | None = None
         self._wake = threading.Event()
+        self._stopping = False  # set by shutdown(): stop promoting jobs and let the worker exit
         self._thread = threading.Thread(target=self._run, daemon=True, name="helix-build-queue")
         self._thread.start()
 
@@ -78,13 +79,27 @@ class BuildQueue:
 
     # ----- control -----
     def cancel_active(self) -> str | None:
-        """Stop the running build (its cleanup offer fires via BuildFinished). Returns its name, if any."""
+        """Stop the running build (its cleanup offer fires via BuildFinished). Returns its name, if any.
+        The token is set UNDER the lock so a stop landing in the hand-off gap can't cancel a job that was
+        just promoted to active."""
         with self._lock:
             job = self._active
-        if job is not None:
-            job.cancel.cancel()
-            return job.name
+            if job is not None:
+                job.cancel.cancel()
+                return job.name
         return None
+
+    def shutdown(self, timeout: float = 3.0) -> None:
+        """Reap the background worker on app close. Closing HELIX mid-build must NOT orphan the coder
+        subprocess — it would keep running (and billing) for up to 30 minutes and leave a file-locked,
+        half-written workspace. Cancel the active build (its watcher kills the claude.exe child and the
+        Forge reverts any escaped write), drop the queue, and wait briefly for the worker to unwind."""
+        self._stopping = True
+        self.cancel_active()
+        with self._lock:
+            self._pending.clear()
+        self._wake.set()
+        self._thread.join(timeout)
 
     def cancel_queued(self, name: str) -> bool:
         slug = name.strip().lower()
@@ -114,11 +129,13 @@ class BuildQueue:
 
     # ----- worker thread -----
     def _run(self) -> None:
-        while True:
+        while not self._stopping:
             self._wake.wait()
-            while True:
+            if self._stopping:
+                break
+            while not self._stopping:
                 with self._lock:
-                    if not self._pending:
+                    if self._stopping or not self._pending:
                         self._active = None
                         self._wake.clear()
                         break
@@ -137,13 +154,18 @@ class BuildQueue:
                 on_progress=on_progress, cancel=job.cancel,
             )
             job.status = "done"
-            self._bus.publish(BuildFinished(name=app.name, ok=True))
+            handle = getattr(job.cancel, "build", None)  # the Forge stamps it with iterating-ness
+            self._bus.publish(
+                BuildFinished(name=app.name, ok=True, iterating=bool(handle and handle.iterating))
+            )
         except BuildCancelled:
             job.status = "stopped"
-            # job.cancel.build is the BuildHandle the Forge stamped on the token before running.
-            self._bus.publish(
-                BuildFinished(name=job.name, ok=False, stopped=True, handle=getattr(job.cancel, "build", None))
-            )
+            # job.cancel.build is the BuildHandle the Forge stamped on the token before running. On app
+            # shutdown the UI is gone, so skip the cleanup announcement (nothing can answer it).
+            if not self._stopping:
+                self._bus.publish(
+                    BuildFinished(name=job.name, ok=False, stopped=True, handle=getattr(job.cancel, "build", None))
+                )
         except Exception as exc:  # noqa: BLE001 - surface any build failure as an announcement
             _LOG.warning("build job failed: %s", exc)
             job.status = "failed"

@@ -20,10 +20,15 @@ STOPPED_REPLY = "Okay, I stopped."  # shown (not spoken) when the user halts a t
 
 MAX_STEPS = 6  # guard against a runaway tool loop
 
-# Tools that build, spend, self-modify, or delete the user's stuff. An AGENT run is autonomous (no human
-# in the loop), so it is denied these — it can read, think, search, and report, but never build or change.
+# Tools that build, spend, self-modify, delete, rename, or launch the user's stuff. An AGENT run is
+# autonomous (no human in the loop), so it is denied all of these — it can read, think, search, and
+# report, but never build, change, remove, rename, or run anything on its own.
 BUILD_TOOLS = frozenset(
-    {"build_app", "build_task", "build_3d_model", "create_agent", "delete_build", "improve_helix"}
+    {
+        "build_app", "build_task", "build_3d_model", "create_agent", "delete_build",
+        "improve_helix", "rename_build", "run_task", "run_agent",
+        "approve_self_change", "reject_self_change",
+    }
 )
 
 
@@ -49,50 +54,75 @@ class ConversationService:
         self._lock = threading.Lock()
 
     def run_turn(
-        self, user_text: str, *, on_progress: ProgressFn | None = None,
-        cancel: CancelToken | None = None, allow_builds: bool = True,
+        self, user_text: str, *, attachments_text: str | None = None,
+        on_progress: ProgressFn | None = None,
+        cancel: CancelToken | None = None, allow_builds: bool = True, persist: bool = True,
     ) -> str:
         # Only the brief history read-modify-writes are locked — NOT the model/tool loop. Builds run in
         # the background (the build tools just enqueue), so a turn is now milliseconds plus model latency;
         # narrowing the lock lets a Console turn and an Agent turn (or a quick follow-up) interleave
         # instead of one freezing the other.
-        with self._lock:
-            self._store.append(Message(Role.USER, user_text, self._clock.now()))
-            turns = self._history_turns()
+        if persist:
+            with self._lock:
+                self._store.append(Message(Role.USER, user_text, self._clock.now()))
+                turns = self._history_turns()
+        else:
+            # An agent run is hermetic: its goal and report never touch the shared Console transcript, so
+            # it can't evict real turns from the window or be 'remembered' as if the user typed it.
+            turns = [Turn(Role.USER, (Text(user_text),))]
+        if attachments_text:
+            # Attached files/folders ride along as EPHEMERAL context on this turn only — appended to the
+            # current (last) user turn, never written to history, so a big attachment isn't replayed on
+            # every later turn (and doesn't bloat the saved transcript). The text is already fenced and
+            # marked untrusted by the attachments service.
+            if turns:
+                last = turns[-1]
+                turns[-1] = Turn(last.role, last.blocks + (Text(attachments_text),))
+            else:
+                turns = [Turn(Role.USER, (Text(attachments_text),))]
         specs = self._tools.specs()
-        if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete tools
+        if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete/run tools
             specs = [s for s in specs if s.name not in BUILD_TOOLS]
 
+        def finish(text: str) -> str:
+            return self._remember(text) if persist else text
+
         reply = None
-        for _ in range(MAX_STEPS):
-            if cancel is not None and cancel.is_set():
-                return self._remember(STOPPED_REPLY)
-            reply = self._chat.chat(turns, system=self._system, tools=specs)
-            u = reply.usage
-            self._memory.record_usage(u.input_tokens, u.output_tokens, u.cost_usd)
+        try:
+            for _ in range(MAX_STEPS):
+                if cancel is not None and cancel.is_set():
+                    return finish(STOPPED_REPLY)
+                reply = self._chat.chat(turns, system=self._system, tools=specs)
+                u = reply.usage
+                self._memory.record_usage(u.input_tokens, u.output_tokens, u.cost_usd)
 
-            if not reply.wants_tools:
-                return self._remember(reply.text)
+                if not reply.wants_tools:
+                    return finish(reply.text)
 
-            turns.append(Turn(Role.ASSISTANT, reply.blocks))
-            results = []
-            for call in reply.tool_uses:
-                if on_progress:
-                    on_progress(self._progress_label(call.name, call.args))
-                try:
-                    out = self._tools.dispatch(
-                        call.name, call.args, on_progress=on_progress, cancel=cancel
-                    )
-                    results.append(ToolResult(call.id, out))
-                except BuildCancelled:  # the user stopped mid-build — end the turn (don't loop the model)
-                    return self._remember(STOPPED_REPLY)
-                except Exception as exc:  # surface to the model so it can recover gracefully
-                    results.append(ToolResult(call.id, f"Error: {exc}", is_error=True))
-            if cancel is not None and cancel.is_set():
-                return self._remember(STOPPED_REPLY)
-            turns.append(Turn(Role.USER, tuple(results)))
+                turns.append(Turn(Role.ASSISTANT, reply.blocks))
+                results = []
+                for call in reply.tool_uses:
+                    if on_progress:
+                        on_progress(self._progress_label(call.name, call.args))
+                    try:
+                        out = self._tools.dispatch(
+                            call.name, call.args, on_progress=on_progress, cancel=cancel
+                        )
+                        results.append(ToolResult(call.id, out))
+                    except BuildCancelled:  # user stopped mid-build — end the turn (don't loop the model)
+                        return finish(STOPPED_REPLY)
+                    except Exception as exc:  # surface to the model so it can recover gracefully
+                        results.append(ToolResult(call.id, f"Error: {exc}", is_error=True))
+                if cancel is not None and cancel.is_set():
+                    return finish(STOPPED_REPLY)
+                turns.append(Turn(Role.USER, tuple(results)))
 
-        return self._remember((reply.text if reply else "") or "I got stuck — could you rephrase?")
+            return finish((reply.text if reply else "") or "I got stuck — could you rephrase?")
+        except Exception:
+            # Record a balanced assistant reply even on failure, so a crashed turn never leaves a dangling
+            # USER row that would malform the NEXT request. The worker still surfaces the real error.
+            finish("Something went wrong on that one — try me again?")
+            raise
 
     # ----- helpers -----
     def _remember(self, text: str) -> str:
@@ -108,7 +138,20 @@ class ConversationService:
         ]
         while turns and turns[0].role != Role.USER:  # the API requires the first turn to be 'user'
             turns.pop(0)
-        return turns
+        return self._coalesce(turns)
+
+    @staticmethod
+    def _coalesce(turns: list[Turn]) -> list[Turn]:
+        """Merge consecutive same-role turns so the transcript always strictly alternates user/assistant —
+        even when concurrent Console + agent runs interleave, or a failed turn left two users in a row.
+        The Anthropic API rejects a malformed (e.g. user-then-user) turn list, so this keeps replay safe."""
+        merged: list[Turn] = []
+        for t in turns:
+            if merged and merged[-1].role == t.role:
+                merged[-1] = Turn(t.role, merged[-1].blocks + t.blocks)
+            else:
+                merged.append(t)
+        return merged
 
     @staticmethod
     def _progress_label(tool: str, args: dict) -> str:

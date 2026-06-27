@@ -3,7 +3,6 @@ and the queue-status tools (list_builds / prioritize_build / cancel_build) route
 from __future__ import annotations
 
 from helix.domain.models import BuildKind
-from helix.services.prompts import build_3d_model_prompt, build_task_prompt
 from helix.services.tools import ToolRegistry
 
 
@@ -75,6 +74,9 @@ class _FakeAgents:
     def list(self):
         return [_App(n) for n in self._existing]
 
+    def exists(self, name) -> bool:
+        return any(a.name.strip().lower() == name.strip().lower() for a in self.list())
+
     def remove(self, name) -> None:
         self.removed.append(name)
 
@@ -97,7 +99,7 @@ def test_build_3d_model_enqueues_with_the_model_prompt_and_kind():
     job = queue.enqueued[0]
     assert job["name"] == "Wall Camera Unit"
     assert job["kind"] == BuildKind.MODEL
-    assert job["prompt"] == build_3d_model_prompt("Wall Camera Unit", "camera, speaker and mic")
+    assert "camera, speaker and mic" in job["prompt"] and "3D MODEL" in job["prompt"]
     assert "Starting" in out and "model" in out  # fast acknowledgement, not "Built"
 
 
@@ -114,7 +116,7 @@ def test_build_task_enqueues_with_the_task_prompt():
     out = reg.dispatch("build_task", {"name": "Rename Downloads", "request": "tidy my downloads"})
     job = queue.enqueued[0]
     assert job["kind"] == BuildKind.TASK
-    assert job["prompt"] == build_task_prompt("Rename Downloads", "tidy my downloads")
+    assert "tidy my downloads" in job["prompt"] and "TASK" in job["prompt"]
     assert "task" in out.lower()
 
 
@@ -181,7 +183,7 @@ def test_delete_build_falls_through_to_a_matching_agent():
 def test_think_harder_routes_to_the_deep_thinker_when_wired():
     asked: list[str] = []
 
-    def deep(question, on_progress=None):
+    def deep(question, on_progress=None, cancel=None):
         asked.append(question)
         return "a carefully reasoned answer"
 

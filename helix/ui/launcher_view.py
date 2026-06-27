@@ -45,9 +45,13 @@ class _Card(QFrame):
         self._lay.setContentsMargins(16, 14, 16, 14)
         self._lay.setSpacing(6)
         name = QLabel(title)
+        # PlainText: a build name / agent goal is user- (and possibly attacker-, via a replayed app
+        # description) controlled — never let it render as live Qt rich text (e.g. a remote-image beacon).
+        name.setTextFormat(Qt.TextFormat.PlainText)
         name.setStyleSheet(f"font-size:15px;font-weight:600;color:{CYAN};")
         desc = QLabel(subtitle)
         desc.setWordWrap(True)
+        desc.setTextFormat(Qt.TextFormat.PlainText)
         desc.setStyleSheet(f"color:{MUTED};")
         self._lay.addWidget(name)
         self._lay.addWidget(desc)
@@ -109,6 +113,13 @@ class LauncherView(QWidget):
         self._tasks_grid, tasks_page, self._tasks_empty = self._grid_page(
             "No tasks yet. Ask the orb to build a script that does something, and it'll show here."
         )
+        # The Tasks page gets its OWN status line — a Run result used to land on the hidden Agents-page
+        # label, so the user never saw it.
+        self._tasks_status = QLabel("")
+        self._tasks_status.setObjectName("Status")
+        self._tasks_status.setWordWrap(True)
+        tasks_page.layout().addWidget(self._tasks_status)
+
         self._stack.addWidget(apps_page)            # 0
         self._stack.addWidget(models_page)          # 1
         self._stack.addWidget(self._agents_page())  # 2
@@ -254,15 +265,34 @@ class LauncherView(QWidget):
         if not name or not goal:
             self._agent_status.setText("Give the agent a name and a goal.")
             return
+        replaced = self._agents.exists(name)
+        if replaced:  # don't silently overwrite a hand-written goal
+            confirm = QMessageBox.question(
+                self,
+                "Update agent",
+                f"An agent named “{name}” already exists. Replace its goal?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
         self._agents.add(name, goal)
         self._agent_name.clear()
         self._agent_goal.clear()
-        self._agent_status.setText(f"Saved agent “{name}”.")
+        self._agent_status.setText(f"{'Updated' if replaced else 'Saved'} agent “{name}”.")
         self.refresh()
 
     def _remove_agent(self, name: str) -> None:
-        self._agents.remove(name)
-        self.refresh()
+        confirm = QMessageBox.question(
+            self,
+            "Remove",
+            f"Remove the agent “{name}”? This can’t be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self._agents.remove(name)
+            self.refresh()
 
     def _ask_new_name(self, current: str) -> str | None:
         """Prompt for a new name; return it only if the user confirmed a non-empty, changed value."""
@@ -309,13 +339,22 @@ class LauncherView(QWidget):
             QMessageBox.StandardButton.No,
         )
         if confirm == QMessageBox.StandardButton.Yes:
-            self._builds.delete(slug)
+            if not self._builds.delete(slug):
+                QMessageBox.warning(
+                    self,
+                    "Remove",
+                    f"Couldn’t remove “{name}” — it’s open or running right now. Close it (or wait a "
+                    "moment) and try again.",
+                )
             self.refresh()
 
     def _run_task(self, slug: str, name: str) -> None:
         ok = self._tasks.run(slug)
-        # Tasks open their own console; surface the outcome where the user can see it.
-        self._agent_status.setText(f"Launched “{name}”." if ok else f"Couldn’t launch “{name}”.")
+        # Tasks open their own console; surface the outcome on the TASKS page, where the user is looking.
+        self._tasks_status.setText(
+            f"Launched “{name}” in its own window."
+            if ok else f"Couldn’t launch “{name}” — it may be missing a runnable main.py."
+        )
 
     def _run_agent(self, name: str) -> None:
         self._show_tab(_AGENTS)

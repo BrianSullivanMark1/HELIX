@@ -1,34 +1,80 @@
 """TaskService — runnable 'action' apps: the built apps that *do a thing* rather than open a screen.
 
 In V2 these are the Python-kind builds; running one launches it in its own console. (HTML apps open in
-the browser from the menu instead.)
+the browser from the menu instead.) Launched processes are tracked so the UI can report status and a
+later 'stop' / close can reason about them.
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 
-from helix.domain.models import App, AppKind, BuildKind
+from helix.domain.models import App, AppKind, BuildKind, slugify
+from helix.logging_setup import get_logger
 from helix.services.builds import BuildService
+
+_LOG = get_logger("tasks")
+
+
+def _python() -> str:
+    """The interpreter to run a task with. In a PyInstaller-frozen app sys.executable is HELIX.exe — so
+    launching it would relaunch HELIX, not the task. Fall back to a real Python on PATH."""
+    if getattr(sys, "frozen", False):
+        return shutil.which("pythonw") or shutil.which("python") or shutil.which("py") or sys.executable
+    return sys.executable
 
 
 class TaskService:
     def __init__(self, builds: BuildService) -> None:
         self._builds = builds
+        self._procs: dict[str, subprocess.Popen] = {}  # slug -> live process (for status / cleanup)
 
     def runnable(self) -> list[App]:
         return [a for a in self._builds.list() if a.build_kind == BuildKind.TASK]
 
+    def find(self, name: str) -> App | None:
+        """Resolve a task by slug or case-insensitive display name (for the orb's run-by-voice)."""
+        slug = slugify(name)
+        target = (name or "").strip().lower()
+        return next(
+            (a for a in self.runnable() if a.slug == slug or a.name.strip().lower() == target), None
+        )
+
+    def is_running(self, slug: str) -> bool:
+        proc = self._procs.get(slug)
+        return proc is not None and proc.poll() is None
+
     def run(self, slug: str) -> bool:
+        self._prune()
         app = next((a for a in self._builds.list() if a.slug == slug), None)
         if app is None or app.kind != AppKind.PYTHON or not app.entry_point:
+            _LOG.warning("task %s is not runnable (kind=%s entry=%s)", slug, getattr(app, "kind", None),
+                         getattr(app, "entry_point", None))
             return False
         try:
-            subprocess.Popen(
-                [sys.executable, app.entry_point],
+            proc = subprocess.Popen(
+                [_python(), app.entry_point],
                 cwd=str(self._builds.workspace(slug)),
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             )
+            self._procs[slug] = proc
             return True
         except Exception:
+            _LOG.exception("could not launch task %s", slug)
             return False
+
+    def terminate_all(self) -> None:
+        """Best-effort stop of any task processes HELIX launched (available; not called on a normal close,
+        since a task runs in its own console and is the user's to keep running)."""
+        for proc in list(self._procs.values()):
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except Exception:
+                pass
+        self._procs.clear()
+
+    def _prune(self) -> None:
+        for slug in [s for s, p in self._procs.items() if p.poll() is not None]:
+            self._procs.pop(slug, None)

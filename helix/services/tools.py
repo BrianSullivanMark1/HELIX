@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable
 
-from helix.domain.models import BuildKind
+from helix.domain.events import BuildDeleteRequested, BuildRenamed
+from helix.domain.models import BuildKind, slugify
 from helix.ports.coder import ProgressFn
+from helix.ports.events import EventBus
 from helix.ports.llm import ToolSpec
 from helix.services.builds import BuildService
 from helix.services.forge import ForgeService
@@ -14,9 +16,11 @@ from helix.services.selfdev import SelfDevService
 if TYPE_CHECKING:  # AgentService -> ConversationService -> ToolRegistry would be a runtime import cycle
     from helix.services.agents import AgentService
     from helix.services.build_queue import BuildQueue
+    from helix.services.tasks import TaskService
 
-# Escalation: hand a hard question to a deeper model and get back its spoken answer.
-DeepThink = Callable[[str, ProgressFn | None], str]
+# Escalation: hand a hard question to a deeper model and get back its spoken answer. The third arg is an
+# optional cancel token so a 'stop' interrupts the (expensive) deep-think call.
+DeepThink = Callable[[str, ProgressFn | None, object], str]
 
 
 def _enqueued_msg(name: str, ahead: int, label: str) -> str:
@@ -38,6 +42,9 @@ class ToolRegistry:
         deep_think: DeepThink | None = None,
         agents: "AgentService | None" = None,
         queue: "BuildQueue | None" = None,
+        tasks: "TaskService | None" = None,
+        bus: EventBus | None = None,
+        selfdev_lane=None,
     ) -> None:
         self._forge = forge
         self._builds = builds
@@ -45,6 +52,9 @@ class ToolRegistry:
         self._deep_think = deep_think
         self._agents = agents
         self._queue = queue
+        self._tasks = tasks
+        self._bus = bus
+        self._selfdev_lane = selfdev_lane  # background drafting of self-changes (no orb freeze)
 
     def bind_agents(self, agents: "AgentService") -> None:
         """Wire the agent store after construction (it depends on ConversationService, which depends on
@@ -147,7 +157,8 @@ class ToolRegistry:
                 description=(
                     "Permanently delete something the user made — an app, a task, a 3D model, or an "
                     "agent — by its name. Use when the user clearly asks to remove or delete one of "
-                    "their builds. This cannot be undone, so only call AFTER the user confirms."
+                    "their builds. This cannot be undone. HELIX will ask the user to confirm with one "
+                    "click before anything is removed, so call this only when they've asked to delete it."
                 ),
                 input_schema={
                     "type": "object",
@@ -161,7 +172,59 @@ class ToolRegistry:
                     "additionalProperties": False,
                 },
             ),
+            ToolSpec(
+                name="rename_build",
+                description=(
+                    "Rename something the user made — an app, a task, a 3D model, or an agent — to a new "
+                    "name, by talking. Use when the user asks to rename or 'call it …' one of their "
+                    "builds. The build keeps everything else; only its display name changes."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "The current name of the build or agent."},
+                        "new_name": {"type": "string", "description": "The new name to give it."},
+                    },
+                    "required": ["name", "new_name"],
+                    "additionalProperties": False,
+                },
+            ),
         ]
+        if self._tasks is not None:
+            tools.append(
+                ToolSpec(
+                    name="run_task",
+                    description=(
+                        "Run one of the user's TASKS by name — launch the script so it does its thing. "
+                        "Use when the user asks to run/start a task they built. It opens in its own "
+                        "console; report that you've launched it."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {"name": {"type": "string", "description": "The task to run."}},
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
+        if self._agents is not None:
+            tools.append(
+                ToolSpec(
+                    name="run_agent",
+                    description=(
+                        "Run one of the user's saved AGENTS by name now and relay its result. Use when "
+                        "the user asks to run an agent (e.g. 'run my morning brief'). The agent works "
+                        "autonomously (it can read, think, search, and report, but not build or change "
+                        "things); summarize what it found briefly in your own voice."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {"name": {"type": "string", "description": "The agent to run."}},
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
         if self._queue is not None:
             tools += [
                 ToolSpec(
@@ -237,9 +300,10 @@ class ToolRegistry:
                     name="improve_helix",
                     description=(
                         "Propose an improvement to HELIX's OWN code (how HELIX looks or works). This "
-                        "DRAFTS the change on a branch for the user to review and approve in Archive — "
-                        "it never applies on its own, and it can never remove HELIX's shell or safety "
-                        "code. Only call after the user confirms, like build_app."
+                        "DRAFTS the change on a branch — it never applies on its own, and it can never "
+                        "remove HELIX's shell or safety code. After drafting, tell the user they can say "
+                        "'apply it' to ship the change or 'discard it' to drop it. Only call after the "
+                        "user confirms, like build_app."
                     ),
                     input_schema={
                         "type": "object",
@@ -250,6 +314,58 @@ class ToolRegistry:
                             }
                         },
                         "required": ["request"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
+            tools.append(
+                ToolSpec(
+                    name="list_self_changes",
+                    description=(
+                        "List the drafted changes to HELIX's own code that are waiting for the user to "
+                        "apply or discard. READ-ONLY. Use to answer 'what changes are pending'."
+                    ),
+                    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                )
+            )
+            tools.append(
+                ToolSpec(
+                    name="approve_self_change",
+                    description=(
+                        "Apply a drafted change to HELIX's own code that is waiting — this merges it (after "
+                        "an automatic safety + compile check) and the user then restarts to load it. Only "
+                        "call when the user explicitly says to apply/ship it. If there are several pending, "
+                        "pass which one; if exactly one is pending, you may omit it."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "which": {
+                                "type": "string",
+                                "description": "Which drafted change to apply (its id/branch). Optional "
+                                "when only one is pending.",
+                            }
+                        },
+                        "additionalProperties": False,
+                    },
+                )
+            )
+            tools.append(
+                ToolSpec(
+                    name="reject_self_change",
+                    description=(
+                        "Discard a drafted change to HELIX's own code without applying it. Call when the "
+                        "user says to drop/discard it. Pass which one; omit when only one is pending."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "which": {
+                                "type": "string",
+                                "description": "Which drafted change to discard (its id/branch). Optional "
+                                "when only one is pending.",
+                            }
+                        },
                         "additionalProperties": False,
                     },
                 )
@@ -320,7 +436,7 @@ class ToolRegistry:
                 return f"Stopping {target}."
             return f"I don't see {target} building or queued."
         if name == "think_harder" and self._deep_think is not None:
-            return self._deep_think(args["question"], on_progress)
+            return self._deep_think(args["question"], on_progress, cancel)
         if name == "list_apps":
             apps = self._builds.list()
             if not apps:
@@ -329,28 +445,152 @@ class ToolRegistry:
             def clean(text: str) -> str:  # collapse the (untrusted) request to a one-line label
                 return " ".join(text.split())[:140]
 
-            return "\n".join(f"- {a.name}: {clean(a.request)}" for a in apps)
+            # Include each build's kind so the model reuses the matching build_* verb to iterate and never
+            # forks a near-duplicate by guessing the wrong kind.
+            return "\n".join(f"- {a.name} [{a.build_kind.value}]: {clean(a.request)}" for a in apps)
+        if name == "rename_build":
+            return self._rename(args["name"], args.get("new_name", ""))
+        if name == "run_task" and self._tasks is not None:
+            task = self._tasks.find(args["name"])
+            if task is None:
+                return f"I don't see a task called '{args['name']}'."
+            return f"Running '{task.name}'." if self._tasks.run(task.slug) else f"Couldn't launch '{task.name}'."
+        if name == "run_agent" and self._agents is not None:
+            target = args["name"].strip().lower()
+            agent = next((a for a in self._agents.list() if a.name.strip().lower() == target), None)
+            if agent is None:
+                return f"I don't see an agent called '{args['name']}'."
+            return self._agents.run(agent.name, on_progress=on_progress)
         if name == "improve_helix" and self._selfdev is not None:
-            change = self._selfdev.propose(args["request"], on_progress=on_progress)
-            return (
-                f"Drafted a change ({change.branch}). Open Archive to review and approve it — "
-                "it won't apply until you do."
-            )
-        if name == "create_agent" and self._agents is not None:
-            agent = self._agents.add(args["name"], args["goal"])
-            return f"Saved the agent '{agent.name}'. Run it any time from the Agents tab."
-        if name == "delete_build":
-            target = args["name"]
-            if self._forge.remove_build(target):
-                return f"Deleted '{target}'."
-            if self._agents is not None:
-                hit = next(
-                    (a for a in self._agents.list()
-                     if a.name.strip().lower() == target.strip().lower()),
-                    None,
+            if self._selfdev_lane is not None:
+                # Draft in the BACKGROUND so the orb isn't frozen for the (long) coder run; HELIX announces
+                # when it's ready to apply. One draft at a time.
+                if self._selfdev_lane.busy():
+                    return "I'm still drafting the last change — one at a time. Try again once it's done."
+                self._selfdev_lane.start(args["request"])
+                return (
+                    "On it — drafting that change in the background. I'll tell you when it's ready; then "
+                    "say 'apply it' to ship it or 'discard it' to drop it."
                 )
-                if hit is not None:
-                    self._agents.remove(hit.name)
-                    return f"Deleted the agent '{hit.name}'."
-            return f"I couldn't find anything called '{target}' to delete."
+            change = self._selfdev.propose(args["request"], on_progress=on_progress)  # synchronous fallback
+            return (
+                f"Drafted the change ({change.summary or change.branch}). Say 'apply it' to ship it "
+                "(I'll safety-check and merge it, then you restart) or 'discard it' to drop it. It won't "
+                "apply until you say so."
+            )
+        if name == "list_self_changes" and self._selfdev is not None:
+            pend = self._selfdev.pending()
+            if not pend:
+                return "No drafted changes to HELIX are waiting."
+            return "Drafted changes waiting:\n" + "\n".join(f"- {p.id}: {p.summary}" for p in pend)
+        if name == "approve_self_change" and self._selfdev is not None:
+            return self._approve_self(args.get("which"))
+        if name == "reject_self_change" and self._selfdev is not None:
+            return self._reject_self(args.get("which"))
+        if name == "create_agent" and self._agents is not None:
+            replaced = self._agents.exists(args["name"])  # honest: don't silently overwrite a saved goal
+            agent = self._agents.add(args["name"], args["goal"])
+            verb = "Updated" if replaced else "Saved"
+            return f"{verb} the agent '{agent.name}'. Run it any time from the Agents tab."
+        if name == "delete_build":
+            return self._request_delete(args["name"])
         return f"Unknown tool: {name}"
+
+    # ----- delete / rename helpers -----
+    def _matches(self, name: str) -> bool:
+        """True if a build OR agent matches the name (slug or case-insensitive display name)."""
+        target = name.strip().lower()
+        slug = slugify(name)
+        if any(a.slug == slug or a.name.strip().lower() == target for a in self._builds.list()):
+            return True
+        if self._agents is not None:
+            return any(a.name.strip().lower() == target for a in self._agents.list())
+        return False
+
+    def _request_delete(self, target: str) -> str:
+        """A delete is NEVER performed from the model loop — it asks the UI for one real human click first
+        (defense-in-depth: injected text can't trigger a silent, irreversible rmtree). With no bus (a
+        headless/test context) fall back to the direct delete so behaviour is unchanged there."""
+        if not self._matches(target):
+            return f"I couldn't find anything called '{target}' to delete."
+        if self._bus is not None:
+            self._bus.publish(BuildDeleteRequested(target))
+            return (
+                f"Asked the user to confirm removing '{target}' — nothing is deleted until they approve."
+            )
+        return self.confirm_delete(target)  # headless fallback
+
+    def confirm_delete(self, target: str) -> str:
+        """Actually remove a build or agent — called only AFTER a human confirmation (UI button click)."""
+        if self._forge.remove_build(target):
+            return f"Removed '{target}'."
+        if self._agents is not None:
+            hit = next(
+                (a for a in self._agents.list() if a.name.strip().lower() == target.strip().lower()),
+                None,
+            )
+            if hit is not None:
+                self._agents.remove(hit.name)
+                return f"Removed the agent '{hit.name}'."
+        return f"Couldn't remove '{target}' — it may be open or running right now."
+
+    def _rename(self, name: str, new_name: str) -> str:
+        new_name = (new_name or "").strip()
+        if not new_name:
+            return "Give me a new name to use."
+        target = name.strip().lower()
+        slug = slugify(name)
+        build = next(
+            (a for a in self._builds.list() if a.slug == slug or a.name.strip().lower() == target), None
+        )
+        if build is not None:
+            old_slug = build.slug
+            renamed = self._builds.rename(build.slug, new_name)
+            if renamed is None:
+                return (
+                    f"Couldn't rename '{build.name}' — that name may be taken, or it's open or building "
+                    "right now. Try again in a moment."
+                )
+            if self._bus is not None:
+                self._bus.publish(BuildRenamed(renamed, old_slug=old_slug))
+            return f"Renamed '{build.name}' to '{renamed.name}'."
+        if self._agents is not None:
+            agent = next((a for a in self._agents.list() if a.name.strip().lower() == target), None)
+            if agent is not None:
+                renamed_agent = self._agents.rename(agent.name, new_name)
+                if renamed_agent is None:
+                    return f"Couldn't rename the agent '{agent.name}' — that name may already be in use."
+                return f"Renamed the agent '{agent.name}' to '{renamed_agent.name}'."
+        return f"I couldn't find anything called '{name}' to rename."
+
+    # ----- self-change (apply / discard a drafted improvement to HELIX itself) -----
+    def _resolve_change(self, which, pending):
+        if which:
+            w = str(which).strip().lower()
+            return next((p for p in pending if w in p.id.lower() or w in (p.summary or "").lower()), None)
+        return pending[0] if len(pending) == 1 else None
+
+    def _approve_self(self, which) -> str:
+        pending = self._selfdev.pending()
+        if not pending:
+            return "There's no drafted change to apply."
+        target = self._resolve_change(which, pending)
+        if target is None:
+            return "Which one? Pending: " + ", ".join(p.id for p in pending)
+        try:
+            return self._selfdev.approve(target.id)
+        except Exception as exc:
+            return f"Couldn't apply it: {exc}"
+
+    def _reject_self(self, which) -> str:
+        pending = self._selfdev.pending()
+        if not pending:
+            return "There's no drafted change to discard."
+        target = self._resolve_change(which, pending)
+        if target is None:
+            return "Which one? Pending: " + ", ".join(p.id for p in pending)
+        try:
+            self._selfdev.reject(target.id)
+            return f"Discarded {target.id}."
+        except Exception as exc:
+            return f"Couldn't discard it: {exc}"

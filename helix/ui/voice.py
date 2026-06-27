@@ -557,7 +557,10 @@ class VoiceController(QObject):
             return None
 
     def _on_utterance(self, pcm: bytes) -> None:
-        if self._state in ("speaking", "thinking"):  # barge-in: only a "stop" phrase interrupts/halts
+        # While speaking/thinking — OR while a background build is narrating (state is 'idle' then) — only
+        # a short "stop" counts. Otherwise HELIX's own narration, picked up by the open mic, would be
+        # transcribed as a brand-new (billed) command.
+        if self._state in ("speaking", "thinking") or self._narrating:  # barge-in: only "stop" interrupts
             if self._barge_busy:
                 return
             path = self._pcm_to_wav(pcm)
@@ -670,12 +673,13 @@ class VoiceController(QObject):
         self._set_state("thinking")
 
     def speak(self, text: str) -> None:
-        if self._narrating:  # a progress note is still talking — cut it for the real reply
-            self._narrating = False
-            try:
-                self._tts.stop()
-            except Exception:
-                pass
+        # Preempt ANY in-flight speech (a progress note, or an earlier reply still playing) so two
+        # utterances can never overlap into two voices talking at once.
+        self._narrating = False
+        try:
+            self._tts.stop()
+        except Exception:
+            pass
         text = speakable(text)  # strip markdown/symbols so they aren't read aloud as words
         if not text or not self._tts.available():
             self._set_state("idle")

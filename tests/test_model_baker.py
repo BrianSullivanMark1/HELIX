@@ -49,6 +49,44 @@ def test_viewer_supports_animation_and_creases_only_missing_normals(tmp_path: Pa
     assert "!o.geometry.attributes.normal" in html  # don't re-crease meshes that already have normals
 
 
+def test_static_to_animated_conversion_skips_baking_and_drops_the_stale_spec(tmp_path: Path):
+    # The coder converted a static model to animated: it wrote its OWN index.html (no generated-viewer
+    # sentinel, no GLB reference). bake() must respect that page and delete the now-stale model.json so a
+    # re-bake never overwrites the animation with the old static mesh.
+    _spec(tmp_path, {"parts": [{"shape": "box", "size": [1, 1, 1]}]})
+    hand = "<!doctype html><html><body><script>/* animated three.js, builds geometry inline */</script></body></html>"
+    (tmp_path / VIEWER_FILE).write_text(hand, encoding="utf-8")
+    ModelBaker().bake(tmp_path)
+    assert not (tmp_path / SPEC_FILE).exists()  # stale spec dropped
+    assert (tmp_path / VIEWER_FILE).read_text(encoding="utf-8") == hand  # animated page untouched
+    assert not (tmp_path / GLB_REL).exists()  # no static mesh baked
+
+
+def test_error_page_does_not_block_a_later_rebake(tmp_path: Path):
+    # A transient bake failure writes HELIX's error page; a later iteration must RE-BAKE, not mistake the
+    # error page for a hand-authored animated page and delete the (now valid) spec.
+    _spec(tmp_path, {"engine": "neural", "prompt": "a dragon"})  # neural with no backend → error page
+    ModelBaker().bake(tmp_path)
+    assert (tmp_path / VIEWER_FILE).exists()
+    assert (tmp_path / SPEC_FILE).exists()  # spec kept — the error page is recognized as ours
+    # the user fixes the spec to a parametric one and iterates
+    (tmp_path / SPEC_FILE).write_text(
+        json.dumps({"parts": [{"shape": "box", "size": [1, 1, 1]}]}), encoding="utf-8"
+    )
+    ModelBaker().bake(tmp_path)
+    assert (tmp_path / GLB_REL).exists()  # re-baked successfully
+    assert (tmp_path / SPEC_FILE).exists()  # spec NOT deleted
+
+
+def test_regenerates_when_the_existing_viewer_is_ours(tmp_path: Path):
+    # A normal static iteration: our generated viewer is present → re-bake (don't mistake it for handmade).
+    _spec(tmp_path, {"parts": [{"shape": "box", "size": [1, 1, 1]}]})
+    ModelBaker().bake(tmp_path)  # first bake writes our sentinel viewer + GLB
+    assert (tmp_path / SPEC_FILE).exists() and (tmp_path / GLB_REL).exists()
+    ModelBaker().bake(tmp_path)  # second bake (an iteration) must still re-bake, not drop the spec
+    assert (tmp_path / SPEC_FILE).exists() and (tmp_path / GLB_REL).exists()
+
+
 def test_subtract_carves_a_hole(tmp_path: Path):
     """A boolean cutaway must actually remove volume (the eye-slit / hollow case)."""
     solid = {"parts": [{"name": "block", "shape": "box", "size": [2, 2, 2]}]}

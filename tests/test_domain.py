@@ -11,6 +11,17 @@ def test_slugify():
     assert slugify("café/niño") == "caf-ni-o"
 
 
+def test_slugify_non_ascii_names_get_unique_hash_slugs():
+    # Emoji/CJK-only names used to all collapse to 'app' and overwrite each other; now each is unique.
+    a, b = slugify("🎮"), slugify("日本語")
+    assert a != b and a != "app" and b != "app"
+    assert a.startswith("build-") and slugify("🎮") == a  # stable for the same name
+
+
+def test_slugify_caps_length():
+    assert len(slugify("x" * 300)) <= 80
+
+
 def test_app_from_request():
     a = App.from_request("My App", "do things")
     assert a.slug == "my-app"

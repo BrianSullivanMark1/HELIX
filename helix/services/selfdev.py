@@ -16,6 +16,7 @@ module is itself a PROTECTED_PATH — the coder may never edit it.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -112,7 +113,9 @@ class SelfDevService:
             raise ConstitutionViolation("human_approval_required is locked on and may not be disabled.")
 
     # ----- propose / approve / reject -----
-    def propose(self, request: str, *, on_progress: ProgressFn | None = None) -> PendingChange:
+    def propose(
+        self, request: str, *, on_progress: ProgressFn | None = None, cancel=None
+    ) -> PendingChange:
         self._require_intact()
         self._refuse_if_hooks_present()
         if not self._repo.is_clean(self._root):
@@ -120,14 +123,41 @@ class SelfDevService:
 
         base = self._repo.current_branch(self._root)
         branch = self._branch_name(request)
-        self._repo.create_branch(self._root, branch)
+        self._worktrees.mkdir(parents=True, exist_ok=True)
+        wt = self._worktrees / (branch.replace("/", "_") + "-draft")
+        # Draft the change in an ISOLATED worktree on its own branch: the live deployed tree NEVER leaves
+        # base, so a crash/kill mid-draft can't strand it on the selfdev branch, and a concurrent
+        # background build never sees half-edited HELIX source. The same Constitution scan + data-guard
+        # apply, on the worktree's staged diff — PLUS a live-source escape backstop (below).
+        self._remove_worktree(wt)  # reap any crash-leftover draft at this path before re-creating it
+        shutil.rmtree(wt, ignore_errors=True)
+        try:
+            self._repo.add_worktree_branch(self._root, wt, branch, base)
+        except Exception:  # git creates the branch ref even when the worktree add fails — clean it up
+            self._cleanup_draft(wt, branch)
+            raise
         guard = snapshot_files(self._guard_files)
         data_sig = scan_tree(self._data_dir) if self._data_dir else {}
+        # Escape backstop: the shared coder (the Claude Code CLI) can target ABSOLUTE paths, so it could
+        # write into the live deployed source OUTSIDE its draft worktree. The worktree's staged diff can't
+        # see that, so snapshot the live source and fail closed if anything moved (mirrors ForgeService).
+        src_skip = (self._root / ".git", self._data_dir, self._worktrees)
+        src_sig = scan_tree(self._root, skip=src_skip)
         try:
             result = self._coder.run_task(
-                self._root, improve_helix_prompt(request), on_progress=on_progress
+                wt, improve_helix_prompt(request), on_progress=on_progress, cancel=cancel
             )
-            # Writes into gitignored data/ are invisible to git, so detect them on the filesystem.
+            if cancel is not None and cancel.is_set():
+                raise BuildError("the self-change was stopped.")
+            escaped = tree_changed(self._root, src_sig, skip=src_skip)
+            if escaped:
+                self._repo.discard_changes(self._root)  # the live tree must be byte-identical to base
+                raise ConstitutionViolation(
+                    "refused — the coder wrote into the live HELIX source outside its draft worktree ("
+                    + ", ".join(Path(p).name for p in escaped[:8]) + ")."
+                )
+            # Writes into gitignored data/ are invisible to git, so detect them on the filesystem (the
+            # worktree lives OUTSIDE data/, so legit draft edits don't trip this — only a real escape).
             reverted = restore_if_changed(guard)  # settings written by the coder are reverted
             data_hit = tree_changed(self._data_dir, data_sig) if self._data_dir else []
             if reverted or data_hit:
@@ -138,9 +168,9 @@ class SelfDevService:
             if not result.ok:
                 raise BuildError(result.error or "the coder produced no change.")
 
-            self._repo.stage_all(self._root)
-            changed = self._repo.staged_changed(self._root)
-            deleted = self._repo.staged_deleted(self._root)
+            self._repo.stage_all(wt)
+            changed = self._repo.staged_changed(wt)
+            deleted = self._repo.staged_deleted(wt)
             if not changed and not deleted:
                 raise BuildError("the coder made no changes.")
 
@@ -152,29 +182,59 @@ class SelfDevService:
 
             summary = (result.summary or "").strip()
             commit = self._repo.commit_all(
-                self._root, f"selfdev: {request.strip()[:64]}" + (f"\n\n{summary}" if summary else "")
+                wt, f"selfdev: {request.strip()[:64]}" + (f"\n\n{summary}" if summary else "")
             )
-            # Leave the deployed branch checked out; the change waits on its branch until approved.
-            self._repo.checkout(self._root, base)
-            _LOG.info("proposed self-change on %s", branch)
+            _LOG.info("proposed self-change on %s (isolated worktree)", branch)
             return PendingChange(
                 id=branch, branch=branch, summary=summary or commit.summary,
                 request=request, created_at=self._clock.now(),
             )
         except Exception:
-            self._safe_abort(base, branch)
+            self._cleanup_draft(wt, branch)  # free the branch even if the worktree dir is locked
             raise
+        finally:
+            self._remove_worktree(wt)        # on success: drop the worktree, keep the branch + its commit
 
     def pending(self) -> list[PendingChange]:
         out: list[PendingChange] = []
+        try:
+            base = self._repo.current_branch(self._root)
+        except Exception:
+            base = ""
         for branch in self._repo.list_branches(self._root, BRANCH_PREFIX):
             try:
                 head = self._repo.branch_head(self._root, branch)
+                if base:  # skip a PHANTOM branch (empty diff vs base) — a draft that never committed; a
+                    changed = self._repo.changed_paths(self._root, base, branch)  # leaked, undeletable
+                    deleted = self._repo.deleted_paths(self._root, base, branch)  # branch must not show
+                    if not changed and not deleted:                              # as an apply/discard item
+                        continue
             except Exception:
                 continue
             out.append(PendingChange(id=branch, branch=branch, summary=head.summary,
                                      request="", created_at=head.at))
         return out
+
+    def recover_interrupted(self) -> None:
+        """On startup, sweep self-change leaks from a crash/kill: prune dead worktree registrations, then
+        delete any selfdev/ branch with an EMPTY diff vs base (a draft killed before it committed). NEVER
+        touches a real, committed pending change — those are the user's reviewable drafts."""
+        try:
+            self._repo.prune_worktrees(self._root)  # un-register worktrees whose dirs are gone
+        except Exception:
+            _LOG.warning("could not prune selfdev worktrees", exc_info=True)
+        try:
+            base = self._repo.current_branch(self._root)
+        except Exception:
+            return
+        for br in self._repo.list_branches(self._root, BRANCH_PREFIX):
+            try:
+                changed = self._repo.changed_paths(self._root, base, br)
+                deleted = self._repo.deleted_paths(self._root, base, br)
+                if not changed and not deleted:  # empty diff vs base → a phantom draft, safe to delete
+                    self._delete_branch_quiet(br)
+            except Exception:
+                continue
 
     def approve(self, change_id: str) -> str:
         self._require_intact()
@@ -248,19 +308,28 @@ class SelfDevService:
             except Exception:
                 _LOG.warning("failed to remove smoke-check worktree %s", wt)
 
-    def _safe_abort(self, base: str, branch: str) -> None:
+    def _remove_worktree(self, wt: Path) -> None:
         try:
-            self._repo.discard_changes(self._root)  # drop the coder's uncommitted edits
+            if wt.exists():
+                self._repo.remove_worktree(self._root, wt)
         except Exception:
-            _LOG.exception("abort: could not discard changes")
+            _LOG.warning("could not remove selfdev worktree %s", wt)
+
+    def _cleanup_draft(self, wt: Path, branch: str) -> None:
+        """Tear down a failed/aborted draft: remove the worktree, prune stale registrations so the branch
+        isn't pinned by a surviving (e.g. Windows-locked) worktree, then delete the branch."""
+        self._remove_worktree(wt)
         try:
-            self._repo.checkout(self._root, base)
+            self._repo.prune_worktrees(self._root)
         except Exception:
-            _LOG.exception("abort: could not switch back to %s", base)
+            _LOG.warning("could not prune worktrees", exc_info=True)
+        self._delete_branch_quiet(branch)
+
+    def _delete_branch_quiet(self, branch: str) -> None:
         try:
             self._repo.delete_branch(self._root, branch)
         except Exception:
-            _LOG.exception("abort: could not delete %s", branch)
+            _LOG.warning("could not delete selfdev branch %s", branch)
 
     def _branch_name(self, request: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "-", request.lower()).strip("-")[:40].strip("-") or "change"

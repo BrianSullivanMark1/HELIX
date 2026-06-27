@@ -158,6 +158,101 @@ def test_forge_refuses_a_kind_conflict_on_a_taken_name(tmp_path):
     assert builds.categorized()["models"][0].slug == "battery"
 
 
+class _RecRepo(_NoRepo):
+    def __init__(self):
+        self.discarded = []
+        self._commits = {}  # ws -> list of commit messages (so log() reflects scaffold vs finalized)
+
+    def commit_all(self, ws, msg):
+        self._commits.setdefault(str(ws), []).append(msg)
+
+    def discard_changes(self, ws):
+        self.discarded.append(ws)
+
+    def log(self, ws, limit=100):
+        return list(reversed(self._commits.get(str(ws), [])))[:limit]
+
+
+class _Bus:
+    def __init__(self):
+        self.events = []
+
+    def publish(self, e):
+        self.events.append(e)
+
+
+def test_delete_removes_the_workspace(tmp_path):
+    svc = _svc(tmp_path)
+    _make(svc, "Gone")
+    assert svc.exists("gone")
+    assert svc.delete("gone") is True
+    assert not svc.workspace("gone").exists()
+    assert svc.delete("gone") is False  # already gone → honest False
+
+
+def test_building_marker_is_set_then_cleared_by_finalize(tmp_path):
+    svc = _svc(tmp_path)
+    app = App.from_request("WIP", "x")
+    svc.create_workspace(app)
+    svc.mark_building(app.slug)
+    assert svc.is_building("wip")
+    (svc.workspace("wip") / "index.html").write_text("<html></html>", encoding="utf-8")
+    svc.finalize(app)
+    assert not svc.is_building("wip")  # a completed build clears the in-progress marker
+
+
+def test_create_workspace_clears_a_manifestless_remnant(tmp_path):
+    svc = _svc(tmp_path)
+    ws = svc.workspace("tip-calc")
+    ws.mkdir(parents=True)
+    (ws / "garbage.txt").write_text("half-written", encoding="utf-8")  # a remnant, no manifest
+    svc.create_workspace(App.from_request("Tip Calc", "x"))
+    assert not (ws / "garbage.txt").exists()  # cleared before scaffolding a fresh build
+    assert svc.exists("tip-calc")
+
+
+def test_recover_interrupted_removes_a_never_finalized_build(tmp_path):
+    repo = _RecRepo()
+    builds = BuildService(tmp_path, repo, _FixedClock())
+    app = App.from_request("Half Built", "x")
+    builds.create_workspace(app)  # manifest written, entry_point None (never finalized)
+    builds.mark_building(app.slug)
+    forge = ForgeService(builds, coder=None, bus=_Bus(), repo=repo, app_root=tmp_path)
+    forge.recover_interrupted()
+    assert not builds.workspace("half-built").exists()  # interrupted brand-new build is removed
+
+
+def test_recover_interrupted_rolls_back_an_interrupted_iteration(tmp_path):
+    repo = _RecRepo()
+    builds = BuildService(tmp_path, repo, _FixedClock())
+    _make(builds, "Done")  # finalized once → has a 'build:' commit
+    builds.mark_building("done")  # then an iteration started and was interrupted
+    forge = ForgeService(builds, coder=None, bus=_Bus(), repo=repo, app_root=tmp_path)
+    forge.recover_interrupted()
+    assert repo.discarded == [builds.workspace("done")]  # rolled back to last good
+    assert builds.exists("done")  # the build survives — it is NOT deleted
+    assert not builds.is_building("done")  # the marker is cleared so recovery doesn't re-fire forever
+
+
+def test_recover_keeps_a_finalized_build_even_with_no_detected_entry_point(tmp_path):
+    # REGRESSION: a real, finalized build can legitimately have entry_point=None (the entry heuristic only
+    # globs the top level). Recovery must NOT delete it on an interrupted iteration — it must roll back.
+    repo = _RecRepo()
+    builds = BuildService(tmp_path, repo, _FixedClock())
+    app = App.from_request("Nested", "x")
+    builds.create_workspace(app)
+    sub = builds.workspace(app.slug) / "src"
+    sub.mkdir()
+    (sub / "index.html").write_text("<html></html>", encoding="utf-8")  # entry is nested, not top level
+    builds.finalize(app)
+    assert builds.list()[0].entry_point is None  # heuristic found no top-level entry — but it's committed
+    builds.mark_building("nested")  # an iteration started and was interrupted
+    forge = ForgeService(builds, coder=None, bus=_Bus(), repo=repo, app_root=tmp_path)
+    forge.recover_interrupted()
+    assert builds.workspace("nested").exists()  # NOT deleted — the good committed version survives
+    assert repo.discarded == [builds.workspace("nested")]  # rolled back instead
+
+
 def test_legacy_python_build_categorizes_as_a_task(tmp_path):
     # A pre-BuildKind manifest with a python entry must derive BuildKind.TASK on read (back-compat),
     # so old python builds keep showing under Tasks.

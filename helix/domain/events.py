@@ -25,8 +25,50 @@ class BuildIterated(Event):
 
 
 @dataclass(frozen=True)
+class BuildRenamed(Event):
+    """A build was given a new display name (and possibly a new slug) — the menu refreshes. old_slug lets
+    an open viewer re-point itself when the rename moved the workspace to a new slug."""
+
+    app: App
+    old_slug: str | None = None
+
+
+@dataclass(frozen=True)
 class BuildDeleted(Event):
     slug: str
+
+
+@dataclass(frozen=True)
+class AgentsChanged(Event):
+    """An agent was created, renamed, or removed — the menu's Agents tab should refresh."""
+
+
+@dataclass(frozen=True)
+class SelfChangeProgress(Event):
+    """A live step while HELIX drafts a change to its OWN code in the background."""
+
+    line: str
+
+
+@dataclass(frozen=True)
+class SelfChangeFinished(Event):
+    """A background self-change draft ended — announced so the user can apply or discard it."""
+
+    ok: bool
+    summary: str = ""
+    branch: str = ""
+    error: str | None = None
+    stopped: bool = False
+
+
+@dataclass(frozen=True)
+class BuildDeleteRequested(Event):
+    """The model asked to delete something. Deletion is NEVER performed from the model loop — this event
+    asks the UI to get one real human confirmation first, so injected text can't trigger a silent rmtree.
+
+    name: the user-facing name the model named."""
+
+    name: str
 
 
 @dataclass(frozen=True)
@@ -48,3 +90,4 @@ class BuildFinished(Event):
     error: str | None = None
     stopped: bool = False
     handle: object | None = None
+    iterating: bool = False  # True = an existing build was updated in place (announce "Updated", not "Done")

@@ -40,6 +40,7 @@ class SqliteStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._closed = False
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
@@ -53,6 +54,8 @@ class SqliteStore:
     # ----- MemoryStore -----
     def record_usage(self, input_tokens: int, output_tokens: int, cost_usd: float) -> None:
         with self._lock:
+            if self._closed:
+                return  # a late worker write after close() drops cleanly instead of raising
             self._conn.execute(
                 "INSERT INTO usage(input_tokens, output_tokens, cost_usd, at) VALUES (?,?,?,?)",
                 (int(input_tokens), int(output_tokens), float(cost_usd), self._now()),
@@ -89,6 +92,8 @@ class SqliteStore:
     def append(self, message: Message) -> None:
         at = (message.at or datetime.now().astimezone()).isoformat()
         with self._lock:
+            if self._closed:
+                return  # a late agent/turn reply after close() drops cleanly instead of raising
             self._conn.execute(
                 "INSERT INTO messages(role, text, at) VALUES (?,?,?)",
                 (message.role.value, message.text, at),
@@ -107,4 +112,5 @@ class SqliteStore:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             self._conn.close()

@@ -34,6 +34,8 @@ NeuralBackend = Callable[[str, Path | None], bytes]
 SPEC_FILE = "model.json"
 GLB_REL = "assets/model.glb"
 VIEWER_FILE = "index.html"
+# Stamped into every generated viewer so bake() can tell its OWN page from a hand-authored animated one.
+VIEWER_SENTINEL = "<!-- HELIX-GENERATED-VIEWER -->"
 
 DEFAULT_BG = "#080b0f"
 DEFAULT_ACCENT = "#3fe0e0"
@@ -58,11 +60,21 @@ class ModelBaker:
         baked index.html is what _detect_entry finds and what gets committed. Never raises: a bad spec
         becomes a friendly error page so the build still completes and the user sees a clear message."""
         spec_path = workspace / SPEC_FILE
+        viewer = workspace / VIEWER_FILE
         if not spec_path.exists():
             # No spec: this is the hand-authored ANIMATED path (the coder wrote index.html itself), or a
             # build that produced nothing. Leave a real page alone; otherwise explain.
-            if not (workspace / VIEWER_FILE).exists():
+            if not viewer.exists():
                 self._write_error(workspace, "The model build produced no model.json and no page.")
+            return
+        # A static→animated CONVERSION: the coder replaced our generated viewer with its own animated
+        # index.html. Respect it — skip baking and drop the now-stale model.json, so a re-bake doesn't
+        # silently overwrite the animation with the old static mesh.
+        if viewer.exists() and not self._is_generated_viewer(viewer):
+            try:
+                spec_path.unlink()
+            except OSError:
+                pass
             return
         try:
             spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -286,7 +298,22 @@ class ModelBaker:
                                              .replace("__ACCENT__", accent)
                                              .replace("__GLB__", GLB_REL), encoding="utf-8")
 
+    @staticmethod
+    def _is_generated_viewer(viewer: Path) -> bool:
+        """True if index.html is HELIX's OWN baked viewer (vs a hand-authored animated page). Matches the
+        sentinel OR a reference to the baked GLB, so viewers from before the sentinel still count — that
+        avoids ever mistaking a real (older) generated viewer for hand-authored and deleting its spec."""
+        try:
+            html = viewer.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return True  # unreadable → don't risk dropping the spec; just re-bake
+        return VIEWER_SENTINEL in html or GLB_REL in html
+
     def _write_error(self, workspace: Path, message: str) -> None:
+        try:  # drop a stale mesh so the error page isn't sitting next to a now-invalid old GLB
+            (workspace / GLB_REL).unlink()
+        except OSError:
+            pass
         (workspace / VIEWER_FILE).write_text(
             _ERROR_HTML.replace("__BG__", DEFAULT_BG).replace("__ACCENT__", DEFAULT_ACCENT)
             .replace("__MSG__", _esc(message)), encoding="utf-8")
@@ -441,6 +468,7 @@ def _esc(text: str) -> str:
 # baked GLB, frames the whole model, and gives orbit/zoom with the HELIX look + a studio environment so
 # metallic/PBR surfaces read well.
 _VIEWER_HTML = """<!doctype html>
+<!-- HELIX-GENERATED-VIEWER -->
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -622,6 +650,7 @@ _VIEWER_HTML = """<!doctype html>
 """
 
 _ERROR_HTML = """<!doctype html>
+<!-- HELIX-GENERATED-VIEWER -->
 <html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Model</title>

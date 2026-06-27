@@ -13,6 +13,7 @@ from helix.ports.clock import Clock
 from helix.ports.repo import VersionedRepo
 
 MANIFEST = ".helixbuild.json"
+BUILDING = ".building"  # in-progress marker: present while a build runs, cleared on finalize
 
 
 def _force_remove(func, path, _exc) -> None:
@@ -41,6 +42,10 @@ class BuildService:
         ws = self.workspace(app.slug)
         if self.exists(app.slug):
             return ws  # iterating an existing app
+        # A folder with no manifest is a remnant of an interrupted/half-built run — never scaffold a new
+        # build on top of it (the coder would inherit a corrupt git state); clear it first.
+        if ws.exists():
+            shutil.rmtree(ws, onerror=_force_remove)
         ws.mkdir(parents=True, exist_ok=True)
         self._repo.init(ws)
         app.created_at = app.created_at or self._clock.now()  # stamp once; finalize must not reset it
@@ -49,9 +54,27 @@ class BuildService:
         self._repo.commit_all(ws, "scaffold")
         return ws
 
+    def mark_building(self, slug: str) -> None:
+        """Drop an in-progress marker so a crash/kill mid-build is recoverable on next launch. Written
+        AFTER the scaffold commit (so it never lands in a commit) and cleared by finalize."""
+        try:
+            (self.workspace(slug) / BUILDING).write_text("1", encoding="utf-8")
+        except OSError:
+            pass
+
+    def is_building(self, slug: str) -> bool:
+        return (self.workspace(slug) / BUILDING).exists()
+
+    def clear_building(self, slug: str) -> None:
+        try:
+            (self.workspace(slug) / BUILDING).unlink()
+        except OSError:
+            pass
+
     def finalize(self, app: App) -> App:
         """After the coder runs: detect how the app runs, persist it, commit the result."""
         ws = self.workspace(app.slug)
+        self.clear_building(app.slug)  # the build completed — clear the in-progress marker before committing
         kind, entry = self._detect_entry(ws)
         app.kind, app.entry_point = kind, entry
         self._write_manifest(ws, app)
@@ -63,6 +86,8 @@ class BuildService:
             return []
         apps: list[App] = []
         for child in sorted(self._dir.iterdir()):
+            if child.name.endswith(".helixdel"):
+                continue  # a move-aside dir from an in-progress/failed delete — not a real build
             manifest = child / MANIFEST
             if manifest.exists():
                 apps.append(self._read_manifest(manifest))
@@ -79,12 +104,24 @@ class BuildService:
         return buckets
 
     def delete(self, slug: str) -> bool:
+        """Atomic-or-honest removal. A workspace that's locked (a running task holds it as CWD, an open
+        viewer, a live coder) refuses an os.rename on Windows (WinError 32) — so move it aside FIRST and
+        only delete on success. A locked build returns False WITHOUT being half-gutted, so the caller can
+        honestly say 'still running, close it and try again' instead of lying 'removed' and leaving a
+        corrupt remnant the next same-named build would scaffold onto."""
         ws = self.workspace(slug)
         if not ws.exists():
             return False
+        aside = ws.with_name(ws.name + ".helixdel")
+        try:
+            if aside.exists():
+                shutil.rmtree(aside, onerror=_force_remove)
+            ws.rename(aside)  # atomic on the same volume; refuses (OSError) if the folder is locked
+        except OSError:
+            return False
         # git marks loose object files read-only, so a plain rmtree silently leaves .git behind on
         # Windows. Clear the read-only bit on any file that refuses to go, then retry the unlink.
-        shutil.rmtree(ws, onerror=_force_remove)
+        shutil.rmtree(aside, onerror=_force_remove)
         return not ws.exists()
 
     def rename(self, slug: str, new_name: str) -> App | None:

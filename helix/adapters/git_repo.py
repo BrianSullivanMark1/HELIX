@@ -20,17 +20,31 @@ class GitRepo:
         self._git = git
         # An empty dir so HELIX-driven git NEVER executes a (possibly planted) repo hook. A hook in
         # .git/hooks would otherwise fire during merge/checkout — arbitrary code the scan can't see.
-        self._no_hooks = tempfile.mkdtemp(prefix="helix-nohooks-")
+        # ONE stable dir reused across launches (not a fresh mkdtemp each time) so the app doesn't leak
+        # an empty temp dir per run — the security property (an empty HELIX-owned hooks path) is identical.
+        stable = Path(tempfile.gettempdir()) / "helix-nohooks"
+        try:
+            stable.mkdir(exist_ok=True)
+            self._no_hooks = str(stable)
+        except OSError:
+            self._no_hooks = tempfile.mkdtemp(prefix="helix-nohooks-")
 
     def _run(self, repo_dir: Path, *args: str) -> str:
-        proc = subprocess.run(
-            [self._git, "-c", f"core.hooksPath={self._no_hooks}", *args],
-            cwd=str(repo_dir),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",  # git emits UTF-8; don't crash on a non-ASCII app name/path
-        )
+        try:
+            proc = subprocess.run(
+                [self._git, "-c", f"core.hooksPath={self._no_hooks}", *args],
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",  # git emits UTF-8; don't crash on a non-ASCII app name/path
+            )
+        except FileNotFoundError as exc:
+            # Git isn't installed/on PATH — the most common first-build wall on a clean consumer machine.
+            # Give a human, actionable message instead of a raw OSError the UI would discard.
+            raise GitError(
+                "Git isn’t installed. Install it from https://git-scm.com and restart HELIX."
+            ) from exc
         if proc.returncode != 0:
             msg = proc.stderr.strip() or proc.stdout.strip()
             raise GitError(f"git {' '.join(args)} failed: {msg}")
@@ -60,6 +74,17 @@ class GitRepo:
         self._run(repo_dir, "checkout", "-q", ref)
 
     def commit_all(self, repo_dir: Path, message: str) -> Commit:
+        # A process killed mid-commit (e.g. closing HELIX during a build) leaves a stale index.lock that
+        # bricks every future commit — and thus iterate/rename — in that workspace. Ask git for the
+        # canonical lock path so this is correct in a linked WORKTREE too (where .git is a file and the
+        # lock lives under .git/worktrees/<name>/). Single-worker, so removing it before staging is safe.
+        try:
+            lock = Path(self._run(repo_dir, "rev-parse", "--git-path", "index.lock"))
+            if not lock.is_absolute():
+                lock = repo_dir / lock
+            lock.unlink()
+        except (OSError, GitError):
+            pass
         self._run(repo_dir, "add", "-A")
         self._run(repo_dir, "commit", "-q", "--allow-empty", "-m", message)
         return self._head(repo_dir)
@@ -140,5 +165,13 @@ class GitRepo:
     def add_worktree(self, repo_dir: Path, path: Path, ref: str) -> None:
         self._run(repo_dir, "worktree", "add", "-q", str(path), ref)
 
+    def add_worktree_branch(self, repo_dir: Path, path: Path, branch: str, start: str) -> None:
+        self._run(repo_dir, "worktree", "add", "-q", "-b", branch, str(path), start)
+
     def remove_worktree(self, repo_dir: Path, path: Path) -> None:
         self._run(repo_dir, "worktree", "remove", "--force", str(path))
+
+    def prune_worktrees(self, repo_dir: Path) -> None:
+        """Drop admin entries for worktrees whose directories are gone — so a leaked/locked draft worktree
+        stops pinning its branch (which would otherwise refuse `git branch -D`)."""
+        self._run(repo_dir, "worktree", "prune")

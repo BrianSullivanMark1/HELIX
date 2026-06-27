@@ -221,24 +221,33 @@ class EdgeSpeechOut:
         self._fallback = fallback if fallback is not None else OsSpeechOut()
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
-        self._stopped = False  # set by stop()/close so a KILLED playback isn't mistaken for a failure
+        # Per-utterance generation guard: each speak() gets a fresh gen; stop() records the gen it
+        # stopped. A KILLED playback is identified by gen (not a shared bool), so a CONCURRENT speak()
+        # can't reset the flag and make the killed utterance fall back to the OS voice (two voices).
+        self._gen = 0
+        self._stopped_gen = 0
 
     def available(self) -> bool:
         return edge_available() or self._fallback.available()
+
+    def _is_stopped(self, gen: int) -> bool:
+        return self._stopped_gen >= gen
 
     def speak(self, text: str, allow_fallback: bool = True) -> None:
         text = (text or "").strip()
         if not text:
             return
-        self._stopped = False
+        with self._lock:
+            self._gen += 1
+            gen = self._gen
         path = None
         try:
-            path = self._synthesize(text)
-            if self._stopped:  # stopped during synthesis — don't start playing
+            path = self._synthesize(text, gen)
+            if self._is_stopped(gen):  # stopped during synthesis — don't start playing
                 return
-            self._play(path)
+            self._play(path, gen)
         except Exception as exc:  # offline, WMP missing, etc.
-            if self._stopped:  # we were told to stop; a killed proc is NOT a failure — never fall back
+            if self._is_stopped(gen):  # we were told to stop; a killed proc is NOT a failure — never fall back
                 return
             if not allow_fallback:
                 # Progress narration: stay in ONE voice. Skip this note rather than speak it in the OS
@@ -254,9 +263,10 @@ class EdgeSpeechOut:
                 except OSError:
                     pass
 
-    def _synthesize(self, text: str) -> str:
+    def _synthesize(self, text: str, gen: int | None = None) -> str:
         import edge_tts
 
+        gen = self._gen if gen is None else gen
         voice = (self._voice() or "").strip() or DEFAULT_TTS_VOICE
         rate = _rate_string(self._rate())
         handle, path = tempfile.mkstemp(suffix=".mp3", prefix="helix_tts_")
@@ -269,7 +279,7 @@ class EdgeSpeechOut:
         # main cause of consecutive lines coming out in different voices during a build.
         last_exc: Exception | None = None
         for attempt in range(3):
-            if self._stopped:
+            if self._is_stopped(gen):
                 raise RuntimeError("stopped")
             try:
                 asyncio.run(_go())
@@ -280,10 +290,11 @@ class EdgeSpeechOut:
                 last_exc = exc
         raise last_exc or RuntimeError("edge-tts produced no audio")
 
-    def _play(self, path: str) -> None:
+    def _play(self, path: str, gen: int | None = None) -> None:
+        gen = self._gen if gen is None else gen
         if platform.system() != "Windows":
             raise RuntimeError("MP3 playback here is Windows-only")
-        if self._stopped:
+        if self._is_stopped(gen):
             return
         # Play the MP3 via WPF's MediaPlayer (Media Foundation; present on every Windows) and block for
         # its natural duration. PowerShell runs STA, which MediaPlayer requires. A non-zero exit (e.g.
@@ -309,12 +320,14 @@ class EdgeSpeechOut:
         proc.wait()
         with self._lock:
             self._proc = None
-        if not self._stopped and proc.returncode not in (0, None):
+        if not self._is_stopped(gen) and proc.returncode not in (0, None):
             raise RuntimeError(f"playback exited {proc.returncode}")
 
     def stop(self) -> None:
-        self._stopped = True  # so the in-flight speak() treats the kill as intentional, not a failure
+        # Mark the current (and any earlier) utterance stopped, so its in-flight speak() treats the kill
+        # as intentional — and a LATER speak() (higher gen) is unaffected, so it can't be un-stopped.
         with self._lock:
+            self._stopped_gen = self._gen
             if self._proc and self._proc.poll() is None:
                 try:
                     self._proc.kill()

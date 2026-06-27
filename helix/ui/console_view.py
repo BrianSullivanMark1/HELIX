@@ -7,7 +7,10 @@ no faster-whisper the voice controls stay hidden and it's a normal text app.
 from __future__ import annotations
 
 import re
+import shutil
+from collections import deque
 from html import escape
+from pathlib import Path
 
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -22,6 +25,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor,
+    QGuiApplication,
     QKeySequence,
     QLinearGradient,
     QPainter,
@@ -31,13 +35,16 @@ from PyQt6.QtGui import (
     QShortcut,
 )
 from PyQt6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -46,6 +53,7 @@ from typing import TYPE_CHECKING
 
 from helix.ports.speech import SpeechIn, SpeechOut
 from helix.ports.stores import SettingsStore
+from helix.services import attachments
 from helix.services.cancel import CancelToken
 from helix.services.conversation import ConversationService
 from helix.ui.orb import OrbState, PresenceOrb
@@ -274,6 +282,189 @@ class _ChartWidget(QWidget):
         p.end()
 
 
+_TOOL_BTN_CSS = (
+    "QToolButton{background:rgba(8,11,15,0.9);color:#9fdcdc;"
+    "border:1px solid rgba(63,224,224,0.35);border-radius:6px;padding:0 6px;font-size:13px;}"
+    "QToolButton:hover{color:#3fe0e0;border-color:#3fe0e0;}"
+)
+
+
+def _chart_text(spec: dict) -> str:
+    """A chart's data as copyable label/value lines (a chart has no selectable text otherwise)."""
+    lines: list[str] = []
+    if spec.get("title"):
+        lines.append(str(spec["title"]))
+    unit = str(spec.get("unit") or "")
+    for d in spec.get("data") or []:
+        if isinstance(d, dict):
+            lines.append(f"{d.get('label', '')}\t{unit}{d.get('value', '')}")
+    return "\n".join(lines)
+
+
+def _table_text(spec: dict) -> str:
+    """A table as tab-separated text (pastes cleanly into a spreadsheet)."""
+    lines: list[str] = []
+    if spec.get("title"):
+        lines.append(str(spec["title"]))
+    cols = spec.get("columns") or []
+    if cols:
+        lines.append("\t".join(str(c) for c in cols))
+    for r in spec.get("rows") or []:
+        cells = r if isinstance(r, (list, tuple)) else [r]
+        lines.append("\t".join(str(c) for c in cells))
+    return "\n".join(lines)
+
+
+def _export_text(parent: QWidget, text: str, default_name: str, on_status) -> None:
+    path, _ = QFileDialog.getSaveFileName(
+        parent, "Export", default_name, "Text (*.txt *.md);;All files (*)"
+    )
+    if not path:
+        return
+    try:
+        Path(path).write_text(text, encoding="utf-8")
+        on_status(f"Saved to {Path(path).name}.")
+    except OSError as exc:
+        on_status(f"Couldn't save: {exc}")
+
+
+class _HoverToolsFrame(QFrame):
+    """A QFrame that floats a copy/export tool row in its top-right corner, revealed on hover. The tools
+    overlay the content (repositioned in resizeEvent) so reading stays uncluttered until you hover."""
+
+    def _install_tools(self, on_copy, on_export) -> None:
+        self._tools = QWidget(self)
+        row = QHBoxLayout(self._tools)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(3)
+        for glyph, tip, cb in (("⧉", "Copy", on_copy), ("⤓", "Export…", on_export)):
+            b = QToolButton(self._tools)
+            b.setText(glyph)
+            b.setToolTip(tip)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(cb)
+            b.setStyleSheet(_TOOL_BTN_CSS)
+            row.addWidget(b)
+        self._tools.setVisible(False)
+
+    def resizeEvent(self, event) -> None:
+        tools = getattr(self, "_tools", None)
+        if tools is not None:
+            tools.adjustSize()
+            tools.move(max(0, self.width() - tools.width() - 6), 6)
+        super().resizeEvent(event)
+
+    def enterEvent(self, event) -> None:
+        tools = getattr(self, "_tools", None)
+        if tools is not None:
+            tools.raise_()
+            tools.setVisible(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        tools = getattr(self, "_tools", None)
+        if tools is not None:
+            tools.setVisible(False)
+        super().leaveEvent(event)
+
+
+class _Bubble(_HoverToolsFrame):
+    """A chat bubble carrying tiny copy / export tools in its top-right corner, revealed on hover. Both
+    work on either side of the conversation — your words and HELIX's. Copy puts the raw text on the
+    clipboard; Export saves it to a file. Feedback goes to the Console status line via on_status."""
+
+    def __init__(self, text: str, *, is_user: bool, on_status) -> None:
+        super().__init__()
+        self._text = text
+        self._is_user = is_user
+        self._on_status = on_status
+        self.setObjectName("Bubble")
+        # Semi-opaque so the orb glows through behind the words, but text stays readable.
+        bg = "rgba(18,27,36,0.82)" if is_user else "rgba(13,20,27,0.82)"
+        edge = LINE if is_user else CYAN
+        self.setStyleSheet(
+            f"QFrame#Bubble{{background:{bg};border:1px solid {edge};border-radius:12px;}}"
+        )
+        self.setMaximumWidth(560)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(0)
+        self._label = QLabel(text)
+        self._label.setWordWrap(True)
+        # PlainText: a reply (or replayed app description) is shown verbatim — code/HTML isn't mangled,
+        # and attacker-controlled text can't render as live Qt rich text (e.g. a remote-image beacon).
+        self._label.setTextFormat(Qt.TextFormat.PlainText)
+        self._label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._label.setStyleSheet("QLabel{background:transparent;border:none;color:#e2edf1;}")
+        lay.addWidget(self._label)
+        self._install_tools(self._copy, self._export)
+
+    def _copy(self) -> None:
+        QGuiApplication.clipboard().setText(self._text)
+        self._on_status("Copied to clipboard.")
+
+    def _export(self) -> None:
+        snippet = "".join(c for c in self._text[:24] if c.isalnum() or c in " -_").strip()
+        default = f"helix-{'you' if self._is_user else 'reply'}-{(snippet or 'message').replace(' ', '-')}.txt"
+        _export_text(self, self._text, default, self._on_status)
+
+
+class _ToolWrap(_HoverToolsFrame):
+    """Wraps an inline visual (a chart or table) and floats copy/export tools over it. The grab text is
+    built from the STRUCTURED spec (TSV for tables, label/value lines for charts) so the user can lift
+    the actual numbers — including from a chart, which otherwise has no selectable text at all."""
+
+    def __init__(self, content: QWidget, copy_text: str, default_name: str, on_status) -> None:
+        super().__init__()
+        self._copy_textval = copy_text
+        self._default = default_name
+        self._on_status = on_status
+        self.setStyleSheet("QFrame{background:transparent;border:none;}")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(content)
+        self._install_tools(self._copy, self._export)
+
+    def _copy(self) -> None:
+        QGuiApplication.clipboard().setText(self._copy_textval)
+        self._on_status("Copied to clipboard.")
+
+    def _export(self) -> None:
+        _export_text(self, self._copy_textval, self._default, self._on_status)
+
+
+class _AttachChip(QFrame):
+    """A small removable token for one attached file or folder, shown above the input row."""
+
+    def __init__(self, path: Path, on_remove) -> None:
+        super().__init__()
+        self.setStyleSheet(
+            "QFrame{background:rgba(8,11,15,0.9);border:1px solid rgba(63,224,224,0.35);"
+            "border-radius:10px;}"
+        )
+        row = QHBoxLayout(self)
+        row.setContentsMargins(9, 3, 5, 3)
+        row.setSpacing(5)
+        glyph = "📁" if path.is_dir() else "📄"
+        label = QLabel(f"{glyph} {path.name}")
+        label.setTextFormat(Qt.TextFormat.PlainText)  # a filename is attacker-controlled — never rich text
+        label.setStyleSheet("color:#cfeaea;border:none;background:transparent;")
+        label.setToolTip(str(path))
+        x = QToolButton()
+        x.setText("✕")
+        x.setCursor(Qt.CursorShape.PointingHandCursor)
+        x.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        x.setStyleSheet(
+            "QToolButton{color:#9fb3ba;border:none;background:transparent;font-size:12px;}"
+            "QToolButton:hover{color:#3fe0e0;}"
+        )
+        x.clicked.connect(lambda: on_remove(path))
+        row.addWidget(label)
+        row.addWidget(x)
+
+
 class ConsoleView(QWidget):
     openSettingsRequested = pyqtSignal()
     restartRequested = pyqtSignal()  # user asked to restart so voice can pre-warm and start listening
@@ -287,6 +478,7 @@ class ConsoleView(QWidget):
         orb: PresenceOrb | None = None,
         forge: "ForgeService | None" = None,
         build_queue=None,
+        selfdev_lane=None,
     ) -> None:
         super().__init__()
         self.setObjectName("Console")
@@ -294,12 +486,17 @@ class ConsoleView(QWidget):
         self._settings = settings
         self._forge = forge  # for removing/rolling back work a 'stop' interrupted
         self._queue = build_queue  # background build jobs — cancel/status the running build
+        self._selfdev_lane = selfdev_lane  # background self-change drafts — cancel/status
         self._workers: set[QtWorker] = set()
         self._busy = False  # a CONVERSATIONAL turn is running (now short — builds left the turn)
-        self._pending_msgs: list[tuple[str, bool]] = []  # follow-ups typed while a turn runs (never dropped)
+        # follow-ups typed while a turn runs (never dropped): (text, from_voice, attachment paths)
+        self._pending_msgs: list[tuple[str, bool, list[Path]]] = []
+        self._attachments: list[Path] = []  # files/folders staged for the next message (like Claude)
         self._cancelled = False  # set by a 'stop' — a pending reply is shown but not spoken
         self._cancel: CancelToken | None = None  # the running turn's stop signal
-        self._pending_cleanup: "BuildHandle | None" = None  # awaiting yes/no to remove half-built work
+        # Half-built-work offers awaiting a yes/no. A DEQUE (not one slot): a second stopped build queues
+        # its own offer instead of clobbering the first and orphaning its workspace.
+        self._cleanups: "deque[BuildHandle]" = deque()
         self.orb = orb  # shared with the whole window; owned by HelixMainWindow
 
         self._voice: VoiceController | None = None
@@ -324,6 +521,21 @@ class ConsoleView(QWidget):
         brow.addStretch(1)
         brow.addWidget(open_btn)
         root.addWidget(self._banner)
+
+        # Git banner — built apps are version-controlled, so building needs git. On a clean consumer
+        # machine its absence is the #1 first-build wall; say so plainly instead of failing cryptically.
+        if shutil.which("git") is None:
+            git_banner = QFrame()
+            git_banner.setObjectName("Card")
+            grow = QHBoxLayout(git_banner)
+            grow.setContentsMargins(16, 10, 12, 10)
+            gmsg = QLabel(
+                "Git isn’t installed — building needs it. Install Git from git-scm.com, then restart HELIX."
+            )
+            gmsg.setObjectName("Banner")
+            gmsg.setWordWrap(True)
+            grow.addWidget(gmsg)
+            root.addWidget(git_banner)
 
         # The conversation fills the full height — text scrolls all the way up — floating over the orb's
         # glow (bubbles are semi-opaque so they stay legible). The controls sit beneath it.
@@ -366,11 +578,34 @@ class ConsoleView(QWidget):
         vrow.addStretch(1)
         root.addLayout(vrow)
 
-        # Input row: hold-to-talk · text · send
+        # Attachment chips: staged files/folders, shown above the input row, hidden when empty.
+        self._attach_row = QHBoxLayout()
+        self._attach_row.setContentsMargins(2, 0, 2, 0)
+        self._attach_row.setSpacing(6)
+        self._attach_host = QWidget()
+        self._attach_host.setLayout(self._attach_row)
+        self._attach_host.setVisible(False)
+        root.addWidget(self._attach_host)
+
+        # Input row: hold-to-talk · attach · text · send
         row = QHBoxLayout()
         self._talk = QPushButton("🎤 Hold to Talk")
         self._talk.pressed.connect(self._talk_start)
         self._talk.released.connect(self._talk_stop)
+        self._attach_btn = QToolButton()
+        self._attach_btn.setText("📎")
+        self._attach_btn.setToolTip("Attach files or a folder as context")
+        self._attach_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._attach_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        amenu = QMenu(self._attach_btn)
+        amenu.addAction("Attach files…", self._attach_files)
+        amenu.addAction("Attach folder…", self._attach_folder)
+        self._attach_btn.setMenu(amenu)
+        self._attach_btn.setStyleSheet(
+            "QToolButton{background:rgba(8,11,15,0.9);border:1px solid rgba(63,224,224,0.3);"
+            "border-radius:14px;padding:8px 12px;font-size:15px;}"
+            "QToolButton:hover{border-color:#3fe0e0;} QToolButton::menu-indicator{image:none;}"
+        )
         self._input = QLineEdit()
         self._input.setPlaceholderText("Tell HELIX what to build…")
         self._input.returnPressed.connect(self._send)
@@ -378,6 +613,7 @@ class ConsoleView(QWidget):
         send.setObjectName("Primary")
         send.clicked.connect(self._send)
         row.addWidget(self._talk)
+        row.addWidget(self._attach_btn)
         row.addWidget(self._input)
         row.addWidget(send)
         root.addLayout(row)
@@ -407,8 +643,11 @@ class ConsoleView(QWidget):
 
     def _on_tap(self) -> None:
         # A tap on empty space is a tap on the orb behind it: interrupt while HELIX is busy, else toggle
-        # voice. Clicks on buttons/input/bubbles are consumed by those children and never get here.
-        if self._voice is not None and self._voice.is_active():
+        # voice. "Busy" includes a BACKGROUND build (the conversational turn has already ended, but the
+        # documented "tap the orb to stop" must still halt the build, not silently mute voice).
+        building = self._queue is not None and self._queue.active_name() is not None
+        drafting = self._selfdev_lane is not None and self._selfdev_lane.busy()
+        if building or drafting or self._busy or (self._voice is not None and self._voice.is_active()):
             self._stop()
         else:
             self.toggle_voice()
@@ -437,12 +676,26 @@ class ConsoleView(QWidget):
     def _cancel_active(self) -> None:
         """Stop now: cancel a generating reply (the conversational turn) AND halt the running background
         build. The build's cleanup offer fires later via on_build_finished(stopped)."""
+        building = self._queue is not None and self._queue.active_name() is not None
+        if self._selfdev_lane is not None and self._selfdev_lane.busy():
+            self._selfdev_lane.cancel()  # a stop must halt a background self-change draft FIRST, before
+            #                              any cleanup-answer early-return below could skip it
+        if self._cleanups and not building and not self._busy:
+            # A "remove the half-built X?" offer is hanging and nothing is running — Esc / "stop" /
+            # "never mind" naturally means "no, leave it", not a no-op. Answer the NEWEST (the one just
+            # asked/spoken) safely (keep it).
+            self._cleanup_keep(self._cleanups[-1])
+            return
         if self._busy and self._cancel is not None:
             self._cancelled = True
             self._cancel.cancel()  # break a mid-flight reply loop
         stopped = self._queue.cancel_active() if self._queue is not None else None  # kill the coder
+        dropped = self._queue.clear_queued() if self._queue is not None else []  # a stop drops the queue too
         if stopped:
-            self.status.setText(f"Stopping {stopped}…")
+            tail = f" Cleared {len(dropped)} queued." if dropped else ""
+            self.status.setText(f"Stopping {stopped}…{tail}")
+        elif dropped:
+            self.status.setText(f"Cleared {len(dropped)} queued.")
         elif self._busy:
             self.status.setText("Stopping…")
         else:
@@ -528,32 +781,100 @@ class ConsoleView(QWidget):
     def _on_recognized(self, text: str) -> None:
         self._submit(str(text), from_voice=True)
 
+    # ----- attachments -----
+    def _attach_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, "Attach files")
+        for p in paths:
+            self._add_attachment(Path(p))
+
+    def _attach_folder(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Attach folder")
+        if path:
+            self._add_attachment(Path(path))
+
+    def _add_attachment(self, path: Path) -> None:
+        if path in self._attachments:
+            return
+        self._attachments.append(path)
+        self._refresh_attachments()
+
+    def _remove_attachment(self, path: Path) -> None:
+        self._attachments = [p for p in self._attachments if p != path]
+        self._refresh_attachments()
+
+    def _clear_attachments(self) -> None:
+        self._attachments = []
+        self._refresh_attachments()
+
+    def _refresh_attachments(self) -> None:
+        while self._attach_row.count():
+            item = self._attach_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for p in self._attachments:
+            self._attach_row.addWidget(_AttachChip(p, self._remove_attachment))
+        self._attach_row.addStretch(1)
+        self._attach_host.setVisible(bool(self._attachments))
+
     # ----- conversation -----
     def _send(self) -> None:
         text = self._input.text().strip()
+        attached = list(self._attachments)
         self._input.clear()
-        self._submit(text, from_voice=False)
+        self._clear_attachments()
+        self._submit(text, from_voice=False, attach_paths=attached)
 
-    def _submit(self, text: str, *, from_voice: bool) -> None:
+    def _submit(self, text: str, *, from_voice: bool, attach_paths: list[Path] | None = None) -> None:
         text = (text or "").strip()
-        if not text:
+        attach_paths = attach_paths or []
+        if not text and not attach_paths:
             return
-        if self._pending_cleanup is not None:  # we asked "remove the half-built X?" — this is the answer
-            self._answer_cleanup(text)
-            return
+        if self._cleanups:  # an offer is open — a clear yes/no answers the NEWEST (the one just asked)
+            answer = _cleanup_answer(text)
+            if answer == "yes":
+                self._cleanup_remove(self._cleanups[-1])
+                return
+            if answer == "no":
+                self._cleanup_keep(self._cleanups[-1])
+                return
+            # neither a clean yes nor no — leave the offer (its buttons stay live) and treat this as a
+            # normal message instead of swallowing it as the answer.
         if is_stop(text):  # "stop" works any time — halts the running build and/or a generating reply
             self._add_bubble("you", text)
             self._stop()
             return
-        self._add_bubble("you", text)
+        if not (self._settings.get("claude_api_key") or "").strip():
+            # No key yet: don't send (it would fail with a raw error and leave a dangling user turn that
+            # breaks the NEXT request). Keep what they typed and point them straight at Settings.
+            if text:
+                self._input.setText(text)
+            self._add_bubble("helix", "Add your Claude API key first, then I'll build.")
+            self._add_actions([("Open Settings", self.openSettingsRequested.emit)])
+            return
+        prompt = text or "Here are some files — take a look."  # allow an attachment-only message
+        self._add_bubble("you", text or "📎 (attached files)")
+        if attach_paths:
+            self._add_attach_note(attach_paths)
         if self._busy:
             # A conversational turn is mid-flight. Turns are short now (builds run in the background), so
             # queue this follow-up and run it the moment the current turn finishes — never drop it.
-            self._pending_msgs.append((text, from_voice))
+            self._pending_msgs.append((prompt, from_voice, attach_paths))
             return
-        self._start_turn(text, from_voice)
+        self._start_turn(prompt, from_voice, attach_paths)
 
-    def _start_turn(self, text: str, from_voice: bool) -> None:
+    def _add_attach_note(self, attach_paths: list[Path]) -> None:
+        note = QLabel(attachments.summary(attach_paths))
+        note.setTextFormat(Qt.TextFormat.PlainText)  # filenames are attacker-controlled
+        note.setStyleSheet(f"color:{MUTED};font-size:12px;")
+        rowlay = QHBoxLayout()
+        rowlay.setContentsMargins(0, 0, 0, 0)
+        rowlay.addStretch(1)
+        rowlay.addWidget(note)
+        self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
+        QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def _start_turn(self, text: str, from_voice: bool, attach_paths: list[Path] | None = None) -> None:
         self._cancelled = False
         self._cancel = CancelToken()
         self._busy = True
@@ -565,7 +886,21 @@ class ConsoleView(QWidget):
             self.status.setText("Thinking…")
 
         token = self._cancel
-        worker = QtWorker(lambda emit: self._conversation.run_turn(text, on_progress=emit, cancel=token))
+        paths = list(attach_paths or [])
+
+        def _run(emit):
+            # Read + bundle the attachments OFF the UI thread (a folder can be large); the result rides
+            # along as ephemeral context for just this turn. If nothing readable came back (all binary/
+            # empty), say so explicitly so the model can't invent file contents.
+            atext = None
+            if paths:
+                atext = attachments.bundle(paths, cancel=token) or (
+                    "(The attached items had no readable text — binary, images, or empty — so their "
+                    "contents aren't available.)"
+                )
+            return self._conversation.run_turn(text, attachments_text=atext, on_progress=emit, cancel=token)
+
+        worker = QtWorker(_run)
         # Strong ref until the QThread truly finishes (see _retire) so the GC can't kill a live thread.
         self._workers.add(worker)
         worker.progress.connect(self._on_progress)
@@ -631,7 +966,9 @@ class ConsoleView(QWidget):
         if self._voice is not None:
             self._voice.narrate(line)
 
-    def on_build_finished(self, name: str, ok: bool, error: str | None, stopped: bool, handle) -> None:
+    def on_build_finished(
+        self, name: str, ok: bool, error: str | None, stopped: bool, handle, iterating: bool = False
+    ) -> None:
         """A background build ended — announce it tersely, or offer cleanup if it was stopped mid-run."""
         if stopped:
             if handle is not None:
@@ -639,49 +976,96 @@ class ConsoleView(QWidget):
             else:
                 self._announce("Stopped.")
             return
-        self._announce(f"Done — {name} is in the menu." if ok else f"The {name} build didn't go through.")
+        if ok:
+            self._announce(f"Updated {name}." if iterating else f"Done — {name} is in the menu.")
+            return
+        # Surface the real reason instead of a vague "didn't go through" (the error was being discarded).
+        reason = (error or "").strip().splitlines()[0][:160] if error else ""
+        self._announce(f"The {name} build didn't go through. {reason}".strip())
 
-    # ----- cleanup after a stopped build -----
+    def on_self_change_finished(
+        self, ok: bool, summary: str, branch: str, error: str | None, stopped: bool
+    ) -> None:
+        """A background self-change draft ended — announce whether it's ready to apply."""
+        if stopped:
+            self._announce("Stopped drafting that change.")
+        elif ok:
+            label = (summary or branch or "the change").strip().splitlines()[0][:90]
+            self._announce(f"Drafted {label}. Say “apply it” to ship it, or “discard it” to drop it.")
+        else:
+            reason = (error or "").strip().splitlines()[0][:160] if error else ""
+            self._announce(f"Couldn't draft that change. {reason}".strip())
+
+    # ----- delete confirmation (model proposed a delete; require one real human click) -----
+    def offer_delete(self, name: str, on_confirm) -> None:
+        q = f"Remove “{name}”? This permanently deletes it and can’t be undone."
+        self._add_bubble("helix", q)
+        self._add_actions([
+            ("Remove", lambda: self._do_delete(on_confirm)),
+            ("Keep", lambda: self._announce("Okay, keeping it.")),
+        ])
+        if self._voice is not None and self._voice.enabled():
+            self._voice.speak(q)
+
+    def _do_delete(self, on_confirm) -> None:
+        try:
+            msg = on_confirm()
+        except Exception as exc:
+            msg = f"Couldn't remove it: {exc}"
+        self._announce(str(msg))
+
+    # ----- cleanup after a stopped build (one offer per stopped build; never clobbered) -----
     def _offer_cleanup(self, handle: "BuildHandle") -> None:
-        """A build was stopped mid-run — ask whether to remove (new) or roll back (iteration) the work."""
+        """A build was stopped mid-run — ask whether to remove (new) or roll back (iteration) the work.
+        Each offer carries its OWN handle into its buttons, and queues behind any earlier open offer, so a
+        second stop can't overwrite the first and orphan its workspace."""
         if self._forge is None:
             return  # nothing we can do without the forge; leave the partial work in place
-        self._pending_cleanup = handle
+        self._cleanups.append(handle)
         verb = "roll back" if handle.iterating else "remove"
         q = f"I stopped. Want me to {verb} the half-built “{handle.name}”?"
         self._add_bubble("helix", q)
         self._add_actions([
-            ("Roll back" if handle.iterating else "Remove", self._cleanup_remove),
-            ("Keep it", self._cleanup_keep),
+            ("Roll back" if handle.iterating else "Remove", lambda h=handle: self._cleanup_remove(h)),
+            ("Keep it", lambda h=handle: self._cleanup_keep(h)),
         ])
         if self._voice is not None and self._voice.enabled():
             self._voice.speak(q)  # spoken too, so the user can answer "yes"/"no" by voice
 
-    def _answer_cleanup(self, text: str) -> None:
-        answer = _cleanup_answer(text)
-        if answer == "yes":
-            self._cleanup_remove()
-        elif answer == "no":
-            self._cleanup_keep()
-        else:  # neither a clear yes nor no — keep the work and treat the words as a fresh request
-            self._pending_cleanup = None
-            self._submit(text, from_voice=False)
-
-    def _cleanup_remove(self) -> None:
-        handle = self._pending_cleanup
-        self._pending_cleanup = None
-        if handle is None or self._forge is None:
+    def _cleanup_remove(self, handle: "BuildHandle") -> None:
+        try:
+            self._cleanups.remove(handle)
+        except ValueError:
+            return  # already answered
+        if self._forge is None:
             return
         try:
-            self._forge.discard_build(handle)
-            msg = f"{'Rolled back' if handle.iterating else 'Removed'} “{handle.name}”."
+            if self._forge.discard_build(handle):
+                msg = f"{'Rolled back' if handle.iterating else 'Removed'} “{handle.name}”."
+            else:  # a locked/open workspace refused removal — be honest, don't claim it's gone
+                msg = f"Couldn't remove “{handle.name}” — it may still be open or building. Try again in a moment."
         except Exception as exc:
             msg = f"I couldn't remove it: {exc}"
         self._announce(msg)
+        self._drain_pending()
 
-    def _cleanup_keep(self) -> None:
-        self._pending_cleanup = None
+    def _cleanup_keep(self, handle: "BuildHandle") -> None:
+        try:
+            self._cleanups.remove(handle)
+        except ValueError:
+            return
         self._announce("Okay, I kept it.")
+        self._drain_pending()
+
+    def _drain_pending(self) -> None:
+        """Run the next queued follow-up once a turn finishes. NOT gated on open cleanup offers: those come
+        from background builds and are independent of the conversation, so a queued message must never
+        stall behind an unanswered "remove the half-built X?" — the offer's buttons stay live in parallel."""
+        if self._busy:
+            return
+        if self._pending_msgs:
+            text, from_voice, attach_paths = self._pending_msgs.pop(0)
+            self._start_turn(text, from_voice, attach_paths)
 
     def _announce(self, msg: str) -> None:
         self._add_bubble("helix", msg)
@@ -706,12 +1090,16 @@ class ConsoleView(QWidget):
         worker.deleteLater()
         self._busy = False
         self._refresh_voice_ui()
-        if self._pending_msgs:  # run the next follow-up the user queued while this turn was running
-            text, from_voice = self._pending_msgs.pop(0)
-            self._start_turn(text, from_voice)
+        self._drain_pending()  # run the next queued follow-up (unless a cleanup offer is still open)
+
+    def is_busy(self) -> bool:
+        """True while a conversational turn is generating — used by the close-anyway prompt."""
+        return self._busy
 
     def shutdown(self) -> None:
         """Wait briefly for any in-flight worker so we never destroy a running QThread on close."""
+        if self._cancel is not None:
+            self._cancel.cancel()  # break a mid-flight turn at its next cancel check before we wait
         if self._voice is not None:
             self._voice.shutdown()
         for worker in list(self._workers):
@@ -733,18 +1121,8 @@ class ConsoleView(QWidget):
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def _add_bubble(self, who: str, text: str) -> None:
-        bubble = QLabel(text)
-        bubble.setWordWrap(True)
-        bubble.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        bubble.setMaximumWidth(560)
         is_user = who == "you"
-        # Semi-opaque so the orb glows through behind the words, but text stays readable.
-        bg = "rgba(18,27,36,0.82)" if is_user else "rgba(13,20,27,0.82)"
-        edge = LINE if is_user else CYAN
-        bubble.setStyleSheet(
-            f"QLabel{{background:{bg};color:#e2edf1;border:1px solid {edge};"
-            f"border-radius:12px;padding:10px 14px;}}"
-        )
+        bubble = _Bubble(text, is_user=is_user, on_status=self._flash_status)
         rowlay = QHBoxLayout()
         rowlay.setContentsMargins(0, 0, 0, 0)
         if is_user:
@@ -757,8 +1135,14 @@ class ConsoleView(QWidget):
         self._animate_in(bubble)
         QTimer.singleShot(0, self._scroll_to_bottom)
 
+    def _flash_status(self, msg: str) -> None:
+        """Brief feedback from a bubble tool (copy/export) on the status line — overwritten by the
+        next real status update, so it reads as a transient confirmation."""
+        self.status.setText(msg)
+
     def _add_visual(self, spec: dict) -> None:
-        """Render a table or chart inline in the transcript (shown, never spoken)."""
+        """Render a table or chart inline in the transcript (shown, never spoken), each with its own
+        copy/export tools whose text is the underlying data — the numbers users most want to grab."""
         kind = spec.get("type")
         if kind == "chart":
             card = QFrame()
@@ -768,9 +1152,11 @@ class ConsoleView(QWidget):
             lay = QVBoxLayout(card)
             lay.setContentsMargins(14, 12, 14, 12)
             lay.addWidget(_ChartWidget(spec))
-            self._insert_visual(card)
+            self._insert_visual(_ToolWrap(card, _chart_text(spec), "helix-chart.txt", self._flash_status))
         elif kind == "table":
-            self._insert_visual(self._table_widget(spec))
+            self._insert_visual(
+                _ToolWrap(self._table_widget(spec), _table_text(spec), "helix-table.txt", self._flash_status)
+            )
 
     @staticmethod
     def _looks_numeric(s: str) -> bool:

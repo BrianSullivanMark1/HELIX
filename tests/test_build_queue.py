@@ -3,6 +3,7 @@ A→B, reorders the queue, and cancels. Uses a gated fake forge so ordering is d
 from __future__ import annotations
 
 import threading
+import time
 
 from helix.domain.errors import BuildCancelled
 from helix.domain.events import BuildFinished, BuildProgress
@@ -135,3 +136,41 @@ def test_cancel_active_stops_and_offers_cleanup():
     assert bus.wait_finishes(1)
     fin = bus.finished()[0]
     assert not fin.ok and fin.stopped
+
+
+class _CancelAwareForge:
+    """A forge whose build() runs until its cancel token fires — mimics the coder the watcher kills."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.calls: list[str] = []
+
+    def build(self, name, request, *, prompt=None, kind=None, on_progress=None, cancel=None):
+        self.calls.append(name)
+        self.started.set()
+        while not (cancel is not None and cancel.is_set()):
+            time.sleep(0.01)
+        raise BuildCancelled(name.lower(), name, False)
+
+
+def test_shutdown_reaps_the_active_build_and_exits_the_worker():
+    # The owner's #1 case: closing mid-build must cancel the coder and stop the worker — never orphan it.
+    bus, forge = _Bus(), _CancelAwareForge()
+    q = BuildQueue(forge, bus)
+    q.enqueue("A", "x", kind=BuildKind.APP)
+    assert forge.started.wait(5)
+    q.shutdown(timeout=3.0)
+    assert not q._thread.is_alive()        # the background worker actually exited
+    assert q.snapshot() == (None, [])      # nothing left active or queued
+    assert bus.finished() == []            # no cleanup announcement during shutdown (the UI is gone)
+
+
+def test_shutdown_drops_pending_jobs_without_running_them():
+    bus, forge = _Bus(), _CancelAwareForge()
+    q = BuildQueue(forge, bus)
+    q.enqueue("A", "x", kind=BuildKind.APP)
+    assert forge.started.wait(5)
+    q.enqueue("B", "x", kind=BuildKind.APP)  # queued behind the running A
+    q.shutdown(timeout=3.0)
+    assert "B" not in forge.calls            # the queued job is dropped, never built, on shutdown
+    assert not q._thread.is_alive()

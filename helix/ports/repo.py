@@ -75,4 +75,13 @@ class VersionedRepo(Protocol):
 
     def add_worktree(self, repo_dir: Path, path: Path, ref: str) -> None: ...
 
+    def add_worktree_branch(self, repo_dir: Path, path: Path, branch: str, start: str) -> None:
+        """Create `branch` at `start` and check it out in a NEW worktree at `path`, without moving the
+        main working tree (git worktree add -b). Used to draft a self-change in isolation."""
+        ...
+
     def remove_worktree(self, repo_dir: Path, path: Path) -> None: ...
+
+    def prune_worktrees(self, repo_dir: Path) -> None:
+        """Drop admin entries for worktrees whose directories no longer exist (frees pinned branches)."""
+        ...
