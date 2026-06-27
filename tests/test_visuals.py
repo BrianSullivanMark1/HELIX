@@ -107,3 +107,11 @@ def test_pcm_bands_loud_tone_lights_up():
     tone = array.array("h", [int(22000 * _math.sin(2 * _math.pi * 8 * i / n)) for i in range(n)])
     bands = _pcm_bands(tone.tobytes())
     assert len(bands) == 16 and max(bands) > 0.1
+
+
+def test_transcript_fade_in_applies_an_effect_without_crashing(_app):
+    from PyQt6.QtWidgets import QLabel
+
+    lbl = QLabel("hello")
+    ConsoleView._animate_in(lbl)  # staticmethod: applies an opacity effect + fade animation
+    assert lbl.graphicsEffect() is not None

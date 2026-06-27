@@ -13,6 +13,7 @@ from PyQt6.QtCore import (
     QEasingCurve,
     QEvent,
     QPointF,
+    QPropertyAnimation,
     QRectF,
     Qt,
     QTimer,
@@ -31,6 +32,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -686,6 +688,20 @@ class ConsoleView(QWidget):
             worker.wait(3000)
 
     # ----- transcript rendering -----
+    @staticmethod
+    def _animate_in(widget: QWidget) -> None:
+        """Fade a freshly-added transcript item in — a cheap, broad 'alive' feel. The opacity effect is
+        cleared once the fade finishes so a long transcript never carries dozens of live effects."""
+        eff = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(eff)
+        anim = QPropertyAnimation(eff, b"opacity", widget)
+        anim.setDuration(260)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda: widget.setGraphicsEffect(None))
+        anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
     def _add_bubble(self, who: str, text: str) -> None:
         bubble = QLabel(text)
         bubble.setWordWrap(True)
@@ -708,6 +724,7 @@ class ConsoleView(QWidget):
             rowlay.addWidget(bubble)
             rowlay.addStretch(1)
         self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
+        self._animate_in(bubble)
         QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _add_visual(self, spec: dict) -> None:
@@ -781,6 +798,7 @@ class ConsoleView(QWidget):
         rowlay.addWidget(widget)
         rowlay.addStretch(1)
         self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
+        self._animate_in(widget)
         QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _scroll_to_bottom(self) -> None:
