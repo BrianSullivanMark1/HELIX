@@ -26,13 +26,14 @@ import numpy as np
 import trimesh
 from trimesh.visual.material import PBRMaterial
 
+from helix.services.builds import MANIFEST  # single source of truth for the manifest filename
+
 # Optional hosted text/image-to-3D backend (Phase 2). Given (prompt, image_path|None) -> GLB bytes.
 NeuralBackend = Callable[[str, Path | None], bytes]
 
 SPEC_FILE = "model.json"
 GLB_REL = "assets/model.glb"
 VIEWER_FILE = "index.html"
-MANIFEST = ".helixbuild.json"  # mirrors BuildService.MANIFEST; read only, for the display title
 
 DEFAULT_BG = "#080b0f"
 DEFAULT_ACCENT = "#3fe0e0"

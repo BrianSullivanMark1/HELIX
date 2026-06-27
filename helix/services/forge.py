@@ -14,7 +14,7 @@ from helix.ports.repo import VersionedRepo
 from helix.services.builds import BuildService
 from helix.services.cancel import BuildHandle, CancelToken
 from helix.services.prompts import build_app_prompt
-from helix.services.selfdev import restore_if_changed, scan_tree, snapshot_files, tree_changed
+from helix.services.sandbox import restore_if_changed, scan_tree, snapshot_files, tree_changed
 
 if TYPE_CHECKING:
     from helix.services.model_baker import ModelBaker

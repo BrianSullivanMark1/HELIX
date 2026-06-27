@@ -43,6 +43,7 @@ PROTECTED_PREFIXES: tuple[str, ...] = (
 PROTECTED_FILES: tuple[str, ...] = (
     "helix/services/selfdev.py",  # the approval gate
     "helix/services/forge.py",  # the build sandbox + data guard
+    "helix/services/sandbox.py",  # the shared containment primitives the gate + Forge rely on
     "helix/services/prompts.py",  # the prompts that frame the coder
     "helix/config.py",  # path resolution — imported at startup
     "helix/logging_setup.py",  # imported at startup (runs before the gate loads)

@@ -9,6 +9,10 @@ from typing import Callable
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from helix.logging_setup import get_logger
+
+_LOG = get_logger("ui.worker")
+
 
 class QtWorker(QThread):
     progress = pyqtSignal(str)
@@ -25,4 +29,7 @@ class QtWorker(QThread):
             result = self._fn(self.progress.emit)
             self.finished_ok.emit(result)
         except Exception as exc:  # never let an exception kill the thread silently
-            self.failed.emit(str(exc))
+            # Log the full traceback for diagnosis; surface a typed one-line message to the UI (the
+            # `failed` signal stays `str` so existing slots keep working).
+            _LOG.exception("worker task failed")
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
