@@ -29,6 +29,7 @@ BODY_EDGE = "#05090d"
 class OrbState(Enum):
     IDLE = "idle"
     LISTENING = "listening"
+    TRANSCRIBING = "transcribing"  # heard you, turning speech → text (a fast cyan shimmer)
     THINKING = "thinking"
     SPEAKING = "speaking"
 
@@ -37,10 +38,12 @@ class OrbState(Enum):
 _PARAMS: dict[OrbState, dict[str, float]] = {
     OrbState.IDLE: {"glow": 0.42, "amp": 0.045, "speed": 0.055, "accent": 0.0, "warm": 0.0},
     OrbState.LISTENING: {"glow": 0.78, "amp": 0.075, "speed": 0.10, "accent": 0.15, "warm": 0.0},
+    OrbState.TRANSCRIBING: {"glow": 0.88, "amp": 0.060, "speed": 0.24, "accent": 0.0, "warm": 0.0},
     OrbState.THINKING: {"glow": 0.66, "amp": 0.050, "speed": 0.14, "accent": 1.0, "warm": 0.0},
     OrbState.SPEAKING: {"glow": 0.95, "amp": 0.10, "speed": 0.16, "accent": 0.0, "warm": 1.0},
 }
 _KEYS = ("glow", "amp", "speed", "accent", "warm")
+_N_BANDS = 16  # FFT bands the live orb listens to for its spectral ring
 
 
 def _mix(c1: str, c2: str, t: float) -> QColor:
@@ -293,6 +296,8 @@ class PresenceOrb(QWidget):
         self._t = 0.0
         self._level = 0.0
         self._level_target = 0.0
+        self._bands = [0.0] * _N_BANDS          # eased FFT band energies (the spectral ring)
+        self._bands_target = [0.0] * _N_BANDS
         self._rings, self._traces, self._nodes = _build_circuits()
         self._smoke = _build_smoke()
         self._timer = QTimer(self)
@@ -305,6 +310,15 @@ class PresenceOrb(QWidget):
     def set_level(self, level: float) -> None:
         self._level_target = max(0.0, min(1.0, float(level)))
 
+    def set_bands(self, bands) -> None:
+        """Live FFT band energies (each ~0..1) from the mic — drives the spectral ring while listening."""
+        try:
+            b = [max(0.0, min(1.0, float(x))) for x in list(bands)[:_N_BANDS]]
+        except (TypeError, ValueError):
+            return  # ignore malformed input; the ring just keeps its last values and decays
+        b += [0.0] * (_N_BANDS - len(b))
+        self._bands_target = b
+
     def mousePressEvent(self, _event) -> None:
         self.clicked.emit()
 
@@ -314,6 +328,9 @@ class PresenceOrb(QWidget):
             self._p[k] += (target[k] - self._p[k]) * 0.08
         self._level += (self._level_target - self._level) * 0.35
         self._level_target *= 0.82
+        for i in range(_N_BANDS):
+            self._bands[i] += (self._bands_target[i] - self._bands[i]) * 0.40
+            self._bands_target[i] *= 0.80  # decay so the ring relaxes when the room goes quiet
         self._phase += self._p["speed"]
         self._spin = (self._spin + 3.0) % 360.0
         self._t += 1.0
@@ -336,4 +353,31 @@ class PresenceOrb(QWidget):
             rings=self._rings, traces=self._traces, nodes=self._nodes, smoke=self._smoke,
             thinking=(self._state is OrbState.THINKING), accent=self._p["accent"], spin=self._spin,
         )
+        self._paint_spectrum(p, cx, cy, r, glow)
         p.end()
+
+    def _paint_spectrum(self, p: QPainter, cx: float, cy: float, r: float, glow: float) -> None:
+        """A ring of soft spikes around the orb that flick with the live voice spectrum. Drawn over
+        paint_orb on the live widget only (the shared paint_orb + app icon stay unchanged). Silent rooms
+        relax to nothing, so it only appears when you actually speak."""
+        peak = max(self._bands) if self._bands else 0.0
+        if peak + self._level < 0.025:
+            return
+        warm = self._p["warm"]
+        n, half = 64, 32
+        inner = r * 1.06
+        for i in range(n):
+            ang = (i / n) * 2 * math.pi - math.pi / 2
+            bi = int(abs(i - half) / half * (_N_BANDS - 1))  # symmetric L/R, low freqs at the sides
+            mag = max(self._bands[bi], self._level * 0.5)
+            a = int(150 * glow * mag)
+            if a < 6:
+                continue
+            length = r * (0.04 + 0.42 * mag)
+            x0, y0 = cx + math.cos(ang) * inner, cy + math.sin(ang) * inner
+            x1, y1 = cx + math.cos(ang) * (inner + length), cy + math.sin(ang) * (inner + length)
+            pen = QPen(_col(CYAN, GOLD, warm, a), 2.2)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawLine(QPointF(x0, y0), QPointF(x1, y1))
+        p.setPen(Qt.PenStyle.NoPen)

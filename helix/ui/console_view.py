@@ -384,6 +384,7 @@ class ConsoleView(QWidget):
             self._voice.stopRequested.connect(self._on_voice_stop)
             if self.orb is not None:
                 self._voice.level.connect(self.orb.set_level)
+                self._voice.bands.connect(self.orb.set_bands)
             self._voice.start_if_enabled()
 
         # Esc interrupts a reply, anywhere in the Console.

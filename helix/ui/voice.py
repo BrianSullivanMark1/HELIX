@@ -89,6 +89,30 @@ def _pcm_rms(pcm: bytes) -> float:
     return math.sqrt(sum(s * s for s in samples) / len(samples))
 
 
+def _pcm_bands(pcm: bytes, n: int = 16) -> list[float]:
+    """`n` log-spaced frequency-band energies (each ~0..1) from 16-bit LE mono PCM, via an rFFT — feeds
+    the orb's spectral ring. Degrades to zeros (no ring) if numpy is unavailable, so it's purely additive."""
+    try:
+        import numpy as np
+
+        usable = len(pcm) - (len(pcm) % 2)
+        if usable < 64:
+            return [0.0] * n
+        x = np.frombuffer(pcm[:usable], dtype="<i2").astype(np.float32)
+        x *= np.hanning(x.size)
+        spec = np.abs(np.fft.rfft(x))
+        edges = np.unique(
+            np.clip(np.logspace(np.log10(2), np.log10(spec.size), n + 1).astype(int), 1, spec.size)
+        )
+        if edges.size < 2:
+            return [0.0] * n
+        out = [float(spec[a:max(a + 1, b)].mean()) for a, b in zip(edges[:-1], edges[1:])]
+        out += [0.0] * (n - len(out))
+        return [min(1.0, (v / 90000.0) ** 0.6) for v in out[:n]]
+    except Exception:
+        return [0.0] * n
+
+
 def split_wake(text: str) -> tuple[bool, str]:
     """(matched, command): if 'HELIX' is in `text`, return True + the words after it, else (False, '')."""
     match = _WAKE_RE.search(text or "")
@@ -241,6 +265,7 @@ class WakeWordListener(QObject):
 
     utterance = pyqtSignal(bytes)
     level = pyqtSignal(float)  # 0..1 mic level, for a live meter
+    bands = pyqtSignal(list)   # per-band FFT energies (0..1), for the orb's spectral ring
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -309,6 +334,7 @@ class WakeWordListener(QObject):
         if not chunk or not self._active:
             return
         self.level.emit(min(1.0, _pcm_rms(chunk) / 8000.0))
+        self.bands.emit(_pcm_bands(chunk))
         utter = self._seg.push(chunk)
         if utter:
             self.utterance.emit(utter)
@@ -384,7 +410,7 @@ class MicRecorder(QObject):
 _ORB = {
     "idle": OrbState.IDLE,
     "listening": OrbState.LISTENING,
-    "transcribing": OrbState.THINKING,
+    "transcribing": OrbState.TRANSCRIBING,
     "thinking": OrbState.THINKING,
     "speaking": OrbState.SPEAKING,
 }
@@ -401,6 +427,7 @@ class VoiceController(QObject):
     recognized = pyqtSignal(str)       # a user command captured by voice — the Console runs it
     stateChanged = pyqtSignal(object)  # an OrbState for the orb + status line
     level = pyqtSignal(float)          # 0..1 mic level while listening
+    bands = pyqtSignal(list)           # per-band FFT energies for the orb's spectral ring
     stopRequested = pyqtSignal()       # the user said "stop" — the Console cancels any pending reply
 
     def __init__(
@@ -480,6 +507,7 @@ class VoiceController(QObject):
             return False
         self._listener.utterance.connect(self._on_utterance)
         self._listener.level.connect(self.level)
+        self._listener.bands.connect(self.bands)
         if not self._listener.start():
             self._listener = None
             return False
