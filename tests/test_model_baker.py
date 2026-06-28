@@ -49,6 +49,124 @@ def test_viewer_supports_animation_and_creases_only_missing_normals(tmp_path: Pa
     assert "!o.geometry.attributes.normal" in html  # don't re-crease meshes that already have normals
 
 
+def _box_glb() -> bytes:
+    return trimesh.Scene(trimesh.creation.box(extents=[1, 1, 1])).export(file_type="glb")
+
+
+class _NeuralSpy:
+    def __init__(self):
+        self.calls: list = []
+
+    def __call__(self, prompt, image):
+        self.calls.append(prompt)
+        return _box_glb()
+
+
+def test_classify_matches_words_not_substrings():
+    # 'mechanism'/'command' must NOT count as the organic word 'man'; 'carpet' must NOT count as 'car'.
+    org, tech = ModelBaker._classify("a scary mechanism with a command interface", "")
+    assert org == 0 and tech >= 1  # 'mechanism' is technical; nothing organic
+    org2, tech2 = ModelBaker._classify("a cross section of an engine", "")
+    assert tech2 >= 2  # the phrase 'cross section' + 'engine' both count
+    org3, _ = ModelBaker._classify("a friendly dog", "")
+    assert org3 == 1
+
+
+def test_auto_routes_organic_subject_to_neural_when_key_present(tmp_path: Path):
+    spy = _NeuralSpy()
+    baker = ModelBaker(neural_backend=spy, neural_available=lambda: True)
+    _spec(tmp_path, {"prompt": "a friendly dog", "parts": [{"shape": "box", "size": [1, 1, 1]}]})
+    baker.bake(tmp_path)
+    assert spy.calls == ["a friendly dog"]  # organic → neural, NOT the primitive parts blob
+    assert (tmp_path / GLB_REL).exists()
+
+
+def test_auto_routes_technical_subject_to_parametric_even_with_key(tmp_path: Path):
+    spy = _NeuralSpy()
+    baker = ModelBaker(neural_backend=spy, neural_available=lambda: True)
+    _spec(tmp_path, {"title": "Spur Gear", "prompt": "a precision spur gear",
+                     "parts": [{"shape": "cylinder", "radius": 1, "height": 0.3}]})
+    baker.bake(tmp_path)
+    assert spy.calls == []  # technical → parametric is the right look; neural untouched
+    assert (tmp_path / GLB_REL).exists()
+
+
+def test_auto_organic_without_key_is_an_honest_parametric_preview(tmp_path: Path):
+    baker = ModelBaker(neural_backend=lambda p, i: _box_glb(), neural_available=lambda: False)
+    _spec(tmp_path, {"prompt": "a little tree", "parts": [{"shape": "cylinder", "radius": 0.3, "height": 2}]})
+    baker.bake(tmp_path)
+    assert (tmp_path / GLB_REL).exists()
+    html = (tmp_path / VIEWER_FILE).read_text(encoding="utf-8")
+    assert "Preview geometry" in html and "Tripo API key" in html  # honest no-key banner
+
+
+def test_explicit_neural_without_key_shows_a_friendly_error(tmp_path: Path):
+    baker = ModelBaker(neural_backend=lambda p, i: _box_glb(), neural_available=lambda: False)
+    _spec(tmp_path, {"engine": "neural", "prompt": "a dragon"})
+    baker.bake(tmp_path)
+    html = (tmp_path / VIEWER_FILE).read_text(encoding="utf-8")
+    assert "didn't build" in html  # error page, not a crash; no silent blob
+
+
+def test_material_preset_bakes_real_textures_into_the_glb(tmp_path: Path):
+    _spec(tmp_path, {"parts": [
+        {"name": "trunk", "shape": "cylinder", "radius": 0.3, "height": 2, "material": "bark"},
+    ]})
+    ModelBaker().bake(tmp_path)
+    glb = tmp_path / GLB_REL
+    assert glb.exists() and glb.stat().st_size > 5000  # embedded texture maps → far bigger than a bare mesh
+    scene = trimesh.load(io.BytesIO(glb.read_bytes()), file_type="glb")
+    geom = list(scene.geometry.values())[0]
+    assert geom.visual.uv is not None and len(geom.visual.uv) == len(geom.vertices)  # triplanar UVs survive
+    assert getattr(geom.visual.material, "baseColorTexture", None) is not None  # textured PBR, not flat
+
+
+def test_unknown_material_falls_back_to_flat_color(tmp_path: Path):
+    _spec(tmp_path, {"parts": [{"shape": "box", "size": [1, 1, 1], "material": "not-a-preset", "color": "#ff0000"}]})
+    ModelBaker().bake(tmp_path)
+    assert (tmp_path / GLB_REL).exists()  # no crash; flat color path
+
+
+def test_every_material_preset_builds_textures():
+    from helix.services import materials
+
+    assert len(materials.PRESETS) >= 8
+    for preset in materials.PRESETS:
+        mat = materials.material_for(preset)
+        assert mat.baseColorTexture is not None and mat.normalTexture is not None
+        assert mat.metallicRoughnessTexture is not None and mat.occlusionTexture is not None
+
+
+def test_viewer_has_shadows_and_ground(tmp_path: Path):
+    _spec(tmp_path, {"parts": [{"shape": "box", "size": [1, 1, 1]}]})
+    ModelBaker().bake(tmp_path)
+    html = (tmp_path / VIEWER_FILE).read_text(encoding="utf-8")
+    assert "shadowMap.enabled = true" in html and "castShadow" in html  # grounded render
+    assert "GTAOPass" in html and "receiveShadow" in html
+
+
+def test_animated_path_ships_the_render_kit(tmp_path: Path):
+    # The coder hand-wrote an animated index.html (no model.json) that imports ./helix3d.js — bake must
+    # ship the kit next to it and leave the page intact.
+    page = "<!doctype html><html><body><script type='module'>import {createStage} from './helix3d.js';</script></body></html>"
+    (tmp_path / VIEWER_FILE).write_text(page, encoding="utf-8")
+    ModelBaker().bake(tmp_path)
+    kit = tmp_path / "helix3d.js"
+    assert kit.exists()
+    js = kit.read_text(encoding="utf-8")
+    assert "export function createStage" in js and "export class Timeline" in js
+    assert (tmp_path / VIEWER_FILE).read_text(encoding="utf-8") == page  # page untouched
+
+
+def test_static_to_animated_conversion_ships_the_kit_and_drops_spec(tmp_path: Path):
+    _spec(tmp_path, {"parts": [{"shape": "box", "size": [1, 1, 1]}]})
+    (tmp_path / VIEWER_FILE).write_text(
+        "<!doctype html><script type=module>import {createStage} from './helix3d.js'</script>", encoding="utf-8")
+    ModelBaker().bake(tmp_path)
+    assert not (tmp_path / SPEC_FILE).exists()  # stale static spec dropped
+    assert (tmp_path / "helix3d.js").exists()   # render kit shipped for the animated page
+
+
 def test_static_to_animated_conversion_skips_baking_and_drops_the_stale_spec(tmp_path: Path):
     # The coder converted a static model to animated: it wrote its OWN index.html (no generated-viewer
     # sentinel, no GLB reference). bake() must respect that page and delete the now-stale model.json so a

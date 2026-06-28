@@ -106,7 +106,9 @@ class Container:
                 texture_quality="detailed" if high else "standard",
             ).generate(prompt, image)
 
-        self.model_baker = ModelBaker(neural_backend=_neural)
+        # neural_available reflects a LIVE Tripo key (the backend is always wired), so auto-routing and the
+        # no-key preview banner key off the real thing, not merely "is a backend object present".
+        self.model_baker = ModelBaker(neural_backend=_neural, neural_available=lambda: bool(_tripo_key()))
         self.forge = ForgeService(
             self.builds, self.coder, self.bus, self.repo, self.paths.root, guard_files,
             model_baker=self.model_baker,

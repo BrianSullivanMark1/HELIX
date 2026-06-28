@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -26,6 +27,7 @@ import numpy as np
 import trimesh
 from trimesh.visual.material import PBRMaterial
 
+from helix.services import materials, render_kit
 from helix.services.builds import MANIFEST  # single source of truth for the manifest filename
 
 # Optional hosted text/image-to-3D backend (Phase 2). Given (prompt, image_path|None) -> GLB bytes.
@@ -47,10 +49,52 @@ class SpecError(Exception):
     """The model.json was missing, malformed, or described nothing we can build."""
 
 
+# Subject classification for engine="auto" routing. Organic/scene/character subjects look best from the
+# neural engine; clearly technical/diagram subjects are parametric's home turf (clean primitives win).
+_ORGANIC_WORDS = (
+    "person", "people", "human", "man", "woman", "child", "character", "figure", "creature", "animal",
+    "dog", "cat", "horse", "bird", "fish", "dragon", "monster", "knight", "soldier", "warrior", "hero",
+    "face", "head", "body", "hand", "tree", "trees", "plant", "flower", "garden", "forest", "jungle",
+    "landscape", "scene", "terrain", "rock", "mountain", "island", "food", "fruit", "car", "vehicle",
+    "ship", "boat", "plane", "armor", "armour", "suit", "statue", "sculpture", "helmet", "sword", "skull",
+)
+_TECHNICAL_WORDS = (
+    "gear", "gears", "engine", "motor", "circuit", "schematic", "diagram", "blueprint", "floor plan",
+    "floorplan", "molecule", "atom", "chip", "pcb", "mechanism", "assembly", "cutaway", "turbine",
+    "piston", "bracket", "gearbox", "valve", "truss", "lattice", "exploded", "cross section",
+    "cross-section", "chart", "graph", "framework", "scaffold", "bolt", "screw", "pipe", "wiring",
+)
+
+
 class ModelBaker:
-    def __init__(self, neural_backend: NeuralBackend | None = None) -> None:
-        # neural_backend is the hosted "turbo" path (Phase 2). None = parametric only.
+    def __init__(
+        self, neural_backend: NeuralBackend | None = None, neural_available=None
+    ) -> None:
+        # neural_backend is the hosted high-detail path (Tripo). The container wires it UNCONDITIONALLY
+        # (it raises only at call time if no key), so `self._neural is not None` is NOT a real availability
+        # check — `neural_available()` is (it reflects a live Tripo key). Defaults to wired==available for
+        # back-compat / tests with no backend.
         self._neural = neural_backend
+        self._neural_available = neural_available or (lambda: neural_backend is not None)
+
+    @staticmethod
+    def _classify(prompt: str, title: str) -> tuple[int, int]:
+        """(organic_hits, technical_hits) for engine='auto' routing. Single-word keywords match on WORD
+        boundaries (so 'man' doesn't fire on 'mechanism', 'car' not on 'carpet'); multi-word phrases
+        ('cross section', 'floor plan') match as substrings."""
+        text = f"{prompt} {title}".lower()
+        words = set(re.findall(r"[a-z]+", text))
+
+        def hits(vocab: tuple[str, ...]) -> int:
+            n = 0
+            for w in vocab:
+                if " " in w or "-" in w:
+                    n += 1 if w in text else 0
+                else:
+                    n += 1 if w in words else 0
+            return n
+
+        return hits(_ORGANIC_WORDS), hits(_TECHNICAL_WORDS)
 
     # ----- public entry point -----
     def bake(self, workspace: Path) -> None:
@@ -63,9 +107,12 @@ class ModelBaker:
         viewer = workspace / VIEWER_FILE
         if not spec_path.exists():
             # No spec: this is the hand-authored ANIMATED path (the coder wrote index.html itself), or a
-            # build that produced nothing. Leave a real page alone; otherwise explain.
+            # build that produced nothing. Leave a real page alone (and ship the render kit it imports);
+            # otherwise explain.
             if not viewer.exists():
                 self._write_error(workspace, "The model build produced no model.json and no page.")
+            else:
+                self._write_render_kit(workspace)
             return
         # A static→animated CONVERSION: the coder replaced our generated viewer with its own animated
         # index.html. Respect it — skip baking and drop the now-stale model.json, so a re-bake doesn't
@@ -75,50 +122,67 @@ class ModelBaker:
                 spec_path.unlink()
             except OSError:
                 pass
+            self._write_render_kit(workspace)
             return
         try:
             spec = json.loads(spec_path.read_text(encoding="utf-8"))
             if not isinstance(spec, dict):
                 raise SpecError("model.json must be a JSON object.")
-            glb = self._make_glb(spec, workspace)
+            glb, preview = self._make_glb(spec, workspace)
             (workspace / "assets").mkdir(parents=True, exist_ok=True)
             (workspace / GLB_REL).write_bytes(glb)
-            self._write_viewer(workspace, spec)
+            self._write_viewer(workspace, spec, preview=preview)
         except SpecError as exc:
             self._write_error(workspace, str(exc))
         except Exception as exc:  # never let a baking bug fail the whole build
             self._write_error(workspace, f"Couldn't build the model: {exc}")
 
     # ----- glb construction -----
-    def _make_glb(self, spec: dict, workspace: Path) -> bytes:
-        """Pick the engine and produce GLB bytes.
+    def _make_glb(self, spec: dict, workspace: Path) -> "tuple[bytes, bool]":
+        """Pick the engine and produce (GLB bytes, is_preview).
 
-        engine "neural" → hosted high-detail (the recognizable-hero path). "parametric" → local primitive
-        mesh (clean mechanical/diagram shapes). "auto" (default) → neural when it's enabled and there's a
-        prompt, otherwise parametric. A neural attempt that fails falls back to parts when they exist, so
-        a missing key / spent credits degrades to the local mesh instead of nothing."""
+        engine "neural" → hosted high-detail (no silent fallback — the user asked for it). "parametric" →
+        local primitive mesh (clean mechanical/diagram shapes). "auto" (default) → route by SUBJECT: an
+        organic/scene/character subject goes neural (when a Tripo key is live), a clearly technical/diagram
+        subject stays parametric even with a key, and the ambiguous middle prefers neural when available.
+        A neural attempt that fails falls back to parts when they exist. is_preview = an organic subject we
+        could only render parametrically because no key is set (the viewer shows an honest banner)."""
         engine = str(spec.get("engine", "auto")).lower()
         parts = spec.get("parts")
         parts = parts if isinstance(parts, list) and parts else []
         prompt = str(spec.get("prompt") or spec.get("title") or "").strip()
+        title = str(spec.get("title") or "")
+        has_neural = self._neural is not None and self._neural_available()
 
-        if engine == "neural" and self._neural is None:
-            raise SpecError("High-detail (neural) modeling isn't enabled — set a TRIPO_API_KEY.")
-        want_neural = self._neural is not None and (engine == "neural" or (engine == "auto" and prompt))
-        if want_neural:
-            try:
-                return self._neural_glb(spec, workspace, prompt)
-            except SpecError:
-                if not parts:
-                    raise
-            except Exception as exc:
-                if not parts:
-                    raise SpecError(f"High-detail modeling failed: {exc}")
-            # a neural attempt failed but parts exist — fall through to the local mesh.
+        if engine == "neural":
+            if not has_neural:
+                raise SpecError("High-detail (neural) modeling isn't enabled — add a Tripo API key in Settings.")
+            return self._neural_glb(spec, workspace, prompt), False
 
+        if engine == "auto":
+            org, tech = self._classify(prompt, title)
+            technical, organic = tech > org, org > tech
+            if has_neural and not technical and prompt:  # organic + ambiguous prefer neural when keyed
+                try:
+                    return self._neural_glb(spec, workspace, prompt), False
+                except SpecError:
+                    if not parts:
+                        raise
+                except Exception as exc:
+                    if not parts:
+                        raise SpecError(f"High-detail modeling failed: {exc}")
+                # neural attempt failed but parts exist — fall through to the local mesh.
+            if not parts:
+                if organic and not has_neural:
+                    raise SpecError("This looks like an organic subject — add a Tripo API key in Settings "
+                                    "for a film-grade model.")
+                raise SpecError("model.json needs a 'parts' list (or an enabled neural 'prompt').")
+            return self._parametric_glb(parts), (organic and not has_neural)
+
+        # engine == "parametric" (or anything unknown)
         if not parts:
-            raise SpecError("model.json needs a 'parts' list (or an enabled neural 'prompt').")
-        return self._parametric_glb(parts)
+            raise SpecError("A parametric model needs a 'parts' list.")
+        return self._parametric_glb(parts), False
 
     def _neural_glb(self, spec: dict, workspace: Path, prompt: str) -> bytes:
         if not prompt:
@@ -154,7 +218,20 @@ class ModelBaker:
         solid = self._solid(part)
         if solid is None or solid.is_empty:
             return []
-        solid.visual = trimesh.visual.TextureVisuals(material=_material(part))
+        # Material: a named texture PRESET gets real surface (baseColor+normal+roughness+AO) via triplanar
+        # UVs computed HERE — after _solid's booleans (which discard visuals) and smoothing (which changes
+        # vertex count), so the UVs match the final geometry. Otherwise, flat solid color as before.
+        preset = str(part.get("material") or "").strip().lower()
+        if preset in materials.PRESETS:
+            try:
+                uv = _triplanar_uv(solid, _material_scale(part, solid))
+                solid.visual = trimesh.visual.TextureVisuals(
+                    uv=uv, material=materials.material_for(preset, _f(part.get("opacity"), 1.0))
+                )
+            except Exception:  # never fail a part over texturing — fall back to flat color
+                solid.visual = trimesh.visual.TextureVisuals(material=_material(part))
+        else:
+            solid.visual = trimesh.visual.TextureVisuals(material=_material(part))
         solid.apply_transform(self._matrix(part))            # place the primary instance
         instances = [solid]
         for axis in _as_list(part.get("mirror")):            # bilateral symmetry, for free
@@ -288,12 +365,15 @@ class ModelBaker:
         return T @ R @ S
 
     # ----- viewer + error page -----
-    def _write_viewer(self, workspace: Path, spec: dict) -> None:
+    def _write_viewer(self, workspace: Path, spec: dict, preview: bool = False) -> None:
         title = self._title(workspace, spec)
         bg = _hex_str(spec.get("background"), DEFAULT_BG)
         accent = _hex_str(spec.get("accent"), DEFAULT_ACCENT)
+        banner = ("Preview geometry — add a Tripo API key in Settings for a film-grade version."
+                  if preview else "")
         (workspace / VIEWER_FILE).write_text(_VIEWER_HTML
                                              .replace("__TITLE__", _esc(title))
+                                             .replace("__BANNER__", _esc(banner))
                                              .replace("__BG__", bg)
                                              .replace("__ACCENT__", accent)
                                              .replace("__GLB__", GLB_REL), encoding="utf-8")
@@ -308,6 +388,13 @@ class ModelBaker:
         except OSError:
             return True  # unreadable → don't risk dropping the spec; just re-bake
         return VIEWER_SENTINEL in html or GLB_REL in html
+
+    def _write_render_kit(self, workspace: Path) -> None:
+        """Ship the shared render kit next to a hand-authored animated index.html (which imports it)."""
+        try:
+            (workspace / render_kit.KIT_FILE).write_text(render_kit.HELIX3D_JS, encoding="utf-8")
+        except OSError:
+            pass
 
     def _write_error(self, workspace: Path, message: str) -> None:
         try:  # drop a stale mesh so the error page isn't sitting next to a now-invalid old GLB
@@ -330,6 +417,37 @@ class ModelBaker:
         except Exception:
             pass
         return "Model"
+
+
+# ----- texture helpers -----
+def _material_scale(part: dict, mesh: trimesh.Trimesh) -> float:
+    """World units per texture tile. Honors an explicit part 'material_scale', else ~a few tiles across
+    the part so detail reads at any size."""
+    explicit = part.get("material_scale")
+    if isinstance(explicit, (int, float)) and explicit > 0:
+        return float(explicit)
+    try:
+        extent = float(max(mesh.extents))
+    except Exception:
+        extent = 1.0
+    return max(extent / 4.0, 0.1)
+
+
+def _triplanar_uv(mesh: trimesh.Trimesh, scale: float) -> np.ndarray:
+    """Per-vertex triplanar UVs: each vertex is projected onto the plane of its dominant normal axis,
+    scaled to world size so tiling is consistent. Good for the mostly-axis-aligned technical parts the
+    parametric engine targets; HELIX (not the coder) computes it."""
+    v = np.asarray(mesh.vertices, dtype=float)
+    n = np.asarray(mesh.vertex_normals, dtype=float)
+    if len(v) == 0:
+        return np.zeros((0, 2))
+    axis = np.argmax(np.abs(n), axis=1)  # 0=x,1=y,2=z dominant
+    uv = np.zeros((len(v), 2))
+    for a, cols in ((0, (2, 1)), (1, (0, 2)), (2, (0, 1))):
+        m = axis == a
+        if m.any():
+            uv[m] = v[m][:, cols]
+    return uv / max(scale, 1e-6)
 
 
 # ----- small value helpers -----
@@ -491,6 +609,10 @@ _VIEWER_HTML = """<!doctype html>
   #panel button.on { color: var(--accent); border-color: var(--accent); }
   #msg { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
     text-align: center; padding: 24px; font-size: 15px; color: #9fc7c8; }
+  #banner { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); max-width: 70%;
+    display: none; background: rgba(8,11,15,.82); border: 1px solid rgba(224,161,63,.5);
+    color: #e6c089; border-radius: 10px; padding: 7px 14px; font-size: 12px; text-align: center;
+    z-index: 2; backdrop-filter: blur(6px); }
   /* Futuristic HUD frame — pure CSS over the canvas, never intercepts pointer events (so the
      OrbitControls + buttons keep working) and never touches the WebGL render. */
   #hud { position: fixed; inset: 0; pointer-events: none; z-index: 1; }
@@ -512,6 +634,7 @@ _VIEWER_HTML = """<!doctype html>
   <div id="hud"><div class="vignette"></div><div class="scan"></div>
     <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i></div>
   <div id="title">__TITLE__</div>
+  <div id="banner">__BANNER__</div>
   <div id="panel">
     <button id="play" style="display:none">Pause</button>
     <button id="spin">Auto-rotate</button>
@@ -535,9 +658,12 @@ _VIEWER_HTML = """<!doctype html>
   import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
   import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
   import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+  import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
 
   const fail = (m) => { const e = document.getElementById("msg");
     e.textContent = m; e.style.display = "flex"; };
+  const _bn = document.getElementById("banner");  // shown only when a preview banner was baked in
+  if (_bn && _bn.textContent.trim()) _bn.style.display = "block";
 
   try {
     const app = document.getElementById("app");
@@ -545,7 +671,9 @@ _VIEWER_HTML = """<!doctype html>
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.0;
+    renderer.toneMappingExposure = 1.05;
+    renderer.shadowMap.enabled = true;          // soft contact shadows ground the model
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     app.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
@@ -559,7 +687,9 @@ _VIEWER_HTML = """<!doctype html>
     const pmrem = new THREE.PMREMGenerator(renderer);
     scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 
-    const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(3, 5, 4); scene.add(key);
+    const key = new THREE.DirectionalLight(0xffffff, 2.6); key.position.set(3, 5, 4);
+    key.castShadow = true; key.shadow.mapSize.set(2048, 2048); key.shadow.bias = -0.0005;
+    key.shadow.normalBias = 0.02; scene.add(key); scene.add(key.target);
     const fill = new THREE.DirectionalLight(0x88ccff, 0.8); fill.position.set(-4, 2, -3); scene.add(fill);
     scene.add(new THREE.HemisphereLight(0xbfe9ea, 0x0a0e12, 0.5));
 
@@ -567,16 +697,23 @@ _VIEWER_HTML = """<!doctype html>
     // actually bloom — the futuristic touch. Follows the official three.js bloom example (RenderPass +
     // UnrealBloomPass + OutputPass, keeping ACES tone mapping). Guarded: if it can't initialise we fall
     // straight back to direct rendering, so a model is never lost to a post-processing hiccup.
-    let composer = null;
+    let composer = null, gtao = null;
     try {
       composer = new EffectComposer(renderer);
       composer.addPass(new RenderPass(scene, camera));
+      // Ground-truth ambient occlusion in the crevices — what makes flat solid-color parts read as solid
+      // 3D forms and reveals booleaned cutaways/recesses. Its own try/catch + a perf guard below.
+      try {
+        gtao = new GTAOPass(scene, camera, window.innerWidth, window.innerHeight);
+        gtao.blendIntensity = 0.55;
+        composer.addPass(gtao);
+      } catch (e) { gtao = null; }
       composer.addPass(new UnrealBloomPass(
         new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.4, 0.85));
       composer.addPass(new OutputPass());
     } catch (e) { composer = null; }
 
-    let model = null, grid = null, radius = 1, mixer = null, playing = true;
+    let model = null, grid = null, ground = null, radius = 1, mixer = null, playing = true;
     const clock = new THREE.Clock();
     const home = { pos: new THREE.Vector3(), target: new THREE.Vector3() };
 
@@ -593,9 +730,24 @@ _VIEWER_HTML = """<!doctype html>
       camera.position.set(c2.x + dist * 0.7, c2.y + dist * 0.45, c2.z + dist);
       controls.target.copy(c2); controls.update();
       home.pos.copy(camera.position); home.target.copy(c2);
+      // Aim the shadow-casting key light at the model and size its ortho frustum to fit (a frustum that's
+      // too big gives blocky shadows; too small clips them).
+      key.position.set(c2.x + radius * 2.2, c2.y + radius * 3.4, c2.z + radius * 2.0);
+      key.target.position.copy(c2); key.target.updateMatrixWorld();
+      const sc = key.shadow.camera;
+      sc.left = -radius * 1.7; sc.right = radius * 1.7; sc.top = radius * 1.7; sc.bottom = -radius * 1.7;
+      sc.near = radius * 0.05; sc.far = radius * 14; sc.updateProjectionMatrix();
+      // A real ground plane that CATCHES the contact shadow (the single biggest "it's grounded" cue),
+      // with a faint grid kept on top for the HUD feel.
+      if (ground) scene.remove(ground);
+      ground = new THREE.Mesh(
+        new THREE.CircleGeometry(radius * 9, 64),
+        new THREE.MeshStandardMaterial({ color: 0x0c1319, roughness: 1.0, metalness: 0.0 }));
+      ground.rotation.x = -Math.PI / 2; ground.position.y = box2.min.y - radius * 0.003;
+      ground.receiveShadow = true; scene.add(ground);
       if (grid) scene.remove(grid);
       grid = new THREE.GridHelper(radius * 6, 24, 0x224a4a, 0x132a2a);
-      grid.position.y = box2.min.y; grid.material.opacity = 0.35; grid.material.transparent = true;
+      grid.position.y = box2.min.y; grid.material.opacity = 0.16; grid.material.transparent = true;
       scene.add(grid);
     };
 
@@ -604,8 +756,9 @@ _VIEWER_HTML = """<!doctype html>
       // Derive creased normals ONLY when a mesh ships without them (the baked parametric GLB) — so flat
       // faces stay crisp and curves read smooth. Skip meshes that already have normals (rigged/animated
       // models do), since re-indexing would disturb skinning.
-      model.traverse((o) => { if (o.isMesh && o.geometry && !o.geometry.attributes.normal) {
-        o.geometry = toCreasedNormals(o.geometry, Math.PI / 3);
+      model.traverse((o) => { if (o.isMesh) {
+        o.castShadow = true; o.receiveShadow = true;
+        if (o.geometry && !o.geometry.attributes.normal) o.geometry = toCreasedNormals(o.geometry, Math.PI / 3);
       } });
       scene.add(model); frame();
       if (gltf.animations && gltf.animations.length) {   // an animated/rigged model — play it
@@ -622,6 +775,7 @@ _VIEWER_HTML = """<!doctype html>
       camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
       if (composer) composer.setSize(window.innerWidth, window.innerHeight);
+      if (gtao && gtao.setSize) gtao.setSize(window.innerWidth, window.innerHeight);
     });
 
     const spinBtn = document.getElementById("spin");
@@ -634,9 +788,24 @@ _VIEWER_HTML = """<!doctype html>
     document.getElementById("reset").onclick = () => {
       camera.position.copy(home.pos); controls.target.copy(home.target); controls.update(); };
 
+    // Perf guard: if the machine can't sustain ~30fps with shadows + AO (a heavy mesh / weak GPU), drop
+    // the expensive bits automatically so the viewer stays smooth — keeps the baker settings-free.
+    let pf = 0, pacc = 0, perfChecked = false;
     (function loop() {
       requestAnimationFrame(loop);
       const dt = clock.getDelta();
+      if (!perfChecked && model) {
+        pf++; pacc += dt;
+        if (pf >= 45) {
+          perfChecked = true;
+          if (pacc / pf > 0.033) {
+            renderer.shadowMap.enabled = false;  // recompile so shadows DROP cleanly (not freeze/black)
+            if (model) model.traverse((o) => { if (o.isMesh && o.material) o.material.needsUpdate = true; });
+            if (ground && ground.material) ground.material.needsUpdate = true;
+            if (gtao) gtao.enabled = false;
+          }
+        }
+      }
       if (mixer && playing) mixer.update(dt);
       controls.update();
       if (composer) composer.render(dt); else renderer.render(scene, camera);

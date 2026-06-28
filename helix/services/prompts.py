@@ -222,16 +222,18 @@ When unsure, choose STATIC.
 Write ONLY model.json. Do NOT write index.html, JavaScript, or any other file; HELIX bakes the mesh and
 generates the interactive viewer itself.
 
-CHOOSE THE ENGINE — this matters:
-- "engine": "neural"  → for anything REALISTIC, ORGANIC, or a CHARACTER/CREATURE/PRODUCT (a person, an
-  animal, "an Iron Man suit", a car, a plant, food). A hosted high-detail service sculpts a real,
-  recognizable, textured mesh from your "prompt". Stacked primitives CANNOT do these — always pick neural.
-  For a neural model, "parts" is optional; the "prompt" is what matters.
-- "engine": "parametric" → for TECHNICAL / MECHANICAL / DIAGRAM / SCHEMATIC subjects made of clean
-  geometric pieces (a gear, an engine cutaway, a circuit, a floor plan, a molecule, an exploded
-  assembly). Here you author precise "parts" and that is BETTER than neural. "parts" is required.
-- "engine": "auto" (default) → HELIX uses neural when it's available, else parts. If you author for auto,
-  provide BOTH a good "prompt" AND "parts" so there is always a result.
+CHOOSE THE ENGINE — this decides quality, so choose deliberately:
+- "engine": "neural"  → for ANYTHING realistic, organic, or a CHARACTER/CREATURE/PERSON/PRODUCT/VEHICLE/
+  SCENE (a person, an animal, "an Iron Man suit", a car, a plant, food, a garden, a landscape). A hosted
+  high-detail service sculpts a real, recognizable, TEXTURED mesh from your "prompt". Stacked primitives
+  CANNOT do these — ALWAYS pick neural for them, and write a vivid "prompt"; "parts" is optional and should
+  usually be omitted. (If no Tripo key is set, HELIX renders a simple preview and tells the user to add one.)
+- "engine": "parametric" → ONLY for TECHNICAL / MECHANICAL / DIAGRAM / SCHEMATIC subjects made of clean
+  geometric pieces (a gear, an engine cutaway, a circuit, a floor plan, a molecule, an exploded assembly).
+  Here you author precise "parts" and that is BETTER than neural. "parts" is required.
+- "engine": "auto" (default) → HELIX routes by subject: organic/scene/character → neural, clearly
+  technical/diagram → parametric. Prefer choosing "engine" explicitly. Do NOT bolt "parts" onto an organic
+  subject as a backstop — that forces a crude primitive blob instead of the neural result.
 Always include a vivid one-paragraph "prompt" describing the whole subject (materials, colors, style) —
 the neural engine reads it, and it documents intent.
 
@@ -267,6 +269,13 @@ Each part (give only the fields its shape needs):
   "rotation": [rx, ry, rz],           // degrees
   "scale": [sx, sy, sz],              // or a single number
   "color": "#b03a2e",
+  "material": "stone",                // optional TEXTURE PRESET — gives the part real surface (baseColor +
+                                      //   normal + roughness + baked AO), far richer than a flat color. One
+                                      //   of: bark, wood, leaf, grass, stone, concrete, metal,
+                                      //   rusted_metal, panel, plastic. Use INSTEAD of "color" for natural
+                                      //   or structural surfaces (trunks, foliage, walls, machinery); HELIX
+                                      //   UV-maps and tiles it for you. Prefer this over flat color.
+  "material_scale": 0.5,             // optional world units per texture tile (smaller = more repeats)
   "metalness": 0.9,                   // 0 matte … 1 fully metal (high for metal/armor/chrome)
   "roughness": 0.35,                  // 0 mirror … 1 dull
   "emissive": "#7fffff",              // optional self-glow (arc reactors, lamps, screens, indicators)
@@ -299,17 +308,40 @@ Make it GOOD (this is where detail comes from):
   lights/reactors/screens → emissive. Keep proportions believable from every angle.
 
 ══════════ ANIMATED (a process) → write ONE file: index.html ══════════
-A single self-contained index.html (no build step, opens by double-click). Three.js r0.160.0 as ES
-modules via an importmap from unpkg ("three" -> https://unpkg.com/three@0.160.0/build/three.module.js ;
-"three/addons/" -> https://unpkg.com/three@0.160.0/examples/jsm/), OrbitControls with damping, a
-requestAnimationFrame loop, and window-resize handling. Frame the WHOLE model with a Box3 fit (never
-hardcode camera distance). HELIX look: near-black background (#080b0f), cyan accent (#3fe0e0), soft
-lighting, subtle grid; keep chrome small, corner-pinned, and OFF the model. Provide a timeline with
-play / pause / restart and a scrub; play the steps in order, each with a short caption; the user can
-orbit while it plays. CONNECTED MOTION: drive every dependent part from ONE shared parameter and one sign
-convention, and check 3–4 key frames so joints stay coincident and nothing penetrates or overshoots.
-Wrap everything in try/catch and show a short message on error rather than a blank page. Do NOT write a
-model.json for an animated model.
+HELIX provides a ready RENDER KIT next to your page — DO NOT write helix3d.js yourself; just import it. The
+kit gives you a fully-lit stage (soft shadows, ambient occlusion, bloom, image-based lighting), orbit
+controls, auto-framing, the HELIX HUD, and a play/restart/scrub timeline — so you ONLY build the model and
+define the steps, and it looks great automatically. Write index.html with EXACTLY this skeleton:
+
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script type="importmap">{{ "imports": {{
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" }} }}</script></head>
+<body><script type="module">
+import {{ createStage, Timeline, THREE }} from "./helix3d.js";
+try {{
+  const stage = createStage({{ title: "<short title>", background: "#080b0f", accent: "#3fe0e0" }});
+  const model = new THREE.Group();
+  // …build your meshes (MeshStandardMaterial with believable color + metalness/roughness; emissive for
+  //   glows; enough segments for round shapes) and add them to `model`. Name parts you animate.
+  stage.scene.add(model);
+  stage.frame(model);                         // auto-frames, grounds, sizes shadows — never hardcode the camera
+  const tl = new Timeline({{
+    duration: 12,                              // seconds for one full play
+    captions: [ {{ at: 0.0, text: "…" }}, {{ at: 0.5, text: "…" }} ],
+    onUpdate: (t) => {{ /* t goes 0→1; drive ALL motion from t */ }}
+  }});
+  stage.start((dt) => tl.update(dt));          // the kit runs the render loop; you just advance the timeline
+}} catch (err) {{ document.body.innerHTML =
+  "<div style='color:#9fc7c8;font-family:sans-serif;padding:40px'>Couldn't start the 3D view: " + err + "</div>"; }}
+</script></body></html>
+
+Build REAL geometry, not flat blobs: detailed, well-proportioned parts with proper MeshStandardMaterials —
+the kit's lighting + AO make good geometry look great. CONNECTED MOTION: derive every dependent part from
+that single `t` and one sign convention, and check 3–4 key frames so joints stay coincident and nothing
+penetrates or overshoots. Do NOT write a model.json for an animated model, and do NOT re-implement the
+renderer / lights / controls / timeline — the kit owns those.
 
 ══════════ EDITING an existing model (reshape by conversation) ══════════
 If the folder already contains model.json, this is an EDIT: read it and change only what the request asks
