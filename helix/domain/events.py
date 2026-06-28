@@ -72,6 +72,17 @@ class BuildDeleteRequested(Event):
 
 
 @dataclass(frozen=True)
+class BuildStarted(Event):
+    """A background build just began — the tile turns yellow, it joins the Console legend, and the orb
+    goes to its working hue. Fired by the Forge the moment the workspace is marked building, so the UI
+    reflects in-progress work immediately (not only when it finishes)."""
+
+    name: str
+    slug: str
+    iterating: bool = False
+
+
+@dataclass(frozen=True)
 class BuildProgress(Event):
     """A live step from a background build, for the status line / spoken narration."""
 
@@ -91,3 +102,4 @@ class BuildFinished(Event):
     stopped: bool = False
     handle: object | None = None
     iterating: bool = False  # True = an existing build was updated in place (announce "Updated", not "Done")
+    slug: str = ""  # the build's slug, so the menu tile / status board can be keyed without re-resolving

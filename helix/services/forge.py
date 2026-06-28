@@ -1,11 +1,12 @@
 """ForgeService — the core loop: describe → build → register. The product, in one method."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from helix.domain.errors import BuildCancelled, BuildError
-from helix.domain.events import BuildCreated, BuildDeleted, BuildIterated
+from helix.domain.events import BuildCreated, BuildDeleted, BuildIterated, BuildStarted
 from helix.domain.models import App, BuildKind, slugify
 from helix.logging_setup import get_logger
 from helix.ports.coder import CoderAgent, ProgressFn
@@ -20,6 +21,13 @@ if TYPE_CHECKING:
     from helix.services.model_baker import ModelBaker
 
 _LOG = get_logger("forge")
+
+# Filler words dropped before a fuzzy build-name match, so "update my garden model" still resolves to the
+# build named "Garden Walkthrough". Conservative on purpose — only obvious connective/kind words.
+_NAME_FILLER = frozenset({
+    "the", "a", "an", "my", "your", "our", "this", "that", "please",
+    "model", "models", "app", "apps", "application", "task", "tasks", "agent", "build", "3d",
+})
 
 
 class ForgeService:
@@ -56,13 +64,11 @@ class ForgeService:
         # right menu tab. The sandbox/guard is identical for every kind.
         app = App.from_request(name, request)
         existing = self._builds.list()
-        # Identity resolution (defends the 'mutable by talking' vision): prefer an exact slug match, else
-        # fall back to a case/whitespace-insensitive DISPLAY-NAME match, so a paraphrase or a name reused
-        # after a rename iterates the SAME build in place instead of silently forking a near-duplicate.
-        prior = next((a for a in existing if a.slug == app.slug), None)
-        if prior is None:
-            target = name.strip().lower()
-            prior = next((a for a in existing if a.name.strip().lower() == target), None)
+        # Identity resolution (defends the 'mutable by talking' vision): an exact slug or display-name
+        # match iterates that build in place; failing that, an UNAMBIGUOUS same-kind fuzzy match catches a
+        # paraphrase ("update my garden" → the only model called "Garden Walkthrough") so the user reliably
+        # edits the build they MEAN instead of silently forking a near-duplicate.
+        prior = self._resolve_prior(name, app.slug, kind, existing)
         if prior is not None:
             app.slug = prior.slug  # iterate in place, whatever name the user used this time
         iterating = prior is not None
@@ -89,11 +95,32 @@ class ForgeService:
         # Record what's being built so a mid-run 'stop' can offer to remove/roll back this exact work.
         if cancel is not None:
             cancel.build = BuildHandle(app.slug, app.name, iterating, bool(app.is_model))
+        # Announce the build has begun, so the menu tile, the Console legend, and the orb's hue reflect
+        # in-progress work immediately (the create/iterate/finished events only land at the end).
+        self._bus.publish(BuildStarted(app.name, app.slug, iterating))
 
-        # A build may ONLY write inside its own workspace. Snapshot everything else — source, data/
-        # (db, settings, sibling apps), and the git hooks dir — and verify it's untouched afterward.
+        # A build may ONLY write inside its own workspace. Snapshot everything else — source code and the
+        # git hooks dir — and verify it's untouched afterward. The skip set excludes:
+        #   - .git (git's own churn),
+        #   - the WHOLE data/builds tree, NOT just this build's folder: with CONCURRENT builds a sibling
+        #     writing to its own workspace must not look like THIS build escaping (which would falsely
+        #     revert the sibling's good work). Trade-off: a build deliberately writing an ABSOLUTE path
+        #     into a sibling's folder is no longer detected. The API coder confines writes to its cwd
+        #     (api_coder._safe_target); the CLI coder does NOT, so cross-build (data↔data) isolation now
+        #     rests on coders writing within their workspace, not on this tripwire. The protections that
+        #     matter — source, settings, the API key, .git, hooks — are unaffected.
+        #   - helix.db and the guarded settings file: both are VOLATILE main-app state the UI thread
+        #     rewrites WHILE a build runs (a sqlite checkpoint; a settings change). Without this, a write
+        #     by the app — not the build — would (a) falsely fail an otherwise-good build and (b) for
+        #     settings, the mtime bump from the byte-revert below would itself read as an escape. Settings
+        #     are still protected: tampering is reverted byte-for-byte by snapshot_files/restore below.
         guard = snapshot_files(self._guard_files)  # byte-revert settings if tampered
-        skip = (self._app_root / ".git", workspace)
+        skip = (
+            self._app_root / ".git",
+            self._app_root / "data" / "builds",
+            self._app_root / "data" / "helix.db",
+            *self._guard_files,
+        )
         tree_sig = scan_tree(self._app_root, skip=skip)
         hooks = self._repo.hooks_dir(self._app_root)
         hooks_sig = scan_tree(hooks)
@@ -112,7 +139,13 @@ class ForgeService:
         escaped = tree_changed(self._app_root, tree_sig, skip=skip) + tree_changed(hooks, hooks_sig)
         if escaped:
             self._revert_escapes(escaped)
-            raise BuildError("the build wrote outside its workspace and was blocked.")
+            _LOG.warning("build %r wrote outside its workspace: %s", app.name, escaped)
+            # Name WHAT it tried to touch — the opaque "wrote outside its workspace" told the user (and us)
+            # nothing; now the announcement and the log both pinpoint the offending file(s).
+            raise BuildError(
+                f"the build tried to change files outside its own folder ({self._escape_names(escaped)}), "
+                "so I blocked it and rolled it back."
+            )
 
         # A model is delivered as a small model.json the coder wrote; HELIX itself bakes it into a real
         # mesh + viewer here (in-process — the coder never gets a shell). Runs AFTER the escape check
@@ -186,6 +219,59 @@ class ForgeService:
                         self._bus.publish(BuildDeleted(app.slug))
             except Exception:
                 _LOG.warning("could not recover interrupted build %s", app.slug, exc_info=True)
+
+    @staticmethod
+    def _name_tokens(name: str) -> frozenset:
+        """Significant words of a build name, lowercased with punctuation and filler stripped."""
+        toks = re.sub(r"[^a-z0-9 ]+", " ", (name or "").lower()).split()
+        return frozenset(t for t in toks if t not in _NAME_FILLER)
+
+    def _resolve_prior(self, name: str, app_slug: str, kind, existing):
+        """Find the existing build a (re)build should iterate IN PLACE: exact slug → exact display name →
+        an UNAMBIGUOUS same-kind fuzzy match (one name's significant words a subset of the other's).
+        Returns None when nothing matches or a fuzzy match is ambiguous — then a brand-new build is made."""
+        prior = next((a for a in existing if a.slug == app_slug), None)
+        if prior is not None:
+            return prior
+        target = (name or "").strip().lower()
+        prior = next((a for a in existing if a.name.strip().lower() == target), None)
+        if prior is not None:
+            return prior
+        if kind is None:
+            return None  # an unclassified rebuild — don't fuzzy-match across kinds
+        want = self._name_tokens(name)
+        if not want:
+            return None
+        cands = []
+        for a in existing:
+            if a.build_kind != kind:
+                continue
+            have = self._name_tokens(a.name)
+            if have and (want <= have or have <= want):
+                cands.append(a)
+        if len(cands) == 1:
+            _LOG.info("resolved build name %r to existing %r by fuzzy match", name, cands[0].name)
+            return cands[0]
+        return None
+
+    def _escape_names(self, escaped: list[str]) -> str:
+        """A short, friendly list of WHAT a build tried to write outside its workspace, for the error
+        message (the full paths go to the log). Deduped filenames, capped at a handful."""
+        root = self._app_root.resolve()
+        names: list[str] = []
+        for ap in escaped:
+            p = Path(ap)
+            try:
+                rel = str(p.resolve().relative_to(root)).replace("\\", "/")
+            except ValueError:
+                rel = p.name
+            short = rel.rsplit("/", 1)[-1] or rel
+            if short and short not in names:
+                names.append(short)
+        if not names:
+            return "a protected file"
+        extra = len(names) - 4
+        return ", ".join(names[:4]) + (f", and {extra} more" if extra > 0 else "")
 
     def _revert_escapes(self, escaped: list[str]) -> None:
         root = self._app_root.resolve()

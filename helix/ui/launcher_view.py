@@ -10,6 +10,8 @@ Settings are the immutable shell.
 """
 from __future__ import annotations
 
+from typing import Callable
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame,
@@ -29,10 +31,19 @@ from PyQt6.QtWidgets import (
 from helix.services.agents import AgentService
 from helix.services.builds import BuildService
 from helix.services.tasks import TaskService
-from helix.ui.theme import CYAN, MUTED
+from helix.ui.build_status import BuildStatus
+from helix.ui.theme import CYAN, LINE, MUTED, PANEL, STATUS_DONE, STATUS_ERROR, STATUS_WORKING
 from helix.ui.workers import QtWorker
 
 _APPS, _MODELS, _AGENTS, _TASKS = 0, 1, 2, 3
+
+# Tile border colour per build status (None = the default look). One glance at the menu shows what's
+# building (yellow), freshly done (green), or broke (red); blue is the resting state.
+_STATUS_BORDER = {
+    BuildStatus.BUILDING: STATUS_WORKING,
+    BuildStatus.DONE: STATUS_DONE,
+    BuildStatus.ERROR: STATUS_ERROR,
+}
 
 
 class _Card(QFrame):
@@ -56,6 +67,17 @@ class _Card(QFrame):
         self._lay.addWidget(name)
         self._lay.addWidget(desc)
 
+    def apply_status(self, status: "BuildStatus | None") -> None:
+        """Colour the card's border to its build status. None keeps the default (global stylesheet)."""
+        color = _STATUS_BORDER.get(status) if status is not None else None
+        if color is None:
+            self.setStyleSheet("")  # fall back to the global QFrame#Card rule
+            return
+        # A 2px coloured border; restate background + radius since an instance stylesheet replaces the rule.
+        self.setStyleSheet(
+            f"QFrame#Card{{background:{PANEL};border:2px solid {color};border-radius:14px;}}"
+        )
+
     def add_actions(self, *buttons: QPushButton) -> None:
         row = QHBoxLayout()
         row.setContentsMargins(0, 4, 0, 0)
@@ -69,6 +91,8 @@ class LauncherView(QWidget):
     newAppRequested = pyqtSignal()
     openSettingsRequested = pyqtSignal()
     openAppRequested = pyqtSignal(str)
+    buildSeen = pyqtSignal(str)              # a build was opened/run — clears its done/error status
+    editBuildRequested = pyqtSignal(str, str)  # (slug, name) — open the live "Edit with AI" prompt
 
     def __init__(self, builds: BuildService, agents: AgentService, tasks: TaskService) -> None:
         super().__init__()
@@ -77,6 +101,8 @@ class LauncherView(QWidget):
         self._agents = agents
         self._tasks = tasks
         self._workers: set[QtWorker] = set()
+        # slug -> BuildStatus|None, supplied by the main window's status board; drives the tile borders.
+        self._status_provider: Callable[[str], "BuildStatus | None"] = lambda _slug: None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 22, 28, 22)
@@ -215,11 +241,15 @@ class LauncherView(QWidget):
             card = _Card(app.name, app.request)
             run = QPushButton("▶ Run")
             run.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._run_task(s, n))
+            edit = QPushButton("✨ Edit")
+            edit.setToolTip("Describe a change and HELIX updates this task live")
+            edit.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self.editBuildRequested.emit(s, n))
             rename = QPushButton("✎ Rename")
             rename.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._rename_build(s, n))
             remove = QPushButton("✕ Remove")
             remove.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._remove_build(s, n))
-            card.add_actions(run, rename, remove)
+            card.add_actions(run, edit, rename, remove)
+            card.apply_status(self._status_provider(app.slug))
             task_cards.append(card)
         self._fill_grid(self._tasks_grid, self._tasks_empty, task_cards)
 
@@ -236,16 +266,25 @@ class LauncherView(QWidget):
             agent_cards.append(card)
         self._fill_grid(self._agents_grid, self._agents_empty, agent_cards)
 
+    def set_status_provider(self, provider: "Callable[[str], BuildStatus | None]") -> None:
+        """Wire the source of per-build status (the main window's board) that colours the tile borders."""
+        self._status_provider = provider
+
     def _openable_card(self, app) -> _Card:
-        """A card for something that opens in the browser — an app or a 3D model (Open/Rename/Remove)."""
+        """A card for something that opens in the browser — an app or a 3D model
+        (Open / Edit with AI / Rename / Remove)."""
         card = _Card(app.name, app.request)
         open_btn = QPushButton("Open")
         open_btn.clicked.connect(lambda _c=False, s=app.slug: self.openAppRequested.emit(s))
+        edit = QPushButton("✨ Edit")
+        edit.setToolTip("Describe a change and HELIX updates this build live")
+        edit.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self.editBuildRequested.emit(s, n))
         rename = QPushButton("✎ Rename")
         rename.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._rename_build(s, n))
         remove = QPushButton("✕ Remove")
         remove.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._remove_build(s, n))
-        card.add_actions(open_btn, rename, remove)
+        card.add_actions(open_btn, edit, rename, remove)
+        card.apply_status(self._status_provider(app.slug))
         return card
 
     def _fill_grid(self, grid: QGridLayout, empty: QLabel, cards: list[QWidget]) -> None:
@@ -349,6 +388,7 @@ class LauncherView(QWidget):
             self.refresh()
 
     def _run_task(self, slug: str, name: str) -> None:
+        self.buildSeen.emit(slug)  # running a task acknowledges its done/error status (back to blue)
         ok = self._tasks.run(slug)
         # Tasks open their own console; surface the outcome on the TASKS page, where the user is looking.
         self._tasks_status.setText(

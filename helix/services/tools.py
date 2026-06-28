@@ -424,15 +424,14 @@ class ToolRegistry:
             target = args["name"]
             if self._queue.move_first(target):
                 return f"Moved {target} to the front — it runs next."
-            if (self._queue.active_name() or "").lower() == target.strip().lower():
+            if self._queue.is_active_named(target):
                 return f"{target} is already building — can't reorder the one in progress."
             return f"I don't see {target} in the queue."
         if name == "cancel_build" and self._queue is not None:
             target = args["name"]
             if self._queue.cancel_queued(target):
                 return f"Dropped {target} from the queue."
-            if (self._queue.active_name() or "").lower() == target.strip().lower():
-                self._queue.cancel_active()
+            if self._queue.cancel_active_named(target):
                 return f"Stopping {target}."
             return f"I don't see {target} building or queued."
         if name == "think_harder" and self._deep_think is not None:

@@ -113,8 +113,10 @@ class Container:
             self.builds, self.coder, self.bus, self.repo, self.paths.root, guard_files,
             model_baker=self.model_baker,
         )
-        # Builds run as background jobs so the orb keeps talking while it works (single worker thread).
-        self.build_queue = BuildQueue(self.forge, self.bus)
+        # Builds run as background jobs so the orb keeps talking while it works — a small pool runs a few
+        # at once (the Forge's escape guard skips all build workspaces, so concurrent builds don't trip
+        # each other; same-name builds still serialize so two edits can't clobber one workspace).
+        self.build_queue = BuildQueue(self.forge, self.bus, max_workers=2)
         # Self-dev worktrees live OUTSIDE the app tree (a temp dir) so a concurrent background build's
         # escape-scan never mistakes an in-progress self-change draft for an escaped write.
         self.selfdev = SelfDevService(

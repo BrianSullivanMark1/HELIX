@@ -43,7 +43,10 @@ def scan_tree(root: Path, skip: tuple[Path, ...] = ()) -> dict[str, tuple[int, i
                 or "__pycache__" in p.parts
                 or p.name.endswith(("-wal", "-shm", "-journal"))
             ):
-                continue  # ignore legitimate churn (bytecode, logs, sqlite sidecars)
+                continue  # ignore legitimate churn (bytecode, logs, sqlite write-ahead sidecars). The
+                # app's own helix.db (volatile state the conversation writes while a build runs) is NOT
+                # ignored here — the Forge exempts it at its own call site so it keeps being scanned for
+                # the self-dev gate, which DOES need to catch a coder planting a database.
             rp = p.resolve()
             if any(rp == s or s in rp.parents for s in skip_res):
                 continue

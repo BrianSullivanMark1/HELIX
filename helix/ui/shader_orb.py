@@ -14,7 +14,7 @@ import json
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QSizePolicy, QStackedLayout, QWidget
 
-from helix.ui.orb import OrbState, PresenceOrb
+from helix.ui.orb import OrbState, OrbStatus, PresenceOrb
 
 _READY = "helix-orb-ready"
 
@@ -78,6 +78,11 @@ class ShaderOrb(QWidget):
         name = state.value if isinstance(state, OrbState) else "idle"
         self._js(f"window.orbState && window.orbState({json.dumps(name)})")
 
+    def set_status(self, status: OrbStatus) -> None:
+        self._fallback.set_status(status)
+        name = status.value if isinstance(status, OrbStatus) else "none"
+        self._js(f"window.orbStatus && window.orbStatus({json.dumps(name)})")
+
     def set_level(self, level: float) -> None:
         self._fallback.set_level(level)
         try:
@@ -118,8 +123,11 @@ const STATES = {
   thinking:    { col: [0.96, 0.70, 0.22], glow: 0.7,  speed: 0.9 },
   speaking:    { col: [1.00, 0.78, 0.34], glow: 1.0,  speed: 0.8 },
 };
-let cur = STATES.idle, tgt = STATES.idle, level = 0.0, bands = new Array(16).fill(0);
+// Build-status colours own the hue (yellow/green/red); null = normal conversational colour.
+const STATUS = { working: [1.0, 0.81, 0.27], done: [0.25, 0.88, 0.48], error: [1.0, 0.36, 0.38] };
+let cur = STATES.idle, tgt = STATES.idle, level = 0.0, bands = new Array(16).fill(0), statusCol = null;
 window.orbState = (s) => { tgt = STATES[s] || STATES.idle; };
+window.orbStatus = (s) => { statusCol = STATUS[s] || null; };
 window.orbLevel = (v) => { level = Math.max(0, Math.min(1, +v || 0)); };
 window.orbBands = (a) => { if (Array.isArray(a)) bands = a; };
 
@@ -170,7 +178,8 @@ try {
     const dt = clock.getDelta();
     // ease state
     for (const k of ["glow","speed"]) cur[k] += (tgt[k]-cur[k])*0.06;
-    for (let i=0;i<3;i++) cur.col[i] += (tgt.col[i]-cur.col[i])*0.06;
+    const colTgt = statusCol || tgt.col;  // a build status overrides the conversational hue
+    for (let i=0;i<3;i++) cur.col[i] += (colTgt[i]-cur.col[i])*0.06;
     phase += dt * cur.speed;
     const bandAvg = bands.length ? bands.reduce((a,b)=>a+ (+b||0),0)/bands.length : 0;
     const energy = Math.min(1, level + bandAvg);

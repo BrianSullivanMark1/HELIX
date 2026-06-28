@@ -18,6 +18,15 @@ TEXT = "#e2edf1"
 MUTED = "#7a8a93"
 LINE = "#1b2730"
 
+# Build-status palette — one shared meaning across the orb, the menu tiles, and the Console legend:
+#   blue  = idle / done-and-seen (the default CYAN above)
+#   yellow = working on it (a build is in progress)
+#   green = finished successfully, not yet reopened
+#   red   = it errored
+STATUS_WORKING = "#ffcf45"  # yellow
+STATUS_DONE = "#3fe07a"     # green
+STATUS_ERROR = "#ff5d62"    # red
+
 _STYLESHEET = f"""
 * {{
     color: {TEXT};

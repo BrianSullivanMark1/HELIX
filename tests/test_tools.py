@@ -58,7 +58,16 @@ class _FakeQueue:
 
     def cancel_active(self):
         self.cancelled_active += 1
-        return self._active
+        return [self._active] if self._active else []
+
+    def is_active_named(self, name):
+        return self._active is not None and self._active.lower() == name.strip().lower()
+
+    def cancel_active_named(self, name):
+        if self.is_active_named(name):
+            self.cancelled_active += 1
+            return True
+        return False
 
 
 class _FakeAgents:

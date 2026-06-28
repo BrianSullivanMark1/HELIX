@@ -215,10 +215,37 @@ def test_build_source_escape_blocked_and_reverted():
     assert not (root / "helix/services/evil.py").exists()
 
 
-def test_build_sibling_app_escape_reverted():
+def test_build_into_a_sibling_workspace_is_allowed_for_concurrency():
+    # Deliberate trade-off enabling PARALLEL builds: the escape guard skips the whole data/builds tree, so
+    # a sibling writing to its own workspace can't be mistaken for THIS build escaping (which used to
+    # falsely revert the sibling). A consequence is that a write INTO another build's folder is no longer
+    # blocked — acceptable, since both are the user's own sandboxed, git-versioned data builds. The
+    # protections that matter — source, settings, .git, hooks — are still enforced (see the tests above).
     root = _build_repo()
     _forge(root, lambda ws: _w(ws / "index.html", "<h1>A</h1>")).build("Alpha", "x")
-    victim = root / "data/builds/alpha/index.html"
-    with pytest.raises(BuildError):
-        _forge(root, lambda ws: victim.write_text("<script>PWN</script>", encoding="utf-8")).build("Beta", "x")
-    assert victim.read_text(encoding="utf-8") == "<h1>A</h1>"  # restored to committed state
+    sibling = root / "data/builds/alpha/index.html"
+
+    def beta(ws):
+        _w(ws / "index.html", "<h1>B</h1>")
+        sibling.write_text("touched", encoding="utf-8")
+
+    _forge(root, beta).build("Beta", "x")  # no BuildError — a sibling write is allowed now
+    assert sibling.read_text(encoding="utf-8") == "touched"
+
+
+def test_settings_churn_during_a_build_does_not_fail_it():
+    # Regression: with concurrent builds, the UI thread can rewrite the guarded settings file WHILE a build
+    # runs. That must NOT fail the build — the settings file is byte-reverted by the guard and excluded
+    # from the escape tripwire, so a guarded-file change can never read as the build escaping.
+    root = _build_repo()
+    sfile = root / "data" / "s.json"
+    sfile.parent.mkdir(parents=True, exist_ok=True)
+    sfile.write_text('{"k":1}', encoding="utf-8")  # guard_files for _forge is [root/data/s.json]
+
+    def coder(ws):
+        _w(ws / "index.html", "<h1>ok</h1>")
+        sfile.write_text('{"k":2}', encoding="utf-8")  # the app (not the build) rewrites settings
+
+    _forge(root, coder).build("Good", "x")  # must NOT raise
+    assert (root / "data/builds/good/index.html").exists()
+    assert sfile.read_text(encoding="utf-8") == '{"k":1}'  # reverted byte-for-byte by the guard

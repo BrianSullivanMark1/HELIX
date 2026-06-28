@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -26,11 +27,14 @@ from helix.domain.events import (
     BuildIterated,
     BuildProgress,
     BuildRenamed,
+    BuildStarted,
     SelfChangeFinished,
     SelfChangeProgress,
 )
-from helix.domain.models import AppKind
+from helix.domain.models import AppKind, BuildKind
 from helix.logging_setup import get_logger
+from helix.services.prompts import build_3d_model_prompt, build_task_prompt
+from helix.ui.build_status import BuildStatusBoard
 from helix.ui.commands_view import CommandsDialog
 from helix.ui.console_view import ConsoleView
 from helix.ui.launcher_view import LauncherView
@@ -51,6 +55,7 @@ _CONSOLE, _MENU, _SETTINGS, _VIEWER = 0, 1, 2, 3
 class HelixMainWindow(QMainWindow):
     # Bridges bus events (published on a worker/queue thread) onto the UI thread via queued signals.
     _buildSignal = pyqtSignal(object)
+    _buildStartedSignal = pyqtSignal(object)
     _buildProgressSignal = pyqtSignal(object)
     _buildFinishedSignal = pyqtSignal(object)
     _deleteRequestSignal = pyqtSignal(object)
@@ -62,6 +67,8 @@ class HelixMainWindow(QMainWindow):
         self._c = container
         self.setWindowTitle("HELIX")
         self.resize(980, 740)
+        # The shared status board behind the menu-tile borders, the Console legend, and the orb hue.
+        self._board = BuildStatusBoard()
 
         # The orb is the living background of the whole window. Default is the dark QPainter PresenceOrb
         # (audio-reactive, on-brand). The GPU-shader ShaderOrb is OPT-IN (shader_orb=true) because a
@@ -100,6 +107,7 @@ class HelixMainWindow(QMainWindow):
         if self._viewer is not None:
             self._viewer.closeRequested.connect(self._close_viewer)
             self._viewer.openExternallyRequested.connect(self._open_current_externally)
+            self._viewer.editRequested.connect(self._on_viewer_edit)  # live "Edit with AI" bar
             self._stack.addWidget(self._viewer)  # 3
         ov.addWidget(self._stack, stretch=1)
 
@@ -119,10 +127,14 @@ class HelixMainWindow(QMainWindow):
         # Navigation wiring
         self.console.openSettingsRequested.connect(lambda: self._go(_SETTINGS))
         self.console.restartRequested.connect(self._on_restart_requested)
+        self.console.openBuildRequested.connect(self._open_app)  # a legend chip → open that build
         self.settings.saved.connect(self._on_settings_saved)
         self.launcher.newAppRequested.connect(lambda: self._go(_CONSOLE))
         self.launcher.openSettingsRequested.connect(lambda: self._go(_SETTINGS))
         self.launcher.openAppRequested.connect(self._open_app)
+        self.launcher.buildSeen.connect(self._on_build_seen)         # opened/ran → clear done/error status
+        self.launcher.editBuildRequested.connect(self._on_edit_build)  # "Edit with AI" on a card
+        self.launcher.set_status_provider(self._board.status_of)     # colour the tiles from the board
 
         # Bus → UI bridge (refresh the menu when a build lands)
         container.bus.subscribe(BuildCreated, self._buildSignal.emit)
@@ -134,9 +146,12 @@ class HelixMainWindow(QMainWindow):
         # A delete the model proposed → one real human confirmation in the Console before anything is removed.
         container.bus.subscribe(BuildDeleteRequested, self._deleteRequestSignal.emit)
         self._deleteRequestSignal.connect(self._on_delete_requested)
-        # Background-build commentary + completion → the Console (status line / spoken announcement).
+        # Background-build lifecycle → the status board (tiles/legend/orb) + the Console (status line /
+        # spoken announcement). Started fires the instant a build begins so the UI shows it at once.
+        container.bus.subscribe(BuildStarted, self._buildStartedSignal.emit)
         container.bus.subscribe(BuildProgress, self._buildProgressSignal.emit)
         container.bus.subscribe(BuildFinished, self._buildFinishedSignal.emit)
+        self._buildStartedSignal.connect(self._on_build_started)
         self._buildProgressSignal.connect(self._on_build_progress)
         self._buildFinishedSignal.connect(self._on_build_finished)
         # Background self-change drafting → live narration + an apply/discard prompt when ready.
@@ -200,8 +215,21 @@ class HelixMainWindow(QMainWindow):
         self._c.restart()
         QApplication.instance().quit()
 
-    def _on_build(self, event: object) -> None:
+    def _refresh_build_ui(self) -> None:
+        """Re-render the surfaces the status board drives: the menu tiles and the Console legend."""
         self.launcher.refresh()
+        self.console.update_legend(self._board.legend())
+
+    def _on_build(self, event: object) -> None:
+        # Keep the status board's keys honest: a deleted build drops off; a renamed build's old-slug entry
+        # is dropped (its transient green/red status doesn't survive the move — it just resets to blue).
+        if isinstance(event, BuildDeleted):
+            self._board.remove(event.slug)
+        elif isinstance(event, BuildRenamed):
+            old = getattr(event, "old_slug", None)
+            if old:
+                self._board.remove(old)
+        self._refresh_build_ui()
         # A rename can move the open build to a NEW slug — re-point the viewer so it isn't pinned to the
         # moved-on-disk workspace (and later iterate events keep reaching it).
         if isinstance(event, BuildRenamed):
@@ -219,6 +247,55 @@ class HelixMainWindow(QMainWindow):
             else:
                 self._reload_viewer()
 
+    def _on_build_started(self, ev: object) -> None:
+        self._board.mark_building(ev.slug, ev.name)
+        self.console.on_build_started(ev.name)
+        self._refresh_build_ui()
+
+    def _on_build_seen(self, slug: str) -> None:
+        """A build was opened or run — clear its done/error status (back to blue) and refresh."""
+        if self._board.mark_seen(slug):
+            self._refresh_build_ui()
+
+    def _on_edit_build(self, slug: str, name: str) -> None:
+        """The 'Edit with AI' action on a menu card — describe a change and HELIX iterates this exact
+        build live. Routes only through the build queue (a sandboxed data build), never the shell."""
+        app = next((a for a in self._c.builds.list() if a.slug == slug), None)
+        if app is None:
+            return
+        change, ok = QInputDialog.getMultiLineText(
+            self, f"Edit {name}", f"Describe the change to “{name}” — HELIX updates it live:", ""
+        )
+        change = (change or "").strip()
+        if ok and change:
+            self._enqueue_edit(app, change)
+
+    def _on_viewer_edit(self, change: str) -> None:
+        """The viewer's live edit bar — iterate the build that's currently open in place."""
+        slug = self._viewer_slug
+        change = (change or "").strip()
+        if not slug or not change:
+            return
+        app = next((a for a in self._c.builds.list() if a.slug == slug), None)
+        if app is None:
+            return
+        self._enqueue_edit(app, change)
+        if self._viewer is not None:
+            self._viewer.set_edit_status("Updating live…")
+
+    def _enqueue_edit(self, app, change: str) -> None:
+        """Queue an in-place iterate of an EXISTING build. Passing its exact name resolves to the same
+        slug, so the Forge edits in place and never forks a near-duplicate. Shared by the menu card edit
+        and the viewer's live edit box."""
+        q = self._c.build_queue
+        if app.build_kind == BuildKind.MODEL:
+            q.enqueue(app.name, change, kind=BuildKind.MODEL, prompt=build_3d_model_prompt(app.name, change))
+        elif app.build_kind == BuildKind.TASK:
+            q.enqueue(app.name, change, kind=BuildKind.TASK, prompt=build_task_prompt(app.name, change))
+        else:
+            q.enqueue(app.name, change, kind=BuildKind.APP)
+        self.console.status.setText(f"Updating {app.name}…")
+
     def _on_delete_requested(self, ev: object) -> None:
         # The model asked to delete ev.name; get one real human click, then perform it via the registry
         # (which removes the build or agent and publishes the refresh/viewer events).
@@ -234,13 +311,31 @@ class HelixMainWindow(QMainWindow):
         self.console.on_build_progress(ev.name, ev.line)
 
     def _on_build_finished(self, ev: object) -> None:
+        slug = getattr(ev, "slug", "") or ""
+        # A failure BEFORE the build starts (e.g. a name/kind collision) has no slug and never fired a
+        # BuildStarted, so there's no tile/legend entry to update — touching the board with an empty slug
+        # would leak a permanent, un-clearable chip. Only update the board for a real, keyed build.
+        if slug:
+            if ev.stopped:
+                self._board.remove(slug)         # stopped: clear the yellow (cleanup offered separately)
+            elif ev.ok:
+                self._board.mark_done(slug, ev.name)   # green until reopened
+            else:
+                self._board.mark_error(slug, ev.name)  # red until reopened
         self.console.on_build_finished(ev.name, ev.ok, ev.error, ev.stopped, ev.handle, ev.iterating)
+        # If the finished build is the one open in the viewer, reflect it on the live edit bar (the page
+        # itself reloads via the BuildIterated handler on success).
+        if self._viewer is not None and slug and slug == self._viewer_slug:
+            self._viewer.set_edit_status(
+                "Updated." if ev.ok else ("Stopped." if ev.stopped else "That change didn't go through.")
+            )
+        self._refresh_build_ui()
 
     def closeEvent(self, event) -> None:
         # If real work is in flight, give the user a decision point rather than silently abandoning it.
-        active, pending = self._c.build_queue.snapshot()
+        active, pending = self._c.build_queue.snapshot()  # both are lists of build names
         if active or pending or self.console.is_busy() or self._c.selfdev_lane.busy():
-            busy = active or ("a self-change" if self._c.selfdev_lane.busy() else "your request")
+            busy = ", ".join(active) or ("a self-change" if self._c.selfdev_lane.busy() else "your request")
             extra = f" (+{len(pending)} queued)" if pending else ""
             confirm = QMessageBox.question(
                 self,
@@ -272,6 +367,7 @@ class HelixMainWindow(QMainWindow):
         app = next((a for a in self._c.builds.list() if a.slug == slug), None)
         if app is None:
             return
+        self._on_build_seen(slug)  # opening acknowledges a done/error result → tile/legend back to blue
         ws = self._c.builds.workspace(slug)
         if app.kind == AppKind.HTML and app.entry_point:
             target = ws / app.entry_point

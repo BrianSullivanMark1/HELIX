@@ -1,5 +1,6 @@
-"""BuildQueue — background single-worker job runner: runs builds, announces finish/failure, serializes
-A→B, reorders the queue, and cancels. Uses a gated fake forge so ordering is deterministic, not timed."""
+"""BuildQueue — background job runner: runs builds (now a small POOL, so distinct builds run in
+parallel), serializes SAME-NAME builds, announces finish/failure, reorders the queue, and cancels. Uses a
+gated fake forge so ordering is deterministic, not timed."""
 from __future__ import annotations
 
 import threading
@@ -14,6 +15,7 @@ from helix.services.build_queue import BuildQueue
 class _App:
     def __init__(self, name: str) -> None:
         self.name = name
+        self.slug = name.lower().replace(" ", "-")
 
 
 class _Bus:
@@ -41,10 +43,11 @@ class _Bus:
 
 
 class _Forge:
-    """A forge whose build() blocks on a per-name gate, so we can hold A 'running' deterministically."""
+    """A forge whose build() blocks on a per-name gate, so we can hold a build 'running' deterministically."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self._calls_lock = threading.Lock()
         self.started: dict[str, threading.Event] = {}
         self.gate: dict[str, threading.Event] = {}
         self.fail: set[str] = set()
@@ -53,7 +56,8 @@ class _Forge:
         return d.setdefault(name, threading.Event())
 
     def build(self, name, request, *, prompt=None, kind=None, on_progress=None, cancel=None):
-        self.calls.append(name)
+        with self._calls_lock:
+            self.calls.append(name)
         self._ev(self.started, name).set()
         if on_progress:
             on_progress(f"working on {name}")
@@ -71,6 +75,10 @@ class _Forge:
         return self._ev(self.started, name).wait(timeout)
 
 
+def _alive(q: BuildQueue) -> bool:
+    return any(t.is_alive() for t in q._threads)
+
+
 def test_runs_a_build_and_announces_finished():
     bus, forge = _Bus(), _Forge()
     q = BuildQueue(forge, bus)
@@ -79,34 +87,63 @@ def test_runs_a_build_and_announces_finished():
     forge.release("Tip Calc")
     assert bus.wait_finishes(1)
     fin = bus.finished()[0]
-    assert fin.ok and fin.name == "Tip Calc"
+    assert fin.ok and fin.name == "Tip Calc" and fin.slug == "tip-calc"
     assert any(isinstance(e, BuildProgress) for e in bus.events)  # progress was published
 
 
-def test_second_build_queues_behind_the_active_one_then_runs():
+def test_two_distinct_builds_run_concurrently():
+    # The headline of the parallel pool: two different builds run at the SAME time, not one-after-another.
     bus, forge = _Bus(), _Forge()
-    q = BuildQueue(forge, bus)
+    q = BuildQueue(forge, bus, max_workers=2)
+    q.enqueue("A", "x", kind=BuildKind.APP)
+    q.enqueue("B", "x", kind=BuildKind.APP)
+    assert forge.wait_started("A")
+    assert forge.wait_started("B")  # BOTH running before either gate opens → genuinely parallel
+    forge.release("A")
+    forge.release("B")
+    assert bus.wait_finishes(2)
+    assert set(forge.calls) == {"A", "B"}
+
+
+def test_same_name_builds_never_run_at_once():
+    # Two edits of the SAME build must serialize, or two coders would clobber one workspace.
+    bus, forge = _Bus(), _Forge()
+    q = BuildQueue(forge, bus, max_workers=2)
+    q.enqueue("X", "first", kind=BuildKind.APP)
+    q.enqueue("X", "second", kind=BuildKind.APP)
+    assert forge.wait_started("X")
+    time.sleep(0.15)  # give a (wrongly) concurrent second run time to enter build()
+    assert forge.calls == ["X"]  # only ONE X is inside build(); the second waits its turn
+    forge.release("X")
+    assert bus.wait_finishes(2)
+    assert forge.calls == ["X", "X"]  # the second ran only after the first finished
+
+
+def test_second_build_queues_behind_the_active_one_then_runs():
+    # With a single worker, builds serialize: B waits for A. (max_workers=1 makes the queue order observable.)
+    bus, forge = _Bus(), _Forge()
+    q = BuildQueue(forge, bus, max_workers=1)
     q.enqueue("A", "x", kind=BuildKind.APP)
     assert forge.wait_started("A")              # A is running, gate still closed
     assert q.enqueue("B", "x", kind=BuildKind.APP) == 1  # one ahead of it (A)
-    assert q.snapshot() == ("A", ["B"])
+    assert q.snapshot() == (["A"], ["B"])
     forge.release("A")
     assert forge.wait_started("B")              # B starts only after A finished
     forge.release("B")
     assert bus.wait_finishes(2)
-    assert forge.calls == ["A", "B"]            # strictly serialized, never parallel
+    assert forge.calls == ["A", "B"]            # strictly serialized with one worker
 
 
 def test_reorder_and_cancel_pending_while_one_runs():
     bus, forge = _Bus(), _Forge()
-    q = BuildQueue(forge, bus)
+    q = BuildQueue(forge, bus, max_workers=1)
     q.enqueue("A", "x", kind=BuildKind.APP)
     assert forge.wait_started("A")
     q.enqueue("B", "x", kind=BuildKind.APP)
     q.enqueue("C", "x", kind=BuildKind.APP)
-    assert q.snapshot() == ("A", ["B", "C"])
-    assert q.move_first("C") and q.snapshot() == ("A", ["C", "B"])  # C jumps ahead of B
-    assert q.cancel_queued("B") and q.snapshot() == ("A", ["C"])    # B dropped
+    assert q.snapshot() == (["A"], ["B", "C"])
+    assert q.move_first("C") and q.snapshot() == (["A"], ["C", "B"])  # C jumps ahead of B
+    assert q.cancel_queued("B") and q.snapshot() == (["A"], ["C"])    # B dropped
     assert not q.move_first("A")  # can't reorder the running one
     forge.release("A")
     forge.release("C")
@@ -131,8 +168,8 @@ def test_cancel_active_stops_and_offers_cleanup():
     q = BuildQueue(forge, bus)
     q.enqueue("A", "x", kind=BuildKind.APP)
     assert forge.wait_started("A")
-    assert q.cancel_active() == "A"  # fire the active job's token
-    forge.release("A")               # build wakes, sees cancel set, raises BuildCancelled
+    assert q.cancel_active() == ["A"]  # fire the active job's token (now a list of cancelled names)
+    forge.release("A")                 # build wakes, sees cancel set, raises BuildCancelled
     assert bus.wait_finishes(1)
     fin = bus.finished()[0]
     assert not fin.ok and fin.stopped
@@ -153,24 +190,24 @@ class _CancelAwareForge:
         raise BuildCancelled(name.lower(), name, False)
 
 
-def test_shutdown_reaps_the_active_build_and_exits_the_worker():
-    # The owner's #1 case: closing mid-build must cancel the coder and stop the worker — never orphan it.
+def test_shutdown_reaps_the_active_build_and_exits_the_workers():
+    # The owner's #1 case: closing mid-build must cancel the coder and stop the workers — never orphan one.
     bus, forge = _Bus(), _CancelAwareForge()
     q = BuildQueue(forge, bus)
     q.enqueue("A", "x", kind=BuildKind.APP)
     assert forge.started.wait(5)
     q.shutdown(timeout=3.0)
-    assert not q._thread.is_alive()        # the background worker actually exited
-    assert q.snapshot() == (None, [])      # nothing left active or queued
-    assert bus.finished() == []            # no cleanup announcement during shutdown (the UI is gone)
+    assert not _alive(q)                    # the background workers actually exited
+    assert q.snapshot() == ([], [])         # nothing left active or queued
+    assert bus.finished() == []             # no cleanup announcement during shutdown (the UI is gone)
 
 
 def test_shutdown_drops_pending_jobs_without_running_them():
     bus, forge = _Bus(), _CancelAwareForge()
-    q = BuildQueue(forge, bus)
+    q = BuildQueue(forge, bus, max_workers=1)
     q.enqueue("A", "x", kind=BuildKind.APP)
     assert forge.started.wait(5)
     q.enqueue("B", "x", kind=BuildKind.APP)  # queued behind the running A
     q.shutdown(timeout=3.0)
     assert "B" not in forge.calls            # the queued job is dropped, never built, on shutdown
-    assert not q._thread.is_alive()
+    assert not _alive(q)

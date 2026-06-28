@@ -11,16 +11,18 @@ from pathlib import Path
 from PyQt6.QtCore import QUrl, pyqtSignal
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
-from helix.ui.theme import CYAN, LINE
+from helix.ui.theme import CYAN, LINE, MUTED
 
 
 class AppViewer(QWidget):
-    """A header (Back / title / Reload / open-in-Browser) above a web view that runs the built page."""
+    """A header (Back / title / Edit / Reload / open-in-Browser) above a web view that runs the built
+    page, with a live 'Edit with AI' bar along the bottom that iterates THIS build in place."""
 
     closeRequested = pyqtSignal()
     openExternallyRequested = pyqtSignal()
+    editRequested = pyqtSignal(str)  # the live edit bar — a plain-language change to the open build
 
     def __init__(self) -> None:
         super().__init__()
@@ -39,6 +41,10 @@ class AppViewer(QWidget):
         back.clicked.connect(self.closeRequested.emit)
         self._title = QLabel("")
         self._title.setStyleSheet(f"color:{CYAN};font-weight:600;")
+        edit_btn = QPushButton("✨ Edit")
+        edit_btn.setObjectName("Nav")
+        edit_btn.setToolTip("Describe a change and HELIX updates this build live")
+        edit_btn.clicked.connect(self._toggle_edit)
         reload_btn = QPushButton("⟳")
         reload_btn.setObjectName("Nav")
         reload_btn.clicked.connect(self._reload)
@@ -48,6 +54,7 @@ class AppViewer(QWidget):
         row.addWidget(back)
         row.addWidget(self._title)
         row.addStretch(1)
+        row.addWidget(edit_btn)
         row.addWidget(reload_btn)
         row.addWidget(browser)
         root.addWidget(bar)
@@ -63,8 +70,50 @@ class AppViewer(QWidget):
         self._web.page().renderProcessTerminated.connect(self._on_render_crash)
         root.addWidget(self._web, stretch=1)
 
+        # Live "Edit with AI" bar — hidden until you press Edit. Typing a change and pressing Update
+        # iterates THIS build in place (the main window resolves it by the open build's slug — no name
+        # guessing), and the page reloads itself when the build finishes.
+        self._edit_bar = QWidget()
+        self._edit_bar.setStyleSheet(f"border-top:1px solid {LINE};")
+        erow = QHBoxLayout(self._edit_bar)
+        erow.setContentsMargins(16, 10, 16, 10)
+        erow.setSpacing(8)
+        self._edit_input = QLineEdit()
+        self._edit_input.setPlaceholderText("Describe a change — HELIX updates this live…")
+        self._edit_input.returnPressed.connect(self._send_edit)
+        self._edit_status = QLabel("")
+        self._edit_status.setStyleSheet(f"color:{MUTED};")
+        update_btn = QPushButton("✨ Update")
+        update_btn.setObjectName("Primary")
+        update_btn.clicked.connect(self._send_edit)
+        erow.addWidget(self._edit_input, stretch=1)
+        erow.addWidget(self._edit_status)
+        erow.addWidget(update_btn)
+        self._edit_bar.setVisible(False)
+        root.addWidget(self._edit_bar)
+
+    def _toggle_edit(self) -> None:
+        show = not self._edit_bar.isVisible()
+        self._edit_bar.setVisible(show)
+        if show:
+            self._edit_status.setText("")
+            self._edit_input.setFocus()
+
+    def _send_edit(self) -> None:
+        text = self._edit_input.text().strip()
+        if not text:
+            return
+        self._edit_input.clear()
+        self._edit_status.setText("Updating…")
+        self.editRequested.emit(text)
+
+    def set_edit_status(self, msg: str) -> None:
+        """The main window pushes build progress/finish here so the edit bar reflects the live update."""
+        self._edit_status.setText(msg)
+
     def load(self, path: Path, title: str) -> None:
         self._title.setText(title)
+        self._edit_status.setText("")
         self._web.setUrl(QUrl.fromLocalFile(str(path)))
 
     def _on_render_crash(self, *_args) -> None:

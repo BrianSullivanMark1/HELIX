@@ -56,9 +56,27 @@ from helix.ports.stores import SettingsStore
 from helix.services import attachments
 from helix.services.cancel import CancelToken
 from helix.services.conversation import ConversationService
-from helix.ui.orb import OrbState, PresenceOrb
-from helix.ui.theme import CYAN, CYAN_DIM, LINE, MUTED, TEXT
+from helix.ui.build_status import BuildStatus, LegendEntry
+from helix.ui.orb import OrbState, OrbStatus, PresenceOrb
+from helix.ui.theme import (
+    CYAN,
+    CYAN_DIM,
+    LINE,
+    MUTED,
+    STATUS_DONE,
+    STATUS_ERROR,
+    STATUS_WORKING,
+    TEXT,
+)
 from helix.ui.voice import VoiceController, is_mute, is_stop, is_unmute, split_visuals
+
+# Legend dot colour per build status — mirrors the orb hue and the menu tile borders.
+_LEGEND_COLOR = {
+    BuildStatus.BUILDING: STATUS_WORKING,
+    BuildStatus.DONE: STATUS_DONE,
+    BuildStatus.ERROR: STATUS_ERROR,
+}
+_LEGEND_WORD = {BuildStatus.BUILDING: "in progress", BuildStatus.DONE: "done", BuildStatus.ERROR: "error"}
 from helix.ui.workers import QtWorker
 
 if TYPE_CHECKING:
@@ -468,6 +486,7 @@ class _AttachChip(QFrame):
 class ConsoleView(QWidget):
     openSettingsRequested = pyqtSignal()
     restartRequested = pyqtSignal()  # user asked to restart so voice can pre-warm and start listening
+    openBuildRequested = pyqtSignal(str)  # a legend chip was clicked — open that build (slug)
 
     def __init__(
         self,
@@ -498,6 +517,18 @@ class ConsoleView(QWidget):
         # its own offer instead of clobbering the first and orphaning its workspace.
         self._cleanups: "deque[BuildHandle]" = deque()
         self.orb = orb  # shared with the whole window; owned by HelixMainWindow
+        # The orb's build-status hue (separate from the conversational state). A token guards the deferred
+        # revert of a transient green "done" flash, so a newer build can't be undone by an older flash timer.
+        self._orb_status = OrbStatus.NONE
+        self._orb_flash_token = 0
+        # Synthesized narrator: when builds finish close together (concurrency), their announcements are
+        # COLLECTED over a short window and spoken as ONE fluent line, instead of several voices preempting
+        # each other. Starts aren't narrated here — the tool's "Starting X" ack already covers those.
+        self._narr_done: list[tuple[str, bool]] = []     # (name, iterating) of completed builds
+        self._narr_errors: list[tuple[str, str]] = []    # (name, reason) of failed builds
+        self._narr_timer = QTimer(self)
+        self._narr_timer.setSingleShot(True)
+        self._narr_timer.timeout.connect(self._flush_narration)
 
         self._voice: VoiceController | None = None
         if speech_in is not None and speech_out is not None:
@@ -536,6 +567,18 @@ class ConsoleView(QWidget):
             gmsg.setWordWrap(True)
             grow.addWidget(gmsg)
             root.addWidget(git_banner)
+
+        # Legend: a self-clearing strip of the builds that want attention — in progress (yellow), done
+        # (green), or errored (red). Click a chip to open that build; opening or navigating to a build
+        # drops it off the strip. Lets HELIX run several builds at once without the orb's single voice
+        # having to narrate each — the strip is the at-a-glance status of everything in flight.
+        self._legend_row = QHBoxLayout()
+        self._legend_row.setContentsMargins(0, 0, 0, 0)
+        self._legend_row.setSpacing(8)
+        self._legend_host = QWidget()
+        self._legend_host.setLayout(self._legend_row)
+        self._legend_host.setVisible(False)
+        root.addWidget(self._legend_host)
 
         # The conversation fills the full height — text scrolls all the way up — floating over the orb's
         # glow (bubbles are semi-opaque so they stay legible). The controls sit beneath it.
@@ -697,11 +740,12 @@ class ConsoleView(QWidget):
         if self._busy and self._cancel is not None:
             self._cancelled = True
             self._cancel.cancel()  # break a mid-flight reply loop
-        stopped = self._queue.cancel_active() if self._queue is not None else None  # kill the coder
+        stopped = self._queue.cancel_active() if self._queue is not None else []  # kill the coder(s)
         dropped = self._queue.clear_queued() if self._queue is not None else []  # a stop drops the queue too
         if stopped:
+            label = stopped[0] if len(stopped) == 1 else f"{len(stopped)} builds"
             tail = f" Cleared {len(dropped)} queued." if dropped else ""
-            self.status.setText(f"Stopping {stopped}…{tail}")
+            self.status.setText(f"Stopping {label}…{tail}")
         elif dropped:
             self.status.setText(f"Cleared {len(dropped)} queued.")
         elif self._busy:
@@ -922,6 +966,10 @@ class ConsoleView(QWidget):
         self._cancelled = False
         self._cancel = CancelToken()
         self._busy = True
+        # Engaging acknowledges a finished build: clear a lingering green/red hue (back to yellow if a
+        # build is still running, else blue) so the orb reflects the live conversation.
+        if self._orb_status in (OrbStatus.DONE, OrbStatus.ERROR):
+            self._settle_orb_status()
         if self._voice is not None:
             if not from_voice:
                 self._voice.begin_turn()  # voice path already went quiet when it captured the command
@@ -1003,6 +1051,56 @@ class ConsoleView(QWidget):
             else "Ready when you are."
         )
 
+    # ----- build legend + orb status (the at-a-glance board for concurrent builds) -----
+    def update_legend(self, entries: "list[LegendEntry]") -> None:
+        """Rebuild the legend strip from the status board (passed by the main window). Hidden when empty."""
+        while self._legend_row.count():
+            item = self._legend_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for entry in entries:
+            self._legend_row.addWidget(self._legend_chip(entry))
+        self._legend_row.addStretch(1)
+        self._legend_host.setVisible(bool(entries))
+
+    def _legend_chip(self, entry: "LegendEntry") -> QPushButton:
+        color = _LEGEND_COLOR.get(entry.status, CYAN)
+        chip = QPushButton(f"●  {entry.name}")
+        chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        chip.setToolTip(f"{entry.name} — {_LEGEND_WORD.get(entry.status, '')}. Click to open it.")
+        chip.setStyleSheet(
+            f"QPushButton{{background:rgba(8,11,15,0.92);color:{color};border:1px solid {color};"
+            f"border-radius:11px;padding:4px 12px;font-size:12px;}}"
+            "QPushButton:hover{background:rgba(13,20,27,0.96);}"
+        )
+        chip.clicked.connect(lambda _c=False, s=entry.slug: self.openBuildRequested.emit(s))
+        return chip
+
+    def set_orb_status(self, status: OrbStatus) -> None:
+        self._orb_status = status
+        if self.orb is not None:
+            self.orb.set_status(status)
+
+    def _any_building(self) -> bool:
+        return self._queue is not None and self._queue.active_name() is not None
+
+    def _settle_orb_status(self) -> None:
+        """Resting hue once a build finishes / a flash ends: yellow if anything's still building, else blue."""
+        self.set_orb_status(OrbStatus.WORKING if self._any_building() else OrbStatus.NONE)
+
+    def _hold_status(self, status: OrbStatus, ms: int) -> None:
+        """Show a transient status hue (green 'done' / red 'error'), then settle. The token guards against
+        an older hold's timer undoing a newer build's hue."""
+        self.set_orb_status(status)
+        self._orb_flash_token += 1
+        token = self._orb_flash_token
+        QTimer.singleShot(ms, lambda: self._settle_orb_status() if token == self._orb_flash_token else None)
+
+    def on_build_started(self, name: str) -> None:
+        """A build began — go to the working (yellow) hue. Tiles/legend are refreshed by the main window."""
+        self.set_orb_status(OrbStatus.WORKING)
+
     # ----- background build announcements (bridged from the event bus by the main window) -----
     def on_build_progress(self, name: str, line: str) -> None:
         """Live commentary from a background build — status line, and (voice on) the spoken milestones."""
@@ -1015,17 +1113,55 @@ class ConsoleView(QWidget):
     ) -> None:
         """A background build ended — announce it tersely, or offer cleanup if it was stopped mid-run."""
         if stopped:
+            self._settle_orb_status()  # back to yellow (others still going) or blue
             if handle is not None:
                 self._offer_cleanup(handle)
             else:
                 self._announce("Stopped.")
             return
         if ok:
-            self._announce(f"Updated {name}." if iterating else f"Done — {name} is in the menu.")
+            self._hold_status(OrbStatus.DONE, 2500)  # a brief green flash, then settle
+            self._narrate_finish(done=(name, iterating))
             return
         # Surface the real reason instead of a vague "didn't go through" (the error was being discarded).
+        self._hold_status(OrbStatus.ERROR, 8000)  # red hue while the failure is fresh
         reason = (error or "").strip().splitlines()[0][:160] if error else ""
-        self._announce(f"The {name} build didn't go through. {reason}".strip())
+        self._narrate_finish(error=(name, reason))
+
+    # ----- synthesized narrator (one fluent voice for many concurrent completions) -----
+    def _narrate_finish(self, *, done: "tuple[str, bool] | None" = None,
+                        error: "tuple[str, str] | None" = None) -> None:
+        """Buffer a completion and (re)arm the short coalescing window. Several builds finishing close
+        together collapse into ONE spoken line instead of overlapping voices."""
+        if done is not None:
+            self._narr_done.append(done)
+        if error is not None:
+            self._narr_errors.append(error)
+        self._narr_timer.start(900)
+
+    def _flush_narration(self) -> None:
+        done, errors = self._narr_done, self._narr_errors
+        self._narr_done, self._narr_errors = [], []
+        msg = self._compose_narration(done, errors)
+        if msg:
+            self._announce(msg)
+
+    @staticmethod
+    def _compose_narration(done: "list[tuple[str, bool]]", errors: "list[tuple[str, str]]") -> str:
+        """Turn the buffered completions into one natural, plain sentence (no markdown — it's spoken)."""
+        parts: list[str] = []
+        names = [n for n, _it in done]
+        if len(done) == 1:
+            name, iterating = done[0]
+            parts.append(f"Updated {name}." if iterating else f"{name} is ready — it's in the menu.")
+        elif len(done) == 2:
+            parts.append(f"{names[0]} and {names[1]} are both ready.")
+        elif len(done) > 2:
+            parts.append(f"{len(done)} builds are ready: {', '.join(names[:-1])}, and {names[-1]}.")
+        for name, reason in errors:
+            parts.append(f"The {name} build hit a snag: {reason}" if reason
+                         else f"The {name} build didn't go through.")
+        return " ".join(parts)
 
     def on_self_change_finished(
         self, ok: bool, summary: str, branch: str, error: str | None, stopped: bool
@@ -1142,6 +1278,7 @@ class ConsoleView(QWidget):
 
     def shutdown(self) -> None:
         """Wait briefly for any in-flight worker so we never destroy a running QThread on close."""
+        self._narr_timer.stop()  # don't let a pending narration fire into a torn-down view
         if self._cancel is not None:
             self._cancel.cancel()  # break a mid-flight turn at its next cancel check before we wait
         if self._voice is not None:

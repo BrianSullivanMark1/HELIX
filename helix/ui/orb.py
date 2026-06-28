@@ -18,7 +18,7 @@ from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QRadialGradient
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
-from helix.ui.theme import AMBER, CYAN, GOLD
+from helix.ui.theme import AMBER, CYAN, GOLD, STATUS_DONE, STATUS_ERROR, STATUS_WORKING
 
 # Dark electronic body, so the circuitry glows against it.
 BODY_HI = "#2b3b4b"
@@ -32,6 +32,30 @@ class OrbState(Enum):
     TRANSCRIBING = "transcribing"  # heard you, turning speech → text (a fast cyan shimmer)
     THINKING = "thinking"
     SPEAKING = "speaking"
+
+
+class OrbStatus(Enum):
+    """The orb's BUILD status, layered on top of the conversational state. It owns the orb's HUE — the
+    whole Presence shifts to one colour so a glance tells you what's happening with your builds:
+      NONE    → normal cyan↔gold conversational colouring (idle blue, gold while speaking).
+      WORKING → yellow: a build is in progress.
+      DONE    → green: a build just finished (a brief flash, then back to NONE).
+      ERROR   → red: a build errored.
+    State (listening/thinking/speaking) still drives the orb's energy/animation; status drives colour."""
+
+    NONE = "none"
+    WORKING = "working"
+    DONE = "done"
+    ERROR = "error"
+
+
+# Per-status base colours. When a status is active the orb mixes toward ONE colour (cold == warm), so the
+# whole Presence reads as that hue regardless of the conversational warm-blend.
+_STATUS_COLORS: dict[OrbStatus, tuple[str, str]] = {
+    OrbStatus.WORKING: (STATUS_WORKING, STATUS_WORKING),
+    OrbStatus.DONE: (STATUS_DONE, STATUS_DONE),
+    OrbStatus.ERROR: (STATUS_ERROR, STATUS_ERROR),
+}
 
 
 # `warm` blends cyan→gold (speaking); `accent` drives the amber thinking arc; `glow` is overall energy.
@@ -142,10 +166,16 @@ def paint_orb(
     thinking: bool = False,
     accent: float = 0.0,
     spin: float = 0.0,
+    cold=CYAN,
+    warm_color=GOLD,
 ) -> None:
     """Draw the electronic Presence orb (sphere radius r, centred at cx,cy). Shared by the live widget
     and the app-icon renderer so they're identical. The caller owns the QPainter (antialiasing/no-pen
-    set, and end())."""
+    set, and end()).
+
+    `cold`/`warm_color` are the two base colours the orb blends between (default cyan→gold); the live
+    widget overrides them to drive the build-status hue (yellow/green/red). Each accepts a colour string
+    or a QColor, so the widget can pass smoothly-eased QColors."""
     center = QPointF(cx, cy)
 
     # 1. Energy smoke streaming off the orb (drifts outward + up, fades).
@@ -159,16 +189,16 @@ def paint_orb(
         if a <= 1:
             continue
         blob = QRadialGradient(QPointF(px, py), rad)
-        blob.setColorAt(0.0, _col(CYAN, GOLD, warm, a))
-        blob.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+        blob.setColorAt(0.0, _col(cold, warm_color, warm, a))
+        blob.setColorAt(1.0, _col(cold, warm_color, warm, 0))
         p.setBrush(blob)
         p.drawEllipse(QPointF(px, py), rad, rad)
 
     # 2. Aura.
     aura = QRadialGradient(center, r * 1.7)
-    aura.setColorAt(0.0, _col(CYAN, GOLD, warm, int(34 * glow)))
-    aura.setColorAt(0.55, _col(CYAN, GOLD, warm, int(30 * glow)))
-    aura.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+    aura.setColorAt(0.0, _col(cold, warm_color, warm, int(34 * glow)))
+    aura.setColorAt(0.55, _col(cold, warm_color, warm, int(30 * glow)))
+    aura.setColorAt(1.0, _col(cold, warm_color, warm, 0))
     p.setBrush(aura)
     p.drawEllipse(center, r * 1.7, r * 1.7)
 
@@ -187,19 +217,19 @@ def paint_orb(
     p.save()
     p.setClipPath(clip)
     core = QRadialGradient(center, r * 0.5)
-    core.setColorAt(0.0, _col(CYAN, GOLD, warm, int(90 * glow)))
-    core.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+    core.setColorAt(0.0, _col(cold, warm_color, warm, int(90 * glow)))
+    core.setColorAt(1.0, _col(cold, warm_color, warm, 0))
     p.setBrush(core)
     p.drawEllipse(center, r * 0.5, r * 0.5)
     lw = max(1.0, r * 0.009)
     p.setBrush(Qt.BrushStyle.NoBrush)
     for rad, a0, span in rings:  # concentric ring buses
-        pen = QPen(_col(CYAN, GOLD, warm, int(80 * glow)))
+        pen = QPen(_col(cold, warm_color, warm, int(80 * glow)))
         pen.setWidthF(lw)
         p.setPen(pen)
         p.drawArc(QRectF(cx - r * rad, cy - r * rad, 2 * r * rad, 2 * r * rad), int(a0 * 16), int(span * 16))
     for pts, is_bus, _ph in traces:  # the streets / wiring
-        pen = QPen(_col(CYAN, GOLD, warm, int((125 if is_bus else 66) * glow)))
+        pen = QPen(_col(cold, warm_color, warm, int((125 if is_bus else 66) * glow)))
         pen.setWidthF(lw)
         p.setPen(pen)
         path = QPainterPath()
@@ -211,8 +241,8 @@ def paint_orb(
     for ux, uy in nodes:  # junction pads
         nx, ny = cx + ux * r, cy + uy * r
         pad = QRadialGradient(QPointF(nx, ny), r * 0.026)
-        pad.setColorAt(0.0, _col(CYAN, GOLD, warm, int(160 * glow)))
-        pad.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+        pad.setColorAt(0.0, _col(cold, warm_color, warm, int(160 * glow)))
+        pad.setColorAt(1.0, _col(cold, warm_color, warm, 0))
         p.setBrush(pad)
         p.drawEllipse(QPointF(nx, ny), r * 0.026, r * 0.026)
     for pts, is_bus, ph in traces:  # impulses fire down the bus traces (a comet head + fading trail)
@@ -232,9 +262,9 @@ def paint_orb(
                 continue
             comet = QRadialGradient(QPointF(nx, ny), rad)
             comet.setColorAt(
-                0.0, _col("#ffffff", GOLD, warm * 0.5, a) if j == 0 else _col(CYAN, GOLD, warm, a)
+                0.0, _col("#ffffff", warm_color, warm * 0.5, a) if j == 0 else _col(cold, warm_color, warm, a)
             )
-            comet.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+            comet.setColorAt(1.0, _col(cold, warm_color, warm, 0))
             p.setBrush(comet)
             p.drawEllipse(QPointF(nx, ny), rad, rad)
     p.restore()
@@ -250,9 +280,9 @@ def paint_orb(
     p.setBrush(glass)
     p.drawEllipse(center, r, r)
     rim = QRadialGradient(center, r)
-    rim.setColorAt(0.80, _col(CYAN, GOLD, warm, 0))
-    rim.setColorAt(0.97, _col(CYAN, GOLD, warm, int(160 * glow)))
-    rim.setColorAt(1.0, _col(CYAN, GOLD, warm, 0))
+    rim.setColorAt(0.80, _col(cold, warm_color, warm, 0))
+    rim.setColorAt(0.97, _col(cold, warm_color, warm, int(160 * glow)))
+    rim.setColorAt(1.0, _col(cold, warm_color, warm, 0))
     p.setBrush(rim)
     p.drawEllipse(center, r, r)
     p.restore()
@@ -290,7 +320,12 @@ class PresenceOrb(QWidget):
         self.setStyleSheet("background: transparent;")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._state = OrbState.IDLE
+        self._status = OrbStatus.NONE
         self._p = dict(_PARAMS[OrbState.IDLE])
+        # Eased base colours: the whole orb mixes between these two. Conversational colouring rides cyan→
+        # gold; a build status overrides both toward one hue (yellow/green/red), eased so it fades, not snaps.
+        self._cold = QColor(CYAN)
+        self._warm = QColor(GOLD)
         self._phase = 0.0
         self._spin = 0.0
         self._t = 0.0
@@ -307,6 +342,19 @@ class PresenceOrb(QWidget):
     def set_state(self, state: OrbState) -> None:
         self._state = state
 
+    def set_status(self, status: OrbStatus) -> None:
+        """Set the build-status hue (yellow/green/red), or NONE for normal conversational colour. Eased,
+        so the orb glides between colours rather than snapping."""
+        self._status = status if isinstance(status, OrbStatus) else OrbStatus.NONE
+
+    def _target_colors(self) -> tuple[QColor, QColor]:
+        """The (cold, warm) base colours this frame should ease toward. A build status owns the hue; with
+        no status, the normal cyan→gold pair (the conversational warm-blend rides on top)."""
+        pair = _STATUS_COLORS.get(self._status)
+        if pair is not None:
+            return QColor(pair[0]), QColor(pair[1])
+        return QColor(CYAN), QColor(GOLD)
+
     def set_level(self, level: float) -> None:
         self._level_target = max(0.0, min(1.0, float(level)))
 
@@ -322,10 +370,21 @@ class PresenceOrb(QWidget):
     def mousePressEvent(self, _event) -> None:
         self.clicked.emit()
 
+    @staticmethod
+    def _ease_color(cur: QColor, target: QColor, f: float = 0.08) -> QColor:
+        return QColor(
+            int(cur.red() + (target.red() - cur.red()) * f),
+            int(cur.green() + (target.green() - cur.green()) * f),
+            int(cur.blue() + (target.blue() - cur.blue()) * f),
+        )
+
     def _tick(self) -> None:
         target = _PARAMS[self._state]
         for k in _KEYS:
             self._p[k] += (target[k] - self._p[k]) * 0.08
+        tcold, twarm = self._target_colors()
+        self._cold = self._ease_color(self._cold, tcold)
+        self._warm = self._ease_color(self._warm, twarm)
         self._level += (self._level_target - self._level) * 0.35
         self._level_target *= 0.82
         for i in range(_N_BANDS):
@@ -352,6 +411,7 @@ class PresenceOrb(QWidget):
             warm=self._p["warm"], glow=glow, t=self._t,
             rings=self._rings, traces=self._traces, nodes=self._nodes, smoke=self._smoke,
             thinking=(self._state is OrbState.THINKING), accent=self._p["accent"], spin=self._spin,
+            cold=self._cold, warm_color=self._warm,
         )
         self._paint_spectrum(p, cx, cy, r, glow)
         p.end()
@@ -364,6 +424,7 @@ class PresenceOrb(QWidget):
         if peak + self._level < 0.025:
             return
         warm = self._p["warm"]
+        cold, warm_color = self._cold, self._warm  # the eased base colours (status hue rides here too)
         n, half = 64, 32
         inner = r * 1.06
         for i in range(n):
@@ -376,7 +437,7 @@ class PresenceOrb(QWidget):
             length = r * (0.04 + 0.42 * mag)
             x0, y0 = cx + math.cos(ang) * inner, cy + math.sin(ang) * inner
             x1, y1 = cx + math.cos(ang) * (inner + length), cy + math.sin(ang) * (inner + length)
-            pen = QPen(_col(CYAN, GOLD, warm, a), 2.2)
+            pen = QPen(_col(cold, warm_color, warm, a), 2.2)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             p.setPen(pen)
             p.drawLine(QPointF(x0, y0), QPointF(x1, y1))
