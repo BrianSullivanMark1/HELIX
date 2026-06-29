@@ -129,13 +129,14 @@ def test_agent_run_is_hermetic_when_not_persisting():
 class _FakeKnowledge:
     """Stand-in KnowledgeService: records the queries it was asked and returns a fixed ambient block."""
 
-    def __init__(self, text: str = "") -> None:
+    def __init__(self, text: str = "", sources: list | None = None) -> None:
         self.text = text
+        self.sources = sources or []
         self.queries: list[str] = []
 
-    def auto_context(self, query: str) -> str:
+    def auto_context_with_sources(self, query: str):
         self.queries.append(query)
-        return self.text
+        return self.text, list(self.sources)
 
 
 def test_ambient_knowledge_is_injected_on_orb_turns_but_not_persisted():
@@ -152,6 +153,19 @@ def test_ambient_knowledge_is_injected_on_orb_turns_but_not_persisted():
     # …but it's ephemeral — only the user's own words were written to history
     assert "hunter2" not in "".join(m.text for m in store.msgs)
     assert know.queries == ["what's my wifi password"]
+
+
+def test_ambient_knowledge_sources_are_surfaced_for_a_citation():
+    chat = _CaptureChat()
+    know = _FakeKnowledge(
+        "<<<KNOWLEDGE-x the wifi password is hunter2 KNOWLEDGE-x<<<", sources=[("Notes", "Wifi")]
+    )
+    svc = ConversationService(
+        chat, _FakeTools([]), _FakeStore(), _FakeMemory(), _FixedClock(), "sys", knowledge=know
+    )
+    sinks: list = []
+    svc.run_turn("what's my wifi password", knowledge_sources=sinks)
+    assert sinks == [("Notes", "Wifi")]  # the UI can render a 'from Notes › Wifi' chip
 
 
 def test_ambient_knowledge_is_never_injected_into_an_agent_run():

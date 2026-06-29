@@ -240,6 +240,13 @@ Requirements:
 - Keep everything inside this folder. Do not read or write outside it.
 - Do NOT run git — HELIX handles version control. Just write the files.
 - The entry point MUST be main.py.
+- SAVING RESULTS TO KNOWLEDGE (only if this task GATHERS or SUMMARIZES information the user will want to
+  ask about later — a digest, a summary, a report; NOT for a one-off action like renaming files): also
+  write each result as a .md or .txt file into the folder named by the HELIX_KNOWLEDGE_OUTBOX environment
+  variable, when it is set — e.g. `out = os.environ.get("HELIX_KNOWLEDGE_OUTBOX"); if out: open(os.path
+  .join(out, "summary.md"), "w", encoding="utf-8").write(text)`. HELIX imports whatever you write there
+  into a searchable knowledge base named after this task when it finishes, so the user can later just ask
+  about it. Still print the result to the console as usual; the outbox is in addition, not instead.
 
 {_CONNECTIONS_GUIDE}"""
 

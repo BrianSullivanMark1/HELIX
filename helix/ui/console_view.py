@@ -513,6 +513,7 @@ class ConsoleView(QWidget):
         self._attachments: list[Path] = []  # files/folders staged for the next message (like Claude)
         self._cancelled = False  # set by a 'stop' — a pending reply is shown but not spoken
         self._cancel: CancelToken | None = None  # the running turn's stop signal
+        self._turn_sources: list = []  # (base, doc) knowledge the current turn drew on — shown as a citation
         # Half-built-work offers awaiting a yes/no. A DEQUE (not one slot): a second stopped build queues
         # its own offer instead of clobbering the first and orphaning its workspace.
         self._cleanups: "deque[BuildHandle]" = deque()
@@ -979,6 +980,8 @@ class ConsoleView(QWidget):
 
         token = self._cancel
         paths = list(attach_paths or [])
+        self._turn_sources = []  # fresh per turn; populated if the orb drew on saved knowledge
+        sources_sink = self._turn_sources
 
         def _run(emit):
             # Read + bundle the attachments OFF the UI thread (a folder can be large); the result rides
@@ -990,7 +993,10 @@ class ConsoleView(QWidget):
                     "(The attached items had no readable text — binary, images, or empty — so their "
                     "contents aren't available.)"
                 )
-            return self._conversation.run_turn(text, attachments_text=atext, on_progress=emit, cancel=token)
+            return self._conversation.run_turn(
+                text, attachments_text=atext, on_progress=emit, cancel=token,
+                knowledge_sources=sources_sink,
+            )
 
         worker = QtWorker(_run)
         # Strong ref until the QThread truly finishes (see _retire) so the GC can't kill a live thread.
@@ -1015,6 +1021,7 @@ class ConsoleView(QWidget):
             self._add_bubble("helix", spoken or str(text))
         for spec in visuals:
             self._add_visual(spec)
+        self._add_citation(self._turn_sources)  # show what saved knowledge this answer drew on, if any
         if self._cancelled:  # the user said stop while this was generating — show it, don't speak it
             self._cancelled = False
             handle = self._cancel.build if self._cancel is not None else None
@@ -1314,6 +1321,24 @@ class ConsoleView(QWidget):
             rowlay.addStretch(1)
         self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
         self._animate_in(bubble)
+        QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def _add_citation(self, sources: list) -> None:
+        """A small 'from <base> › <doc>' line under a reply that drew on the user's saved knowledge — so
+        an answer pulled from their own notes shows its provenance. Hidden when nothing was used."""
+        if not sources:
+            return
+        parts = [f"{base} › {title}" for base, title in sources[:3]]
+        more = f" +{len(sources) - 3}" if len(sources) > 3 else ""
+        lbl = QLabel("📚 from " + "; ".join(parts) + more)
+        lbl.setTextFormat(Qt.TextFormat.PlainText)  # base/doc names are user-controlled — never rich text
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(f"color:{MUTED};font-size:11px;")
+        rowlay = QHBoxLayout()
+        rowlay.setContentsMargins(8, 0, 0, 0)
+        rowlay.addWidget(lbl)
+        rowlay.addStretch(1)
+        self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
         QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _flash_status(self, msg: str) -> None:

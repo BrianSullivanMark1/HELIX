@@ -34,6 +34,12 @@ class BuildService:
     def workspace(self, slug: str) -> Path:
         return self._dir / slug
 
+    @property
+    def dir(self) -> Path:
+        """The builds root (data/builds). Sidecar caches that must survive a rebuild + not trip the Forge
+        escape-guard live here (the guard skips the whole builds tree); list() ignores non-build files."""
+        return self._dir
+
     def exists(self, slug: str) -> bool:
         return (self.workspace(slug) / MANIFEST).exists()
 

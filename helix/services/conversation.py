@@ -66,6 +66,7 @@ class ConversationService:
         self, user_text: str, *, attachments_text: str | None = None,
         on_progress: ProgressFn | None = None,
         cancel: CancelToken | None = None, allow_builds: bool = True, persist: bool = True,
+        knowledge_sources: list[tuple[str, str]] | None = None,
     ) -> str:
         # Only the brief history read-modify-writes are locked — NOT the model/tool loop. Builds run in
         # the background (the build tools just enqueue), so a turn is now milliseconds plus model latency;
@@ -94,10 +95,12 @@ class ConversationService:
         # orb answers from their own material without being told to search. Interactive orb only (persist);
         # an agent retrieves explicitly. auto_context is high-precision, so most turns inject nothing.
         if persist and self._knowledge is not None and turns:
-            knowledge_text = self._knowledge.auto_context(user_text)
+            knowledge_text, ksources = self._knowledge.auto_context_with_sources(user_text)
             if knowledge_text:
                 last = turns[-1]
                 turns[-1] = Turn(last.role, last.blocks + (Text(knowledge_text),))
+                if knowledge_sources is not None:
+                    knowledge_sources.extend(ksources)  # surfaced to the UI as a citation chip
         specs = self._tools.specs()
         if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete/run tools
             specs = [s for s in specs if s.name not in BUILD_TOOLS]

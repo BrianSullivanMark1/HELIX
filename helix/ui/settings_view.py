@@ -68,6 +68,23 @@ class SettingsView(QWidget):
         self._tripo.setPlaceholderText("tsk_…")
         root.addWidget(self._tripo)
 
+        # Voyage API key — turns on SEMANTIC knowledge search (find by meaning, not just words). Optional;
+        # without it, knowledge search uses fast keyword matching. The key is only ever sent to Voyage.
+        root.addSpacing(8)
+        root.addWidget(QLabel("Voyage API key (smarter knowledge search)"))
+        vghint = QLabel(
+            "Optional. Lets HELIX search your saved knowledge by MEANING, not just matching words "
+            "(e.g. “how do I get in?” finds a note about the door code). Get a key at voyageai.com. "
+            "Without it, knowledge search still works using keywords."
+        )
+        vghint.setObjectName("Status")
+        vghint.setWordWrap(True)
+        root.addWidget(vghint)
+        self._voyage = QLineEdit()
+        self._voyage.setEchoMode(QLineEdit.EchoMode.Password)
+        self._voyage.setPlaceholderText("pa-…")
+        root.addWidget(self._voyage)
+
         # Connections — tokens for outside services your apps and agents read (Slack, GitHub, …). Saved on
         # this machine only; injected into a build when it runs, or used by the orb's read-only call_api
         # (e.g. an agent that watches Slack). A build that needs a key also has its own Connect button.
@@ -153,6 +170,7 @@ class SettingsView(QWidget):
     def reload(self) -> None:
         self._key.setText(self._settings.get("claude_api_key", "") or "")
         self._tripo.setText(self._settings.get("tripo_api_key", "") or "")
+        self._voyage.setText(self._settings.get("voyage_api_key", "") or "")
         detail = (self._settings.get("model_detail") or "balanced").lower()
         didx = self._detail.findData(detail)
         self._detail.setCurrentIndex(didx if didx >= 0 else 0)
@@ -172,6 +190,7 @@ class SettingsView(QWidget):
     def _save(self) -> None:
         self._settings.set("claude_api_key", self._key.text().strip())
         self._settings.set("tripo_api_key", self._tripo.text().strip())
+        self._settings.set("voyage_api_key", self._voyage.text().strip())
         self._settings.set("model_detail", self._detail.currentData())
         self._settings.set("tts_voice", self._voice.currentData())
         self._settings.set("tts_rate", round(self._speed.value() / 10, 1))

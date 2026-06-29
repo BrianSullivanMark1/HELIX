@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 from helix.services.knowledge import KnowledgeService
 from helix.ui.theme import CYAN, LINE, MUTED, PANEL, STATUS_DONE
 
-_SOURCE_LABEL = {"note": "note", "file": "file", "folder": "folder"}
+_SOURCE_LABEL = {"note": "note", "file": "file", "folder": "folder", "task": "from a task"}
 
 
 class _DocRow(QFrame):
@@ -200,7 +200,10 @@ class KnowledgeView(QWidget):
                 f"Added {len(added)} document{'s' if len(added) != 1 else ''} from {source}."
             )
         else:
-            self._status.setText("Nothing readable to add — only text documents are ingested (no binaries).")
+            self._status.setText(
+                "Nothing readable to add — text, Markdown, code, PDF, and Word files are supported "
+                "(other binaries are skipped)."
+            )
         self.reload()
 
     # ----- remove -----

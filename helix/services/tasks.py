@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from typing import TYPE_CHECKING
 
 from helix.domain.models import App, AppKind, BuildKind, slugify
@@ -18,6 +19,12 @@ from helix.services.builds import BuildService
 
 if TYPE_CHECKING:
     from helix.services.connections import ConnectionsService
+    from helix.services.knowledge import KnowledgeService
+
+# A task writes results it wants saved into the folder named by this env var; HELIX ingests them into a
+# knowledge base when the task finishes. (See build_task_prompt.)
+KNOWLEDGE_OUTBOX_ENV = "HELIX_KNOWLEDGE_OUTBOX"
+_OUTBOX_DIR = ".knowledge_out"
 
 _LOG = get_logger("tasks")
 
@@ -31,9 +38,13 @@ def _python() -> str:
 
 
 class TaskService:
-    def __init__(self, builds: BuildService, connections: "ConnectionsService | None" = None) -> None:
+    def __init__(
+        self, builds: BuildService, connections: "ConnectionsService | None" = None,
+        knowledge: "KnowledgeService | None" = None,
+    ) -> None:
         self._builds = builds
         self._connections = connections  # injects the build's declared API keys as env vars at launch
+        self._knowledge = knowledge       # ingests a task's outbox into a knowledge base when it finishes
         self._procs: dict[str, subprocess.Popen] = {}  # slug -> live process (for status / cleanup)
 
     def runnable(self) -> list[App]:
@@ -69,6 +80,15 @@ class TaskService:
         if port is not None:
             env["PORT"] = str(port)  # HELIX assigns the port so backend apps never collide
         ws = self._builds.workspace(slug)
+        # Give the task an OUTBOX it can drop results into; HELIX ingests them into a knowledge base when it
+        # finishes (see _watch_knowledge_outbox). Only console TASK runs are watched — a headless backend
+        # app (port set) is a server, not a finishing job, so it's never harvested.
+        outbox = ws / _OUTBOX_DIR
+        try:
+            outbox.mkdir(exist_ok=True)
+            env[KNOWLEDGE_OUTBOX_ENV] = str(outbox)
+        except OSError:
+            pass
         stdout = stderr = None
         flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
         if headless:
@@ -84,10 +104,31 @@ class TaskService:
                 stdout=stdout, stderr=stderr, creationflags=flags,
             )
             self._procs[slug] = proc
+            # Watch a finishing console task for results to harvest into the user's knowledge. A server app
+            # (headless, runs indefinitely) is never harvested.
+            if not headless and self._knowledge is not None:
+                threading.Thread(
+                    target=self._watch_knowledge_outbox, args=(app.name, proc, outbox),
+                    daemon=True, name=f"helix-knowledge-{slug}",
+                ).start()
             return True
         except Exception:
             _LOG.exception("could not launch task %s", slug)
             return False
+
+    def _watch_knowledge_outbox(self, task_name: str, proc: subprocess.Popen, outbox) -> None:
+        """Wait for a task to finish, then ingest anything it wrote to its outbox into a knowledge base
+        named after the task (created on demand). Daemon thread — best-effort, never raises into the app."""
+        try:
+            proc.wait()
+        except Exception:  # noqa: BLE001
+            return
+        if self._knowledge is None:
+            return
+        try:
+            self._knowledge.ingest_outbox(f"{task_name} results", outbox)
+        except Exception:  # noqa: BLE001 - a harvest failure must never disturb the app
+            _LOG.warning("could not harvest knowledge from task %s", task_name, exc_info=True)
 
     def stop(self, slug: str) -> None:
         """Terminate one running build (e.g. a backend app's server when its viewer closes)."""

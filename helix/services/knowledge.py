@@ -18,10 +18,12 @@ reserved for the human-in-the-loop orb, never an autonomous agent.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from helix.domain.errors import BuildError
 from helix.domain.events import BuildCreated, BuildDeleted, BuildIterated
@@ -29,8 +31,11 @@ from helix.domain.knowledge import (
     KnowledgeDoc,
     SearchHit,
     chunk_text,
+    cosine,
     format_hits,
     rank_chunks,
+    score_chunk,
+    semantic_rank,
     tokenize,
 )
 from helix.domain.models import App, BuildKind, slugify
@@ -38,8 +43,13 @@ from helix.logging_setup import get_logger
 from helix.ports.clock import Clock
 from helix.ports.events import EventBus
 from helix.ports.repo import VersionedRepo
-from helix.services import attachments
+from helix.services import attachments, doc_extract
 from helix.services.builds import BuildService
+
+if TYPE_CHECKING:
+    from helix.ports.embedder import Embedder
+
+EMBED_CACHE_FILE = ".embeddings_cache.json"  # lives in data/builds (guard-skipped); ignored by list()
 
 _LOG = get_logger("knowledge")
 
@@ -65,15 +75,18 @@ def _new_nonce(index: int) -> str:
 
 class KnowledgeService:
     def __init__(
-        self, builds: BuildService, repo: VersionedRepo, clock: Clock, bus: EventBus | None = None
+        self, builds: BuildService, repo: VersionedRepo, clock: Clock, bus: EventBus | None = None,
+        embedder: "Embedder | None" = None,
     ) -> None:
         self._builds = builds
         self._repo = repo
         self._clock = clock
         self._bus = bus
+        self._embedder = embedder  # optional: enables semantic search; None → keyword only
         # Ingestion is a read-modify-write of the per-base index; the orb (a worker thread) and the
         # Knowledge view (the UI thread) can both write, so serialize mutations. Search reads defensively.
         self._lock = threading.Lock()
+        self._embed_lock = threading.Lock()  # guards the embedding cache file (not held across the network)
         self._searches = 0  # salts the search fence nonce without needing randomness
 
     # ----- bases (a base is a workspace build with build_kind == KNOWLEDGE) -----
@@ -131,18 +144,88 @@ class KnowledgeService:
         """Ingest the readable text files found under a folder (noise dirs + binaries are skipped)."""
         return self._ingest_paths(slug, [folder], source="folder")
 
-    def _ingest_paths(self, slug: str, paths: list, *, source: str) -> list[KnowledgeDoc]:
-        # collect_files expands folders, dedupes, caps the count, and filters binaries (by extension and a
-        # NUL sniff) — the same vetting an attachment gets, reused so a Knowledge import behaves identically.
-        files = attachments.collect_files([Path(p) for p in paths])
+    def ingest_outbox(self, base_name: str, outbox_dir, *, source: str = "task") -> list[KnowledgeDoc]:
+        """Harvest a finished task's output: ingest every file it dropped in its outbox into a base (created
+        on demand), then DELETE those files so the next run starts clean. Raises BuildError only if the
+        base name collides with a different kind of build. Returns the stored docs."""
+        outbox = Path(outbox_dir)
+        if not outbox.is_dir():
+            return []
+        files = [p for p in sorted(outbox.iterdir()) if p.is_file()]
+        if not files:
+            return []
+        base = self.create(base_name)
         out: list[KnowledgeDoc] = []
         for fp in files:
-            text = self._read_text(fp)
+            text = self._read_any(fp)
+            if text:
+                doc = self._store(base.slug, fp.name, text, source=source)
+                if doc is not None:
+                    out.append(doc)
+            try:
+                fp.unlink()  # harvested → remove so a re-run doesn't re-ingest the same file
+            except OSError:
+                pass
+        return out
+
+    def _ingest_paths(self, slug: str, paths: list, *, source: str) -> list[KnowledgeDoc]:
+        files = self._collect_files([Path(p) for p in paths])
+        out: list[KnowledgeDoc] = []
+        for fp in files:
+            text = self._read_any(fp)
             if text:
                 doc = self._store(slug, fp.name, text, source=source)
                 if doc is not None:
                     out.append(doc)
         return out
+
+    def _collect_files(self, paths: list[Path]) -> list[Path]:
+        """Expand the chosen paths into a deduped, capped list of ingestible files. Like the attachments
+        collector, but ALSO keeps rich documents (PDF/Word) that the plain binary filter would drop —
+        those are extracted at read time. Folders are walked (skipping noise dirs); explicit file picks are
+        kept and filtered when read."""
+        out: list[Path] = []
+        seen: set[Path] = set()
+
+        def add(p: Path) -> None:
+            try:
+                rp = p.resolve()
+            except OSError:
+                return
+            if rp in seen or not rp.is_file():
+                return
+            seen.add(rp)
+            out.append(rp)
+
+        for raw in paths:
+            if len(out) >= attachments.MAX_FILES:
+                break
+            p = Path(raw)
+            if p.is_file():
+                add(p)  # an explicit pick is kept; _read_any decides text vs rich-doc vs skip
+            elif p.is_dir():
+                for root, dirs, files in os.walk(p):
+                    dirs[:] = sorted(
+                        d for d in dirs if d not in attachments._SKIP_DIRS and not d.startswith(".")
+                    )
+                    for name in sorted(files):
+                        fp = Path(root) / name
+                        if doc_extract.is_rich_doc(fp) or not attachments._looks_binary(fp):
+                            add(fp)
+                        if len(out) >= attachments.MAX_FILES:
+                            break
+                    if len(out) >= attachments.MAX_FILES:
+                        break
+        return out[: attachments.MAX_FILES]
+
+    def _read_any(self, path: Path) -> str:
+        """Text for ingestion: extract a rich doc (PDF/Word), read a text file (capped), or "" for a
+        binary/unreadable file."""
+        if doc_extract.is_rich_doc(path):
+            return doc_extract.extract(path).strip()
+        if attachments._looks_binary(path):
+            return ""
+        return self._read_text(path)
 
     @staticmethod
     def _read_text(path: Path) -> str:
@@ -228,7 +311,7 @@ class KnowledgeService:
         targets = self._resolve_targets(base_name)
         if isinstance(targets, str):
             return targets  # a friendly "no such base" / "no knowledge yet" message
-        hits = self._gather_and_rank(query, targets)
+        hits = self._gather_and_rank(query, targets, semantic=True)
         if not hits:
             where = f" in {targets[0].name}" if base_name and targets else " in your saved knowledge"
             return f"I couldn't find anything about that{where}."
@@ -245,12 +328,19 @@ class KnowledgeService:
             single shared word never triggers it, while a stray extra word ("…the wifi password again?")
             doesn't suppress a genuine match.
         Returns "" when nothing qualifies. Cheap, local, no network — safe to call on every orb turn."""
+        return self.auto_context_with_sources(query, limit=limit, max_chars=max_chars)[0]
+
+    def auto_context_with_sources(
+        self, query: str, *, limit: int = 3, max_chars: int = 3000
+    ) -> tuple[str, list[tuple[str, str]]]:
+        """auto_context plus the (base, document) pairs it surfaced — so the UI can show a small 'from …'
+        citation under a reply that drew on saved knowledge. Returns ("", []) when nothing qualifies."""
         qtokens = list(dict.fromkeys(tokenize(query)))
         if len(qtokens) < 2:
-            return ""
+            return "", []
         bases = self.bases()
         if not bases:
-            return ""
+            return "", []
         qset = set(qtokens)
         strong: list[SearchHit] = []
         for h in self._gather_and_rank(query, bases):  # already ranked best-first
@@ -261,9 +351,17 @@ class KnowledgeService:
             if len(strong) >= limit:
                 break
         if not strong:
-            return ""
+            return "", []
         self._searches += 1
-        return format_hits(strong, _new_nonce(self._searches), max_chars=max_chars, speculative=True)
+        text = format_hits(strong, _new_nonce(self._searches), max_chars=max_chars, speculative=True)
+        sources: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for h in strong:
+            key = (h.base, h.title)
+            if key not in seen:
+                seen.add(key)
+                sources.append(key)
+        return text, sources
 
     def preview(self, query: str, base_name: str | None = None) -> list[SearchHit]:
         """Ranked hits for the Knowledge view's own search box (plain objects, not a fenced block)."""
@@ -273,7 +371,7 @@ class KnowledgeService:
         targets = self._resolve_targets(base_name)
         if isinstance(targets, str):
             return []
-        return self._gather_and_rank(query, targets)
+        return self._gather_and_rank(query, targets, semantic=True)
 
     def _resolve_targets(self, base_name: str | None):
         """The bases a search should cover: one named base, or all of them. Returns a friendly string
@@ -289,7 +387,9 @@ class KnowledgeService:
             return [one]
         return bases
 
-    def _gather_and_rank(self, query: str, bases: list[App]) -> list[SearchHit]:
+    def _gather_and_rank(
+        self, query: str, bases: list[App], *, semantic: bool = False
+    ) -> list[SearchHit]:
         passages: list[tuple[str, str, str]] = []
         for base in bases:
             for doc in self._load_index(base.slug):
@@ -301,7 +401,82 @@ class KnowledgeService:
                     continue
                 for chunk in chunk_text(text):
                     passages.append((base.name, doc.title, chunk))
+        if semantic and self._embedder is not None and self._embedder.available():
+            hits = self._semantic_rank(query, passages)
+            if hits is not None:  # None = embedding unavailable/failed → fall back to keyword
+                return hits
         return rank_chunks(query, passages)
+
+    # ----- optional semantic ranking (embeddings; falls back to keyword on any failure) -----
+    def _semantic_rank(
+        self, query: str, passages: list[tuple[str, str, str]]
+    ) -> list[SearchHit] | None:
+        """Blend embedding similarity with the keyword score. Returns None (→ keyword fallback) if the
+        query or chunk embeddings can't be obtained; [] is a valid 'nothing relevant' result."""
+        if not passages:
+            return []
+        qvecs = self._embedder.embed([query], input_type="query")
+        if not qvecs:
+            return None
+        qv = qvecs[0]
+        cvecs = self._chunk_vectors([c for _, _, c in passages])
+        if cvecs is None:
+            return None
+        qtokens = tokenize(query)
+        scored = [
+            (base, title, chunk, score_chunk(qtokens, chunk), cosine(qv, cv))
+            for (base, title, chunk), cv in zip(passages, cvecs)
+        ]
+        return semantic_rank(scored)
+
+    def _chunk_vectors(self, chunk_texts: list[str]) -> list[list[float]] | None:
+        """Embeddings for each chunk, served from an on-disk cache (keyed by model+content) — only the
+        cache MISSES hit the network, so repeated searches are cheap. Returns None if the embedder fails."""
+        model = getattr(self._embedder, "model", "")
+        keys = [self._embed_key(model, t) for t in chunk_texts]
+        with self._embed_lock:
+            cache = self._load_cache()
+        missing: dict[str, str] = {}
+        for k, t in zip(keys, chunk_texts):
+            if k not in cache:
+                missing.setdefault(k, t)
+        if missing:
+            miss_keys = list(missing.keys())
+            vecs = self._embedder.embed([missing[k] for k in miss_keys], input_type="document")
+            if vecs is None or len(vecs) != len(miss_keys):
+                return None
+            fresh = dict(zip(miss_keys, vecs))
+            with self._embed_lock:
+                cache = self._load_cache()  # re-read to merge with any concurrent writer, then persist
+                cache.update(fresh)
+                self._save_cache(cache)
+        try:
+            return [cache[k] for k in keys]
+        except KeyError:
+            return None
+
+    @staticmethod
+    def _embed_key(model: str, text: str) -> str:
+        return hashlib.sha1(f"{model}\n{text}".encode("utf-8")).hexdigest()
+
+    def _cache_path(self) -> Path:
+        return self._builds.dir / EMBED_CACHE_FILE
+
+    def _load_cache(self) -> dict[str, list[float]]:
+        try:
+            raw = json.loads(self._cache_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _save_cache(self, cache: dict) -> None:
+        path = self._cache_path()
+        tmp = path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(cache), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            _LOG.warning("could not save embedding cache: %s", exc)
 
     # ----- helpers -----
     def _workspace(self, slug: str) -> Path:

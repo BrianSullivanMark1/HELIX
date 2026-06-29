@@ -80,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
     # mapbox_earcut), so PyInstaller's static scan misses them — collect each in full.
     for pkg in ("trimesh", "shapely", "manifold3d", "mapbox_earcut"):
         args += ["--collect-all", pkg]
+    # Knowledge document ingestion: pypdf is pure-python; python-docx (imported as `docx`) ships a default
+    # template as DATA that a static scan misses — collect both in full so PDF/Word ingestion works frozen.
+    for pkg in ("pypdf", "docx"):
+        args += ["--collect-all", pkg]
     # scipy 1.16 added a compiled helper (scipy._cyutility) that scipy.linalg/ndimage import at startup;
     # PyInstaller 6.12's bundled scipy hook predates it and skips it, so the frozen app dies importing
     # materials.py (gaussian_filter -> scipy.ndimage -> scipy.linalg -> _cyutility). Pull it in explicitly.

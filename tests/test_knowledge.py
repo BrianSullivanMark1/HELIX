@@ -11,9 +11,11 @@ from helix.domain.errors import BuildError
 from helix.domain.knowledge import (
     SearchHit,
     chunk_text,
+    cosine,
     format_hits,
     rank_chunks,
     score_chunk,
+    semantic_rank,
     tokenize,
 )
 from helix.domain.models import App, BuildKind
@@ -92,9 +94,31 @@ class _Bus:
         self.events.append(e)
 
 
-def _svc(tmp_path, bus=None) -> KnowledgeService:
+def _svc(tmp_path, bus=None, embedder=None) -> KnowledgeService:
     builds = BuildService(tmp_path, _NoRepo(), _FixedClock())
-    return KnowledgeService(builds, _NoRepo(), _FixedClock(), bus=bus)
+    return KnowledgeService(builds, _NoRepo(), _FixedClock(), bus=bus, embedder=embedder)
+
+
+class _FakeEmbedder:
+    """Deterministic embedder: anything about ENTRY/ACCESS maps to one direction, everything else to
+    another — so a query and a passage can be 'about the same thing' with NO shared keywords."""
+
+    model = "fake-1"
+    _ENTRY = ("door", "code", "inside", "enter", "building", "access", "key", "lock")
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def available(self) -> bool:
+        return True
+
+    def embed(self, texts, *, input_type=None):
+        self.calls += 1
+        return [self._vec(t.lower()) for t in texts]
+
+    @classmethod
+    def _vec(cls, t: str):
+        return [1.0, 0.0, 0.0] if any(w in t for w in cls._ENTRY) else [0.0, 0.0, 1.0]
 
 
 def test_create_makes_a_knowledge_workspace_and_categorizes(tmp_path):
@@ -146,6 +170,51 @@ def test_add_files_ingests_text_and_skips_binary(tmp_path):
     docs = ks.add_files(base.slug, [good, binary])
     assert [d.title for d in docs] == ["note.txt"]  # the binary was skipped
     assert "Tuesday" in ks.search("deadline")
+
+
+def test_add_files_ingests_a_word_document(tmp_path):
+    docx = pytest.importorskip("docx")
+    ks = _svc(tmp_path)
+    base = ks.create("Docs")
+    p = tmp_path / "vault.docx"
+    d = docx.Document()
+    d.add_paragraph("The vault combination is 12-24-36.")
+    d.save(str(p))
+    added = ks.add_files(base.slug, [p])
+    assert [a.title for a in added] == ["vault.docx"]
+    assert "12-24-36" in ks.search("vault combination")
+
+
+def test_ingest_outbox_harvests_results_and_clears_them(tmp_path):
+    ks = _svc(tmp_path)
+    outbox = tmp_path / "ob"
+    outbox.mkdir()
+    (outbox / "digest.md").write_text("Top story: markets rallied today.", encoding="utf-8")
+    docs = ks.ingest_outbox("Morning News results", outbox)
+    assert len(docs) == 1
+    assert {a.name for a in ks.bases()} == {"Morning News results"}
+    assert "markets rallied" in ks.search("markets")
+    assert not (outbox / "digest.md").exists()           # harvested files are removed
+    assert ks.ingest_outbox("Morning News results", outbox) == []  # nothing left to harvest
+
+
+def test_task_watcher_harvests_its_outbox_into_knowledge(tmp_path):
+    # The TaskService watcher: when a task finishes, its outbox is ingested into a base named for the task.
+    from helix.services.tasks import TaskService
+
+    ks = _svc(tmp_path)
+    tasks = TaskService(ks._builds, knowledge=ks)
+    outbox = tmp_path / "task_ob"
+    outbox.mkdir()
+    (outbox / "summary.txt").write_text("Sales were up 12 percent in June.", encoding="utf-8")
+
+    class _Proc:
+        def wait(self):
+            return 0  # already finished
+
+    tasks._watch_knowledge_outbox("Sales Report", _Proc(), outbox)
+    assert {a.name for a in ks.bases()} == {"Sales Report results"}
+    assert "12 percent" in ks.search("sales")
 
 
 def test_remove_doc_drops_it_from_index_and_disk(tmp_path):
@@ -211,6 +280,64 @@ def test_auto_context_surfaces_only_on_a_confident_match(tmp_path):
     assert ks.auto_context("wifi dentist") == ""
     # a message unrelated to anything saved → nothing
     assert ks.auto_context("quarterly revenue forecast") == ""
+
+
+# ───────────────────────── semantic search (optional embeddings) ─────────────────────────
+def test_cosine_basics():
+    assert cosine([1.0, 0.0], [1.0, 0.0]) == 1.0
+    assert abs(cosine([1.0, 0.0], [0.0, 1.0])) < 1e-9
+    assert cosine([], [1.0]) == 0.0
+    assert cosine([0.0, 0.0], [1.0, 1.0]) == 0.0
+
+
+def test_semantic_rank_keeps_keyword_and_strong_semantic_drops_the_rest():
+    scored = [
+        ("B", "kw", "keyword passage", 5.0, 0.10),   # keyword hit, weak cosine → kept (never regress)
+        ("B", "sem", "semantic passage", 0.0, 0.90),  # no keyword, strong cosine → kept
+        ("B", "none", "unrelated", 0.0, 0.20),        # neither → dropped
+    ]
+    titles = [h.title for h in semantic_rank(scored)]
+    assert "kw" in titles and "sem" in titles and "none" not in titles
+
+
+def test_semantic_search_finds_a_meaning_match_with_no_shared_words(tmp_path):
+    emb = _FakeEmbedder()
+    ks = _svc(tmp_path, embedder=emb)
+    base = ks.create("Home")
+    ks.add_note(base.slug, "The door code is 4815.")
+    ks.add_note(base.slug, "Dentist appointment on Friday.")
+    # "get inside the building" shares NO words with "the door code is 4815" — only meaning.
+    out = ks.search("how do I get inside the building")
+    assert "4815" in out
+    assert "Dentist" not in out  # the unrelated note is not dragged in
+
+
+def test_semantic_falls_back_to_keyword_when_the_embedder_fails(tmp_path):
+    class _Failing:
+        model = "x"
+
+        def available(self):
+            return True
+
+        def embed(self, texts, *, input_type=None):
+            return None  # always fails
+
+    ks = _svc(tmp_path, embedder=_Failing())
+    base = ks.create("Notes")
+    ks.add_note(base.slug, "The wifi password is hunter2.")
+    assert "hunter2" in ks.search("wifi password")  # keyword search still works
+
+
+def test_semantic_caches_chunk_vectors_across_searches(tmp_path):
+    emb = _FakeEmbedder()
+    ks = _svc(tmp_path, embedder=emb)
+    base = ks.create("Home")
+    ks.add_note(base.slug, "The door code is 4815.")
+    ks.search("how do I get inside")   # embeds the query + the one chunk (2 calls)
+    ks.search("how do I get inside")   # embeds only the query; the chunk is served from cache (1 call)
+    assert emb.calls == 3
+    cache = json.loads((ks._builds.dir / ".embeddings_cache.json").read_text(encoding="utf-8"))
+    assert len(cache) == 1  # exactly one chunk vector cached (not re-embedded or duplicated)
 
 
 # ───────────────────────── the orb tools ─────────────────────────

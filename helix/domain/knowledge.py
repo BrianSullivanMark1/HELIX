@@ -13,6 +13,7 @@ service or the tools.
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 
@@ -25,6 +26,15 @@ CHUNK_OVERLAP = 150
 # context window or the token bill (mirrors the attachments service's posture).
 MAX_HITS = 6
 MAX_RESULT_CHARS = 8_000
+
+# Semantic search (optional, when an embedder is configured): a passage with NO keyword overlap is only
+# surfaced when its cosine similarity to the query clears this floor — so semantic search can ADD
+# meaning-based matches a keyword search would miss, without dredging up unrelated text. Keyword matches
+# are always kept, so enabling semantic never regresses keyword recall. Blend weights favor cosine for
+# ordering once a passage qualifies.
+SEMANTIC_FLOOR = 0.62
+SEMANTIC_KEYWORD_WEIGHT = 0.4
+SEMANTIC_COSINE_WEIGHT = 0.6
 
 # Common words carry no signal for matching; drop them from the query so scoring keys off the real terms.
 _STOPWORDS = frozenset("""
@@ -177,6 +187,37 @@ def rank_chunks(query: str, passages: list[tuple[str, str, str]], limit: int = M
             scored.append(SearchHit(base=base, title=title, text=chunk, score=s))
     scored.sort(key=lambda h: h.score, reverse=True)
     return scored[:limit]
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two vectors (0.0 for empty/mismatched/zero vectors). Pure."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def semantic_rank(
+    scored: list[tuple[str, str, str, float, float]], limit: int = MAX_HITS
+) -> list[SearchHit]:
+    """Blend keyword + embedding signals. `scored` is (base, title, chunk, keyword_score, cosine) per
+    passage. A passage qualifies if it has ANY keyword overlap OR its cosine clears SEMANTIC_FLOOR — so
+    semantic search adds meaning-based matches without surfacing unrelated text, and never drops a keyword
+    hit. Ranked by a weighted blend of the normalized keyword score and the cosine. Pure + testable."""
+    qualifying = [s for s in scored if s[3] > 0.0 or s[4] >= SEMANTIC_FLOOR]
+    if not qualifying:
+        return []
+    max_kw = max((s[3] for s in qualifying), default=0.0) or 1.0
+    hits: list[SearchHit] = []
+    for base, title, chunk, kw, cos in qualifying:
+        blended = SEMANTIC_KEYWORD_WEIGHT * (kw / max_kw) + SEMANTIC_COSINE_WEIGHT * max(0.0, cos)
+        hits.append(SearchHit(base=base, title=title, text=chunk, score=blended))
+    hits.sort(key=lambda h: h.score, reverse=True)
+    return hits[:limit]
 
 
 def format_hits(

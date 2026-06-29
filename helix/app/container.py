@@ -20,6 +20,7 @@ from helix.adapters.signal_bus import SignalBus
 from helix.adapters.speech import EdgeSpeechOut, OsSpeechOut, WhisperSpeechIn
 from helix.adapters.sqlite_store import SqliteStore
 from helix.adapters.system_clock import SystemClock
+from helix.adapters.voyage_embed import VoyageEmbedder
 from helix.config import AppPaths
 from helix.domain.models import Role
 from helix.logging_setup import setup_logging
@@ -133,11 +134,24 @@ class Container:
         # written into a build's folder, git, or the browser.
         self.secrets = JsonSettings(self.paths.data / "helix_secrets.json")
         self.connections = ConnectionsService(self.builds, self.secrets)
-        self.tasks = TaskService(self.builds, connections=self.connections)
+        # Optional SEMANTIC knowledge search: enabled only when a Voyage key is set (Settings or the
+        # VOYAGE_API_KEY env var). The key is read PER search, so adding it takes effect with no restart;
+        # without it, knowledge search is keyword-only. Failures fall back to keyword automatically.
+        def _voyage_key() -> str | None:
+            return (
+                (self.settings.get("voyage_api_key") or os.environ.get("VOYAGE_API_KEY") or "").strip()
+                or None
+            )
+
+        self.embedder = VoyageEmbedder(_voyage_key)
         # Knowledge: the user's own searchable notes/documents. A workspace build like any other (so it
         # inherits git, the rebuild-surviving guard skip, and voice rename/delete), but ingested directly
-        # here — never by the coder — so there is no build sandbox in the loop.
-        self.knowledge = KnowledgeService(self.builds, self.repo, self.clock, bus=self.bus)
+        # here — never by the coder — so there is no build sandbox in the loop. Built before tasks so a
+        # finishing task can harvest its output into a knowledge base.
+        self.knowledge = KnowledgeService(
+            self.builds, self.repo, self.clock, bus=self.bus, embedder=self.embedder
+        )
+        self.tasks = TaskService(self.builds, connections=self.connections, knowledge=self.knowledge)
         self.tools = ToolRegistry(
             self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue,
             tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane, connections=self.connections,
