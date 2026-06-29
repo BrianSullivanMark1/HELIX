@@ -27,7 +27,7 @@ DeepThink = Callable[[str, ProgressFn | None, object], str]
 
 
 def _enqueued_msg(name: str, ahead: int, label: str) -> str:
-    """The terse acknowledgement the model relays after a build is enqueued. label: '', 'task', 'model'."""
+    """The terse acknowledgement the model relays after a build is enqueued. label: '', 'flow', 'model'."""
     thing = f"the {name} {label}".rstrip() if label else name
     if ahead == 0:
         return f"Starting {thing} now."
@@ -128,10 +128,10 @@ class ToolRegistry:
             ToolSpec(
                 name="build_task",
                 description=(
-                    "Build a TASK — a small program that DOES A THING when run (a script, an automation, "
+                    "Build a FLOW — a small program that DOES A THING when run (a script, an automation, "
                     "a converter, a generator) instead of opening a screen. It runs in its own console "
-                    "and lands in the Tasks tab; the user runs it on demand. Use this when they want an "
-                    "action performed repeatably, not an interactive app. To CHANGE a task, call this "
+                    "and lands in the Flows tab; the user runs it on demand. Use this when they want an "
+                    "action performed repeatably, not an interactive app. To CHANGE a flow, call this "
                     "again with the SAME name and the change. Only call AFTER the user confirms — "
                     "building spends Claude time, like build_app."
                 ),
@@ -140,13 +140,13 @@ class ToolRegistry:
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "A short, human name for the task, e.g. 'Rename Downloads'.",
+                            "description": "A short, human name for the flow, e.g. 'Rename Downloads'.",
                         },
                         "request": {
                             "type": "string",
                             "description": (
-                                "Plain-language description of what the task should do — or, when "
-                                "modifying an existing task, the change to make."
+                                "Plain-language description of what the flow should do — or, when "
+                                "modifying an existing flow, the change to make."
                             ),
                         },
                     },
@@ -162,7 +162,7 @@ class ToolRegistry:
             ToolSpec(
                 name="delete_build",
                 description=(
-                    "Permanently delete something the user made — an app, a task, a 3D model, or an "
+                    "Permanently delete something the user made — an app, a flow, a 3D model, or an "
                     "agent — by its name. Use when the user clearly asks to remove or delete one of "
                     "their builds. This cannot be undone. HELIX will ask the user to confirm with one "
                     "click before anything is removed, so call this only when they've asked to delete it."
@@ -182,7 +182,7 @@ class ToolRegistry:
             ToolSpec(
                 name="rename_build",
                 description=(
-                    "Rename something the user made — an app, a task, a 3D model, or an agent — to a new "
+                    "Rename something the user made — an app, a flow, a 3D model, or an agent — to a new "
                     "name, by talking. Use when the user asks to rename or 'call it …' one of their "
                     "builds. The build keeps everything else; only its display name changes."
                 ),
@@ -202,13 +202,13 @@ class ToolRegistry:
                 ToolSpec(
                     name="run_task",
                     description=(
-                        "Run one of the user's TASKS by name — launch the script so it does its thing. "
-                        "Use when the user asks to run/start a task they built. It opens in its own "
+                        "Run one of the user's FLOWS by name — launch the script so it does its thing. "
+                        "Use when the user asks to run/start a flow they built. It opens in its own "
                         "console; report that you've launched it."
                     ),
                     input_schema={
                         "type": "object",
-                        "properties": {"name": {"type": "string", "description": "The task to run."}},
+                        "properties": {"name": {"type": "string", "description": "The flow to run."}},
                         "required": ["name"],
                         "additionalProperties": False,
                     },
@@ -534,7 +534,7 @@ class ToolRegistry:
                 args["name"], args["request"], kind=BuildKind.TASK,
                 prompt=build_task_prompt(args["name"], args["request"]),
             )
-            return _enqueued_msg(args["name"], ahead, "task")
+            return _enqueued_msg(args["name"], ahead, "flow")
         if name == "list_builds" and self._queue is not None:
             return self._queue.status_line()
         if name == "prioritize_build" and self._queue is not None:
@@ -587,7 +587,7 @@ class ToolRegistry:
         if name == "run_task" and self._tasks is not None:
             task = self._tasks.find(args["name"])
             if task is None:
-                return f"I don't see a task called '{args['name']}'."
+                return f"I don't see a flow called '{args['name']}'."
             return f"Running '{task.name}'." if self._tasks.run(task.slug) else f"Couldn't launch '{task.name}'."
         if name == "run_agent" and self._agents is not None:
             target = args["name"].strip().lower()

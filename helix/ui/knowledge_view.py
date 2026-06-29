@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 from helix.services.knowledge import KnowledgeService
 from helix.ui.theme import CYAN, LINE, MUTED, PANEL, STATUS_DONE
 
-_SOURCE_LABEL = {"note": "note", "file": "file", "folder": "folder", "task": "from a task"}
+_SOURCE_LABEL = {"note": "note", "file": "file", "folder": "folder", "task": "from a flow"}
 
 
 class _DocRow(QFrame):

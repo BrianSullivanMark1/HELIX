@@ -60,7 +60,7 @@ _STATUS_COLORS: dict[OrbStatus, tuple[str, str]] = {
 
 # `warm` blends cyan→gold (speaking); `accent` drives the amber thinking arc; `glow` is overall energy.
 _PARAMS: dict[OrbState, dict[str, float]] = {
-    OrbState.IDLE: {"glow": 0.42, "amp": 0.045, "speed": 0.055, "accent": 0.0, "warm": 0.0},
+    OrbState.IDLE: {"glow": 0.50, "amp": 0.050, "speed": 0.065, "accent": 0.0, "warm": 0.0},
     OrbState.LISTENING: {"glow": 0.78, "amp": 0.075, "speed": 0.10, "accent": 0.15, "warm": 0.0},
     OrbState.TRANSCRIBING: {"glow": 0.88, "amp": 0.060, "speed": 0.24, "accent": 0.0, "warm": 0.0},
     OrbState.THINKING: {"glow": 0.66, "amp": 0.050, "speed": 0.14, "accent": 1.0, "warm": 0.0},
@@ -133,7 +133,7 @@ def _build_circuits(seed: int = 0x4845) -> tuple[list, list, list]:
                 pts.append((x, y))
             horiz = not horiz
         if len(pts) >= 2:
-            traces.append((pts, i % 3 == 0, rng.uniform(0, 1)))
+            traces.append((pts, i % 2 == 0, rng.uniform(0, 1)))  # half are buses → more impulses firing
             nodes.append(pts[-1])
     for _ in range(12):  # extra scattered pads
         rr, a = rng.uniform(0.15, 0.85), rng.uniform(0, 2 * math.pi)
@@ -146,7 +146,7 @@ def _build_smoke(seed: int = 0x536D) -> list[tuple[float, float, float, float]]:
     rng = random.Random(seed)
     return [
         (rng.uniform(0, 2 * math.pi), rng.uniform(0, 1), rng.uniform(0.4, 0.9), rng.uniform(0.5, 1.1))
-        for _ in range(14)
+        for _ in range(18)
     ]
 
 
@@ -185,7 +185,7 @@ def paint_orb(
         px = sx + math.cos(theta) * r * prog
         py = sy + math.sin(theta) * r * prog - r * 0.85 * prog
         rad = r * (0.2 + prog * 0.5) * sz
-        a = int(52 * glow * math.sin(prog * math.pi))
+        a = int(64 * glow * math.sin(prog * math.pi))
         if a <= 1:
             continue
         blob = QRadialGradient(QPointF(px, py), rad)
@@ -195,12 +195,12 @@ def paint_orb(
         p.drawEllipse(QPointF(px, py), rad, rad)
 
     # 2. Aura.
-    aura = QRadialGradient(center, r * 1.7)
-    aura.setColorAt(0.0, _col(cold, warm_color, warm, int(34 * glow)))
-    aura.setColorAt(0.55, _col(cold, warm_color, warm, int(30 * glow)))
+    aura = QRadialGradient(center, r * 1.8)
+    aura.setColorAt(0.0, _col(cold, warm_color, warm, int(46 * glow)))
+    aura.setColorAt(0.55, _col(cold, warm_color, warm, int(38 * glow)))
     aura.setColorAt(1.0, _col(cold, warm_color, warm, 0))
     p.setBrush(aura)
-    p.drawEllipse(center, r * 1.7, r * 1.7)
+    p.drawEllipse(center, r * 1.8, r * 1.8)
 
     # 3. Dark electronic body.
     hx, hy = cx - r * 0.3, cy - r * 0.34
@@ -211,26 +211,54 @@ def paint_orb(
     p.setBrush(body)
     p.drawEllipse(center, r, r)
 
-    # 4. Circuit-city, clipped to the sphere.
+    # 4. Circuit-city, clipped to the sphere — a living lattice: a mind-core that breathes and emits energy
+    #    pulses, an activation wavefront that lights the circuit up in sequence, synapses that flare
+    #    white-hot, and impulses racing the buses. This is where the Presence reads as conscious.
     clip = QPainterPath()
     clip.addEllipse(center, r, r)
     p.save()
     p.setClipPath(clip)
-    core = QRadialGradient(center, r * 0.5)
-    core.setColorAt(0.0, _col(cold, warm_color, warm, int(90 * glow)))
+
+    # The mind core: a central glow that BREATHES (a slow pulse), brightest at its white-hot centre.
+    pulse = 0.72 + 0.28 * math.sin(t * 0.045)
+    core = QRadialGradient(center, r * 0.58)
+    core.setColorAt(0.0, _col("#ffffff", warm_color, warm * 0.6, int(72 * glow * pulse)))
+    core.setColorAt(0.4, _col(cold, warm_color, warm, int(120 * glow * pulse)))
     core.setColorAt(1.0, _col(cold, warm_color, warm, 0))
     p.setBrush(core)
-    p.drawEllipse(center, r * 0.5, r * 0.5)
-    lw = max(1.0, r * 0.009)
+    p.drawEllipse(center, r * 0.58, r * 0.58)
+
+    # Concentric energy pulses ripple outward from the core — the visible "thinking" heartbeat.
     p.setBrush(Qt.BrushStyle.NoBrush)
+    for k in range(3):
+        rp = (t * 0.011 + k / 3.0) % 1.0
+        ring_r = r * (0.06 + rp * 0.96)
+        a = int(120 * glow * math.sin(rp * math.pi))
+        if a <= 2:
+            continue
+        pen = QPen(_col(cold, warm_color, warm, a))
+        pen.setWidthF(max(1.0, r * 0.014))
+        p.setPen(pen)
+        p.drawEllipse(center, ring_r, ring_r)
+
+    # An activation wavefront sweeps outward; everything near it brightens — a thought propagating.
+    wf = (t * 0.010) % 1.45
+
+    def wave(rr: float) -> float:
+        d = rr - wf
+        return 1.0 + 1.05 * math.exp(-(d * d) / 0.010)
+
+    lw = max(1.0, r * 0.009)
     for rad, a0, span in rings:  # concentric ring buses
-        pen = QPen(_col(cold, warm_color, warm, int(80 * glow)))
+        pen = QPen(_col(cold, warm_color, warm, min(255, int(82 * glow * wave(rad)))))
         pen.setWidthF(lw)
         p.setPen(pen)
         p.drawArc(QRectF(cx - r * rad, cy - r * rad, 2 * r * rad, 2 * r * rad), int(a0 * 16), int(span * 16))
     for pts, is_bus, _ph in traces:  # the streets / wiring
-        pen = QPen(_col(cold, warm_color, warm, int((125 if is_bus else 66) * glow)))
-        pen.setWidthF(lw)
+        rr = math.hypot(*_along(pts, 0.5))  # midpoint radius drives the wave brightening
+        a = min(255, int((132 if is_bus else 64) * glow * wave(rr)))
+        pen = QPen(_col(cold, warm_color, warm, a))
+        pen.setWidthF(lw * (1.25 if is_bus else 1.0))
         p.setPen(pen)
         path = QPainterPath()
         path.moveTo(cx + pts[0][0] * r, cy + pts[0][1] * r)
@@ -238,27 +266,40 @@ def paint_orb(
             path.lineTo(cx + ux * r, cy + uy * r)
         p.drawPath(path)
     p.setPen(Qt.PenStyle.NoPen)
-    for ux, uy in nodes:  # junction pads
+    for ux, uy in nodes:  # junction pads = synapses: each twinkles on its own clock, some flare white-hot
         nx, ny = cx + ux * r, cy + uy * r
-        pad = QRadialGradient(QPointF(nx, ny), r * 0.026)
-        pad.setColorAt(0.0, _col(cold, warm_color, warm, int(160 * glow)))
+        rr = math.hypot(ux, uy)
+        ph = (ux * 7.3 + uy * 5.1) % 1.0
+        tw = 0.5 + 0.5 * math.sin((t * 0.05 + ph) * 2 * math.pi)
+        bright = wave(rr) * (0.55 + 0.85 * tw)
+        pr = r * 0.028 * (0.85 + 0.4 * tw)
+        hot = tw > 0.86  # a firing synapse
+        pad = QRadialGradient(QPointF(nx, ny), pr)
+        pad.setColorAt(0.0, _col("#ffffff", warm_color, warm * 0.5, min(255, int(175 * glow * bright)))
+                       if hot else _col(cold, warm_color, warm, min(255, int(150 * glow * bright))))
         pad.setColorAt(1.0, _col(cold, warm_color, warm, 0))
         p.setBrush(pad)
-        p.drawEllipse(QPointF(nx, ny), r * 0.026, r * 0.026)
-    for pts, is_bus, ph in traces:  # impulses fire down the bus traces (a comet head + fading trail)
+        p.drawEllipse(QPointF(nx, ny), pr, pr)
+        if hot:  # a wider soft bloom when it fires
+            bloom = QRadialGradient(QPointF(nx, ny), pr * 2.6)
+            bloom.setColorAt(0.0, _col(cold, warm_color, warm, int(95 * glow)))
+            bloom.setColorAt(1.0, _col(cold, warm_color, warm, 0))
+            p.setBrush(bloom)
+            p.drawEllipse(QPointF(nx, ny), pr * 2.6, pr * 2.6)
+    for pts, is_bus, ph in traces:  # impulses race the buses — a white-hot comet head + a glowing trail
         if not is_bus:
             continue
-        head = (t * 0.03 + ph) % 1.0
-        for j in range(6):
-            prog = head - 0.05 * j
+        head = (t * 0.032 + ph) % 1.0
+        for j in range(9):
+            prog = head - 0.045 * j
             if prog <= 0.02 or prog >= 1.0:
                 continue
             ux, uy = _along(pts, prog)
             nx, ny = cx + ux * r, cy + uy * r
-            f = 1.0 - j / 6.0
-            rad = r * (0.01 + 0.03 * f)
-            a = int(245 * glow * f * f)
-            if a <= 1:
+            f = 1.0 - j / 9.0
+            rad = r * (0.012 + 0.036 * f)
+            a = int(255 * glow * f * f)
+            if a <= 2:
                 continue
             comet = QRadialGradient(QPointF(nx, ny), rad)
             comet.setColorAt(
@@ -281,7 +322,7 @@ def paint_orb(
     p.drawEllipse(center, r, r)
     rim = QRadialGradient(center, r)
     rim.setColorAt(0.80, _col(cold, warm_color, warm, 0))
-    rim.setColorAt(0.97, _col(cold, warm_color, warm, int(160 * glow)))
+    rim.setColorAt(0.97, _col(cold, warm_color, warm, int(205 * glow)))
     rim.setColorAt(1.0, _col(cold, warm_color, warm, 0))
     p.setBrush(rim)
     p.drawEllipse(center, r, r)

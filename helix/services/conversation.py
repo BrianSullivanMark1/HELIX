@@ -179,7 +179,7 @@ class ConversationService:
         if tool == "build_app":
             return f"Building {args.get('name', 'your app')}…"
         if tool == "build_task":
-            return f"Building the {args.get('name', 'task')} task…"
+            return f"Building the {args.get('name', 'flow')} flow…"
         if tool == "build_3d_model":
             return f"Modeling {args.get('name', 'it')}…"
         if tool == "create_agent":

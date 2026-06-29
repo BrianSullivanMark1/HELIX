@@ -1,5 +1,12 @@
-"""SettingsView — your Claude API key, and HELIX's voice (neural accent + speed)."""
+"""SettingsView — clean, scannable settings.
+
+One required field (your Claude key) up top; every OPTIONAL integration grouped under "API Connections",
+each a single row with an at-a-glance Set/Not-set status and an ⓘ button that pops the detail — so the
+page stays uncluttered and easy to fill in. Long forms scroll; Save stays pinned at the bottom.
+"""
 from __future__ import annotations
+
+from typing import Callable
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -7,8 +14,11 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -16,7 +26,7 @@ from PyQt6.QtWidgets import (
 from helix.adapters.speech import DEFAULT_TTS_VOICE, TTS_VOICES, edge_available
 from helix.domain.connections import KNOWN_SERVICES
 from helix.ports.stores import SettingsStore
-from helix.ui.theme import MUTED
+from helix.ui.theme import CYAN, LINE, MUTED, STATUS_DONE
 
 
 class SettingsView(QWidget):
@@ -28,100 +38,83 @@ class SettingsView(QWidget):
         self._settings = settings
         self._connections = connections           # save/load service tokens used by agents + call_api
         self._conn_fields: list[tuple[str, QLineEdit]] = []  # (env-var name, field)
+        # (status QLabel, getter) pairs refreshed on load + save so each row shows Set / Not set at a glance.
+        self._statuses: list[tuple[QLabel, Callable[[], str]]] = []
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(36, 24, 36, 28)
-        root.setSpacing(12)
+        root.setContentsMargins(36, 22, 36, 18)
+        root.setSpacing(10)
 
         title = QLabel("Settings")
         title.setObjectName("Title")
         root.addWidget(title)
 
-        hint = QLabel(
-            "Your Claude API key stays on this machine. The only thing it's ever used for is the "
-            "Claude calls you trigger."
-        )
-        hint.setObjectName("Status")
-        hint.setWordWrap(True)
-        root.addWidget(hint)
+        # Everything scrolls; Save stays pinned below, so a long form never hides the button.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        form_host = QWidget()
+        form_host.setStyleSheet("background:transparent;")
+        form = QVBoxLayout(form_host)
+        form.setContentsMargins(0, 2, 12, 4)
+        form.setSpacing(8)
 
-        root.addSpacing(6)
-        root.addWidget(QLabel("Claude API key"))
-        self._key = QLineEdit()
-        self._key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._key.setPlaceholderText("sk-ant-…")
-        root.addWidget(self._key)
+        # ── Required: the Claude key ──
+        form.addWidget(self._section("HELIX", "Your key stays on this machine — used only for the Claude calls you trigger."))
+        self._key = self._password("sk-ant-…")
+        form.addWidget(self._field_row(
+            "Claude API key", "Claude API key",
+            "Powers everything HELIX does — the conversation and the apps it builds. Get one at "
+            "console.anthropic.com. It's stored locally and only ever used for the Claude calls you make.",
+            self._key, lambda: self._settings.get("claude_api_key", "") or "",
+        ))
 
-        # Tripo API key — enables film-quality (neural) 3D models. Optional; without it, models use the
-        # local primitive builder. Lives on this machine; only sent to Tripo when you build a model.
-        root.addSpacing(8)
-        root.addWidget(QLabel("Tripo API key (high-detail 3D models)"))
-        thint = QLabel(
-            "Optional. Enables recognizable, film-quality 3D models (your description is sent to Tripo "
-            "to generate them). Get a key at platform.tripo3d.ai. Without it, models use basic shapes."
-        )
-        thint.setObjectName("Status")
-        thint.setWordWrap(True)
-        root.addWidget(thint)
-        self._tripo = QLineEdit()
-        self._tripo.setEchoMode(QLineEdit.EchoMode.Password)
-        self._tripo.setPlaceholderText("tsk_…")
-        root.addWidget(self._tripo)
-
-        # Voyage API key — turns on SEMANTIC knowledge search (find by meaning, not just words). Optional;
-        # without it, knowledge search uses fast keyword matching. The key is only ever sent to Voyage.
-        root.addSpacing(8)
-        root.addWidget(QLabel("Voyage API key (smarter knowledge search)"))
-        vghint = QLabel(
-            "Optional. Lets HELIX search your saved knowledge by MEANING, not just matching words "
-            "(e.g. “how do I get in?” finds a note about the door code). Get a key at voyageai.com. "
-            "Without it, knowledge search still works using keywords."
-        )
-        vghint.setObjectName("Status")
-        vghint.setWordWrap(True)
-        root.addWidget(vghint)
-        self._voyage = QLineEdit()
-        self._voyage.setEchoMode(QLineEdit.EchoMode.Password)
-        self._voyage.setPlaceholderText("pa-…")
-        root.addWidget(self._voyage)
-
-        # Connections — tokens for outside services your apps and agents read (Slack, GitHub, …). Saved on
-        # this machine only; injected into a build when it runs, or used by the orb's read-only call_api
-        # (e.g. an agent that watches Slack). A build that needs a key also has its own Connect button.
-        if self._connections is not None and KNOWN_SERVICES:
-            root.addSpacing(10)
-            root.addWidget(QLabel("Connections"))
-            chint = QLabel(
-                "API tokens for outside services your builds and agents use. Stored on this machine only; "
-                "never put inside a build's files or sent anywhere except the service itself."
-            )
-            chint.setObjectName("Status")
-            chint.setWordWrap(True)
-            root.addWidget(chint)
+        # ── Optional integrations, grouped ──
+        form.addSpacing(4)
+        form.addWidget(self._section(
+            "API Connections", "Optional. Add a key to unlock a feature — HELIX works fine without these."
+        ))
+        self._tripo = self._password("tsk_…")
+        form.addWidget(self._field_row(
+            "Tripo — high-detail 3D models", "Tripo API key",
+            "Optional. Turns build_3d_model into recognizable, film-quality 3D (your description is sent to "
+            "Tripo to generate the mesh). Get a key at platform.tripo3d.ai. Without it, models use the "
+            "built-in basic-shape builder.",
+            self._tripo, lambda: self._settings.get("tripo_api_key", "") or "",
+        ))
+        self._voyage = self._password("pa-…")
+        form.addWidget(self._field_row(
+            "Voyage — smarter knowledge search", "Voyage API key",
+            "Optional. Lets HELIX search your saved knowledge by MEANING, not just matching words (e.g. "
+            "“how do I get in?” finds a note about the door code). Get a key at voyageai.com. Without it, "
+            "knowledge search still works using keywords.",
+            self._voyage, lambda: self._settings.get("voyage_api_key", "") or "",
+        ))
+        # Service tokens (Slack, GitHub, …) your apps and agents read, or the orb's read-only call_api uses.
+        if self._connections is not None:
             for svc in KNOWN_SERVICES:
-                root.addWidget(QLabel(f"{svc.label} token  ({svc.hint})"))
-                field = QLineEdit()
-                field.setEchoMode(QLineEdit.EchoMode.Password)
-                field.setPlaceholderText(svc.hint)
-                root.addWidget(field)
+                field = self._password(svc.hint)
                 self._conn_fields.append((svc.env, field))
+                form.addWidget(self._field_row(
+                    f"{svc.label}", f"{svc.label} token",
+                    f"Optional. Lets apps, flows, and agents you build read your {svc.label} account, and "
+                    f"the orb answer questions about it. Stored on this machine only; never written into a "
+                    f"build's files or sent anywhere except {svc.label}. Format: {svc.hint}.",
+                    field, (lambda env=svc.env: self._connections.value(env) or ""),
+                ))
 
-        # 3D model detail — High keeps native polygon counts + detailed textures (no forced low-poly).
-        root.addSpacing(8)
-        root.addWidget(QLabel("3D model detail"))
-        dhint = QLabel(
-            "High = native polygon count and detailed textures — best quality, heavier to render. "
-            "Balanced is lighter and faster, and renders on any machine."
-        )
-        dhint.setObjectName("Status")
-        dhint.setWordWrap(True)
-        root.addWidget(dhint)
+        # ── Appearance & voice ──
+        form.addSpacing(4)
+        form.addWidget(self._section("Appearance & voice"))
         self._detail = QComboBox()
         self._detail.addItem("Balanced — faster, lighter", "balanced")
         self._detail.addItem("High — native poly + detailed textures", "high")
-        root.addWidget(self._detail)
+        form.addWidget(self._labeled(
+            "3D model detail", "3D model detail",
+            "High keeps native polygon counts and detailed textures — best quality, heavier to render. "
+            "Balanced is lighter and renders on any machine.",
+            self._detail,
+        ))
 
-        # Voice (only meaningful when the neural-TTS engine is present).
         self._voice = QComboBox()
         for label, voice_id in TTS_VOICES:
             self._voice.addItem(label, voice_id)
@@ -132,27 +125,25 @@ class SettingsView(QWidget):
         self._speed_lbl = QLabel("1.0×")
         self._speed_lbl.setMinimumWidth(40)
         self._speed.valueChanged.connect(lambda v: self._speed_lbl.setText(f"{v / 10:.1f}×"))
-
-        self._voice_section: list[QWidget] = []
         if edge_available():
-            root.addSpacing(8)
-            vlabel = QLabel("HELIX's voice")
-            root.addWidget(vlabel)
-            vhint = QLabel(
-                "Neural voices (online). Falls back to the built-in OS voice if you're offline."
-            )
-            vhint.setObjectName("Status")
-            vhint.setWordWrap(True)
-            root.addWidget(vhint)
-            root.addWidget(self._voice)
-            srow = QHBoxLayout()
-            speed_label = QLabel("Speed")
-            srow.addWidget(speed_label)
-            srow.addWidget(self._speed, stretch=1)
-            srow.addWidget(self._speed_lbl)
-            root.addLayout(srow)
-            self._voice_section = [vlabel, vhint, self._voice, speed_label, self._speed, self._speed_lbl]
+            form.addWidget(self._labeled(
+                "HELIX's voice", "HELIX's voice",
+                "Neural voices (online). Falls back to the built-in OS voice if you're offline.",
+                self._voice,
+            ))
+            srow = QWidget()
+            sl = QHBoxLayout(srow)
+            sl.setContentsMargins(0, 0, 0, 0)
+            sl.addWidget(QLabel("Speed"))
+            sl.addWidget(self._speed, stretch=1)
+            sl.addWidget(self._speed_lbl)
+            form.addWidget(srow)
 
+        form.addStretch(1)
+        scroll.setWidget(form_host)
+        root.addWidget(scroll, stretch=1)
+
+        # Save row — pinned.
         row = QHBoxLayout()
         save = QPushButton("Save")
         save.setObjectName("Primary")
@@ -163,10 +154,104 @@ class SettingsView(QWidget):
         row.addWidget(self._status)
         row.addStretch(1)
         root.addLayout(row)
-        root.addStretch(1)
 
         self.reload()
 
+    # ----- small builders -----
+    @staticmethod
+    def _password(placeholder: str) -> QLineEdit:
+        field = QLineEdit()
+        field.setEchoMode(QLineEdit.EchoMode.Password)
+        field.setPlaceholderText(placeholder)
+        return field
+
+    @staticmethod
+    def _section(title: str, subtitle: str | None = None) -> QWidget:
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 6, 0, 0)
+        lay.setSpacing(2)
+        head = QLabel(title.upper())
+        head.setStyleSheet(f"color:{CYAN};font-size:12px;font-weight:700;letter-spacing:1px;")
+        lay.addWidget(head)
+        if subtitle:
+            sub = QLabel(subtitle)
+            sub.setWordWrap(True)
+            sub.setStyleSheet(f"color:{MUTED};font-size:12px;")
+            lay.addWidget(sub)
+        # a hairline under the header
+        rule = QLabel()
+        rule.setFixedHeight(1)
+        rule.setStyleSheet(f"background:{LINE};")
+        lay.addWidget(rule)
+        return box
+
+    def _info_btn(self, title: str, body: str) -> QToolButton:
+        # A small circular "?" badge — press it for the detail (kept out of the page). Plain "?" so it
+        # renders on every machine/font (a circled-i glyph tofu'd in testing).
+        btn = QToolButton()
+        btn.setText("?")
+        btn.setFixedSize(20, 20)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip("What's this?")
+        btn.setStyleSheet(
+            "QToolButton{border:1px solid #2a3a44;border-radius:10px;background:transparent;"
+            "color:#7a8a93;font-size:12px;font-weight:700;}"
+            "QToolButton:hover{color:#3fe0e0;border-color:#3fe0e0;}"
+        )
+        btn.clicked.connect(lambda: QMessageBox.information(self, title, body))
+        return btn
+
+    def _field_row(self, name: str, info_title: str, info_body: str, field: QLineEdit,
+                   getter: Callable[[], str]) -> QWidget:
+        """A labelled secret field: [name] [Set/Not set] … [ⓘ], with the field below. Detail is in the ⓘ
+        popup, never crowding the page."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(4)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        lbl = QLabel(name)
+        lbl.setStyleSheet("font-weight:600;")
+        status = QLabel()
+        status.setStyleSheet("font-size:12px;")
+        head.addWidget(lbl)
+        head.addWidget(status)
+        head.addStretch(1)
+        head.addWidget(self._info_btn(info_title, info_body))
+        lay.addLayout(head)
+        lay.addWidget(field)
+        self._statuses.append((status, getter))
+        return box
+
+    def _labeled(self, name: str, info_title: str, info_body: str, widget: QWidget) -> QWidget:
+        """A labelled control (combo/etc.) with an ⓘ for the detail and the control below."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(4)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        lbl = QLabel(name)
+        lbl.setStyleSheet("font-weight:600;")
+        head.addWidget(lbl)
+        head.addStretch(1)
+        head.addWidget(self._info_btn(info_title, info_body))
+        lay.addLayout(head)
+        lay.addWidget(widget)
+        return box
+
+    def _refresh_statuses(self) -> None:
+        for label, getter in self._statuses:
+            try:
+                has = bool((getter() or "").strip())
+            except Exception:  # noqa: BLE001
+                has = False
+            label.setText("● Set" if has else "○ Not set")
+            label.setStyleSheet(f"font-size:12px;color:{STATUS_DONE if has else MUTED};")
+
+    # ----- load / save -----
     def reload(self) -> None:
         self._key.setText(self._settings.get("claude_api_key", "") or "")
         self._tripo.setText(self._settings.get("tripo_api_key", "") or "")
@@ -186,6 +271,7 @@ class SettingsView(QWidget):
         if self._connections is not None:
             for env, field in self._conn_fields:
                 field.setText(self._connections.value(env) or "")
+        self._refresh_statuses()
 
     def _save(self) -> None:
         self._settings.set("claude_api_key", self._key.text().strip())
@@ -197,5 +283,6 @@ class SettingsView(QWidget):
         if self._connections is not None:
             for env, field in self._conn_fields:
                 self._connections.set_value(env, field.text().strip())
+        self._refresh_statuses()
         self._status.setText("Saved.")
         self.saved.emit()

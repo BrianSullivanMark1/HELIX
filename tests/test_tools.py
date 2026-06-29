@@ -126,7 +126,7 @@ def test_build_task_enqueues_with_the_task_prompt():
     job = queue.enqueued[0]
     assert job["kind"] == BuildKind.TASK
     assert "tidy my downloads" in job["prompt"] and "TASK" in job["prompt"]
-    assert "task" in out.lower()
+    assert "flow" in out.lower()  # user-facing label is now "Flow" (the build_task tool name is unchanged)
 
 
 def test_second_build_while_one_runs_is_queued_not_started():

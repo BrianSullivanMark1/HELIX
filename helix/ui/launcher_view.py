@@ -3,11 +3,11 @@
   • Apps      — built apps that open a screen (Open / Rename / Remove).
   • Models    — 3D models and animations the orb made to show you (build_3d_model) (Open / Rename / Remove).
   • Agents    — saved goals HELIX runs on demand (Run / Rename / Remove).
-  • Tasks     — built scripts that *do a thing* when run (Run / Rename / Remove).
+  • Flows     — built scripts that *do a thing* when run (Run / Rename / Remove).
   • Knowledge — searchable collections of the user's own notes/documents (Open / Rename / Remove).
 
-Builds are data, not shell: they're freely removable. The tabs, New app, and Settings are the immutable
-shell.
+Builds are data, not shell: they're freely removable. The tabs and New app are the immutable shell
+(Settings lives in the top-right of the window, so the menu doesn't repeat it).
 """
 from __future__ import annotations
 
@@ -118,7 +118,7 @@ class LauncherView(QWidget):
         header = QHBoxLayout()
         self._tabs: dict[int, QPushButton] = {}
         for idx, label in (
-            (_APPS, "Apps"), (_MODELS, "Models"), (_AGENTS, "Agents"), (_TASKS, "Tasks"),
+            (_APPS, "Apps"), (_MODELS, "Models"), (_AGENTS, "Agents"), (_TASKS, "Flows"),
             (_KNOWLEDGE, "Knowledge"),
         ):
             btn = QPushButton(label)
@@ -130,10 +130,7 @@ class LauncherView(QWidget):
         new_btn = QPushButton("＋ New app")
         new_btn.setObjectName("Primary")
         new_btn.clicked.connect(self.newAppRequested.emit)
-        settings_btn = QPushButton("⚙ Settings")
-        settings_btn.clicked.connect(self.openSettingsRequested.emit)
-        header.addWidget(new_btn)
-        header.addWidget(settings_btn)
+        header.addWidget(new_btn)  # Settings lives in the window's top-right nav — not repeated here
         root.addLayout(header)
 
         self._stack = QStackedWidget()
@@ -144,7 +141,7 @@ class LauncherView(QWidget):
             "No models yet — ask the orb to show you something in 3D."
         )
         self._tasks_grid, tasks_page, self._tasks_empty = self._grid_page(
-            "No tasks yet. Ask the orb to build a script that does something, and it'll show here."
+            "No flows yet. Ask the orb to build a flow — a script that does something when you run it."
         )
         # The Tasks page gets its OWN status line — a Run result used to land on the hidden Agents-page
         # label, so the user never saw it.
