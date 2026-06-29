@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from helix.adapters.speech import DEFAULT_TTS_VOICE, TTS_VOICES, edge_available
+from helix.domain.connections import KNOWN_SERVICES
 from helix.ports.stores import SettingsStore
 from helix.ui.theme import MUTED
 
@@ -21,10 +22,12 @@ from helix.ui.theme import MUTED
 class SettingsView(QWidget):
     saved = pyqtSignal()
 
-    def __init__(self, settings: SettingsStore) -> None:
+    def __init__(self, settings: SettingsStore, connections=None) -> None:
         super().__init__()
         self.setObjectName("Panel")
         self._settings = settings
+        self._connections = connections           # save/load service tokens used by agents + call_api
+        self._conn_fields: list[tuple[str, QLineEdit]] = []  # (env-var name, field)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(36, 24, 36, 28)
@@ -64,6 +67,27 @@ class SettingsView(QWidget):
         self._tripo.setEchoMode(QLineEdit.EchoMode.Password)
         self._tripo.setPlaceholderText("tsk_…")
         root.addWidget(self._tripo)
+
+        # Connections — tokens for outside services your apps and agents read (Slack, GitHub, …). Saved on
+        # this machine only; injected into a build when it runs, or used by the orb's read-only call_api
+        # (e.g. an agent that watches Slack). A build that needs a key also has its own Connect button.
+        if self._connections is not None and KNOWN_SERVICES:
+            root.addSpacing(10)
+            root.addWidget(QLabel("Connections"))
+            chint = QLabel(
+                "API tokens for outside services your builds and agents use. Stored on this machine only; "
+                "never put inside a build's files or sent anywhere except the service itself."
+            )
+            chint.setObjectName("Status")
+            chint.setWordWrap(True)
+            root.addWidget(chint)
+            for svc in KNOWN_SERVICES:
+                root.addWidget(QLabel(f"{svc.label} token  ({svc.hint})"))
+                field = QLineEdit()
+                field.setEchoMode(QLineEdit.EchoMode.Password)
+                field.setPlaceholderText(svc.hint)
+                root.addWidget(field)
+                self._conn_fields.append((svc.env, field))
 
         # 3D model detail — High keeps native polygon counts + detailed textures (no forced low-poly).
         root.addSpacing(8)
@@ -141,6 +165,9 @@ class SettingsView(QWidget):
             rate = 1.0
         self._speed.setValue(int(round(max(0.8, min(2.0, rate)) * 10)))
         self._speed_lbl.setText(f"{self._speed.value() / 10:.1f}×")
+        if self._connections is not None:
+            for env, field in self._conn_fields:
+                field.setText(self._connections.value(env) or "")
 
     def _save(self) -> None:
         self._settings.set("claude_api_key", self._key.text().strip())
@@ -148,5 +175,8 @@ class SettingsView(QWidget):
         self._settings.set("model_detail", self._detail.currentData())
         self._settings.set("tts_voice", self._voice.currentData())
         self._settings.set("tts_rate", round(self._speed.value() / 10, 1))
+        if self._connections is not None:
+            for env, field in self._conn_fields:
+                self._connections.set_value(env, field.text().strip())
         self._status.setText("Saved.")
         self.saved.emit()

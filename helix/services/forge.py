@@ -119,6 +119,7 @@ class ForgeService:
             self._app_root / ".git",
             self._app_root / "data" / "builds",
             self._app_root / "data" / "helix.db",
+            self._app_root / "data" / "helix_secrets.json",  # volatile: the user can connect a key mid-build
             *self._guard_files,
         )
         tree_sig = scan_tree(self._app_root, skip=skip)

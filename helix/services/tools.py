@@ -16,6 +16,7 @@ from helix.services.selfdev import SelfDevService
 if TYPE_CHECKING:  # AgentService -> ConversationService -> ToolRegistry would be a runtime import cycle
     from helix.services.agents import AgentService
     from helix.services.build_queue import BuildQueue
+    from helix.services.connections import ConnectionsService
     from helix.services.tasks import TaskService
 
 # Escalation: hand a hard question to a deeper model and get back its spoken answer. The third arg is an
@@ -45,6 +46,7 @@ class ToolRegistry:
         tasks: "TaskService | None" = None,
         bus: EventBus | None = None,
         selfdev_lane=None,
+        connections: "ConnectionsService | None" = None,
     ) -> None:
         self._forge = forge
         self._builds = builds
@@ -55,6 +57,7 @@ class ToolRegistry:
         self._tasks = tasks
         self._bus = bus
         self._selfdev_lane = selfdev_lane  # background drafting of self-changes (no orb freeze)
+        self._connections = connections  # read-only call_api to connected services (Slack, GitHub, …)
 
     def bind_agents(self, agents: "AgentService") -> None:
         """Wire the agent store after construction (it depends on ConversationService, which depends on
@@ -294,6 +297,34 @@ class ToolRegistry:
                     },
                 )
             )
+        if self._connections is not None:
+            tools.append(
+                ToolSpec(
+                    name="call_api",
+                    description=(
+                        "Read live data from a service the user has CONNECTED (Slack, GitHub) by GETting "
+                        "one of its API URLs — HELIX attaches the user's saved token for you. Use it to "
+                        "answer questions about their accounts: recent Slack messages, open GitHub PRs or "
+                        "issues, statuses, etc. Pass the full https API URL (e.g. "
+                        "'https://slack.com/api/conversations.list' or "
+                        "'https://api.github.com/user/repos'). READ-ONLY (GET only) and limited to "
+                        "connected services — it cannot reach anything else or change anything. If it says "
+                        "a service isn't connected, tell the user to add its token in Settings → "
+                        "Connections; never ask them to paste a token into the chat."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "The full https API URL to GET from a connected service.",
+                            }
+                        },
+                        "required": ["url"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
         if self._selfdev is not None:
             tools.append(
                 ToolSpec(
@@ -436,6 +467,8 @@ class ToolRegistry:
             return f"I don't see {target} building or queued."
         if name == "think_harder" and self._deep_think is not None:
             return self._deep_think(args["question"], on_progress, cancel)
+        if name == "call_api" and self._connections is not None:
+            return self._connections.call_api(args.get("url", ""))
         if name == "list_apps":
             apps = self._builds.list()
             if not apps:

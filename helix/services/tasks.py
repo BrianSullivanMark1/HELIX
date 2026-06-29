@@ -6,13 +6,18 @@ later 'stop' / close can reason about them.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
+from typing import TYPE_CHECKING
 
 from helix.domain.models import App, AppKind, BuildKind, slugify
 from helix.logging_setup import get_logger
 from helix.services.builds import BuildService
+
+if TYPE_CHECKING:
+    from helix.services.connections import ConnectionsService
 
 _LOG = get_logger("tasks")
 
@@ -26,8 +31,9 @@ def _python() -> str:
 
 
 class TaskService:
-    def __init__(self, builds: BuildService) -> None:
+    def __init__(self, builds: BuildService, connections: "ConnectionsService | None" = None) -> None:
         self._builds = builds
+        self._connections = connections  # injects the build's declared API keys as env vars at launch
         self._procs: dict[str, subprocess.Popen] = {}  # slug -> live process (for status / cleanup)
 
     def runnable(self) -> list[App]:
@@ -52,10 +58,16 @@ class TaskService:
             _LOG.warning("task %s is not runnable (kind=%s entry=%s)", slug, getattr(app, "kind", None),
                          getattr(app, "entry_point", None))
             return False
+        # Inject the build's declared API keys as environment variables, so its code reads them from
+        # os.environ instead of ever hardcoding a secret. Keys the user hasn't connected are simply absent.
+        env = dict(os.environ)
+        if self._connections is not None:
+            env.update(self._connections.env_for(slug))
         try:
             proc = subprocess.Popen(
                 [_python(), app.entry_point],
                 cwd=str(self._builds.workspace(slug)),
+                env=env,
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             )
             self._procs[slug] = proc

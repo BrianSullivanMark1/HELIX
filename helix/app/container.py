@@ -27,6 +27,7 @@ from helix.ports.llm import Text, Turn
 from helix.services.agents import AgentService
 from helix.services.build_queue import BuildQueue
 from helix.services.builds import BuildService
+from helix.services.connections import ConnectionsService
 from helix.services.conversation import ConversationService
 from helix.services.forge import ForgeService
 from helix.services.model_baker import ModelBaker
@@ -126,10 +127,15 @@ class Container:
         )
         # Background lane so drafting a self-change doesn't freeze the orb.
         self.selfdev_lane = SelfDevLane(self.selfdev, self.bus)
-        self.tasks = TaskService(self.builds)
+        # Connections: the user's saved API keys for builds that need them. A DEDICATED secrets file (not
+        # the settings file, so the build guard never byte-reverts it), kept on this machine only and never
+        # written into a build's folder, git, or the browser.
+        self.secrets = JsonSettings(self.paths.data / "helix_secrets.json")
+        self.connections = ConnectionsService(self.builds, self.secrets)
+        self.tasks = TaskService(self.builds, connections=self.connections)
         self.tools = ToolRegistry(
             self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue,
-            tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane,
+            tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane, connections=self.connections,
         )
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM

@@ -75,8 +75,12 @@ class BuildService:
         """After the coder runs: detect how the app runs, persist it, commit the result."""
         ws = self.workspace(app.slug)
         self.clear_building(app.slug)  # the build completed — clear the in-progress marker before committing
-        kind, entry = self._detect_entry(ws)
-        app.kind, app.entry_point = kind, entry
+        if app.build_kind == BuildKind.MODEL and (ws / "index.html").exists():
+            # A model ALWAYS opens in its baked Three.js viewer. Pin it, so a stray main.py the coder might
+            # have left can't make main.py-first _detect_entry turn the model into a console launch.
+            app.kind, app.entry_point = AppKind.HTML, "index.html"
+        else:
+            app.kind, app.entry_point = self._detect_entry(ws)
         self._write_manifest(ws, app)
         self._repo.commit_all(ws, f"build: {app.name}")
         return app
@@ -160,10 +164,14 @@ class BuildService:
 
     # ----- helpers -----
     def _detect_entry(self, ws: Path) -> tuple[AppKind, str | None]:
-        if (ws / "index.html").exists():
-            return AppKind.HTML, "index.html"
+        # A main.py means there's a program to RUN — a task, or an app with a local backend that serves
+        # its page AND proxies APIs (needed for anything holding a secret key). Prefer it over a sibling
+        # index.html, which for those builds is just a landing page. Pure web apps and 3D models have no
+        # main.py, so they still resolve to their index.html.
         if (ws / "main.py").exists():
             return AppKind.PYTHON, "main.py"
+        if (ws / "index.html").exists():
+            return AppKind.HTML, "index.html"
         html = next(iter(ws.glob("*.html")), None)
         if html:
             return AppKind.HTML, html.name

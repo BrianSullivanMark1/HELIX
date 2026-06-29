@@ -125,6 +125,15 @@ How you work:
   shows what's waiting. Confirm before drafting, like building. Drafting and applying happen right here in
   conversation — there is no separate Archive screen, so never tell the user to "open Archive".
 - You never claim to have built something you didn't. Report honestly, including failures.
+- HELIX connects to outside services for the user. When something you build needs an API key (Slack,
+  GitHub, etc.), the build shows a simple Connect panel where the user pastes the key — you never handle
+  raw keys yourself and never ask the user to paste a token into this chat. If a build can't reach a
+  service, tell them to add its key in the build's Connect panel, or in Settings → Connections.
+- You can READ a service the user has connected, live, with call_api: GET one of its API URLs (e.g. a
+  Slack or GitHub endpoint) and HELIX attaches the saved token for you. Use it to answer things like "any
+  new messages in Slack?" or "what's open on GitHub?" — relay the answer briefly in your own voice. It's
+  read-only and only works for connected services; if it says a service isn't connected, point the user
+  to Settings → Connections.
 
 You cannot remove your own shell (the orb, the navigation, the menu, or Settings) — if asked, explain
 that those are permanent, and offer to build what they actually need instead. Built apps, however, are
@@ -145,6 +154,27 @@ markdown, lists, or symbols. Lead with the answer, then the essential why.
 """
 
 
+# The ONE standard way every build connects to an outside service — so anything HELIX builds that needs
+# an API key "just works" once the user pastes it, and a secret never lands in the browser or on disk.
+_CONNECTIONS_GUIDE = """\
+Connecting to an external service (API keys) — follow this EXACTLY when the build needs one:
+- NEVER ask for a key in the UI, hardcode it, or write it into any file. Instead:
+  1) Write a file named connections.json in this folder — a JSON array, one object per key, each with
+     "key" (the EXACT environment-variable name your code reads), "label" (a friendly name shown to the
+     user), and "hint" (what the value looks like). Example:
+     [{"key":"SLACK_TOKEN","label":"Slack token","hint":"starts with xoxp- or xoxb-"},
+      {"key":"GITHUB_TOKEN","label":"GitHub personal access token","hint":"ghp_... or github_pat_..."}]
+  2) Read each value from the ENVIRONMENT at run time (e.g. os.environ["SLACK_TOKEN"]). HELIX collects
+     the key from the user and injects it as that environment variable when the build runs. For known
+     services use these standard names: SLACK_TOKEN, GITHUB_TOKEN.
+- A browser page CANNOT safely hold a secret, and some APIs (Slack especially) block browser calls (CORS).
+  So if a web UI needs such a service, build the WHOLE thing as ONE main.py that serves the page AND makes
+  the API calls itself with the env token (a tiny standard-library HTTP server). The page talks only to
+  your local main.py; the token never reaches the browser. In that case main.py is the app — that is what
+  runs, not a bare index.html.
+"""
+
+
 def build_app_prompt(name: str, request: str) -> str:
     """The instruction handed to the coding agent to build one app into its workspace."""
     _, fenced, _ = _fenced(request)
@@ -160,12 +190,14 @@ Requirements:
   you're making, not file names or code (e.g. "Sketching the layout", "Adding the buttons", "Final
   touches"). Say it just before you do the step; it's read aloud to the user as live commentary.
 - Prefer a single, dependency-free HTML file (index.html) with inline CSS/JS so it runs anywhere by
-  just opening it — unless the request clearly needs Python.
+  just opening it — UNLESS the request clearly needs Python, OR it needs a secret API key or a service
+  that blocks browser calls, in which case build it as a main.py local server (see below).
 - Make it actually work and look clean. No placeholders, no TODOs.
 - Keep everything inside this folder. Do not read or write outside it.
 - Do NOT run git — HELIX handles version control. Just write the files.
 - When done, the entry point should be index.html (web) or main.py (python).
-"""
+
+{_CONNECTIONS_GUIDE}"""
 
 
 def build_task_prompt(name: str, request: str) -> str:
@@ -191,7 +223,8 @@ Requirements:
 - Keep everything inside this folder. Do not read or write outside it.
 - Do NOT run git — HELIX handles version control. Just write the files.
 - The entry point MUST be main.py.
-"""
+
+{_CONNECTIONS_GUIDE}"""
 
 
 def build_3d_model_prompt(name: str, request: str) -> str:

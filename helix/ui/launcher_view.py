@@ -93,6 +93,7 @@ class LauncherView(QWidget):
     openAppRequested = pyqtSignal(str)
     buildSeen = pyqtSignal(str)              # a build was opened/run — clears its done/error status
     editBuildRequested = pyqtSignal(str, str)  # (slug, name) — open the live "Edit with AI" prompt
+    connectBuildRequested = pyqtSignal(str, str)  # (slug, name) — open the API-key Connect panel
 
     def __init__(self, builds: BuildService, agents: AgentService, tasks: TaskService) -> None:
         super().__init__()
@@ -103,6 +104,7 @@ class LauncherView(QWidget):
         self._workers: set[QtWorker] = set()
         # slug -> BuildStatus|None, supplied by the main window's status board; drives the tile borders.
         self._status_provider: Callable[[str], "BuildStatus | None"] = lambda _slug: None
+        self._connections = None  # ConnectionsService (read-only here): whether a build needs/has its keys
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 22, 28, 22)
@@ -248,7 +250,12 @@ class LauncherView(QWidget):
             rename.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._rename_build(s, n))
             remove = QPushButton("✕ Remove")
             remove.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._remove_build(s, n))
-            card.add_actions(run, edit, rename, remove)
+            actions = [run, edit]
+            connect = self._connect_button(app)
+            if connect is not None:
+                actions.append(connect)
+            actions += [rename, remove]
+            card.add_actions(*actions)
             card.apply_status(self._status_provider(app.slug))
             task_cards.append(card)
         self._fill_grid(self._tasks_grid, self._tasks_empty, task_cards)
@@ -270,6 +277,24 @@ class LauncherView(QWidget):
         """Wire the source of per-build status (the main window's board) that colours the tile borders."""
         self._status_provider = provider
 
+    def set_connections_service(self, connections) -> None:
+        """Wire the ConnectionsService so cards that need API keys show a Connect button."""
+        self._connections = connections
+
+    def _connect_button(self, app) -> "QPushButton | None":
+        """A '🔑 Connect' button for a build that declared it needs API keys — amber until they're set."""
+        if self._connections is None or not self._connections.needs_connection(app.slug):
+            return None
+        missing = self._connections.missing(app.slug)
+        btn = QPushButton("🔑 Connect" if missing else "🔑 Keys set")
+        color = STATUS_WORKING if missing else STATUS_DONE
+        btn.setStyleSheet(f"QPushButton{{border:1px solid {color};color:{color};}}")
+        btn.setToolTip(
+            "Set the API keys this build needs" if missing else "API keys are set — click to edit"
+        )
+        btn.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self.connectBuildRequested.emit(s, n))
+        return btn
+
     def _openable_card(self, app) -> _Card:
         """A card for something that opens in the browser — an app or a 3D model
         (Open / Edit with AI / Rename / Remove)."""
@@ -283,7 +308,12 @@ class LauncherView(QWidget):
         rename.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._rename_build(s, n))
         remove = QPushButton("✕ Remove")
         remove.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._remove_build(s, n))
-        card.add_actions(open_btn, edit, rename, remove)
+        actions = [open_btn, edit]
+        connect = self._connect_button(app)
+        if connect is not None:
+            actions.append(connect)
+        actions += [rename, remove]
+        card.add_actions(*actions)
         card.apply_status(self._status_provider(app.slug))
         return card
 

@@ -36,6 +36,7 @@ from helix.logging_setup import get_logger
 from helix.services.prompts import build_3d_model_prompt, build_task_prompt
 from helix.ui.build_status import BuildStatusBoard
 from helix.ui.commands_view import CommandsDialog
+from helix.ui.connections_dialog import ConnectionsDialog
 from helix.ui.console_view import ConsoleView
 from helix.ui.launcher_view import LauncherView
 from helix.ui.orb import PresenceOrb
@@ -95,7 +96,7 @@ class HelixMainWindow(QMainWindow):
             selfdev_lane=container.selfdev_lane,
         )
         self.launcher = LauncherView(container.builds, container.agents, container.tasks)
-        self.settings = SettingsView(container.settings)
+        self.settings = SettingsView(container.settings, container.connections)
         self._stack.addWidget(self.console)  # 0
         self._stack.addWidget(self.launcher)  # 1
         self._stack.addWidget(self.settings)  # 2
@@ -134,7 +135,9 @@ class HelixMainWindow(QMainWindow):
         self.launcher.openAppRequested.connect(self._open_app)
         self.launcher.buildSeen.connect(self._on_build_seen)         # opened/ran → clear done/error status
         self.launcher.editBuildRequested.connect(self._on_edit_build)  # "Edit with AI" on a card
+        self.launcher.connectBuildRequested.connect(self._on_connect_build)  # 🔑 API-key Connect panel
         self.launcher.set_status_provider(self._board.status_of)     # colour the tiles from the board
+        self.launcher.set_connections_service(container.connections)  # show Connect on builds that need keys
 
         # Bus → UI bridge (refresh the menu when a build lands)
         container.bus.subscribe(BuildCreated, self._buildSignal.emit)
@@ -270,6 +273,18 @@ class HelixMainWindow(QMainWindow):
         if ok and change:
             self._enqueue_edit(app, change)
 
+    def _on_connect_build(self, slug: str, name: str) -> None:
+        """Open the auto-generated 'paste your API keys' panel for a build that declared it needs them."""
+        conns = self._c.connections.declared(slug)
+        if not conns:
+            return
+        dlg = ConnectionsDialog(
+            self, f"Connect — {name}", conns,
+            self._c.connections.value, self._c.connections.set_value,
+        )
+        if dlg.exec():
+            self._refresh_build_ui()  # repaint the Connect button (set vs. still-missing)
+
     def _on_viewer_edit(self, change: str) -> None:
         """The viewer's live edit bar — iterate the build that's currently open in place."""
         slug = self._viewer_slug
@@ -379,7 +394,19 @@ class HelixMainWindow(QMainWindow):
                 return
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))  # fallback: no WebEngine
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(ws)))  # non-HTML build: open its folder
+        if app.kind == AppKind.PYTHON and app.entry_point:
+            # An app with a backend (main.py) RUNS — it starts its local server (with any connected API
+            # keys injected) and opens itself in the browser, rather than dumping the user in a folder.
+            if self._c.tasks.is_running(slug):
+                self.console.status.setText(f"“{app.name}” is already running — check your browser.")
+                return
+            ok = self._c.tasks.run(slug)
+            self.console.status.setText(
+                f"Started “{app.name}” — it opens in your browser."
+                if ok else f"Couldn't start “{app.name}”. Make sure Python is installed."
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(ws)))  # other build: open its folder
 
     def _reload_viewer(self) -> None:
         """Re-load the open build's page so a background iterate (a rewritten GLB/HTML) shows at once."""
