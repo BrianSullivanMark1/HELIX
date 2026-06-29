@@ -31,6 +31,7 @@ from helix.services.builds import BuildService
 from helix.services.connections import ConnectionsService
 from helix.services.conversation import ConversationService
 from helix.services.forge import ForgeService
+from helix.services.gmail import GmailService
 from helix.services.knowledge import KnowledgeService
 from helix.services.model_baker import ModelBaker
 from helix.services.tasks import TaskService
@@ -134,6 +135,9 @@ class Container:
         # written into a build's folder, git, or the browser.
         self.secrets = JsonSettings(self.paths.data / "helix_secrets.json")
         self.connections = ConnectionsService(self.builds, self.secrets)
+        # Gmail: read-only inbox access (an address + a Google App Password in the secrets store). Like
+        # Connections, the credential is local-only; HELIX only ever READS the inbox.
+        self.gmail = GmailService(self.secrets)
         # Optional SEMANTIC knowledge search: enabled only when a Voyage key is set (Settings or the
         # VOYAGE_API_KEY env var). The key is read PER search, so adding it takes effect with no restart;
         # without it, knowledge search is keyword-only. Failures fall back to keyword automatically.
@@ -155,7 +159,7 @@ class Container:
         self.tools = ToolRegistry(
             self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue,
             tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane, connections=self.connections,
-            knowledge=self.knowledge,
+            knowledge=self.knowledge, gmail=self.gmail,
         )
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM,

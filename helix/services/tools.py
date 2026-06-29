@@ -18,6 +18,7 @@ if TYPE_CHECKING:  # AgentService -> ConversationService -> ToolRegistry would b
     from helix.services.agents import AgentService
     from helix.services.build_queue import BuildQueue
     from helix.services.connections import ConnectionsService
+    from helix.services.gmail import GmailService
     from helix.services.knowledge import KnowledgeService
     from helix.services.tasks import TaskService
 
@@ -50,6 +51,7 @@ class ToolRegistry:
         selfdev_lane=None,
         connections: "ConnectionsService | None" = None,
         knowledge: "KnowledgeService | None" = None,
+        gmail: "GmailService | None" = None,
     ) -> None:
         self._forge = forge
         self._builds = builds
@@ -62,6 +64,7 @@ class ToolRegistry:
         self._selfdev_lane = selfdev_lane  # background drafting of self-changes (no orb freeze)
         self._connections = connections  # read-only call_api to connected services (Slack, GitHub, …)
         self._knowledge = knowledge  # the user's searchable notes/documents (create/remember/search)
+        self._gmail = gmail  # read-only Gmail inbox access (check_email)
 
     def bind_agents(self, agents: "AgentService") -> None:
         """Wire the agent store after construction (it depends on ConversationService, which depends on
@@ -411,6 +414,31 @@ class ToolRegistry:
                     },
                 ),
             ]
+        if self._gmail is not None:
+            tools.append(
+                ToolSpec(
+                    name="check_email",
+                    description=(
+                        "Read the user's Gmail inbox (READ-ONLY) to answer questions about their email — "
+                        "'any new email?', 'anything from my landlord?', 'what's in my inbox?'. Returns "
+                        "recent messages (sender, subject, date, and which are unread). Optionally pass a "
+                        "term to filter by sender or subject. It ONLY reads and never marks mail as read or "
+                        "changes anything; relay what's there briefly. If it says Gmail isn't connected, "
+                        "tell the user to add it in Settings → Gmail."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Optional term to match in the sender or subject (a name or "
+                                "topic). Omit for the most recent inbox messages.",
+                            },
+                        },
+                        "additionalProperties": False,
+                    },
+                )
+            )
         if self._selfdev is not None:
             tools.append(
                 ToolSpec(
@@ -571,6 +599,8 @@ class ToolRegistry:
             )
         if name == "remember" and self._knowledge is not None:
             return self._knowledge.remember(args.get("note", ""), args.get("knowledge"))
+        if name == "check_email" and self._gmail is not None:
+            return self._gmail.check_inbox(args.get("query"))
         if name == "list_apps":
             apps = self._builds.list()
             if not apps:

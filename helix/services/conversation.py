@@ -190,6 +190,8 @@ class ConversationService:
             return "Thinking it through…"
         if tool == "search_knowledge":
             return "Checking your knowledge…"
+        if tool == "check_email":
+            return "Checking your inbox…"
         if tool == "remember":
             return "Saving that…"
         if tool == "create_knowledge":

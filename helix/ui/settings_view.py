@@ -32,11 +32,12 @@ from helix.ui.theme import CYAN, LINE, MUTED, STATUS_DONE
 class SettingsView(QWidget):
     saved = pyqtSignal()
 
-    def __init__(self, settings: SettingsStore, connections=None) -> None:
+    def __init__(self, settings: SettingsStore, connections=None, gmail=None) -> None:
         super().__init__()
         self.setObjectName("Panel")
         self._settings = settings
         self._connections = connections           # save/load service tokens used by agents + call_api
+        self._gmail = gmail                        # read-only Gmail inbox credentials (address + app password)
         self._conn_fields: list[tuple[str, QLineEdit]] = []  # (env-var name, field)
         # (status QLabel, getter) pairs refreshed on load + save so each row shows Set / Not set at a glance.
         self._statuses: list[tuple[QLabel, Callable[[], str]]] = []
@@ -101,6 +102,12 @@ class SettingsView(QWidget):
                     f"build's files or sent anywhere except {svc.label}. Format: {svc.hint}.",
                     field, (lambda env=svc.env: self._connections.value(env) or ""),
                 ))
+        # Gmail — read-only inbox (an address + a Google App Password). Two fields, one status.
+        if self._gmail is not None:
+            self._gmail_addr = QLineEdit()
+            self._gmail_addr.setPlaceholderText("you@gmail.com")
+            self._gmail_pw = self._password("16-character app password")
+            form.addWidget(self._gmail_section())
 
         # ── Appearance & voice ──
         form.addSpacing(4)
@@ -242,6 +249,37 @@ class SettingsView(QWidget):
         lay.addWidget(widget)
         return box
 
+    def _gmail_section(self) -> QWidget:
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(4)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        lbl = QLabel("Gmail — read-only inbox")
+        lbl.setStyleSheet("font-weight:600;")
+        status = QLabel()
+        status.setStyleSheet("font-size:12px;")
+        head.addWidget(lbl)
+        head.addWidget(status)
+        head.addStretch(1)
+        head.addWidget(self._info_btn(
+            "Gmail (read-only inbox)",
+            "Lets HELIX answer questions about your inbox — “any new email?”, “anything from the school?”. "
+            "It ONLY reads (it never marks mail as read, sends, or deletes).\n\n"
+            "Setup: turn on 2-Step Verification on your Google account, then create a 16-character App "
+            "Password at myaccount.google.com/apppasswords and paste it here with your Gmail address.\n\n"
+            "Security note: a Google App Password grants FULL mailbox access (read, send, AND delete) and "
+            "can't be scoped read-only — HELIX restricts itself to reading, but the credential itself is "
+            "powerful. It's stored on this machine only, never sent anywhere except Gmail, and you can "
+            "revoke it anytime at myaccount.google.com/apppasswords.",
+        ))
+        lay.addLayout(head)
+        lay.addWidget(self._gmail_addr)
+        lay.addWidget(self._gmail_pw)
+        self._statuses.append((status, lambda: "set" if self._gmail.configured() else ""))
+        return box
+
     def _refresh_statuses(self) -> None:
         for label, getter in self._statuses:
             try:
@@ -271,6 +309,9 @@ class SettingsView(QWidget):
         if self._connections is not None:
             for env, field in self._conn_fields:
                 field.setText(self._connections.value(env) or "")
+        if self._gmail is not None:
+            self._gmail_addr.setText(self._gmail.address())
+            self._gmail_pw.setText(self._gmail.app_password())
         self._refresh_statuses()
 
     def _save(self) -> None:
@@ -283,6 +324,8 @@ class SettingsView(QWidget):
         if self._connections is not None:
             for env, field in self._conn_fields:
                 self._connections.set_value(env, field.text().strip())
+        if self._gmail is not None:
+            self._gmail.set_credentials(self._gmail_addr.text(), self._gmail_pw.text())
         self._refresh_statuses()
         self._status.setText("Saved.")
         self.saved.emit()
