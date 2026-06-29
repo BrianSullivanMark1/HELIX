@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable
 
+from helix.domain.errors import BuildError
 from helix.domain.events import BuildDeleteRequested, BuildRenamed
 from helix.domain.models import BuildKind, slugify
 from helix.ports.coder import ProgressFn
@@ -17,6 +18,7 @@ if TYPE_CHECKING:  # AgentService -> ConversationService -> ToolRegistry would b
     from helix.services.agents import AgentService
     from helix.services.build_queue import BuildQueue
     from helix.services.connections import ConnectionsService
+    from helix.services.knowledge import KnowledgeService
     from helix.services.tasks import TaskService
 
 # Escalation: hand a hard question to a deeper model and get back its spoken answer. The third arg is an
@@ -47,6 +49,7 @@ class ToolRegistry:
         bus: EventBus | None = None,
         selfdev_lane=None,
         connections: "ConnectionsService | None" = None,
+        knowledge: "KnowledgeService | None" = None,
     ) -> None:
         self._forge = forge
         self._builds = builds
@@ -58,6 +61,7 @@ class ToolRegistry:
         self._bus = bus
         self._selfdev_lane = selfdev_lane  # background drafting of self-changes (no orb freeze)
         self._connections = connections  # read-only call_api to connected services (Slack, GitHub, …)
+        self._knowledge = knowledge  # the user's searchable notes/documents (create/remember/search)
 
     def bind_agents(self, agents: "AgentService") -> None:
         """Wire the agent store after construction (it depends on ConversationService, which depends on
@@ -325,6 +329,88 @@ class ToolRegistry:
                     },
                 )
             )
+        if self._knowledge is not None:
+            tools += [
+                ToolSpec(
+                    name="search_knowledge",
+                    description=(
+                        "Search the user's OWN saved knowledge — the notes and documents they've kept in "
+                        "HELIX — and read back the most relevant passages. Use this whenever the answer "
+                        "might live in something they saved (their notes, their docs, 'what did I write "
+                        "about X', a personal fact like a password or address they told you to remember). "
+                        "READ-ONLY. Pass a focused query; optionally name one base to search just it. "
+                        "Then answer from what comes back in your own words; if it doesn't actually "
+                        "answer, say so and offer to look elsewhere."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "What to look for in the user's saved knowledge.",
+                            },
+                            "knowledge": {
+                                "type": "string",
+                                "description": "Optional: the name of one knowledge base to search. "
+                                "Omit to search across all of them.",
+                            },
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="create_knowledge",
+                    description=(
+                        "Create a KNOWLEDGE base — a named collection of the user's notes and documents "
+                        "that HELIX and its agents can later search. Use when the user wants to start a "
+                        "place to keep things ('make a knowledge base for my recipes', 'start a notes "
+                        "collection'). You can seed it with a first note. Creating it is instant and costs "
+                        "nothing. Reuse the SAME name to refer to an existing base. Confirm once first, "
+                        "like the other builds."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "A short name for the base, e.g. 'Recipes' or 'Work notes'.",
+                            },
+                            "note": {
+                                "type": "string",
+                                "description": "Optional first note to save into the new base.",
+                            },
+                        },
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="remember",
+                    description=(
+                        "Save a note into the user's knowledge so it can be recalled later. Use when the "
+                        "user tells you to remember or note something ('remember the wifi password is …', "
+                        "'note that the meeting moved to Friday'). Optionally name which base to file it "
+                        "under; otherwise it goes to their default Notes. Saving is instant. This WRITES, "
+                        "so only do it when the user asks you to remember/save something."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "note": {
+                                "type": "string",
+                                "description": "The note to save, in the user's words.",
+                            },
+                            "knowledge": {
+                                "type": "string",
+                                "description": "Optional: the name of the base to save it in.",
+                            },
+                        },
+                        "required": ["note"],
+                        "additionalProperties": False,
+                    },
+                ),
+            ]
         if self._selfdev is not None:
             tools.append(
                 ToolSpec(
@@ -469,6 +555,22 @@ class ToolRegistry:
             return self._deep_think(args["question"], on_progress, cancel)
         if name == "call_api" and self._connections is not None:
             return self._connections.call_api(args.get("url", ""))
+        if name == "search_knowledge" and self._knowledge is not None:
+            return self._knowledge.search(args.get("query", ""), args.get("knowledge"))
+        if name == "create_knowledge" and self._knowledge is not None:
+            try:
+                base = self._knowledge.create(args["name"])
+            except BuildError as exc:
+                return str(exc)  # a friendly cross-kind-name-clash message, not a tool error
+            note = (args.get("note") or "").strip()
+            seeded = note and self._knowledge.add_note(base.slug, note) is not None
+            extra = " Saved your first note." if seeded else ""
+            return (
+                f"Created the knowledge base '{base.name}'.{extra} Tell me to remember things and I'll "
+                "keep them here."
+            )
+        if name == "remember" and self._knowledge is not None:
+            return self._knowledge.remember(args.get("note", ""), args.get("knowledge"))
         if name == "list_apps":
             apps = self._builds.list()
             if not apps:

@@ -35,6 +35,7 @@ class BuildKind(str, Enum):
     TASK = "task"  # a headless script that does a thing when run (console)
     AGENT = "agent"  # a saved goal HELIX runs on demand
     MODEL = "model"  # a 3D model/animation conjured to show the user (build_3d_model)
+    KNOWLEDGE = "knowledge"  # a searchable collection of the user's own notes/documents (not coder-built)
 
 
 def slugify(name: str) -> str:

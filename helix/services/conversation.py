@@ -6,6 +6,7 @@ build_app, so the human always approves a spend in plain language before it happ
 from __future__ import annotations
 
 import threading
+from typing import TYPE_CHECKING
 
 from helix.domain.errors import BuildCancelled
 from helix.domain.models import Message, Role
@@ -15,6 +16,9 @@ from helix.ports.llm import ChatModel, Text, ToolResult, Turn
 from helix.ports.stores import ConversationStore, MemoryStore
 from helix.services.cancel import CancelToken
 from helix.services.tools import ToolRegistry
+
+if TYPE_CHECKING:
+    from helix.services.knowledge import KnowledgeService
 
 STOPPED_REPLY = "Okay, I stopped."  # shown (not spoken) when the user halts a turn; UI may offer cleanup
 
@@ -28,6 +32,9 @@ BUILD_TOOLS = frozenset(
         "build_app", "build_task", "build_3d_model", "create_agent", "delete_build",
         "improve_helix", "rename_build", "run_task", "run_agent",
         "approve_self_change", "reject_self_change",
+        # Knowledge WRITES are human-driven only — an autonomous agent may search the user's knowledge
+        # (search_knowledge is deliberately NOT here) but never create a base or save a note on its own.
+        "create_knowledge", "remember",
     }
 )
 
@@ -41,6 +48,7 @@ class ConversationService:
         memory: MemoryStore,
         clock: Clock,
         system: str,
+        knowledge: "KnowledgeService | None" = None,
     ) -> None:
         self._chat = chat
         self._tools = tools
@@ -48,6 +56,7 @@ class ConversationService:
         self._memory = memory
         self._clock = clock
         self._system = system
+        self._knowledge = knowledge  # ambient auto-recall of the user's saved knowledge (orb turns only)
         # A turn is a read-modify-write over the shared history. The Console and an Agent run on
         # separate worker threads against this one service, so serialize whole turns — otherwise their
         # appends interleave and the API gets a malformed (e.g. two-user-in-a-row) turn list.
@@ -80,6 +89,15 @@ class ConversationService:
                 turns[-1] = Turn(last.role, last.blocks + (Text(attachments_text),))
             else:
                 turns = [Turn(Role.USER, (Text(attachments_text),))]
+        # Ambient knowledge: when the message clearly matches something the user saved, surface it as
+        # EPHEMERAL context (appended to this turn only, never persisted — exactly like attachments) so the
+        # orb answers from their own material without being told to search. Interactive orb only (persist);
+        # an agent retrieves explicitly. auto_context is high-precision, so most turns inject nothing.
+        if persist and self._knowledge is not None and turns:
+            knowledge_text = self._knowledge.auto_context(user_text)
+            if knowledge_text:
+                last = turns[-1]
+                turns[-1] = Turn(last.role, last.blocks + (Text(knowledge_text),))
         specs = self._tools.specs()
         if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete/run tools
             specs = [s for s in specs if s.name not in BUILD_TOOLS]
@@ -167,4 +185,10 @@ class ConversationService:
             return f"Removing {args.get('name', 'it')}…"
         if tool == "think_harder":
             return "Thinking it through…"
+        if tool == "search_knowledge":
+            return "Checking your knowledge…"
+        if tool == "remember":
+            return "Saving that…"
+        if tool == "create_knowledge":
+            return f"Starting the {args.get('name', 'knowledge')} base…"
         return "Working…"

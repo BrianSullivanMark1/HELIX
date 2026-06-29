@@ -30,6 +30,7 @@ from helix.services.builds import BuildService
 from helix.services.connections import ConnectionsService
 from helix.services.conversation import ConversationService
 from helix.services.forge import ForgeService
+from helix.services.knowledge import KnowledgeService
 from helix.services.model_baker import ModelBaker
 from helix.services.tasks import TaskService
 from helix.services.prompts import CONSOLE_SYSTEM, DEEP_THINK_SYSTEM
@@ -133,12 +134,18 @@ class Container:
         self.secrets = JsonSettings(self.paths.data / "helix_secrets.json")
         self.connections = ConnectionsService(self.builds, self.secrets)
         self.tasks = TaskService(self.builds, connections=self.connections)
+        # Knowledge: the user's own searchable notes/documents. A workspace build like any other (so it
+        # inherits git, the rebuild-surviving guard skip, and voice rename/delete), but ingested directly
+        # here — never by the coder — so there is no build sandbox in the loop.
+        self.knowledge = KnowledgeService(self.builds, self.repo, self.clock, bus=self.bus)
         self.tools = ToolRegistry(
             self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue,
             tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane, connections=self.connections,
+            knowledge=self.knowledge,
         )
         self.conversation = ConversationService(
-            self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM
+            self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM,
+            knowledge=self.knowledge,
         )
         self.agents = AgentService(self.settings, self.conversation, bus=self.bus)
         self.tools.bind_agents(self.agents)  # late-bind: agents → conversation → tools, so it can't be ctor-passed

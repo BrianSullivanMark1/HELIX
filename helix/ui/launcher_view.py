@@ -1,12 +1,13 @@
-"""LauncherView — the Menu: four tabs over what you've made.
+"""LauncherView — the Menu: five tabs over what you've made.
 
-  • Apps   — built apps that open a screen (Open / Rename / Remove).
-  • Models — 3D models and animations the orb made to show you (build_3d_model) (Open / Rename / Remove).
-  • Agents — saved goals HELIX runs on demand (Run / Rename / Remove).
-  • Tasks  — built scripts that *do a thing* when run (Run / Rename / Remove).
+  • Apps      — built apps that open a screen (Open / Rename / Remove).
+  • Models    — 3D models and animations the orb made to show you (build_3d_model) (Open / Rename / Remove).
+  • Agents    — saved goals HELIX runs on demand (Run / Rename / Remove).
+  • Tasks     — built scripts that *do a thing* when run (Run / Rename / Remove).
+  • Knowledge — searchable collections of the user's own notes/documents (Open / Rename / Remove).
 
-Apps/Models and Agents/Tasks are data, not shell: they're freely removable. The tabs, New app, and
-Settings are the immutable shell.
+Builds are data, not shell: they're freely removable. The tabs, New app, and Settings are the immutable
+shell.
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ from helix.ui.build_status import BuildStatus
 from helix.ui.theme import CYAN, LINE, MUTED, PANEL, STATUS_DONE, STATUS_ERROR, STATUS_WORKING
 from helix.ui.workers import QtWorker
 
-_APPS, _MODELS, _AGENTS, _TASKS = 0, 1, 2, 3
+_APPS, _MODELS, _AGENTS, _TASKS, _KNOWLEDGE = 0, 1, 2, 3, 4
 
 # Tile border colour per build status (None = the default look). One glance at the menu shows what's
 # building (yellow), freshly done (green), or broke (red); blue is the resting state.
@@ -95,12 +96,15 @@ class LauncherView(QWidget):
     editBuildRequested = pyqtSignal(str, str)  # (slug, name) — open the live "Edit with AI" prompt
     connectBuildRequested = pyqtSignal(str, str)  # (slug, name) — open the API-key Connect panel
 
-    def __init__(self, builds: BuildService, agents: AgentService, tasks: TaskService) -> None:
+    def __init__(
+        self, builds: BuildService, agents: AgentService, tasks: TaskService, knowledge=None
+    ) -> None:
         super().__init__()
         self.setObjectName("Panel")
         self._builds = builds
         self._agents = agents
         self._tasks = tasks
+        self._knowledge = knowledge  # KnowledgeService — drives the Knowledge tab's cards + doc counts
         self._workers: set[QtWorker] = set()
         # slug -> BuildStatus|None, supplied by the main window's status board; drives the tile borders.
         self._status_provider: Callable[[str], "BuildStatus | None"] = lambda _slug: None
@@ -114,7 +118,8 @@ class LauncherView(QWidget):
         header = QHBoxLayout()
         self._tabs: dict[int, QPushButton] = {}
         for idx, label in (
-            (_APPS, "Apps"), (_MODELS, "Models"), (_AGENTS, "Agents"), (_TASKS, "Tasks")
+            (_APPS, "Apps"), (_MODELS, "Models"), (_AGENTS, "Agents"), (_TASKS, "Tasks"),
+            (_KNOWLEDGE, "Knowledge"),
         ):
             btn = QPushButton(label)
             btn.setCheckable(True)
@@ -148,10 +153,16 @@ class LauncherView(QWidget):
         self._tasks_status.setWordWrap(True)
         tasks_page.layout().addWidget(self._tasks_status)
 
+        self._knowledge_grid, knowledge_page, self._knowledge_empty = self._grid_page(
+            "No knowledge yet. Tell the orb to remember something, or open a base here to add notes "
+            "and files HELIX can search."
+        )
+
         self._stack.addWidget(apps_page)            # 0
         self._stack.addWidget(models_page)          # 1
         self._stack.addWidget(self._agents_page())  # 2
         self._stack.addWidget(tasks_page)           # 3
+        self._stack.addWidget(knowledge_page)       # 4
         root.addWidget(self._stack, stretch=1)
 
         self._show_tab(_APPS)
@@ -237,6 +248,10 @@ class LauncherView(QWidget):
         self._fill_grid(
             self._models_grid, self._models_empty, [self._openable_card(a) for a in cat["models"]]
         )
+        self._fill_grid(
+            self._knowledge_grid, self._knowledge_empty,
+            [self._knowledge_card(a) for a in cat.get("knowledge", [])],
+        )
 
         task_cards = []
         for app in cat["tasks"]:
@@ -314,6 +329,23 @@ class LauncherView(QWidget):
             actions.append(connect)
         actions += [rename, remove]
         card.add_actions(*actions)
+        card.apply_status(self._status_provider(app.slug))
+        return card
+
+    def _knowledge_card(self, app) -> _Card:
+        """A card for a knowledge base — Open (manage its docs) / Rename / Remove. The subtitle shows how
+        much is in it rather than the build request, since a base is a living collection, not a one-shot
+        description."""
+        count = self._knowledge.count(app.slug) if self._knowledge is not None else 0
+        subtitle = f"{count} document{'s' if count != 1 else ''} · searchable by the orb"
+        card = _Card(app.name, subtitle)
+        open_btn = QPushButton("Open")
+        open_btn.clicked.connect(lambda _c=False, s=app.slug: self.openAppRequested.emit(s))
+        rename = QPushButton("✎ Rename")
+        rename.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._rename_build(s, n))
+        remove = QPushButton("✕ Remove")
+        remove.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._remove_build(s, n))
+        card.add_actions(open_btn, rename, remove)
         card.apply_status(self._status_provider(app.slug))
         return card
 

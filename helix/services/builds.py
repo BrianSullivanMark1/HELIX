@@ -75,7 +75,12 @@ class BuildService:
         """After the coder runs: detect how the app runs, persist it, commit the result."""
         ws = self.workspace(app.slug)
         self.clear_building(app.slug)  # the build completed — clear the in-progress marker before committing
-        if app.build_kind == BuildKind.MODEL and (ws / "index.html").exists():
+        if app.build_kind == BuildKind.KNOWLEDGE:
+            # A knowledge base is data the user ingests, never a runnable artifact — it has no entry point.
+            # (Knowledge is created directly by KnowledgeService, not the coder, so this is defensive: it
+            # keeps _detect_entry from ever mislabelling a base as a launchable app/task.)
+            app.kind, app.entry_point = AppKind.UNKNOWN, None
+        elif app.build_kind == BuildKind.MODEL and (ws / "index.html").exists():
             # A model ALWAYS opens in its baked Three.js viewer. Pin it, so a stray main.py the coder might
             # have left can't make main.py-first _detect_entry turn the model into a console launch.
             app.kind, app.entry_point = AppKind.HTML, "index.html"
@@ -101,8 +106,11 @@ class BuildService:
         """Partition every workspace build by its canonical BuildKind — the single source of truth the
         menu and the orb's list both render, so they always agree. (Agents are a separate substrate and
         are folded in by the caller.) Classification lives here, never in the view."""
-        buckets: dict[str, list[App]] = {"apps": [], "tasks": [], "models": []}
-        by_kind = {BuildKind.APP: "apps", BuildKind.TASK: "tasks", BuildKind.MODEL: "models"}
+        buckets: dict[str, list[App]] = {"apps": [], "tasks": [], "models": [], "knowledge": []}
+        by_kind = {
+            BuildKind.APP: "apps", BuildKind.TASK: "tasks", BuildKind.MODEL: "models",
+            BuildKind.KNOWLEDGE: "knowledge",
+        }
         for app in self.list():
             buckets[by_kind.get(app.build_kind, "apps")].append(app)
         return buckets

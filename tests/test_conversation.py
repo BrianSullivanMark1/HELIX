@@ -126,6 +126,45 @@ def test_agent_run_is_hermetic_when_not_persisting():
     assert _all_text(chat.last_turns).strip() == "agent goal"
 
 
+class _FakeKnowledge:
+    """Stand-in KnowledgeService: records the queries it was asked and returns a fixed ambient block."""
+
+    def __init__(self, text: str = "") -> None:
+        self.text = text
+        self.queries: list[str] = []
+
+    def auto_context(self, query: str) -> str:
+        self.queries.append(query)
+        return self.text
+
+
+def test_ambient_knowledge_is_injected_on_orb_turns_but_not_persisted():
+    chat = _CaptureChat()
+    store = _FakeStore()
+    know = _FakeKnowledge("<<<KNOWLEDGE-x the wifi password is hunter2 KNOWLEDGE-x<<<")
+    svc = ConversationService(
+        chat, _FakeTools([]), store, _FakeMemory(), _FixedClock(), "sys", knowledge=know
+    )
+    svc.run_turn("what's my wifi password")
+    # the orb saw the surfaced passage this turn…
+    assert "hunter2" in _all_text(chat.last_turns)
+    assert "what's my wifi password" in _all_text(chat.last_turns)
+    # …but it's ephemeral — only the user's own words were written to history
+    assert "hunter2" not in "".join(m.text for m in store.msgs)
+    assert know.queries == ["what's my wifi password"]
+
+
+def test_ambient_knowledge_is_never_injected_into_an_agent_run():
+    chat = _CaptureChat()
+    know = _FakeKnowledge("<<<KNOWLEDGE-x should-not-appear KNOWLEDGE-x<<<")
+    svc = ConversationService(
+        chat, _FakeTools([]), _FakeStore(), _FakeMemory(), _FixedClock(), "sys", knowledge=know
+    )
+    svc.run_turn("agent goal", allow_builds=False, persist=False)
+    assert "should-not-appear" not in _all_text(chat.last_turns)
+    assert know.queries == []  # an agent retrieves explicitly; auto_context isn't even consulted
+
+
 def test_history_coalesces_consecutive_same_role_turns():
     from helix.domain.models import Message, Role
 

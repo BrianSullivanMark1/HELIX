@@ -51,7 +51,10 @@ class TaskService:
         proc = self._procs.get(slug)
         return proc is not None and proc.poll() is None
 
-    def run(self, slug: str) -> bool:
+    def run(self, slug: str, *, port: int | None = None, headless: bool = False) -> bool:
+        """Launch a Python build. A console TASK runs in its own window (headless=False). An APP with a
+        backend runs HEADLESS (no window) on the given PORT, with its output captured to server.log, so
+        HELIX can show its page inside the app instead of a console/browser."""
         self._prune()
         app = next((a for a in self._builds.list() if a.slug == slug), None)
         if app is None or app.kind != AppKind.PYTHON or not app.entry_point:
@@ -63,18 +66,38 @@ class TaskService:
         env = dict(os.environ)
         if self._connections is not None:
             env.update(self._connections.env_for(slug))
+        if port is not None:
+            env["PORT"] = str(port)  # HELIX assigns the port so backend apps never collide
+        ws = self._builds.workspace(slug)
+        stdout = stderr = None
+        flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        if headless:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no console window — shown inside HELIX
+            try:
+                stdout = open(ws / "server.log", "w", encoding="utf-8", errors="replace")
+                stderr = subprocess.STDOUT
+            except OSError:
+                stdout = stderr = None
         try:
             proc = subprocess.Popen(
-                [_python(), app.entry_point],
-                cwd=str(self._builds.workspace(slug)),
-                env=env,
-                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                [_python(), app.entry_point], cwd=str(ws), env=env,
+                stdout=stdout, stderr=stderr, creationflags=flags,
             )
             self._procs[slug] = proc
             return True
         except Exception:
             _LOG.exception("could not launch task %s", slug)
             return False
+
+    def stop(self, slug: str) -> None:
+        """Terminate one running build (e.g. a backend app's server when its viewer closes)."""
+        proc = self._procs.pop(slug, None)
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except Exception:
+                pass
 
     def terminate_all(self) -> None:
         """Best-effort stop of any task processes HELIX launched (available; not called on a normal close,

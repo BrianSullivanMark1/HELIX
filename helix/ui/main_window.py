@@ -1,7 +1,9 @@
 """HelixMainWindow — the shell: the Presence orb as the window background, nav + pages floating on top."""
 from __future__ import annotations
 
-from PyQt6.QtCore import QUrl, pyqtSignal
+import socket
+
+from PyQt6.QtCore import QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication,
@@ -38,6 +40,7 @@ from helix.ui.build_status import BuildStatusBoard
 from helix.ui.commands_view import CommandsDialog
 from helix.ui.connections_dialog import ConnectionsDialog
 from helix.ui.console_view import ConsoleView
+from helix.ui.knowledge_view import KnowledgeView
 from helix.ui.launcher_view import LauncherView
 from helix.ui.orb import PresenceOrb
 from helix.ui.settings_view import SettingsView
@@ -95,7 +98,9 @@ class HelixMainWindow(QMainWindow):
             forge=container.forge, build_queue=container.build_queue,
             selfdev_lane=container.selfdev_lane,
         )
-        self.launcher = LauncherView(container.builds, container.agents, container.tasks)
+        self.launcher = LauncherView(
+            container.builds, container.agents, container.tasks, container.knowledge
+        )
         self.settings = SettingsView(container.settings, container.connections)
         self._stack.addWidget(self.console)  # 0
         self._stack.addWidget(self.launcher)  # 1
@@ -103,13 +108,21 @@ class HelixMainWindow(QMainWindow):
         # In-app viewer for built HTML apps and 3D models — renders inside HELIX instead of the browser,
         # and is reused so tabs never pile up. None if PyQt6-WebEngine isn't available (browser fallback).
         self._viewer = AppViewer() if AppViewer is not None else None
-        self._viewer_target: object | None = None  # the file currently shown, for "open in browser"
+        self._viewer_target: object | None = None  # the file/URL currently shown, for "open in browser"
         self._viewer_slug: str | None = None  # the build currently open in the viewer (for live reload)
+        self._app_ports: dict[str, int] = {}  # slug -> port of a backend app's local server, shown in-app
         if self._viewer is not None:
             self._viewer.closeRequested.connect(self._close_viewer)
             self._viewer.openExternallyRequested.connect(self._open_current_externally)
             self._viewer.editRequested.connect(self._on_viewer_edit)  # live "Edit with AI" bar
             self._stack.addWidget(self._viewer)  # 3
+        # The Knowledge manager — a native widget (no WebEngine), reused for whichever base is opened. Its
+        # stack index is captured (not a fixed constant) since the optional viewer above may or may not
+        # have been added before it.
+        self._knowledge_view = KnowledgeView(container.knowledge)
+        self._knowledge_slug: str | None = None  # the base currently open in the knowledge manager
+        self._knowledge_view.closeRequested.connect(self._close_knowledge_view)
+        self._knowledge_view_index = self._stack.addWidget(self._knowledge_view)
         ov.addWidget(self._stack, stretch=1)
 
         # Tap-to-talk: the Console handles clicks on its own empty space (the orb glowing behind it),
@@ -233,6 +246,9 @@ class HelixMainWindow(QMainWindow):
             if old:
                 self._board.remove(old)
         self._refresh_build_ui()
+        # Keep an open Knowledge base in sync when it changes underneath the manager (the orb saved a note
+        # into it, it was renamed, or it was deleted from elsewhere).
+        self._sync_knowledge_view(event)
         # A rename can move the open build to a NEW slug — re-point the viewer so it isn't pinned to the
         # moved-on-disk workspace (and later iterate events keep reaching it).
         if isinstance(event, BuildRenamed):
@@ -247,6 +263,8 @@ class HelixMainWindow(QMainWindow):
         if slug and slug == self._viewer_slug:
             if isinstance(event, BuildDeleted):
                 self._close_viewer()
+            elif slug in self._app_ports:
+                self._restart_app_server(slug)  # backend app edited — serve the new code, then re-show
             else:
                 self._reload_viewer()
 
@@ -367,6 +385,7 @@ class HelixMainWindow(QMainWindow):
         for teardown in (
             self._c.build_queue.shutdown,
             self._c.selfdev_lane.shutdown,
+            self._stop_app_servers,  # kill any backend-app servers so they don't outlive HELIX / hold a port
             (self._viewer.clear if self._viewer is not None else lambda: None),
             self.console.shutdown,
             self.launcher.shutdown,
@@ -383,6 +402,12 @@ class HelixMainWindow(QMainWindow):
         if app is None:
             return
         self._on_build_seen(slug)  # opening acknowledges a done/error result → tile/legend back to blue
+        if app.build_kind == BuildKind.KNOWLEDGE:
+            # A knowledge base opens in its native manager (add notes/files, search, remove), not a webview.
+            self._knowledge_slug = slug
+            self._knowledge_view.open_base(slug, app.name)
+            self._go(self._knowledge_view_index)
+            return
         ws = self._c.builds.workspace(slug)
         if app.kind == AppKind.HTML and app.entry_point:
             target = ws / app.entry_point
@@ -395,18 +420,83 @@ class HelixMainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))  # fallback: no WebEngine
             return
         if app.kind == AppKind.PYTHON and app.entry_point:
-            # An app with a backend (main.py) RUNS — it starts its local server (with any connected API
-            # keys injected) and opens itself in the browser, rather than dumping the user in a folder.
-            if self._c.tasks.is_running(slug):
-                self.console.status.setText(f"“{app.name}” is already running — check your browser.")
-                return
-            ok = self._c.tasks.run(slug)
-            self.console.status.setText(
-                f"Started “{app.name}” — it opens in your browser."
-                if ok else f"Couldn't start “{app.name}”. Make sure Python is installed."
-            )
+            # An app with a backend (main.py) RUNS its local server and is shown INSIDE HELIX — no browser.
+            self._open_server_app(slug, app)
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(ws)))  # other build: open its folder
+
+    # ----- backend (server) apps: run main.py on a private port, show its page in the in-app viewer -----
+    def _open_server_app(self, slug: str, app) -> None:
+        if self._viewer is None:  # no in-app web view available — fall back to a console launch
+            self._c.tasks.run(slug)
+            self.console.status.setText(f"Started “{app.name}” (no in-app viewer available).")
+            return
+        if not self._c.tasks.is_running(slug):  # not already running — start it headless on a free port
+            port = self._free_port()
+            if not self._c.tasks.run(slug, port=port, headless=True):
+                self.console.status.setText(f"Couldn't start “{app.name}”. Make sure Python is installed.")
+                return
+            self._app_ports[slug] = port
+        port = self._app_ports.get(slug)
+        if port is None:
+            return
+        url = f"http://127.0.0.1:{port}"
+        self._viewer_slug = slug
+        self._viewer_target = url
+        self._viewer.show_starting(app.name)
+        self._go(_VIEWER)
+        self._await_server(slug, app.name, port, url, 0)
+
+    @staticmethod
+    def _free_port() -> int:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+        finally:
+            s.close()
+
+    @staticmethod
+    def _port_open(port: int) -> bool:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.25)
+        try:
+            s.connect(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+        finally:
+            s.close()
+
+    def _await_server(self, slug: str, name: str, port: int, url: str, tries: int) -> None:
+        """Poll until the build's local server is accepting, then show its page in the viewer."""
+        if self._viewer is None or self._viewer_slug != slug:
+            return  # user navigated away / opened something else
+        if not self._c.tasks.is_running(slug):  # the server process died on startup
+            self._viewer.show_notice(name, "It didn’t start. Check its server.log in the build folder.")
+            self.console.status.setText(f"“{name}” didn’t start — see its server.log.")
+            return
+        if self._port_open(port):
+            self._viewer.load_url(url, name)
+            return
+        if tries >= 40:  # ~6s and still not up
+            self._viewer.show_notice(name, "It’s taking too long to start — try Reload.")
+            return
+        QTimer.singleShot(150, lambda: self._await_server(slug, name, port, url, tries + 1))
+
+    def _restart_app_server(self, slug: str) -> None:
+        """A backend app was edited — restart its server so it serves the new code, then re-show it."""
+        app = next((a for a in self._c.builds.list() if a.slug == slug), None)
+        if app is None:
+            return
+        self._c.tasks.stop(slug)
+        self._app_ports.pop(slug, None)
+        self._open_server_app(slug, app)
+
+    def _stop_app_servers(self) -> None:
+        for slug in list(self._app_ports):
+            self._c.tasks.stop(slug)
+        self._app_ports.clear()
 
     def _reload_viewer(self) -> None:
         """Re-load the open build's page so a background iterate (a rewritten GLB/HTML) shows at once."""
@@ -420,11 +510,42 @@ class HelixMainWindow(QMainWindow):
         self._viewer.load(target, app.name)
 
     def _close_viewer(self) -> None:
+        slug = self._viewer_slug
         if self._viewer is not None:
             self._viewer.clear()  # stop the page (animation/audio) and free the GL surface
         self._viewer_slug = None
+        if slug and slug in self._app_ports:  # leaving a backend app — stop its server, free the port
+            self._c.tasks.stop(slug)
+            self._app_ports.pop(slug, None)
         self._go(_MENU)
 
+    def _close_knowledge_view(self) -> None:
+        self._knowledge_slug = None
+        self._go(_MENU)
+
+    def _sync_knowledge_view(self, event: object) -> None:
+        """Reflect a change to the OPEN knowledge base in the manager: re-point + retitle on a rename,
+        close on a delete, reload its contents on any other change (e.g. the orb remembered a note)."""
+        if self._knowledge_slug is None:
+            return
+        if isinstance(event, BuildRenamed):
+            if getattr(event, "old_slug", None) == self._knowledge_slug:
+                self._knowledge_slug = event.app.slug
+                self._knowledge_view.open_base(event.app.slug, event.app.name)
+            return
+        if isinstance(event, BuildDeleted):
+            if event.slug == self._knowledge_slug:
+                self._close_knowledge_view()
+            return
+        slug = getattr(getattr(event, "app", None), "slug", None)
+        if slug and slug == self._knowledge_slug:
+            self._knowledge_view.reload()
+
     def _open_current_externally(self) -> None:
-        if self._viewer_target is not None:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._viewer_target)))
+        t = self._viewer_target
+        if t is None:
+            return
+        if isinstance(t, str) and t.startswith("http"):
+            QDesktopServices.openUrl(QUrl(t))  # a backend app: open its local server in the real browser
+        else:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(t)))
