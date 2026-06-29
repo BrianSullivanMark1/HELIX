@@ -51,6 +51,7 @@ from PyQt6.QtWidgets import (
 
 from typing import TYPE_CHECKING
 
+from helix.domain.models import Role
 from helix.ports.speech import SpeechIn, SpeechOut
 from helix.ports.stores import SettingsStore
 from helix.services import attachments
@@ -687,6 +688,7 @@ class ConsoleView(QWidget):
 
         self.refresh_key_state()
         self._refresh_voice_ui()
+        self._load_history()  # show the recent conversation so the chat persists across launches
 
     # ----- public -----
     def refresh_key_state(self) -> None:
@@ -1308,7 +1310,7 @@ class ConsoleView(QWidget):
         anim.finished.connect(lambda: widget.setGraphicsEffect(None))
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
-    def _add_bubble(self, who: str, text: str) -> None:
+    def _add_bubble(self, who: str, text: str, *, animate: bool = True) -> None:
         is_user = who == "you"
         bubble = _Bubble(text, is_user=is_user, on_status=self._flash_status)
         rowlay = QHBoxLayout()
@@ -1320,8 +1322,28 @@ class ConsoleView(QWidget):
             rowlay.addWidget(bubble)
             rowlay.addStretch(1)
         self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
-        self._animate_in(bubble)
-        QTimer.singleShot(0, self._scroll_to_bottom)
+        if animate:  # historical (on-load) bubbles skip the fade + per-item scroll; we scroll once at the end
+            self._animate_in(bubble)
+            QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def _load_history(self) -> None:
+        """On launch, show the recent conversation so the chat persists across sessions instead of starting
+        blank. Read-only render of the last messages (no animation flurry); scroll to the newest once."""
+        try:
+            msgs = self._conversation.recent_messages(50)
+        except Exception:  # noqa: BLE001 - a history-read hiccup must never block the app from starting
+            return
+        for m in msgs:
+            if m.role == Role.USER:
+                self._add_bubble("you", m.text, animate=False)
+            else:
+                spoken, visuals = split_visuals(m.text)  # drop any inline viz JSON from the bubble text
+                if spoken.strip() or not visuals:
+                    self._add_bubble("helix", spoken.strip() or m.text, animate=False)
+                for spec in visuals:
+                    self._add_visual(spec)
+        if msgs:
+            QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _add_citation(self, sources: list) -> None:
         """A small 'from <base> › <doc>' line under a reply that drew on the user's saved knowledge — so

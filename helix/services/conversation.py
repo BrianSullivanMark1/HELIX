@@ -145,6 +145,11 @@ class ConversationService:
             finish("Something went wrong on that one — try me again?")
             raise
 
+    def recent_messages(self, limit: int = 50) -> list[Message]:
+        """The recent human-facing transcript (USER/ASSISTANT only), oldest-first — so the Console can show
+        the last messages on load and the conversation persists across launches."""
+        return [m for m in self._store.recent(limit) if m.role in (Role.USER, Role.ASSISTANT)]
+
     # ----- helpers -----
     def _remember(self, text: str) -> str:
         with self._lock:
