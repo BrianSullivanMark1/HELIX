@@ -80,6 +80,12 @@ class ConversationService:
             # An agent run is hermetic: its goal and report never touch the shared Console transcript, so
             # it can't evict real turns from the window or be 'remembered' as if the user typed it.
             turns = [Turn(Role.USER, (Text(user_text),))]
+        # Anchor the model to the REAL current time every turn. Without this it has no idea what "today"
+        # is or the user's timezone, so it guesses dates — and it mis-converts the Unix-epoch timestamps
+        # that Slack/GitHub/email return (e.g. Slack's "ts"). This is the fix for wrong message dates.
+        if turns:
+            last = turns[-1]
+            turns[-1] = Turn(last.role, last.blocks + (Text(self._now_context()),))
         if attachments_text:
             # Attached files/folders ride along as EPHEMERAL context on this turn only — appended to the
             # current (last) user turn, never written to history, so a big attachment isn't replayed on
@@ -144,6 +150,25 @@ class ConversationService:
             # USER row that would malform the NEXT request. The worker still surfaces the real error.
             finish("Something went wrong on that one — try me again?")
             raise
+
+    def _now_context(self) -> str:
+        """A one-line current-time anchor injected each turn, so date reasoning is grounded and API
+        epoch timestamps (Slack 'ts', GitHub, email) convert correctly instead of being guessed."""
+        now = self._clock.now()
+        offset = now.strftime("%z")
+        tz = f"UTC{offset[:3]}:{offset[3:]}" if offset else "local time"
+        human = now.strftime("%A, %B %d, %Y, %I:%M %p").replace(" 0", " ")
+        try:
+            epoch = int(now.timestamp())
+        except (OverflowError, OSError, ValueError):
+            epoch = 0
+        return (
+            f"[Current date & time: {human} ({tz}); Unix epoch {epoch}. Use THIS as \"now\" for every "
+            f"date question. When a tool result contains a Unix-epoch timestamp (e.g. Slack's \"ts\", or "
+            f"GitHub/email times), convert it to the user's local timezone by comparing it to the current "
+            f"epoch above, and answer with the absolute date (e.g. \"July 1\"). Never guess a date or "
+            f"infer it from earlier in the conversation; if a timestamp is ambiguous, say so.]"
+        )
 
     def recent_messages(self, limit: int = 50) -> list[Message]:
         """The recent human-facing transcript (USER/ASSISTANT only), oldest-first — so the Console can show

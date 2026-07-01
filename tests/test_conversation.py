@@ -107,7 +107,9 @@ def test_no_attachments_leaves_the_turn_unchanged():
     chat = _CaptureChat()
     svc = ConversationService(chat, _FakeTools([]), _FakeStore(), _FakeMemory(), _FixedClock(), "sys")
     svc.run_turn("plain message")
-    assert _all_text(chat.last_turns).strip() == "plain message"
+    seen = _all_text(chat.last_turns)
+    assert "plain message" in seen
+    assert "ATTACHMENTS" not in seen  # no attachment block was added (the time anchor rides along separately)
 
 
 def test_agent_run_is_hermetic_when_not_persisting():
@@ -122,8 +124,10 @@ def test_agent_run_is_hermetic_when_not_persisting():
     # The goal/report never enter the shared transcript…
     assert all("agent goal" not in m.text for m in store.msgs)
     assert out == "done"
-    # …and the model saw ONLY the hermetic goal, not the Console history.
-    assert _all_text(chat.last_turns).strip() == "agent goal"
+    # …and the model saw ONLY the hermetic goal (plus the ephemeral time anchor), not the Console history.
+    seen = _all_text(chat.last_turns)
+    assert "agent goal" in seen
+    assert "a console message" not in seen and "a console reply" not in seen
 
 
 class _FakeKnowledge:
@@ -179,6 +183,20 @@ def test_ambient_knowledge_is_never_injected_into_an_agent_run():
     assert know.queries == []  # an agent retrieves explicitly; auto_context isn't even consulted
 
 
+def test_current_time_anchor_is_injected_each_turn_but_not_persisted():
+    chat = _CaptureChat()
+    store = _FakeStore()
+    svc = ConversationService(chat, _FakeTools([]), store, _FakeMemory(), _FixedClock(), "sys")
+    svc.run_turn("what day is it")
+    seen = _all_text(chat.last_turns)
+    # the model is told the real 'now' + how to convert epoch timestamps — the date-accuracy fix
+    assert "Current date & time" in seen and "2026" in seen and "Unix epoch" in seen
+    assert "convert" in seen.lower()
+    # ...but the anchor is ephemeral — only the user's words are written to history
+    stored = "".join(m.text for m in store.msgs)
+    assert "what day is it" in stored and "Current date & time" not in stored
+
+
 def test_history_coalesces_consecutive_same_role_turns():
     from helix.domain.models import Message, Role
 
@@ -190,4 +208,4 @@ def test_history_coalesces_consecutive_same_role_turns():
     svc.run_turn("third")
     # The API rejects user-then-user; the leading users must coalesce into one well-formed turn.
     assert [t.role for t in chat.last_turns] == [Role.USER]
-    assert _all_text(chat.last_turns) == "firstsecondthird"
+    assert _all_text(chat.last_turns).startswith("firstsecondthird")  # + the ephemeral time anchor

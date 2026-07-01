@@ -12,8 +12,9 @@ from pathlib import Path
 from PyQt6.QtCore import QUrl, pyqtSignal
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from helix.ui.chat_input import ChatInput
 from helix.ui.theme import CYAN, LINE, MUTED
 
 
@@ -79,9 +80,8 @@ class AppViewer(QWidget):
         erow = QHBoxLayout(self._edit_bar)
         erow.setContentsMargins(16, 10, 16, 10)
         erow.setSpacing(8)
-        self._edit_input = QLineEdit()
-        self._edit_input.setPlaceholderText("Describe a change — HELIX updates this live…")
-        self._edit_input.returnPressed.connect(self._send_edit)
+        self._edit_input = ChatInput("Describe a change — HELIX updates this live…")  # Enter sends · Shift+Enter = new line
+        self._edit_input.submitted.connect(self._send_edit)
         self._edit_status = QLabel("")
         self._edit_status.setStyleSheet(f"color:{MUTED};")
         update_btn = QPushButton("✨ Update")

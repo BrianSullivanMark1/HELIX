@@ -40,7 +40,6 @@ from PyQt6.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMenu,
     QPushButton,
     QScrollArea,
@@ -58,6 +57,7 @@ from helix.services import attachments
 from helix.services.cancel import CancelToken
 from helix.services.conversation import ConversationService
 from helix.ui.build_status import BuildStatus, LegendEntry
+from helix.ui.chat_input import ChatInput
 from helix.ui.orb import OrbState, OrbStatus, PresenceOrb
 from helix.ui.theme import (
     CYAN,
@@ -334,6 +334,31 @@ def _table_text(spec: dict) -> str:
     return "\n".join(lines)
 
 
+def _table_slack(spec: dict) -> str:
+    """A table formatted for pasting into Slack (and readable anywhere): an ALIGNED, fixed-width table
+    inside a code fence — Slack only lines columns up inside ``` blocks — with a bold title above it. This
+    is what the copy button puts on the clipboard, so a pasted table looks like a table, not raw TSV."""
+    cols = [str(c) for c in (spec.get("columns") or [])]
+    rows: list[list[str]] = []
+    for r in spec.get("rows") or []:
+        cells = r if isinstance(r, (list, tuple)) else [r]
+        rows.append([str(c) for c in cells])
+    ncol = max([len(cols)] + [len(r) for r in rows] or [1])
+    if ncol == 0:
+        return str(spec.get("title") or "")
+    cols += [""] * (ncol - len(cols))
+    rows = [r + [""] * (ncol - len(r)) for r in rows]
+    widths = [max([len(cols[i])] + [len(r[i]) for r in rows]) for i in range(ncol)]
+
+    def fmt(cells: list[str]) -> str:
+        return " | ".join(cells[i].ljust(widths[i]) for i in range(ncol))
+
+    body = [fmt(cols), "-+-".join("-" * w for w in widths)] + [fmt(r) for r in rows]
+    table = "```\n" + "\n".join(body) + "\n```"
+    title = str(spec.get("title") or "").strip()
+    return f"*{title}*\n{table}" if title else table
+
+
 def _export_text(parent: QWidget, text: str, default_name: str, on_status) -> None:
     path, _ = QFileDialog.getSaveFileName(
         parent, "Export", default_name, "Text (*.txt *.md);;All files (*)"
@@ -600,6 +625,13 @@ class ConsoleView(QWidget):
         self._transcript.installEventFilter(self)
         self._scroll.viewport().installEventFilter(self)
         root.addWidget(self._scroll, stretch=1)
+        # Auto-follow: keep the newest message in view. When content grows (a bubble is added) and the user
+        # is at/near the bottom, snap down — so hitting Enter always scrolls to the bottom. If they've
+        # scrolled up to read, we stop following so we don't yank them away.
+        self._follow = True
+        _sb = self._scroll.verticalScrollBar()
+        _sb.rangeChanged.connect(self._on_scroll_range)
+        _sb.valueChanged.connect(self._on_scroll_value)
 
         # Status pill + voice toggle, beneath the conversation, over the orb's lower glow.
         self.status = QLabel("Ready when you are.")
@@ -651,9 +683,8 @@ class ConsoleView(QWidget):
             "border-radius:14px;padding:8px 12px;font-size:15px;}"
             "QToolButton:hover{border-color:#3fe0e0;} QToolButton::menu-indicator{image:none;}"
         )
-        self._input = QLineEdit()
-        self._input.setPlaceholderText("Tell HELIX what to build…")
-        self._input.returnPressed.connect(self._send)
+        self._input = ChatInput("Tell HELIX what to build…")  # Enter sends · Shift+Enter = new line
+        self._input.submitted.connect(self._send)
         # Mute: pause/resume the mic without stopping a build — the intuitive manual control, right by the
         # input. Shown only when hands-free voice is on. (Stopping a build is a separate "stop" action.)
         self._mute_btn = QPushButton("🎙 Mute")
@@ -944,6 +975,7 @@ class ConsoleView(QWidget):
             self._add_actions([("Open Settings", self.openSettingsRequested.emit)])
             return
         prompt = text or "Here are some files — take a look."  # allow an attachment-only message
+        self._follow = True  # submitting always snaps the view to the bottom, even if scrolled up to read
         self._add_bubble("you", text or "📎 (attached files)")
         if attach_paths:
             self._add_attach_note(attach_paths)
@@ -1382,9 +1414,28 @@ class ConsoleView(QWidget):
             lay.addWidget(_ChartWidget(spec))
             self._insert_visual(_ToolWrap(card, _chart_text(spec), "helix-chart.txt", self._flash_status))
         elif kind == "table":
+            scroller = self._h_scroll(self._table_widget(spec))  # wide tables scroll instead of clipping
             self._insert_visual(
-                _ToolWrap(self._table_widget(spec), _table_text(spec), "helix-table.txt", self._flash_status)
+                _ToolWrap(scroller, _table_slack(spec), "helix-table.txt", self._flash_status)
             )
+
+    def _h_scroll(self, widget: QWidget) -> QWidget:
+        """Wrap a wide widget (a table) in a horizontally-scrollable viewport, so many columns render at
+        full width and scroll sideways rather than getting cut off at the window edge."""
+        widget.adjustSize()
+        hint = widget.sizeHint()
+        max_w = 860  # roomier than before; content wider than this scrolls horizontally
+        area = QScrollArea()
+        area.setWidget(widget)
+        area.setWidgetResizable(False)  # keep the table's natural width; scroll to reach the rest
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        wide = hint.width() > max_w
+        area.setMaximumWidth(min(hint.width() + 2, max_w))
+        area.setFixedHeight(hint.height() + (16 if wide else 2))  # room for the h-scrollbar only when shown
+        return area
 
     @staticmethod
     def _looks_numeric(s: str) -> bool:
@@ -1433,7 +1484,8 @@ class ConsoleView(QWidget):
             f"QLabel{{background:rgba(13,20,27,0.86);border:1px solid {CYAN_DIM};"
             "border-radius:12px;padding:12px 16px;}"
         )
-        lbl.setMaximumWidth(620)
+        # No width cap — the table renders at its natural width and _h_scroll gives it horizontal scroll,
+        # so many-column tables aren't clipped at the window edge.
         return lbl
 
     def _insert_visual(self, widget: QWidget) -> None:
@@ -1448,3 +1500,13 @@ class ConsoleView(QWidget):
     def _scroll_to_bottom(self) -> None:
         bar = self._scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
+
+    def _on_scroll_range(self, _minimum: int, maximum: int) -> None:
+        """Content grew (or history loaded): if we're following, pin to the newest. Fires AFTER layout,
+        so it lands on the true bottom (unlike an immediate scroll on a freshly-added widget)."""
+        if self._follow:
+            self._scroll.verticalScrollBar().setValue(maximum)
+
+    def _on_scroll_value(self, value: int) -> None:
+        bar = self._scroll.verticalScrollBar()
+        self._follow = value >= bar.maximum() - 40  # near the bottom → keep following the conversation

@@ -13,7 +13,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from helix.domain.models import Message, Role  # noqa: E402
-from helix.ui.console_view import ConsoleView, _Bubble  # noqa: E402
+from helix.ui.console_view import ConsoleView, _Bubble, _table_slack  # noqa: E402
 
 
 class _Conv:
@@ -85,3 +85,19 @@ def test_console_history_strips_inline_viz_json(_app):
 def test_console_empty_history_is_fine(_app):
     cv = ConsoleView(_Conv([]), _Settings())
     assert _bubbles(cv) == []
+
+
+def test_table_slack_copy_is_an_aligned_code_block():
+    spec = {
+        "type": "table", "title": "Open Actions",
+        "columns": ["Item", "Owner", "Status"],
+        "rows": [["Fix login", "Bren", "In Progress"], ["Deploy 2.6.8", "Brian", "Blocked"]],
+    }
+    out = _table_slack(spec)
+    assert out.startswith("*Open Actions*")   # Slack-bold title
+    assert out.count("```") == 2               # wrapped in a code fence (so Slack aligns columns)
+    body = [ln for ln in out.splitlines() if "|" in ln]
+    assert len({len(ln) for ln in body}) == 1  # every row padded to the same width → columns line up
+    assert "Fix login" in out and "Blocked" in out
+    # a header separator row of dashes is present
+    assert any(set(ln) <= set("-+ ") for ln in out.splitlines())
