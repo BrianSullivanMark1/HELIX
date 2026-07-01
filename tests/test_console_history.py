@@ -87,17 +87,24 @@ def test_console_empty_history_is_fine(_app):
     assert _bubbles(cv) == []
 
 
-def test_table_slack_copy_is_an_aligned_code_block():
+def test_table_slack_copy_is_backtick_wrapped_and_aligned():
     spec = {
         "type": "table", "title": "Open Actions",
         "columns": ["Item", "Owner", "Status"],
         "rows": [["Fix login", "Bren", "In Progress"], ["Deploy 2.6.8", "Brian", "Blocked"]],
     }
     out = _table_slack(spec)
-    assert out.startswith("*Open Actions*")   # Slack-bold title
-    assert out.count("```") == 2               # wrapped in a code fence (so Slack aligns columns)
-    body = [ln for ln in out.splitlines() if "|" in ln]
-    assert len({len(ln) for ln in body}) == 1  # every row padded to the same width → columns line up
+    assert out.startswith("*Open Actions*\n\n")  # Slack-bold title, then a blank line
+    assert "```" not in out                      # no fence — Slack's composer mangles pasted fences
+    body = out.splitlines()[2:]
+    # every table line is wrapped in single backticks → Slack renders each as monospaced inline code
+    assert body and all(ln.startswith("`") and ln.endswith("`") for ln in body)
+    assert len({len(ln) for ln in body}) == 1    # every line padded to the same width → columns line up
     assert "Fix login" in out and "Blocked" in out
-    # a header separator row of dashes is present
-    assert any(set(ln) <= set("-+ ") for ln in out.splitlines())
+    assert set(body[1]) <= set("`-+ ")           # a header separator row of dashes under the header
+
+
+def test_table_slack_copy_escapes_backticks_in_cells():
+    out = _table_slack({"type": "table", "columns": ["Cmd"], "rows": [["run `build.py` now"]]})
+    for ln in out.splitlines():
+        assert ln.count("`") == 2                # only the wrapping pair — cell backticks can't break a line

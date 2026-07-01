@@ -336,13 +336,20 @@ def _table_text(spec: dict) -> str:
 
 def _table_slack(spec: dict) -> str:
     """A table formatted for pasting into Slack (and readable anywhere): an ALIGNED, fixed-width table
-    inside a code fence — Slack only lines columns up inside ``` blocks — with a bold title above it. This
-    is what the copy button puts on the clipboard, so a pasted table looks like a table, not raw TSV."""
-    cols = [str(c) for c in (spec.get("columns") or [])]
+    where EVERY line is wrapped in single backticks — Slack renders each as monospaced inline code, so
+    columns line up, and unlike a ``` fence the layout survives Slack's composer on paste. A *bold*
+    title sits above. This is what the copy button puts on the clipboard, so a pasted table looks like
+    a table, not raw TSV."""
+
+    def cell(c) -> str:
+        # A backtick or newline inside a cell would break its line's inline-code wrapping in Slack.
+        return str(c).replace("`", "'").replace("\n", " ")
+
+    cols = [cell(c) for c in (spec.get("columns") or [])]
     rows: list[list[str]] = []
     for r in spec.get("rows") or []:
         cells = r if isinstance(r, (list, tuple)) else [r]
-        rows.append([str(c) for c in cells])
+        rows.append([cell(c) for c in cells])
     ncol = max([len(cols)] + [len(r) for r in rows] or [1])
     if ncol == 0:
         return str(spec.get("title") or "")
@@ -354,9 +361,9 @@ def _table_slack(spec: dict) -> str:
         return " | ".join(cells[i].ljust(widths[i]) for i in range(ncol))
 
     body = [fmt(cols), "-+-".join("-" * w for w in widths)] + [fmt(r) for r in rows]
-    table = "```\n" + "\n".join(body) + "\n```"
+    table = "\n".join(f"`{ln}`" for ln in body)
     title = str(spec.get("title") or "").strip()
-    return f"*{title}*\n{table}" if title else table
+    return f"*{title}*\n\n{table}" if title else table
 
 
 def _export_text(parent: QWidget, text: str, default_name: str, on_status) -> None:
