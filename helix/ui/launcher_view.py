@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -95,6 +96,7 @@ class LauncherView(QWidget):
     buildSeen = pyqtSignal(str)              # a build was opened/run — clears its done/error status
     editBuildRequested = pyqtSignal(str, str)  # (slug, name) — open the live "Edit with AI" prompt
     connectBuildRequested = pyqtSignal(str, str)  # (slug, name) — open the API-key Connect panel
+    buildReverted = pyqtSignal(str)            # slug — a build was rolled back; reload its open viewer
 
     def __init__(
         self, builds: BuildService, agents: AgentService, tasks: TaskService, knowledge=None
@@ -266,7 +268,7 @@ class LauncherView(QWidget):
             connect = self._connect_button(app)
             if connect is not None:
                 actions.append(connect)
-            actions += [rename, remove]
+            actions += [self._history_button(app), rename, remove]
             card.add_actions(*actions)
             card.apply_status(self._status_provider(app.slug))
             task_cards.append(card)
@@ -307,6 +309,49 @@ class LauncherView(QWidget):
         btn.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self.connectBuildRequested.emit(s, n))
         return btn
 
+    def _history_button(self, app) -> QPushButton:
+        """A version dropdown — the last few saved versions (with dates); pick one to roll back to it.
+        Every AI edit is a version (a git commit), so this is a clean undo for a bad prompt."""
+        btn = QPushButton("🕘 Versions")
+        btn.setToolTip("Roll this build back to an earlier version")
+        menu = QMenu(btn)
+        versions = self._builds.versions(app.slug, 5)
+        if len(versions) <= 1:
+            menu.addAction("No earlier versions yet").setEnabled(False)
+        else:
+            for i, c in enumerate(versions):
+                when = c.at.strftime("%b %d · %I:%M %p")
+                if i == 0:
+                    menu.addAction(f"{when}  ·  current").setEnabled(False)
+                else:
+                    act = menu.addAction(f"Revert to {when}")
+                    act.triggered.connect(
+                        lambda _c=False, s=app.slug, sha=c.sha, w=when, n=app.name: self._revert(s, sha, w, n)
+                    )
+        btn.setMenu(menu)
+        return btn
+
+    def _revert(self, slug: str, sha: str, when: str, name: str) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Revert",
+            f"Revert “{name}” to the version from {when}? Your current version is kept in history, so you "
+            "can always revert again.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        if self._builds.revert(slug, sha) is None:
+            QMessageBox.warning(
+                self,
+                "Revert",
+                f"Couldn’t revert “{name}” — it may be open or running right now. Close it and try again.",
+            )
+            return
+        self.buildReverted.emit(slug)  # let the main window reload an open viewer
+        self.refresh()
+
     def _openable_card(self, app) -> _Card:
         """A card for something that opens in the browser — an app or a 3D model
         (Open / Edit with AI / Rename / Remove)."""
@@ -324,7 +369,7 @@ class LauncherView(QWidget):
         connect = self._connect_button(app)
         if connect is not None:
             actions.append(connect)
-        actions += [rename, remove]
+        actions += [self._history_button(app), rename, remove]
         card.add_actions(*actions)
         card.apply_status(self._status_provider(app.slug))
         return card
@@ -342,7 +387,7 @@ class LauncherView(QWidget):
         rename.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._rename_build(s, n))
         remove = QPushButton("✕ Remove")
         remove.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._remove_build(s, n))
-        card.add_actions(open_btn, rename, remove)
+        card.add_actions(open_btn, self._history_button(app), rename, remove)
         card.apply_status(self._status_provider(app.slug))
         return card
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from typing import Callable
 
 from helix.domain.connections import KNOWN_SERVICES, Connection, service_for_url
 from helix.logging_setup import get_logger
@@ -39,9 +40,17 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 class ConnectionsService:
-    def __init__(self, builds: BuildService, secrets: SettingsStore) -> None:
+    def __init__(
+        self, builds: BuildService, secrets: SettingsStore,
+        managed: "dict[str, Callable[[], str]] | None" = None,
+    ) -> None:
         self._builds = builds
         self._secrets = secrets  # a JSON store dedicated to secret values (data/helix_secrets.json)
+        # HELIX-MANAGED keys: credentials the user already gave HELIX that live OUTSIDE the secrets store
+        # (the Claude/Tripo/Voyage keys are in Settings). Maps an env-var name a build might declare (e.g.
+        # ANTHROPIC_API_KEY) → a getter for its value, so a built app can reuse what HELIX already has
+        # instead of asking for a new key. Wired in the container.
+        self._managed = managed or {}
 
     # ----- what a build declared it needs -----
     def declared(self, slug: str) -> list[Connection]:
@@ -72,7 +81,26 @@ class ConnectionsService:
 
     # ----- values (stored globally by env-var name; never in the build folder / git / browser) -----
     def value(self, key: str) -> str:
-        return (self._secrets.get(key) or "").strip()
+        """The value for a declared env-var key. Checks the secrets store first (Slack/GitHub tokens the
+        user pasted), then HELIX-managed keys (Claude/Tripo/Voyage from Settings) — so a build that
+        declares e.g. ANTHROPIC_API_KEY is served the user's existing Claude key automatically."""
+        key = (key or "").strip()
+        v = (self._secrets.get(key) or "").strip()
+        if v:
+            return v
+        getter = self._managed.get(key) or self._managed.get(key.upper())
+        if getter is not None:
+            try:
+                return (getter() or "").strip()
+            except Exception:  # noqa: BLE001 - a bad getter must never break injection
+                return ""
+        return ""
+
+    def is_managed(self, key: str) -> bool:
+        """True if this key is one HELIX manages centrally (Claude/Tripo/Voyage) — so the build's Connect
+        panel can show it as already provided rather than asking the user to paste it again."""
+        key = (key or "").strip()
+        return (key in self._managed) or (key.upper() in self._managed)
 
     def set_value(self, key: str, value: str) -> None:
         self._secrets.set(key, (value or "").strip())

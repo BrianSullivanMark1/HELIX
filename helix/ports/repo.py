@@ -33,6 +33,11 @@ class VersionedRepo(Protocol):
         """Hard-restore the working tree to a past commit (the Archive lifeline)."""
         ...
 
+    def revert_to(self, repo_dir: Path, sha: str) -> Commit:
+        """Non-destructive revert: restore the tree to `sha` and commit it forward as a new version, so
+        newer commits stay in history and the revert is itself undoable."""
+        ...
+
     def discard_changes(self, repo_dir: Path) -> None:
         """Drop all uncommitted changes (tracked + untracked) — used to abort a refused self-change."""
         ...

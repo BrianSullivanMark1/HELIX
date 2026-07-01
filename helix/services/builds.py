@@ -176,6 +176,31 @@ class BuildService:
         self._write_manifest(ws, app)
         return app
 
+    def versions(self, slug: str, limit: int = 5) -> list:
+        """The build's recent versions (git commits, newest first) — for the tile's version dropdown. Each
+        has .sha, .summary, and .at (creation time). Empty if the build is missing or has no git history."""
+        ws = self.workspace(slug)
+        if not (ws / MANIFEST).exists():
+            return []
+        try:
+            return self._repo.log(ws, limit)
+        except Exception:  # noqa: BLE001 - a git hiccup must never break the menu
+            return []
+
+    def revert(self, slug: str, sha: str) -> App | None:
+        """Roll a build back to an earlier version, NON-destructively (the revert becomes a new version, so
+        nothing is lost and it can be reverted again). Returns the reverted App, or None if the build is
+        missing or the revert failed (e.g. a locked/open workspace, or a bad sha)."""
+        ws = self.workspace(slug)
+        manifest = ws / MANIFEST
+        if not manifest.exists():
+            return None
+        try:
+            self._repo.revert_to(ws, sha)
+        except Exception:  # noqa: BLE001 - locked/open workspace or bad ref → honest failure
+            return None
+        return self._read_manifest(manifest)
+
     # ----- helpers -----
     def _detect_entry(self, ws: Path) -> tuple[AppKind, str | None]:
         # A main.py means there's a program to RUN — a task, or an app with a local backend that serves

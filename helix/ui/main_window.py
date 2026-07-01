@@ -149,6 +149,7 @@ class HelixMainWindow(QMainWindow):
         self.launcher.buildSeen.connect(self._on_build_seen)         # opened/ran → clear done/error status
         self.launcher.editBuildRequested.connect(self._on_edit_build)  # "Edit with AI" on a card
         self.launcher.connectBuildRequested.connect(self._on_connect_build)  # 🔑 API-key Connect panel
+        self.launcher.buildReverted.connect(self._on_build_reverted)  # rolled back to an earlier version
         self.launcher.set_status_provider(self._board.status_of)     # colour the tiles from the board
         self.launcher.set_connections_service(container.connections)  # show Connect on builds that need keys
 
@@ -277,6 +278,18 @@ class HelixMainWindow(QMainWindow):
         """A build was opened or run — clear its done/error status (back to blue) and refresh."""
         if self._board.mark_seen(slug):
             self._refresh_build_ui()
+
+    def _on_build_reverted(self, slug: str) -> None:
+        """A build was rolled back to an earlier version — reflect it live: refresh the menu and, if the
+        build is open, reload its viewer / restart its server / reload its knowledge base."""
+        self._refresh_build_ui()
+        if slug and slug == self._viewer_slug:
+            if slug in self._app_ports:
+                self._restart_app_server(slug)  # backend app: serve the reverted code
+            else:
+                self._reload_viewer()
+        if slug and slug == self._knowledge_slug:
+            self._knowledge_view.reload()
 
     def _on_edit_build(self, slug: str, name: str) -> None:
         """The 'Edit with AI' action on a menu card — describe a change and HELIX iterates this exact

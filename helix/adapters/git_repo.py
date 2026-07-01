@@ -100,6 +100,14 @@ class GitRepo:
     def restore_to(self, repo_dir: Path, sha: str) -> None:
         self._run(repo_dir, "reset", "--hard", sha)
 
+    def revert_to(self, repo_dir: Path, sha: str) -> Commit:
+        """Roll the build back to an OLD version NON-destructively: make the working tree + index exactly
+        match `sha` (read-tree -u --reset, which does NOT move HEAD), then commit it forward as a new
+        version. So the mistaken newer commits stay in the log and the revert is itself undoable — unlike
+        restore_to's hard reset, which throws away everything after `sha`."""
+        self._run(repo_dir, "read-tree", "-u", "--reset", sha)
+        return self.commit_all(repo_dir, f"revert to {sha[:8]}")
+
     def discard_changes(self, repo_dir: Path) -> None:
         self._run(repo_dir, "reset", "--hard")  # drop staged/unstaged edits
         self._run(repo_dir, "clean", "-fd")  # drop untracked files (respects .gitignore)

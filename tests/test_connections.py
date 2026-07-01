@@ -122,6 +122,30 @@ def test_service_for_url_matching():
     assert {s.env for s in KNOWN_SERVICES} == {"SLACK_TOKEN", "GITHUB_TOKEN"}
 
 
+def test_managed_keys_are_reused_from_helix_not_re_prompted(tmp_path):
+    # A build that needs AI declares ANTHROPIC_API_KEY but the user never pastes it — HELIX provides its
+    # existing Claude key (which lives in Settings, not the secrets store). This is the OpenAI->Claude fix.
+    managed = {"ANTHROPIC_API_KEY": lambda: "sk-ant-managed", "TRIPO_API_KEY": lambda: ""}
+    s = ConnectionsService(_Builds(tmp_path), _Secrets(), managed=managed)
+    _declare(tmp_path, "aiapp", [
+        {"key": "ANTHROPIC_API_KEY", "label": "Claude"},
+        {"key": "SLACK_TOKEN", "label": "Slack"},
+    ])
+    assert s.value("ANTHROPIC_API_KEY") == "sk-ant-managed"  # resolved from the managed getter
+    assert s.is_managed("ANTHROPIC_API_KEY") and not s.is_managed("SLACK_TOKEN")
+    # env_for injects the managed key automatically; the unset Slack one is simply absent
+    assert s.env_for("aiapp") == {"ANTHROPIC_API_KEY": "sk-ant-managed"}
+    # the build is NOT reported as missing the Claude key — only the genuinely-unset Slack token
+    assert [c.key for c in s.missing("aiapp")] == ["SLACK_TOKEN"]
+
+
+def test_a_pasted_secret_wins_over_a_managed_key(tmp_path):
+    sec = _Secrets()
+    sec.set("ANTHROPIC_API_KEY", "from-secrets")
+    s = ConnectionsService(_Builds(tmp_path), sec, managed={"ANTHROPIC_API_KEY": lambda: "from-settings"})
+    assert s.value("ANTHROPIC_API_KEY") == "from-secrets"  # an explicit paste still takes precedence
+
+
 def test_detect_entry_prefers_a_backend_main_py(tmp_path):
     # The Slack-dashboard fix: a build with index.html + main.py runs the backend, not the landing page.
     ws = tmp_path / "app"

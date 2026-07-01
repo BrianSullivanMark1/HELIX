@@ -134,7 +134,20 @@ class Container:
         # the settings file, so the build guard never byte-reverts it), kept on this machine only and never
         # written into a build's folder, git, or the browser.
         self.secrets = JsonSettings(self.paths.data / "helix_secrets.json")
-        self.connections = ConnectionsService(self.builds, self.secrets)
+        # HELIX-managed keys a built app can reuse without the user re-pasting them: the Claude key powers
+        # any AI feature (so builds default to Anthropic, never OpenAI); Tripo/Voyage are here too. These
+        # live in Settings (not the secrets store), so the connections layer resolves them via these getters.
+        _managed_keys = {
+            "ANTHROPIC_API_KEY": lambda: (self.settings.get("claude_api_key") or "").strip(),
+            "CLAUDE_API_KEY": lambda: (self.settings.get("claude_api_key") or "").strip(),
+            "TRIPO_API_KEY": lambda: (
+                self.settings.get("tripo_api_key") or os.environ.get("TRIPO_API_KEY") or ""
+            ).strip(),
+            "VOYAGE_API_KEY": lambda: (
+                self.settings.get("voyage_api_key") or os.environ.get("VOYAGE_API_KEY") or ""
+            ).strip(),
+        }
+        self.connections = ConnectionsService(self.builds, self.secrets, managed=_managed_keys)
         # Gmail: read-only inbox access (an address + a Google App Password in the secrets store). Like
         # Connections, the credential is local-only; HELIX only ever READS the inbox.
         self.gmail = GmailService(self.secrets)
