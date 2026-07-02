@@ -13,7 +13,12 @@ pytest.importorskip("PyQt6.QtWidgets")
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from helix.domain.models import Message, Role  # noqa: E402
-from helix.ui.console_view import ConsoleView, _Bubble, _table_slack  # noqa: E402
+from helix.ui.console_view import (  # noqa: E402
+    ConsoleView,
+    _Bubble,
+    _table_html,
+    _table_slack,
+)
 
 
 class _Conv:
@@ -114,3 +119,25 @@ def test_table_slack_copy_neutralizes_a_triple_backtick_in_a_cell():
     out = _table_slack({"type": "table", "columns": ["Cmd"], "rows": [["run ```build``` now"]]})
     assert out.count("```") == 2                  # only the opening + closing fence survive
     assert "'''build'''" in out                   # the cell's fence was defanged, content preserved
+
+
+def test_table_html_is_a_real_table_for_rich_paste():
+    spec = {
+        "type": "table", "title": "Open Actions",
+        "columns": ["Item", "Owner"],
+        "rows": [["Fix login", "Bren"], ["Deploy", "Brian"]],
+    }
+    html = _table_html(spec)
+    assert "<table" in html and "</table>" in html
+    assert html.count("<th ") == 2      # two header cells (space avoids matching <thead>)
+    assert html.count("<tr>") == 3      # one header row + one per data row
+    assert html.count("<td ") == 4      # 2 columns x 2 data rows
+    assert "<b>Open Actions</b>" in html  # title as bold above the table
+    assert "Fix login" in html and "Brian" in html
+
+
+def test_table_html_escapes_cell_markup():
+    # Cell content must never inject live HTML into the pasted table.
+    html = _table_html({"type": "table", "columns": ["X"], "rows": [["<script>alert(1)</script>"]]})
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html

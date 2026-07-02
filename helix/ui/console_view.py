@@ -15,6 +15,7 @@ from pathlib import Path
 from PyQt6.QtCore import (
     QEasingCurve,
     QEvent,
+    QMimeData,
     QPointF,
     QPropertyAnimation,
     QRectF,
@@ -372,6 +373,47 @@ def _table_slack(spec: dict) -> str:
     return f"*{title}*\n\n{table}" if title else table
 
 
+def _html_escape(s: str) -> str:
+    return (
+        str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _table_html(spec: dict) -> str:
+    """A real HTML <table> for the clipboard's rich (text/html) flavor. Editors that accept rich paste —
+    Word, Google Docs, Outlook, Notion, and Claude's composer — render this as an ACTUAL table (Slack,
+    which strips HTML, falls back to the plain-text code block instead). Inline styles only, so it
+    survives paste into apps that drop <style> blocks."""
+    cell_css = "border:1px solid #bbbbbb;padding:4px 8px;text-align:left;vertical-align:top;"
+    th_css = cell_css + "background:#f0f0f0;font-weight:bold;"
+    parts: list[str] = []
+    title = str(spec.get("title") or "").strip()
+    if title:
+        parts.append(f"<p><b>{_html_escape(title)}</b></p>")
+    parts.append('<table style="border-collapse:collapse;border:1px solid #bbbbbb;" cellspacing="0">')
+    cols = spec.get("columns") or []
+    if cols:
+        head = "".join(f'<th style="{th_css}">{_html_escape(c)}</th>' for c in cols)
+        parts.append(f"<thead><tr>{head}</tr></thead>")
+    parts.append("<tbody>")
+    for r in spec.get("rows") or []:
+        cells = r if isinstance(r, (list, tuple)) else [r]
+        tds = "".join(f'<td style="{cell_css}">{_html_escape(c)}</td>' for c in cells)
+        parts.append(f"<tr>{tds}</tr>")
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def _copy_table_to_clipboard(spec: dict) -> None:
+    """Put BOTH a rich HTML table AND the Slack code-block plain text on the clipboard, so rich editors
+    render a real table while Slack (and any plain-text target) still gets the aligned monospace block."""
+    mime = QMimeData()
+    mime.setText(_table_slack(spec))   # plain-text fallback (Slack-friendly)
+    mime.setHtml(_table_html(spec))    # rich table for Word / Docs / Notion / Claude
+    QGuiApplication.clipboard().setMimeData(mime)
+
+
 def _export_text(parent: QWidget, text: str, default_name: str, on_status) -> None:
     path, _ = QFileDialog.getSaveFileName(
         parent, "Export", default_name, "Text (*.txt *.md);;All files (*)"
@@ -472,9 +514,12 @@ class _ToolWrap(_HoverToolsFrame):
     built from the STRUCTURED spec (TSV for tables, label/value lines for charts) so the user can lift
     the actual numbers — including from a chart, which otherwise has no selectable text at all."""
 
-    def __init__(self, content: QWidget, copy_text: str, default_name: str, on_status) -> None:
+    def __init__(
+        self, content: QWidget, copy_text: str, default_name: str, on_status, *, copy_spec: dict | None = None
+    ) -> None:
         super().__init__()
         self._copy_textval = copy_text
+        self._copy_spec = copy_spec  # a table spec → copy BOTH an HTML table and the plain-text block
         self._default = default_name
         self._on_status = on_status
         self.setStyleSheet("QFrame{background:transparent;border:none;}")
@@ -485,7 +530,11 @@ class _ToolWrap(_HoverToolsFrame):
         self._install_tools(self._copy, self._export)
 
     def _copy(self) -> None:
-        QGuiApplication.clipboard().setText(self._copy_textval)
+        if self._copy_spec is not None:
+            # A table: rich editors get a real HTML table; Slack/plain get the aligned code block.
+            _copy_table_to_clipboard(self._copy_spec)
+        else:
+            QGuiApplication.clipboard().setText(self._copy_textval)
         self._on_status("Copied to clipboard.")
 
     def _export(self) -> None:
@@ -1439,7 +1488,9 @@ class ConsoleView(QWidget):
         elif kind == "table":
             scroller = self._h_scroll(self._table_widget(spec))  # wide tables scroll instead of clipping
             self._insert_visual(
-                _ToolWrap(scroller, _table_slack(spec), "helix-table.txt", self._flash_status)
+                _ToolWrap(
+                    scroller, _table_slack(spec), "helix-table.txt", self._flash_status, copy_spec=spec
+                )
             )
 
     def _h_scroll(self, widget: QWidget) -> QWidget:
