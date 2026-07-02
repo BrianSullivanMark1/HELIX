@@ -17,6 +17,7 @@ from helix.ui.console_view import (  # noqa: E402
     ConsoleView,
     _Bubble,
     _table_html,
+    _table_image,
     _table_slack,
 )
 
@@ -141,3 +142,25 @@ def test_table_html_escapes_cell_markup():
     html = _table_html({"type": "table", "columns": ["X"], "rows": [["<script>alert(1)</script>"]]})
     assert "<script>" not in html
     assert "&lt;script&gt;" in html
+
+
+def test_table_image_renders_a_bordered_picture():
+    # The 'copy as image' path (a bordered table for pasting into Slack, which has no table support).
+    img = _table_image({
+        "type": "table", "title": "Hours",
+        "columns": ["Employee", "Project", "Hours"],
+        "rows": [["Brendan", "BRMS", "8"], ["Brian", "BRMS", "6"]],
+    })
+    assert img is not None and not img.isNull()
+    assert img.width() > 0 and img.height() > 0
+
+
+def test_table_image_wide_table_is_capped_and_wraps():
+    # A very wide free-text column must not produce an unbounded strip — the width is capped so cells wrap.
+    wide = "x " * 400  # a ~800-char activity cell
+    img = _table_image({
+        "type": "table", "columns": ["Who", "Activity"], "rows": [["Bren", wide]],
+    })
+    assert img is not None and not img.isNull()
+    from helix.ui.console_view import _IMG_MAX_W, _IMG_SCALE
+    assert img.width() <= _IMG_MAX_W * _IMG_SCALE  # capped, so it wrapped instead of a huge strip

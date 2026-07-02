@@ -26,7 +26,9 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor,
+    QFont,
     QGuiApplication,
+    QImage,
     QKeySequence,
     QLinearGradient,
     QPainter,
@@ -34,6 +36,7 @@ from PyQt6.QtGui import (
     QPen,
     QPolygonF,
     QShortcut,
+    QTextDocument,
 )
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -414,6 +417,47 @@ def _copy_table_to_clipboard(spec: dict) -> None:
     QGuiApplication.clipboard().setMimeData(mime)
 
 
+_IMG_MAX_W = 1400   # cap the rendered width so a very wide table wraps its cells instead of a huge strip
+_IMG_SCALE = 2      # render at 2x for crisp text when the pasted image is viewed at normal size
+
+
+def _table_image(spec: dict) -> "QImage | None":
+    """Render the table to a clean WHITE, bordered image — the only way to get an actual bordered table
+    into a Slack MESSAGE (Slack has no table syntax; it renders a pasted image). Reuses the HTML table
+    (borders + header shading already inline) via a QTextDocument. Returns None if it can't render."""
+    doc = QTextDocument()
+    doc.setDocumentMargin(12)  # a little breathing room around the grid
+    # Pin a clean sans-serif at a readable size so the pasted image is legible and consistent, not tied
+    # to whatever themed font the app happens to use (Segoe UI is the Windows default; Arial the fallback).
+    font = QFont("Segoe UI", 10)
+    font.setStyleHint(QFont.StyleHint.SansSerif)
+    doc.setDefaultFont(font)
+    doc.setHtml(_table_html(spec))
+    ideal = doc.idealWidth()
+    doc.setTextWidth(min(ideal, _IMG_MAX_W) if ideal > 0 else _IMG_MAX_W)
+    size = doc.size().toSize()
+    if size.width() <= 0 or size.height() <= 0:
+        return None
+    img = QImage(size.width() * _IMG_SCALE, size.height() * _IMG_SCALE, QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.white)
+    painter = QPainter(img)
+    try:
+        painter.scale(_IMG_SCALE, _IMG_SCALE)
+        doc.drawContents(painter)
+    finally:
+        painter.end()
+    return img
+
+
+def _copy_table_image_to_clipboard(spec: dict) -> bool:
+    """Copy the table as a bordered image, so Ctrl+V into Slack drops in a real table. False if render fails."""
+    img = _table_image(spec)
+    if img is None or img.isNull():
+        return False
+    QGuiApplication.clipboard().setImage(img)
+    return True
+
+
 def _export_text(parent: QWidget, text: str, default_name: str, on_status) -> None:
     path, _ = QFileDialog.getSaveFileName(
         parent, "Export", default_name, "Text (*.txt *.md);;All files (*)"
@@ -431,12 +475,16 @@ class _HoverToolsFrame(QFrame):
     """A QFrame that floats a copy/export tool row in its top-right corner, revealed on hover. The tools
     overlay the content (repositioned in resizeEvent) so reading stays uncluttered until you hover."""
 
-    def _install_tools(self, on_copy, on_export) -> None:
+    def _install_tools(self, on_copy, on_export, on_copy_image=None) -> None:
         self._tools = QWidget(self)
         row = QHBoxLayout(self._tools)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(3)
-        for glyph, tip, cb in (("⧉", "Copy", on_copy), ("⤓", "Export…", on_export)):
+        specs = [("⧉", "Copy", on_copy)]
+        if on_copy_image is not None:  # tables only: a bordered-table image for pasting into Slack
+            specs.append(("🖼", "Copy as image (for Slack)", on_copy_image))
+        specs.append(("⤓", "Export…", on_export))
+        for glyph, tip, cb in specs:
             b = QToolButton(self._tools)
             b.setText(glyph)
             b.setToolTip(tip)
@@ -527,7 +575,11 @@ class _ToolWrap(_HoverToolsFrame):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(content)
-        self._install_tools(self._copy, self._export)
+        # Tables get an extra 'copy as image' tool (a bordered picture for pasting into Slack).
+        self._install_tools(
+            self._copy, self._export,
+            on_copy_image=self._copy_image if copy_spec is not None else None,
+        )
 
     def _copy(self) -> None:
         if self._copy_spec is not None:
@@ -536,6 +588,12 @@ class _ToolWrap(_HoverToolsFrame):
         else:
             QGuiApplication.clipboard().setText(self._copy_textval)
         self._on_status("Copied to clipboard.")
+
+    def _copy_image(self) -> None:
+        if self._copy_spec is not None and _copy_table_image_to_clipboard(self._copy_spec):
+            self._on_status("Copied table as an image — paste into Slack.")
+        else:
+            self._on_status("Couldn't render the table image.")
 
     def _export(self) -> None:
         _export_text(self, self._copy_textval, self._default, self._on_status)
