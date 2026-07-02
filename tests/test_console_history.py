@@ -87,24 +87,30 @@ def test_console_empty_history_is_fine(_app):
     assert _bubbles(cv) == []
 
 
-def test_table_slack_copy_is_backtick_wrapped_and_aligned():
+def test_table_slack_copy_is_a_single_fenced_aligned_table():
     spec = {
         "type": "table", "title": "Open Actions",
         "columns": ["Item", "Owner", "Status"],
         "rows": [["Fix login", "Bren", "In Progress"], ["Deploy 2.6.8", "Brian", "Blocked"]],
     }
     out = _table_slack(spec)
-    assert out.startswith("*Open Actions*\n\n")  # Slack-bold title, then a blank line
-    assert "```" not in out                      # no fence — Slack's composer mangles pasted fences
-    body = out.splitlines()[2:]
-    # every table line is wrapped in single backticks → Slack renders each as monospaced inline code
-    assert body and all(ln.startswith("`") and ln.endswith("`") for ln in body)
-    assert len({len(ln) for ln in body}) == 1    # every line padded to the same width → columns line up
+    assert out.startswith("*Open Actions*\n\n")   # Slack-bold title above the fence, then a blank line
+    lines = out.splitlines()
+    # exactly ONE fenced code block wraps the whole table — Slack renders it as one aligned monospace grid
+    assert out.count("```") == 2
+    assert lines[2] == "```" and lines[-1] == "```"
+    body = lines[3:-1]  # header, separator, two data rows
+    assert len(body) == 4
+    assert body[0].startswith("Item")            # header row, not wrapped in inline backticks anymore
+    assert set(body[1]) <= set("-+ ")            # a dashes separator row under the header
+    # the non-final columns are padded to a constant width so columns line up down the block
+    prefixes = [ln.split(" | ")[0] for ln in body if " | " in ln]
+    assert len({len(p) for p in prefixes}) == 1
     assert "Fix login" in out and "Blocked" in out
-    assert set(body[1]) <= set("`-+ ")           # a header separator row of dashes under the header
 
 
-def test_table_slack_copy_escapes_backticks_in_cells():
-    out = _table_slack({"type": "table", "columns": ["Cmd"], "rows": [["run `build.py` now"]]})
-    for ln in out.splitlines():
-        assert ln.count("`") == 2                # only the wrapping pair — cell backticks can't break a line
+def test_table_slack_copy_neutralizes_a_triple_backtick_in_a_cell():
+    # A stray ``` inside a cell must not close the fence early and spill the rest as plain text.
+    out = _table_slack({"type": "table", "columns": ["Cmd"], "rows": [["run ```build``` now"]]})
+    assert out.count("```") == 2                  # only the opening + closing fence survive
+    assert "'''build'''" in out                   # the cell's fence was defanged, content preserved

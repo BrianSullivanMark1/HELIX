@@ -335,15 +335,18 @@ def _table_text(spec: dict) -> str:
 
 
 def _table_slack(spec: dict) -> str:
-    """A table formatted for pasting into Slack (and readable anywhere): an ALIGNED, fixed-width table
-    where EVERY line is wrapped in single backticks — Slack renders each as monospaced inline code, so
-    columns line up, and unlike a ``` fence the layout survives Slack's composer on paste. A *bold*
-    title sits above. This is what the copy button puts on the clipboard, so a pasted table looks like
-    a table, not raw TSV."""
+    """A table formatted for pasting into Slack as an ALIGNED table.
+
+    Slack has no table syntax, so the way to get columns that line up is a SINGLE fenced code block
+    (```): Slack's composer turns a pasted fence into a code block, and its monospace font makes the
+    fixed-width padding align into one cohesive grid. (Per-line inline code — the old approach — instead
+    renders as a stack of separate gray lines that don't cohere and wrap badly once any column is wide,
+    which is exactly the 'not a table' paste users hit.) A *bold* title sits ABOVE the fence, since bold
+    doesn't render inside a code block. This is what the copy button puts on the clipboard."""
 
     def cell(c) -> str:
-        # A backtick or newline inside a cell would break its line's inline-code wrapping in Slack.
-        return str(c).replace("`", "'").replace("\n", " ")
+        # A triple-backtick in a cell would close the fence early; a newline would break the row.
+        return str(c).replace("```", "'''").replace("\r", " ").replace("\n", " ")
 
     cols = [cell(c) for c in (spec.get("columns") or [])]
     rows: list[list[str]] = []
@@ -358,10 +361,13 @@ def _table_slack(spec: dict) -> str:
     widths = [max([len(cols[i])] + [len(r[i]) for r in rows]) for i in range(ncol)]
 
     def fmt(cells: list[str]) -> str:
-        return " | ".join(cells[i].ljust(widths[i]) for i in range(ncol))
+        # Pad every column but the LAST — trailing spaces on the final column only add dead width and a
+        # wider horizontal scroll in Slack for no visual gain.
+        padded = [cells[i].ljust(widths[i]) for i in range(ncol - 1)] + [cells[ncol - 1]]
+        return " | ".join(padded).rstrip()
 
     body = [fmt(cols), "-+-".join("-" * w for w in widths)] + [fmt(r) for r in rows]
-    table = "\n".join(f"`{ln}`" for ln in body)
+    table = "```\n" + "\n".join(body) + "\n```"
     title = str(spec.get("title") or "").strip()
     return f"*{title}*\n\n{table}" if title else table
 
