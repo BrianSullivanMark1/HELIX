@@ -100,11 +100,27 @@ def main(argv: list[str] | None = None) -> int:
                  "--exclude-module", "torch"]
     args.append(str(ROOT / "main.py"))
 
+    # LIVE user data (keys, history, built apps) may still sit at dist/<name>/data from an older install
+    # (new installs keep data in %LOCALAPPDATA%). Move it aside BEFORE the rmtree and restore it after —
+    # a rebuild must never wipe the user's data, even if the build itself fails.
+    live_data = ROOT / "dist" / NAME / "data"
+    keep = ROOT / "dist" / f".{NAME}-data-keep"
+    if live_data.is_dir():
+        _force_rmtree(keep)  # a stale keep from an interrupted run — the fresher live data wins
+        live_data.rename(keep)
+        print(f"Preserved live user data: {live_data} -> {keep}")
+
     # Pre-clean dist/<name> ourselves (read-only-aware) so PyInstaller doesn't choke on built apps' .git.
     _force_rmtree(ROOT / "dist" / NAME)
 
     print("Running:", " ".join(args))
-    result = subprocess.run(args, cwd=str(ROOT))
+    try:
+        result = subprocess.run(args, cwd=str(ROOT))
+    finally:
+        if keep.is_dir():  # restore even when the build failed — the data must never be stranded
+            live_data.parent.mkdir(parents=True, exist_ok=True)
+            keep.rename(live_data)
+            print(f"Restored live user data: {keep} -> {live_data}")
     if result.returncode == 0:
         _unify_vc_runtime(ROOT / "dist" / NAME)
         print(f"\nBuilt dist/{NAME}/{NAME}.exe — data/ is NOT bundled; a fresh install starts blank.")

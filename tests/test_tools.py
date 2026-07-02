@@ -76,9 +76,11 @@ class _FakeAgents:
         self.removed: list[str] = []
         self._existing = list(existing)
 
-    def add(self, name, goal):
+    def add(self, name, goal, schedule_hint=None):
         self.added.append((name, goal))
-        return _App(name)
+        agent = _App(name)
+        agent.schedule = None  # manual agent — dispatch reads this to phrase the acknowledgement
+        return agent
 
     def list(self):
         return [_App(n) for n in self._existing]
@@ -101,14 +103,16 @@ def test_build_tools_are_exposed():
     assert {"build_app", "build_task", "build_3d_model", "list_builds"} <= names
 
 
-def test_build_3d_model_enqueues_with_the_model_prompt_and_kind():
+def test_build_3d_model_enqueues_with_no_prompt_and_model_kind():
+    # The registry no longer precomputes prompts: the Forge picks build_* vs edit_* itself once it
+    # knows whether the name resolves to an existing build (the edit-trust fix).
     reg, queue = _registry()
     out = reg.dispatch("build_3d_model", {"name": "Wall Camera Unit", "request": "camera, speaker and mic"})
     assert len(queue.enqueued) == 1
     job = queue.enqueued[0]
     assert job["name"] == "Wall Camera Unit"
     assert job["kind"] == BuildKind.MODEL
-    assert "camera, speaker and mic" in job["prompt"] and "3D MODEL" in job["prompt"]
+    assert job["prompt"] is None
     assert "Starting" in out and "model" in out  # fast acknowledgement, not "Built"
 
 
@@ -120,12 +124,12 @@ def test_build_app_enqueues_with_no_prompt_and_app_kind():
     assert "Starting" in out
 
 
-def test_build_task_enqueues_with_the_task_prompt():
+def test_build_task_enqueues_with_no_prompt_and_task_kind():
     reg, queue = _registry()
     out = reg.dispatch("build_task", {"name": "Rename Downloads", "request": "tidy my downloads"})
     job = queue.enqueued[0]
     assert job["kind"] == BuildKind.TASK
-    assert "tidy my downloads" in job["prompt"] and "TASK" in job["prompt"]
+    assert job["prompt"] is None  # the Forge picks build_task_prompt vs edit_task_prompt itself
     assert "flow" in out.lower()  # user-facing label is now "Flow" (the build_task tool name is unchanged)
 
 

@@ -4,22 +4,23 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable
 
 from helix.domain.errors import BuildError
-from helix.domain.events import BuildDeleteRequested, BuildRenamed
+from helix.domain.events import BuildDeleteRequested, BuildOpenRequested, BuildRenamed
 from helix.domain.models import BuildKind, slugify
 from helix.ports.coder import ProgressFn
 from helix.ports.events import EventBus
 from helix.ports.llm import ToolSpec
 from helix.services.builds import BuildService
 from helix.services.forge import ForgeService
-from helix.services.prompts import build_3d_model_prompt, build_task_prompt
 from helix.services.selfdev import SelfDevService
 
 if TYPE_CHECKING:  # AgentService -> ConversationService -> ToolRegistry would be a runtime import cycle
     from helix.services.agents import AgentService
     from helix.services.build_queue import BuildQueue
+    from helix.services.calendar import CalendarService
     from helix.services.connections import ConnectionsService
     from helix.services.gmail import GmailService
     from helix.services.knowledge import KnowledgeService
+    from helix.services.reminders import ReminderService
     from helix.services.tasks import TaskService
 
 # Escalation: hand a hard question to a deeper model and get back its spoken answer. The third arg is an
@@ -52,6 +53,8 @@ class ToolRegistry:
         connections: "ConnectionsService | None" = None,
         knowledge: "KnowledgeService | None" = None,
         gmail: "GmailService | None" = None,
+        reminders: "ReminderService | None" = None,
+        calendar: "CalendarService | None" = None,
     ) -> None:
         self._forge = forge
         self._builds = builds
@@ -65,6 +68,8 @@ class ToolRegistry:
         self._connections = connections  # read-only call_api to connected services (Slack, GitHub, …)
         self._knowledge = knowledge  # the user's searchable notes/documents (create/remember/search)
         self._gmail = gmail  # read-only Gmail inbox access (check_email)
+        self._reminders = reminders  # voice timers/reminders the heartbeat speaks when due
+        self._calendar = calendar  # read-only iCal access (check_calendar)
 
     def bind_agents(self, agents: "AgentService") -> None:
         """Wire the agent store after construction (it depends on ConversationService, which depends on
@@ -177,6 +182,24 @@ class ToolRegistry:
                             "type": "string",
                             "description": "The name of the build or agent to delete.",
                         }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": False,
+                },
+            ),
+            ToolSpec(
+                name="open_build",
+                description=(
+                    "OPEN something the user built — an app, a 3D model, or a knowledge base — by name, "
+                    "exactly as if they clicked it in the menu ('open it', 'show me the tip calculator', "
+                    "'pull up the garden model'). It brings the build up on screen (and, for an app with "
+                    "its own local server, starts that server). For a FLOW that should DO its thing, use "
+                    "run_task instead."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "The build to open."},
                     },
                     "required": ["name"],
                     "additionalProperties": False,
@@ -414,6 +437,68 @@ class ToolRegistry:
                     },
                 ),
             ]
+        if self._reminders is not None:
+            tools += [
+                ToolSpec(
+                    name="set_reminder",
+                    description=(
+                        "Set a reminder or timer HELIX will SPEAK when it's due — 'set a 10 minute "
+                        "timer', 'remind me at 5 to start the oven'. Pass the reminder text plus EITHER "
+                        "in_minutes (relative) OR at_time (a 24h clock time 'HH:MM'; if that time already "
+                        "passed today it means tomorrow). Setting one is instant and free — never offer "
+                        "to build an app for a timer or reminder."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "What to say when it fires, e.g. 'check the oven'."},
+                            "in_minutes": {"type": "number", "description": "Fire this many minutes from now."},
+                            "at_time": {"type": "string", "description": "Fire at this 24h clock time, 'HH:MM'."},
+                        },
+                        "required": ["text"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="cancel_reminder",
+                    description=(
+                        "Cancel a pending reminder/timer by (part of) its text — 'cancel the oven "
+                        "reminder'. If several match, HELIX says which so the user can pick."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {"which": {"type": "string", "description": "Part of the reminder's text."}},
+                        "required": ["which"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="list_reminders",
+                    description="List the pending reminders/timers. READ-ONLY.",
+                    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                ),
+            ]
+        if self._calendar is not None:
+            tools.append(
+                ToolSpec(
+                    name="check_calendar",
+                    description=(
+                        "Read the user's calendar (READ-ONLY) to answer 'what's on today?', 'when is my "
+                        "next meeting?', 'am I free Thursday?'. Returns the upcoming events (day, time, "
+                        "title, location). Optionally pass how many days ahead to look (default 7). It "
+                        "only reads; relay what's there briefly. If it says the calendar isn't "
+                        "connected, tell the user to paste their private iCal address in Settings → "
+                        "Calendar."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "days": {"type": "number", "description": "How many days ahead to look (1-31, default 7)."},
+                        },
+                        "additionalProperties": False,
+                    },
+                )
+            )
         if self._gmail is not None:
             tools.append(
                 ToolSpec(
@@ -516,13 +601,15 @@ class ToolRegistry:
                 )
             )
         if self._agents is not None:
-            tools.append(
+            tools += [
                 ToolSpec(
                     name="create_agent",
                     description=(
-                        "Save an AGENT — a standing goal the user can run on demand (a morning brief, a "
-                        "recurring check, a routine). Use when the user describes a repeatable job they "
-                        "want to keep and re-run later, not a one-off. Creating it is instant and costs "
+                        "Save an AGENT — a standing goal HELIX runs on demand OR on a schedule (a "
+                        "morning brief, a recurring check, a routine). Use when the user describes a "
+                        "repeatable job, not a one-off. If they said WHEN it should run ('every morning "
+                        "at 8', 'hourly', 'each Friday'), pass that phrase as `schedule` and it runs "
+                        "itself and reports in — no reminder needed. Creating it is instant and costs "
                         "nothing (running it later does the work). Reuse the SAME name to update an "
                         "agent's goal. Confirm once first, like the other builds."
                     ),
@@ -535,14 +622,39 @@ class ToolRegistry:
                             },
                             "goal": {
                                 "type": "string",
-                                "description": "What HELIX should do each time the user runs this agent.",
+                                "description": "What HELIX should do each time this agent runs.",
+                            },
+                            "schedule": {
+                                "type": "string",
+                                "description": (
+                                    "When it should run itself, in the user's words — e.g. 'every "
+                                    "morning at 8', 'every 30 minutes', 'each Friday at 9'. Omit for a "
+                                    "run-on-demand agent."
+                                ),
                             },
                         },
                         "required": ["name", "goal"],
                         "additionalProperties": False,
                     },
-                )
-            )
+                ),
+                ToolSpec(
+                    name="set_agent_enabled",
+                    description=(
+                        "Pause or resume a scheduled agent by name ('pause the morning brief', 'turn "
+                        "the inbox watch back on'). Paused agents keep their schedule but don't fire; "
+                        "they can still be run manually."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "The agent to pause/resume."},
+                            "enabled": {"type": "boolean", "description": "true = resume, false = pause."},
+                        },
+                        "required": ["name", "enabled"],
+                        "additionalProperties": False,
+                    },
+                ),
+            ]
         return tools
 
     def dispatch(self, name: str, args: dict, *, on_progress: ProgressFn | None = None, cancel=None) -> str:
@@ -551,17 +663,13 @@ class ToolRegistry:
         if name == "build_app" and self._queue is not None:
             ahead = self._queue.enqueue(args["name"], args["request"], kind=BuildKind.APP)
             return _enqueued_msg(args["name"], ahead, "")
+        # No precomputed prompt for any build kind: the Forge picks the right instruction itself once it
+        # knows whether this is a fresh build or an in-place edit (build_* vs edit_* prompts).
         if name == "build_3d_model" and self._queue is not None:
-            ahead = self._queue.enqueue(
-                args["name"], args["request"], kind=BuildKind.MODEL,
-                prompt=build_3d_model_prompt(args["name"], args["request"]),
-            )
+            ahead = self._queue.enqueue(args["name"], args["request"], kind=BuildKind.MODEL)
             return _enqueued_msg(args["name"], ahead, "model")
         if name == "build_task" and self._queue is not None:
-            ahead = self._queue.enqueue(
-                args["name"], args["request"], kind=BuildKind.TASK,
-                prompt=build_task_prompt(args["name"], args["request"]),
-            )
+            ahead = self._queue.enqueue(args["name"], args["request"], kind=BuildKind.TASK)
             return _enqueued_msg(args["name"], ahead, "flow")
         if name == "list_builds" and self._queue is not None:
             return self._queue.status_line()
@@ -601,6 +709,28 @@ class ToolRegistry:
             return self._knowledge.remember(args.get("note", ""), args.get("knowledge"))
         if name == "check_email" and self._gmail is not None:
             return self._gmail.check_inbox(args.get("query"))
+        if name == "set_reminder" and self._reminders is not None:
+            in_minutes = args.get("in_minutes")
+            return self._reminders.add(
+                args.get("text", ""),
+                in_minutes=float(in_minutes) if in_minutes is not None else None,
+                at_time=args.get("at_time"),
+            )
+        if name == "cancel_reminder" and self._reminders is not None:
+            return self._reminders.cancel(args.get("which", ""))
+        if name == "list_reminders" and self._reminders is not None:
+            return self._reminders.list_line()
+        if name == "check_calendar" and self._calendar is not None:
+            try:
+                days = int(args.get("days") or 7)
+            except (TypeError, ValueError):
+                days = 7
+            return self._calendar.upcoming(days)
+        if name == "set_agent_enabled" and self._agents is not None:
+            agent = self._agents.set_enabled(args.get("name", ""), bool(args.get("enabled", True)))
+            if agent is None:
+                return f"I don't see an agent called '{args.get('name', '')}'."
+            return f"{'Resumed' if agent.enabled else 'Paused'} the agent '{agent.name}'."
         if name == "list_apps":
             apps = self._builds.list()
             if not apps:
@@ -612,6 +742,8 @@ class ToolRegistry:
             # Include each build's kind so the model reuses the matching build_* verb to iterate and never
             # forks a near-duplicate by guessing the wrong kind.
             return "\n".join(f"- {a.name} [{a.build_kind.value}]: {clean(a.request)}" for a in apps)
+        if name == "open_build":
+            return self._request_open(args["name"])
         if name == "rename_build":
             return self._rename(args["name"], args.get("new_name", ""))
         if name == "run_task" and self._tasks is not None:
@@ -652,9 +784,14 @@ class ToolRegistry:
         if name == "reject_self_change" and self._selfdev is not None:
             return self._reject_self(args.get("which"))
         if name == "create_agent" and self._agents is not None:
+            from helix.services.scheduler import describe  # local: avoids a module-level cycle risk
+
             replaced = self._agents.exists(args["name"])  # honest: don't silently overwrite a saved goal
-            agent = self._agents.add(args["name"], args["goal"])
+            agent = self._agents.add(args["name"], args["goal"], schedule_hint=args.get("schedule"))
             verb = "Updated" if replaced else "Saved"
+            if agent.schedule:
+                return (f"{verb} the agent '{agent.name}' — it'll run itself {describe(agent.schedule)} "
+                        "and report in. Say 'pause it' any time.")
             return f"{verb} the agent '{agent.name}'. Run it any time from the Agents tab."
         if name == "delete_build":
             return self._request_delete(args["name"])
@@ -670,6 +807,21 @@ class ToolRegistry:
         if self._agents is not None:
             return any(a.name.strip().lower() == target for a in self._agents.list())
         return False
+
+    def _request_open(self, name: str) -> str:
+        """'Open it' by voice: resolve the build (slug or display name) and ask the UI to open it the
+        same way a menu click would. Agents are not openable; flows are runnable, not viewable."""
+        target = name.strip().lower()
+        slug = slugify(name)
+        app = next(
+            (a for a in self._builds.list() if a.slug == slug or a.name.strip().lower() == target), None
+        )
+        if app is None:
+            return f"I couldn't find anything called '{name}' to open."
+        if self._bus is None:
+            return "I can't open things right now."
+        self._bus.publish(BuildOpenRequested(slug=app.slug, name=app.name))
+        return f"Opening {app.name}."
 
     def _request_delete(self, target: str) -> str:
         """A delete is NEVER performed from the model loop — it asks the UI for one real human click first

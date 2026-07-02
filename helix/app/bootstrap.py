@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 # Let QtWebEngine render heavier WebGL (high-poly 3D models) without the GPU process being killed — the
 # "sandbox limit" symptom: a blank viewer on a big mesh. Force GPU use even on blocklisted/integrated
@@ -18,12 +19,15 @@ os.environ.setdefault(
     "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --disable-gpu-sandbox",
 )
 
-from PyQt6.QtCore import Qt
+import time
+
+from PyQt6.QtCore import Qt, QLockFile
 from PyQt6.QtWidgets import QApplication
 
 from helix.adapters.git_repo import GitRepo
 from helix.adapters.json_settings import JsonSettings
 from helix.adapters.restart import Restarter
+from helix.adapters.watchdog import clear_clean_exit, mark_clean_exit, spawn_watchdog
 from helix.app.container import Container
 from helix.config import AppPaths
 from helix.logging_setup import get_logger, setup_logging
@@ -35,6 +39,20 @@ _LAST_GOOD = "last_good_commit"
 _HEALING = "healing_in_progress"
 
 
+def _acquire_instance_lock(data_dir: Path) -> QLockFile | None:
+    """One HELIX per data dir. QLockFile clears stale locks from dead processes itself; the short retry
+    loop covers the restart path, where the old process may not have released the lock yet. Returns the
+    held lock (keep it alive for the process lifetime), or None when another live instance owns it."""
+    lock = QLockFile(str(data_dir / "helix.lock"))
+    deadline = time.monotonic() + 10.0
+    while True:
+        if lock.tryLock(0):
+            return lock
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.25)
+
+
 def run_app(argv: list[str] | None = None) -> int:
     # QtWebEngine (the in-app viewer for built apps/models) needs shared GL contexts, set before the
     # QApplication is created. Harmless when WebEngine isn't installed.
@@ -42,6 +60,14 @@ def run_app(argv: list[str] | None = None) -> int:
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("HELIX")
     apply_theme(app)
+
+    # Single instance BEFORE any state is touched: a second launch (double-click races, a watchdog
+    # relaunch crossing a manual one) must not fight the first over the mic, the DB, and the lock files.
+    paths = AppPaths.resolve().ensure()
+    instance_lock = _acquire_instance_lock(paths.data)
+    if instance_lock is None:
+        _LOG.info("another HELIX instance is already running — exiting")
+        return 0
 
     try:
         container = Container()
@@ -63,6 +89,12 @@ def run_app(argv: list[str] | None = None) -> int:
     except Exception:
         _LOG.exception("interrupted self-change recovery failed")
 
+    # Crash watchdog protocol: clear any stale clean-exit sentinel now, and write a fresh one FIRST on
+    # aboutToQuit (before the other teardown hooks — a hang in one of them must not turn a clean quit
+    # into a phantom "crash" the watchdog would resurrect).
+    clear_clean_exit(container.paths.data)
+    app.aboutToQuit.connect(lambda: mark_clean_exit(container.paths.data))
+
     # Belt-and-suspenders: tear down on ANY exit path — including a restart's quit() / OS logoff, which
     # bypass the window's closeEvent. Order matters (release the mic + join workers and reap the coder
     # BEFORE closing the DB). All steps are idempotent, so a normal closeEvent close runs them twice
@@ -75,6 +107,9 @@ def run_app(argv: list[str] | None = None) -> int:
 
     window.show()
     _record_good(container)
+    # Only a HEALTHY startup gets a watchdog (a boot failure is self-heal's job) — from here on, any
+    # death without the clean-exit sentinel gets the app relaunched so the always-on cadence survives.
+    spawn_watchdog(container.paths.data, container.paths.root / "main.py", container.paths.root)
     return app.exec()
 
 

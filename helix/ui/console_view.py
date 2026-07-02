@@ -1301,6 +1301,16 @@ class ConsoleView(QWidget):
         if self._voice is not None and self._voice.enabled():
             self._voice.speak(msg)
 
+    # ----- heartbeat announcements (reminders + scheduled agents; bridged by the main window) -----
+    def announce_reminder(self, text: str) -> None:
+        self._announce(f"Reminder: {text}")
+
+    def announce_agent_report(self, name: str, report: str) -> None:
+        text = " ".join((report or "").split())
+        if len(text) > 600:
+            text = text[:600] + "…"
+        self._announce(f"{name}: {text}" if text else f"{name} finished with nothing to report.")
+
     def _add_actions(self, buttons: list[tuple[str, object]]) -> None:
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)

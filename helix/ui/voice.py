@@ -121,6 +121,43 @@ def split_wake(text: str) -> tuple[bool, str]:
     return True, (text[match.end():] or "").strip()
 
 
+# Grammar words carry no evidence about WHO is speaking — the echo test scores content words only.
+_ECHO_STOPWORDS = frozenset(
+    "a an and are be but can could did do for i in is it its just of on or so that the this to was "
+    "we what will with you your".split()
+)
+
+
+def _content_words(text: str) -> list[str]:
+    words = re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower()).split()
+    return [w for w in words if w not in _ECHO_STOPWORDS]
+
+
+def is_echo(heard: str, spoken: str) -> bool:
+    """Is this transcript, overheard WHILE HELIX speaks, just its own voice coming back through the mic?
+
+    The name is the primary discriminator: a reply that never says 'HELIX' cannot put the name in the
+    mic — so a wake-word match against such a reply is always the user (this is what makes barge-in
+    safe in a noisy room). Only when the reply itself contains the name do we fall back to content-word
+    overlap: mostly-contained words = an echo; fresh words = a real command cutting in.
+
+    The wake word is stripped from BOTH sides before scoring — it appears in every barge utterance (the
+    user said it) AND, on this branch, in the reply, so counting it as overlap would be a guaranteed
+    free hit that wrongly flags a genuine short command like 'HELIX, make it red' as an echo."""
+    if not (spoken or "").strip():
+        return False
+    if not _WAKE_RE.search(spoken):
+        return False  # the reply never says the name; hearing it means the user said it
+    heard_nowake = _WAKE_RE.sub(" ", heard or "")
+    spoken_nowake = _WAKE_RE.sub(" ", spoken)
+    content = _content_words(heard_nowake)
+    if not content:
+        return True  # nothing beyond the name and filler, and the reply itself says the name
+    spoken_words = set(_content_words(spoken_nowake))
+    hits = sum(1 for w in content if w in spoken_words)
+    return hits / len(content) >= 0.6
+
+
 def is_dismissal(text: str) -> bool:
     """True if `text` closes an active conversation session (e.g. 'goodbye', 'that's all') — but NOT when
     it's actually a request that merely contains such a word ('build a goodbye card', 'that's all wrong,
@@ -476,9 +513,11 @@ class VoiceController(QObject):
         self._state = "idle"
         self._session = False
         self._ptt = False
-        self._barge_busy = False          # one in-flight 'stop?' transcription at a time while speaking
+        self._barge_busy = False          # one in-flight barge transcription at a time while speaking
         self._narrating = False           # a progress note is being spoken (skip new ones until it ends)
         self._muted = False               # user paused the mic: ignore all speech except unmute/stop
+        self._speaking_text = ""          # what TTS is saying right now — the echo check compares to it
+        self._speak_gen = 0               # a preempted utterance must not knock a newer turn to idle
         self._mic_ok: bool | None = None  # cache the device probe; don't reopen it on every settle
         self._session_timer = QTimer(self)
         self._session_timer.setSingleShot(True)
@@ -660,20 +699,51 @@ class VoiceController(QObject):
         self._set_state("transcribing")
         self._transcribe(path, self._on_wake_text)
 
+    def _hush(self) -> None:
+        """Silence any in-flight speech/narration immediately."""
+        try:
+            self._tts.stop()
+        except Exception:
+            pass
+        self._narrating = False
+
     def _on_barge_text(self, text: str) -> None:
-        # While HELIX is busy (speaking a reply OR building), only a SHORT stop phrase counts — so its
-        # own reply/narration audio, picked up by the mic, can't make it cut itself off.
+        # While HELIX is busy (speaking a reply OR building), two things cut through: a SHORT stop
+        # phrase, and the NAME — "HELIX, actually make it blue" lands mid-sentence. Everything else
+        # (family chatter, the TV, HELIX's own reply leaking into the mic) is ignored, so a noisy
+        # house can't hijack a turn — only the wake word interrupts.
         self._barge_busy = False
         t = (text or "").strip()
-        if t and len(t.split()) <= 4 and is_stop(t):
-            try:
-                self._tts.stop()  # hush any speech/narration now
-            except Exception:
-                pass
-            self._narrating = False
+        if not t:
+            return
+        if len(t.split()) <= 4 and is_stop(t):
+            self._hush()
             # Don't force idle here: the Console cancels the running turn/build and drives the orb state
             # when the worker actually unwinds (stopping TTS ends a speaking turn on its own).
             self.stopRequested.emit()
+            return
+        matched, after = split_wake(t)
+        if not matched or is_echo(t, self._speaking_text):
+            return  # not addressed to HELIX — or HELIX hearing itself say its own name
+        command = after.strip()
+        if self._state == "thinking" and not self._narrating:
+            # A model turn already in flight can't be redirected — only a stop phrase acts (above).
+            return
+        self._hush()  # the name cuts the voice off mid-sentence
+        if is_stop(command):
+            self.stopRequested.emit()
+            self._set_state("idle")
+            return
+        if is_mute(command):
+            self.set_muted(True)
+            self._set_state("idle")
+            return
+        self._start_session()
+        if not command:
+            self._say("Yes?")  # called by name mid-speech — acknowledge and listen
+            return
+        self._set_state("thinking")
+        self.recognized.emit(command)
 
     def _on_wake_text(self, text: str) -> None:
         text = (text or "").strip()
@@ -783,8 +853,18 @@ class VoiceController(QObject):
         if not text or not self._tts.available():
             self._set_state("idle")
             return
+        self._speaking_text = text  # the echo check compares overheard speech to this
         self._set_state("speaking")
-        self._run(lambda _emit: self._tts.speak(text), lambda *_: self._set_state("idle"))
+        self._speak_gen += 1
+        gen = self._speak_gen
+        self._run(lambda _emit: self._tts.speak(text), lambda *_: self._speak_done(gen))
+
+    def _speak_done(self, gen: int) -> None:
+        """Settle to idle when an utterance finishes — unless it was preempted (a newer speak took
+        over) or a barge-in already moved the turn on (state left 'speaking'). Without this guard the
+        killed utterance's completion used to reset WHATEVER state came after it back to idle."""
+        if gen == self._speak_gen and self._state == "speaking":
+            self._set_state("idle")
 
     def narrate(self, text: str) -> None:
         """Speak a short progress note as HELIX works, WITHOUT changing the turn state (the mic stays
@@ -792,9 +872,16 @@ class VoiceController(QObject):
         themselves to speech and never stack up — turning a stream of steps into spoken milestones."""
         if self._narrating or self._muted or not self.enabled():
             return  # muted means quiet: don't speak progress notes (HELIX would also hear itself)
+        if self._state == "speaking":
+            # A real reply is audibly playing right now. Overlaying a progress note here would (a) queue
+            # its audio behind the reply on the one warm player and (b) overwrite _speaking_text, so the
+            # echo shield would compare an overheard reply against the NOTE — and, since the note lacks
+            # the wake word, wrongly treat HELIX's own reply as a user command. Skip the note instead.
+            return
         text = speakable(text)
         if not text or not self._tts.available():
             return
+        self._speaking_text = text  # narration echoes are filtered the same way as reply echoes
         self._narrating = True
         # allow_fallback=False: progress notes stay in ONE voice — a transient neural-TTS failure skips
         # the note instead of speaking it in the OS voice (which made consecutive notes flip voices).

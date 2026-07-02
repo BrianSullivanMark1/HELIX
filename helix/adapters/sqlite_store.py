@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS messages (
   text TEXT NOT NULL,
   at   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS profile (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  text       TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 """
 
 
@@ -109,6 +114,25 @@ class SqliteStore:
             Message(role=Role(r["role"]), text=r["text"], at=datetime.fromisoformat(r["at"]))
             for r in reversed(rows)
         ]
+
+    # ----- user profile (the distilled who-is-the-user text; one row) -----
+    def profile_text(self) -> str:
+        with self._lock:
+            if self._closed:
+                return ""
+            row = self._conn.execute("SELECT text FROM profile WHERE id = 1").fetchone()
+        return row["text"] if row else ""
+
+    def set_profile_text(self, text: str) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._conn.execute(
+                "INSERT INTO profile(id, text, updated_at) VALUES (1,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET text=excluded.text, updated_at=excluded.updated_at",
+                (text, self._now()),
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:

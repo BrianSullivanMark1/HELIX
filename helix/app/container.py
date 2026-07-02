@@ -28,17 +28,34 @@ from helix.ports.llm import Text, Turn
 from helix.services.agents import AgentService
 from helix.services.build_queue import BuildQueue
 from helix.services.builds import BuildService
+from helix.services.calendar import CalendarService
 from helix.services.connections import ConnectionsService
 from helix.services.conversation import ConversationService
 from helix.services.forge import ForgeService
 from helix.services.gmail import GmailService
 from helix.services.knowledge import KnowledgeService
 from helix.services.model_baker import ModelBaker
+from helix.services.profile import ProfileService
+from helix.services.reminders import ReminderService
+from helix.services.scheduler import AgentScheduler
 from helix.services.tasks import TaskService
 from helix.services.prompts import CONSOLE_SYSTEM, DEEP_THINK_SYSTEM
 from helix.services.selfdev import SelfDevService
 from helix.services.selfdev_lane import SelfDevLane
 from helix.services.tools import ToolRegistry
+
+
+def _migrate_agents(settings: JsonSettings, agent_store: JsonSettings) -> None:
+    """One-time lift of the 'agents' list from the old (guarded) settings file into its own file. Runs
+    only when the new store is empty and the old key is present, then clears the old key so it can't be
+    resurrected — and can't keep getting byte-reverted mid-build in its old home."""
+    if agent_store.get("agents"):
+        return  # already on the dedicated store
+    legacy = settings.get("agents")
+    if not legacy:
+        return
+    agent_store.set("agents", legacy)
+    settings.set("agents", [])  # leave a tombstone (not delete) — JsonSettings has no delete
 
 
 class Container:
@@ -115,7 +132,7 @@ class Container:
         self.model_baker = ModelBaker(neural_backend=_neural, neural_available=lambda: bool(_tripo_key()))
         self.forge = ForgeService(
             self.builds, self.coder, self.bus, self.repo, self.paths.root, guard_files,
-            model_baker=self.model_baker,
+            model_baker=self.model_baker, data_dir=self.paths.data,
         )
         # Builds run as background jobs so the orb keeps talking while it works — a small pool runs a few
         # at once (the Forge's escape guard skips all build workspaces, so concurrent builds don't trip
@@ -151,6 +168,14 @@ class Container:
         # Gmail: read-only inbox access (an address + a Google App Password in the secrets store). Like
         # Connections, the credential is local-only; HELIX only ever READS the inbox.
         self.gmail = GmailService(self.secrets)
+        # Calendar: read-only iCal access (the private feed URL is the secret, same posture as Gmail).
+        self.calendar = CalendarService(self.secrets, clock=self.clock)
+        # Reminders/timers the orb keeps itself ("set a 10-minute timer") — spoken by the heartbeat.
+        # A DEDICATED file (like secrets), NOT the guarded settings file: a reminder set WHILE a build
+        # runs must survive the build guard's byte-revert of settings, or the timer silently vanishes.
+        self.reminders = ReminderService(
+            JsonSettings(self.paths.data / "helix_reminders.json"), self.clock
+        )
         # Optional SEMANTIC knowledge search: enabled only when a Voyage key is set (Settings or the
         # VOYAGE_API_KEY env var). The key is read PER search, so adding it takes effect with no restart;
         # without it, knowledge search is keyword-only. Failures fall back to keyword automatically.
@@ -172,14 +197,25 @@ class Container:
         self.tools = ToolRegistry(
             self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue,
             tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane, connections=self.connections,
-            knowledge=self.knowledge, gmail=self.gmail,
+            knowledge=self.knowledge, gmail=self.gmail, reminders=self.reminders, calendar=self.calendar,
         )
+        # The orb quietly learns who the user is: a background distiller (same fast chat model) keeps a
+        # compact profile in the DB, injected into each Console turn like the time anchor. No knobs.
+        self.profile = ProfileService(self.chat, self.store, self.clock)
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM,
-            knowledge=self.knowledge,
+            knowledge=self.knowledge, profile=self.profile,
         )
-        self.agents = AgentService(self.settings, self.conversation, bus=self.bus)
+        # Agents persist in a DEDICATED file (not the guarded settings file): scheduled agents write
+        # last_run mid-build via the heartbeat, and the orb can create/pause an agent while a build runs
+        # — both would be byte-reverted by the Forge guard if they lived in settings (silent agent loss
+        # + duplicate scheduled fires). One-time migration lifts any agents from the old settings key.
+        self.agent_store = JsonSettings(self.paths.data / "helix_agents.json")
+        _migrate_agents(self.settings, self.agent_store)
+        self.agents = AgentService(self.agent_store, self.conversation, bus=self.bus, clock=self.clock)
         self.tools.bind_agents(self.agents)  # late-bind: agents → conversation → tools, so it can't be ctor-passed
+        # Which scheduled agents are due — the shell's heartbeat (main_window) asks this every tick.
+        self.scheduler = AgentScheduler(self.agents, self.clock)
         self.restart = Restarter(self.paths.root / "main.py", self.paths.root).restart
 
         # Voice (optional; both degrade to text-only / silent if unavailable). TTS uses the chosen

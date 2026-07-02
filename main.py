@@ -25,7 +25,8 @@ def _prewarm_voice_if_enabled() -> None:
 
 
 if __name__ == "__main__":
-    _prewarm_voice_if_enabled()
-    from helix.app.cli import main  # imported after prewarm — this pulls in PyQt6
+    if "watchdog" not in sys.argv[1:2]:  # the crash-guard subprocess needs no STT (and no Qt)
+        _prewarm_voice_if_enabled()
+    from helix.app.cli import main  # imported after prewarm — Qt loads lazily inside
 
     sys.exit(main())

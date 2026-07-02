@@ -32,12 +32,13 @@ from helix.ui.theme import CYAN, LINE, MUTED, STATUS_DONE
 class SettingsView(QWidget):
     saved = pyqtSignal()
 
-    def __init__(self, settings: SettingsStore, connections=None, gmail=None) -> None:
+    def __init__(self, settings: SettingsStore, connections=None, gmail=None, calendar=None) -> None:
         super().__init__()
         self.setObjectName("Panel")
         self._settings = settings
         self._connections = connections           # save/load service tokens used by agents + call_api
         self._gmail = gmail                        # read-only Gmail inbox credentials (address + app password)
+        self._calendar = calendar                  # read-only calendar (the private iCal URL is the secret)
         self._conn_fields: list[tuple[str, QLineEdit]] = []  # (env-var name, field)
         # (status QLabel, getter) pairs refreshed on load + save so each row shows Set / Not set at a glance.
         self._statuses: list[tuple[QLabel, Callable[[], str]]] = []
@@ -108,6 +109,10 @@ class SettingsView(QWidget):
             self._gmail_addr.setPlaceholderText("you@gmail.com")
             self._gmail_pw = self._password("16-character app password")
             form.addWidget(self._gmail_section())
+        # Calendar — read-only (one private iCal URL; the URL itself is the credential).
+        if self._calendar is not None:
+            self._calendar_url = self._password("https://calendar.google.com/calendar/ical/…/basic.ics")
+            form.addWidget(self._calendar_section())
 
         # ── Appearance & voice ──
         form.addSpacing(4)
@@ -280,6 +285,36 @@ class SettingsView(QWidget):
         self._statuses.append((status, lambda: "set" if self._gmail.configured() else ""))
         return box
 
+    def _calendar_section(self) -> QWidget:
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(4)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        lbl = QLabel("Calendar — read-only")
+        lbl.setStyleSheet("font-weight:600;")
+        status = QLabel()
+        status.setStyleSheet("font-size:12px;")
+        head.addWidget(lbl)
+        head.addWidget(status)
+        head.addStretch(1)
+        head.addWidget(self._info_btn(
+            "Calendar (read-only)",
+            "Lets HELIX answer “what's on today?”, “when's my next meeting?” and give agents (like a "
+            "morning brief) your schedule. It ONLY reads.\n\n"
+            "Setup (Google Calendar): Settings → your calendar → “Integrate calendar” → copy the "
+            "“Secret address in iCal format” and paste it here. Most other calendars offer a private "
+            "iCal/ICS link too.\n\n"
+            "Security note: that URL is a secret — anyone holding it can read this calendar. It's stored "
+            "on this machine only and never sent anywhere except the calendar itself; you can reset it "
+            "from your calendar's settings anytime.",
+        ))
+        lay.addLayout(head)
+        lay.addWidget(self._calendar_url)
+        self._statuses.append((status, lambda: "set" if self._calendar.configured() else ""))
+        return box
+
     def _refresh_statuses(self) -> None:
         for label, getter in self._statuses:
             try:
@@ -312,6 +347,8 @@ class SettingsView(QWidget):
         if self._gmail is not None:
             self._gmail_addr.setText(self._gmail.address())
             self._gmail_pw.setText(self._gmail.app_password())
+        if self._calendar is not None:
+            self._calendar_url.setText(self._calendar.url())
         self._refresh_statuses()
 
     def _save(self) -> None:
@@ -326,6 +363,8 @@ class SettingsView(QWidget):
                 self._connections.set_value(env, field.text().strip())
         if self._gmail is not None:
             self._gmail.set_credentials(self._gmail_addr.text(), self._gmail_pw.text())
+        if self._calendar is not None:
+            self._calendar.set_url(self._calendar_url.text())
         self._refresh_statuses()
         self._status.setText("Saved.")
         self.saved.emit()

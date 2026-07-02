@@ -9,8 +9,11 @@ from datetime import datetime
 from pathlib import Path
 
 from helix.domain.models import App, AppKind, BuildKind, slugify
+from helix.logging_setup import get_logger
 from helix.ports.clock import Clock
 from helix.ports.repo import VersionedRepo
+
+_LOG = get_logger("builds")
 
 MANIFEST = ".helixbuild.json"
 BUILDING = ".building"  # in-progress marker: present while a build runs, cleared on finalize
@@ -105,7 +108,12 @@ class BuildService:
                 continue  # a move-aside dir from an in-progress/failed delete — not a real build
             manifest = child / MANIFEST
             if manifest.exists():
-                apps.append(self._read_manifest(manifest))
+                # One truncated/corrupt manifest must never empty the whole menu — skip just that build
+                # (it stays on disk for repair) and keep listing the rest.
+                try:
+                    apps.append(self._read_manifest(manifest))
+                except (OSError, ValueError, KeyError):
+                    _LOG.warning("skipping build with unreadable manifest: %s", manifest)
         return apps
 
     def categorized(self) -> dict[str, list[App]]:
@@ -159,7 +167,10 @@ class BuildService:
         new_name = (new_name or "").strip()
         if not new_name:
             return None
-        app = self._read_manifest(manifest)
+        try:
+            app = self._read_manifest(manifest)
+        except (OSError, ValueError, KeyError):
+            return None  # corrupt manifest — honest failure, same as a missing build
         ws = self.workspace(slug)
         new_slug = slugify(new_name)
         if new_slug != slug:
@@ -199,7 +210,10 @@ class BuildService:
             self._repo.revert_to(ws, sha)
         except Exception:  # noqa: BLE001 - locked/open workspace or bad ref → honest failure
             return None
-        return self._read_manifest(manifest)
+        try:
+            return self._read_manifest(manifest)
+        except (OSError, ValueError, KeyError):
+            return None
 
     # ----- helpers -----
     def _detect_entry(self, ws: Path) -> tuple[AppKind, str | None]:
@@ -230,7 +244,15 @@ class BuildService:
             "created_at": (app.created_at or self._clock.now()).isoformat(),
             "is_model": app.is_model,  # legacy mirror of build_kind == MODEL (back-compat reads)
         }
-        (ws / MANIFEST).write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self._atomic_write(ws / MANIFEST, json.dumps(data, indent=2))
+
+    @staticmethod
+    def _atomic_write(path: Path, text: str) -> None:
+        """Write-then-rename so a crash/power-loss mid-write can never leave a truncated manifest (which
+        would make the build vanish from the menu on the next launch)."""
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
 
     def _read_manifest(self, manifest: Path) -> App:
         d = json.loads(manifest.read_text(encoding="utf-8"))
@@ -248,7 +270,7 @@ class BuildService:
             changed = True
         if changed:
             try:
-                manifest.write_text(json.dumps(d, indent=2), encoding="utf-8")
+                self._atomic_write(manifest, json.dumps(d, indent=2))
             except OSError:
                 pass  # read-only/locked — fall back to the in-memory value, retry next load
         created = d.get("created_at")

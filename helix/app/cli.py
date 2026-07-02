@@ -1,9 +1,9 @@
-"""CLI — argparse entry. Bare `helix` opens the desktop app."""
+"""CLI — argparse entry. Bare `helix` opens the desktop app; `helix watchdog ...` runs the tiny
+crash-guard process (spawned by bootstrap — never run by hand), which must import no Qt."""
 from __future__ import annotations
 
 import argparse
-
-from helix.app.bootstrap import run_app
+from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -11,7 +11,22 @@ def main(argv: list[str] | None = None) -> int:
         prog="helix", description="HELIX — a local-first desktop app-builder you talk to."
     )
     parser.add_argument(
-        "command", nargs="?", default="ui", choices=["ui"], help="what to run (default: ui)"
+        "command", nargs="?", default="ui", choices=["ui", "watchdog"],
+        help="what to run (default: ui)",
     )
-    parser.parse_args(argv)
+    parser.add_argument("--pid", type=int, help="(watchdog) the HELIX process to guard")
+    parser.add_argument("--data", help="(watchdog) the data directory")
+    parser.add_argument("--entry", help="(watchdog) the entry script to relaunch")
+    parser.add_argument("--root", help="(watchdog) the app root / working directory")
+    args = parser.parse_args(argv)
+
+    if args.command == "watchdog":
+        if args.pid is None or not args.data or not args.entry or not args.root:
+            parser.error("watchdog requires --pid, --data, --entry and --root")
+        from helix.adapters.watchdog import watchdog_main  # no Qt on this path
+
+        return watchdog_main(args.pid, Path(args.data), Path(args.entry), Path(args.root))
+
+    from helix.app.bootstrap import run_app  # imported lazily — this pulls in PyQt6
+
     return run_app()

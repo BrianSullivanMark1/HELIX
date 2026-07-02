@@ -14,7 +14,14 @@ from helix.ports.events import EventBus
 from helix.ports.repo import VersionedRepo
 from helix.services.builds import BuildService
 from helix.services.cancel import BuildHandle, CancelToken
-from helix.services.prompts import build_app_prompt
+from helix.services.prompts import (
+    build_3d_model_prompt,
+    build_app_prompt,
+    build_task_prompt,
+    edit_app_prompt,
+    edit_task_prompt,
+    repair_prompt,
+)
 from helix.services.sandbox import restore_if_changed, scan_tree, snapshot_files, tree_changed
 
 if TYPE_CHECKING:
@@ -40,12 +47,16 @@ class ForgeService:
         app_root: Path,
         guard_files: list[Path] | None = None,
         model_baker: "ModelBaker | None" = None,
+        data_dir: Path | None = None,
     ) -> None:
         self._builds = builds
         self._coder = coder
         self._bus = bus
         self._repo = repo
         self._app_root = app_root
+        # data/ no longer necessarily lives under the app root (a frozen build keeps it in
+        # %LOCALAPPDATA%), so the guard's skip set must use the REAL location, not app_root/"data".
+        self._data_dir = data_dir or (app_root / "data")
         self._guard_files = list(guard_files or [])
         self._baker = model_baker  # turns a built model.json into assets/model.glb + a viewer
 
@@ -117,36 +128,59 @@ class ForgeService:
         guard = snapshot_files(self._guard_files)  # byte-revert settings if tampered
         skip = (
             self._app_root / ".git",
-            self._app_root / "data" / "builds",
-            self._app_root / "data" / "helix.db",
-            self._app_root / "data" / "helix_secrets.json",  # volatile: the user can connect a key mid-build
+            self._builds.dir,
+            self._data_dir / "helix.db",
+            self._data_dir / "helix_secrets.json",  # volatile: the user can connect a key mid-build
+            self._data_dir / "helix_reminders.json",  # volatile: "set a timer" works mid-build too
+            self._data_dir / "helix_agents.json",  # volatile: create/pause/mark_ran happen mid-build too
             *self._guard_files,
         )
         tree_sig = scan_tree(self._app_root, skip=skip)
         hooks = self._repo.hooks_dir(self._app_root)
         hooks_sig = scan_tree(hooks)
 
-        result = self._coder.run_task(
-            workspace, prompt or build_app_prompt(app.name, request),
-            on_progress=on_progress, cancel=cancel,
-        )
-        restore_if_changed(guard)
-        if cancel is not None and cancel.is_set():
-            # Stopped mid-build: don't finalize. The token carries the handle so the UI can offer cleanup.
-            raise BuildCancelled(app.slug, app.name, iterating, bool(app.is_model))
-        if not result.ok:
-            raise BuildError(result.error or result.summary or "the build failed")
-
-        escaped = tree_changed(self._app_root, tree_sig, skip=skip) + tree_changed(hooks, hooks_sig)
-        if escaped:
-            self._revert_escapes(escaped)
-            _LOG.warning("build %r wrote outside its workspace: %s", app.name, escaped)
-            # Name WHAT it tried to touch — the opaque "wrote outside its workspace" told the user (and us)
-            # nothing; now the announcement and the log both pinpoint the offending file(s).
-            raise BuildError(
-                f"the build tried to change files outside its own folder ({self._escape_names(escaped)}), "
-                "so I blocked it and rolled it back."
+        # The coder runs at most twice: the build itself, and ONE automatic repair pass if the result
+        # fails the pre-finalize check (a syntax error, a missing entry point). Every pass gets the full
+        # guard treatment — escapes are scanned and reverted UNCONDITIONALLY, before the cancel/failure
+        # exits, because a cancelled or failed run drove the same coder with the same hands.
+        prompt_text = prompt or self._default_prompt(app, request, iterating)
+        problem: str | None = None
+        for attempt in range(2):
+            result = self._coder.run_task(
+                workspace, prompt_text, on_progress=on_progress, cancel=cancel,
             )
+            restore_if_changed(guard)
+            escaped = tree_changed(self._app_root, tree_sig, skip=skip) + tree_changed(hooks, hooks_sig)
+            if escaped:
+                self._revert_escapes(escaped)
+                _LOG.warning("build %r wrote outside its workspace: %s", app.name, escaped)
+            if cancel is not None and cancel.is_set():
+                # Stopped mid-build: don't finalize. The token carries the handle so the UI can offer cleanup.
+                raise BuildCancelled(app.slug, app.name, iterating, bool(app.is_model))
+            if not result.ok:
+                raise BuildError(result.error or result.summary or "the build failed")
+            if escaped:
+                # Name WHAT it tried to touch — the opaque "wrote outside its workspace" told the user
+                # (and us) nothing; now the announcement and the log pinpoint the offending file(s).
+                raise BuildError(
+                    f"the build tried to change files outside its own folder "
+                    f"({self._escape_names(escaped)}), so I blocked it and rolled it back."
+                )
+            problem = self._verify_workspace(workspace, app.build_kind)
+            if problem is None:
+                break
+            if attempt == 0:
+                _LOG.warning("build %r failed its check (%s) — one repair pass", app.name, problem)
+                if on_progress:
+                    on_progress("Fixing a problem I caught checking the work…")
+                prompt_text = repair_prompt(app.name, problem)
+        if problem is not None:
+            # Both passes failed the checks. Do NOT leave the broken result on disk (the app is opened
+            # straight from its workspace): an ITERATION rolls back to its last good, still-working
+            # version; a never-finalized NEW build's broken scaffold is removed so it can't linger in the
+            # menu. Without this, a working app stays silently broken until the next restart's recovery.
+            self._rollback_failed(app, workspace, iterating)
+            raise BuildError(f"the finished build didn't pass its checks ({problem})")
 
         # A model is delivered as a small model.json the coder wrote; HELIX itself bakes it into a real
         # mesh + viewer here (in-process — the coder never gets a shell). Runs AFTER the escape check
@@ -189,6 +223,63 @@ class ForgeService:
             return False  # locked (still open / mid-write): don't claim a removal that didn't happen
         self._bus.publish(BuildDeleted(handle.slug))
         return True
+
+    def _rollback_failed(self, app: App, workspace: Path, iterating: bool) -> None:
+        """Undo a build that failed its pre-finalize checks, so a broken result never sits on disk. An
+        iteration is restored to its last committed version; a never-finalized new build is deleted."""
+        try:
+            if iterating:
+                self._repo.discard_changes(workspace)  # back to the last good, working version
+                self._builds.clear_building(app.slug)   # settled — don't let startup recovery re-touch it
+            elif self._builds.delete(app.slug):
+                self._bus.publish(BuildDeleted(app.slug))
+        except Exception:  # noqa: BLE001 — a rollback hiccup must not mask the original BuildError
+            _LOG.warning("could not roll back failed build %s", app.slug, exc_info=True)
+
+    def _default_prompt(self, app: App, request: str, iterating: bool) -> str:
+        """The coder instruction for this build — kind- AND iteration-aware. An edit of an existing
+        build gets an edit prompt (smallest change, keep everything else), never the from-scratch one
+        with only the change fragment. The 3D prompt is already edit-aware (it reuses the workspace)."""
+        if app.build_kind == BuildKind.MODEL:
+            return build_3d_model_prompt(app.name, request)
+        if app.build_kind == BuildKind.TASK:
+            return edit_task_prompt(app.name, request) if iterating else build_task_prompt(app.name, request)
+        return edit_app_prompt(app.name, request) if iterating else build_app_prompt(app.name, request)
+
+    def _verify_workspace(self, ws: Path, kind: BuildKind) -> str | None:
+        """The pre-finalize gate: every .py must compile and the build must have a real entry point.
+        Cheap, no execution. Returns a one-line problem description, or None when it passes — so a
+        build that LOOKS finished but can't even parse never lands in the menu as 'ready'."""
+        if kind == BuildKind.KNOWLEDGE:
+            return None  # ingested data, never a runnable artifact
+        vendor = {".git", ".venv", "venv", "site-packages", "node_modules", "__pycache__"}
+        problems: list[str] = []
+        for py in ws.rglob("*.py"):
+            if any(part in vendor for part in py.parts):
+                continue  # only gate the coder's own code, not an installed dependency tree
+            try:
+                compile(py.read_text(encoding="utf-8", errors="replace"), str(py), "exec")
+            except SyntaxError as exc:
+                problems.append(f"{py.name} line {exc.lineno}: {exc.msg}")
+                if len(problems) >= 3:
+                    break
+            except OSError:
+                continue
+        if problems:
+            return "Python syntax errors — " + "; ".join(problems)
+        if kind == BuildKind.MODEL:
+            if not ((ws / "model.json").exists() or (ws / "index.html").exists()):
+                return "no model.json or index.html was produced"
+            return None
+        if kind == BuildKind.TASK:
+            return None if (ws / "main.py").exists() else "the entry point main.py is missing"
+        has_entry = (
+            (ws / "main.py").exists()
+            or (ws / "index.html").exists()
+            or next(iter(ws.glob("*.html")), None) is not None
+            or next(iter(ws.glob("*.py")), None) is not None
+        )
+        return None if has_entry else "no runnable entry point (index.html or main.py) was produced"
 
     def _was_finalized(self, ws: Path) -> bool:
         """Has this workspace ever been finalized (vs. only scaffolded)? create_workspace makes ONE
@@ -276,24 +367,27 @@ class ForgeService:
 
     def _revert_escapes(self, escaped: list[str]) -> None:
         root = self._app_root.resolve()
-        builds_root = (self._app_root / "data" / "builds").resolve()
+        builds_root = self._builds.dir.resolve()
+        data_root = self._data_dir.resolve()
         source_rels: list[str] = []
         siblings: set[Path] = set()
         for ap in escaped:
             rp = Path(ap).resolve()
-            try:
-                rel = str(rp.relative_to(root)).replace("\\", "/")
-            except ValueError:
-                continue
             if builds_root in rp.parents:
-                # a write into ANOTHER built app — revert that app's whole working tree to its commit
+                # a write into ANOTHER built app — revert that app's whole working tree to its commit.
+                # Checked before the root-relative test: the builds tree may live outside the app root.
                 try:
                     siblings.add(builds_root / rp.relative_to(builds_root).parts[0])
                 except (ValueError, IndexError):
                     pass
-            elif rel.startswith("data/"):
+                continue
+            if data_root == rp or data_root in rp.parents:
                 continue  # db/log/settings: detected + refused (settings already byte-reverted)
-            elif ".git" in rp.parts:
+            try:
+                rel = str(rp.relative_to(root)).replace("\\", "/")
+            except ValueError:
+                continue  # outside the app tree entirely — nothing of ours to restore
+            if ".git" in rp.parts:
                 try:  # a planted hook — remove it
                     if rp.is_file() and not rp.name.endswith(".sample"):
                         rp.unlink()

@@ -19,10 +19,15 @@ from helix.services.tools import ToolRegistry
 
 if TYPE_CHECKING:
     from helix.services.knowledge import KnowledgeService
+    from helix.services.profile import ProfileService
 
 STOPPED_REPLY = "Okay, I stopped."  # shown (not spoken) when the user halts a turn; UI may offer cleanup
 
 MAX_STEPS = 6  # guard against a runaway tool loop
+
+# What a persisted tool digest may keep. Enough that "what did Dave's email say?" is answerable from
+# memory next turn; small enough that a handful of digests never crowds real turns out of the window.
+TOOL_DIGEST_CHARS = 1500
 
 # Tools that build, spend, self-modify, delete, rename, or launch the user's stuff. An AGENT run is
 # autonomous (no human in the loop), so it is denied all of these — it can read, think, search, and
@@ -31,10 +36,17 @@ BUILD_TOOLS = frozenset(
     {
         "build_app", "build_task", "build_3d_model", "create_agent", "delete_build",
         "improve_helix", "rename_build", "run_task", "run_agent",
+        # open_build LAUNCHES the user's code for a server app (main.py) and yanks the UI — the same
+        # capability as run_task, so an autonomous agent must not have it either (an email saying
+        # "HELIX, open the X app" must not make an agent run X unattended).
+        "open_build",
         "approve_self_change", "reject_self_change",
         # Knowledge WRITES are human-driven only — an autonomous agent may search the user's knowledge
         # (search_knowledge is deliberately NOT here) but never create a base or save a note on its own.
         "create_knowledge", "remember",
+        # Reminder/agent writes stay human-driven too. READS stay allowed: an agent may check the
+        # calendar, the inbox, and the pending reminders — that's what a morning brief is made of.
+        "set_reminder", "cancel_reminder", "set_agent_enabled",
     }
 )
 
@@ -49,6 +61,7 @@ class ConversationService:
         clock: Clock,
         system: str,
         knowledge: "KnowledgeService | None" = None,
+        profile: "ProfileService | None" = None,
     ) -> None:
         self._chat = chat
         self._tools = tools
@@ -57,6 +70,7 @@ class ConversationService:
         self._clock = clock
         self._system = system
         self._knowledge = knowledge  # ambient auto-recall of the user's saved knowledge (orb turns only)
+        self._profile = profile      # the distilled who-is-the-user block, injected on orb turns
         # A turn is a read-modify-write over the shared history. The Console and an Agent run on
         # separate worker threads against this one service, so serialize whole turns — otherwise their
         # appends interleave and the API gets a malformed (e.g. two-user-in-a-row) turn list.
@@ -86,6 +100,14 @@ class ConversationService:
         if turns:
             last = turns[-1]
             turns[-1] = Turn(last.role, last.blocks + (Text(self._now_context()),))
+        # Who the user is — the distilled profile rides along like the time anchor (ephemeral, never
+        # persisted, cache-friendly because the system prompt stays byte-stable). Orb turns only: an
+        # agent run stays hermetic.
+        if persist and self._profile is not None and turns:
+            profile_text = self._profile.context()
+            if profile_text:
+                last = turns[-1]
+                turns[-1] = Turn(last.role, last.blocks + (Text(profile_text),))
         if attachments_text:
             # Attached files/folders ride along as EPHEMERAL context on this turn only — appended to the
             # current (last) user turn, never written to history, so a big attachment isn't replayed on
@@ -112,7 +134,12 @@ class ConversationService:
             specs = [s for s in specs if s.name not in BUILD_TOOLS]
 
         def finish(text: str) -> str:
-            return self._remember(text) if persist else text
+            if not persist:
+                return text
+            out = self._remember(text)
+            if self._profile is not None:
+                self._profile.after_turn()  # background; never delays the reply
+            return out
 
         reply = None
         try:
@@ -136,6 +163,11 @@ class ConversationService:
                             call.name, call.args, on_progress=on_progress, cancel=cancel
                         )
                         results.append(ToolResult(call.id, out))
+                        if persist:
+                            # Keep a capped digest so what a tool LEARNED survives into later turns —
+                            # without this, "what did that email say?" forced a silent re-fetch (or a
+                            # guess). Hidden from the visible transcript (recent_messages filters TOOL).
+                            self._remember_tool(call.name, out)
                     except BuildCancelled:  # user stopped mid-build — end the turn (don't loop the model)
                         return finish(STOPPED_REPLY)
                     except Exception as exc:  # surface to the model so it can recover gracefully
@@ -181,11 +213,27 @@ class ConversationService:
             self._store.append(Message(Role.ASSISTANT, text, self._clock.now()))
         return text
 
+    def _remember_tool(self, name: str, out: str) -> None:
+        """Persist a capped digest of what a tool returned, as a TOOL row. Replayed to the model on
+        later turns (labelled, untrusted) but never shown in the Console transcript."""
+        text = (out or "").strip()
+        if not text:
+            return
+        if len(text) > TOOL_DIGEST_CHARS:
+            text = text[:TOOL_DIGEST_CHARS] + " …[truncated]"
+        digest = f"[Earlier tool result — {name} (replayed by HELIX, not typed by the user)]\n{text}"
+        with self._lock:
+            self._store.append(Message(Role.TOOL, digest, self._clock.now()))
+
     def _history_turns(self) -> list[Turn]:
+        # TOOL digests replay as user-role context blocks (the API has no bare 'tool' text role); they
+        # sit between the question and the reply they informed, and _coalesce folds them into a valid
+        # strictly-alternating turn list. The window is wider than before so digests don't crowd out
+        # real turns.
         turns = [
-            Turn(m.role, (Text(m.text),))
-            for m in self._store.recent(40)
-            if m.role in (Role.USER, Role.ASSISTANT)
+            Turn(Role.USER if m.role == Role.TOOL else m.role, (Text(m.text),))
+            for m in self._store.recent(60)
+            if m.role in (Role.USER, Role.ASSISTANT, Role.TOOL)
         ]
         while turns and turns[0].role != Role.USER:  # the API requires the first turn to be 'user'
             turns.pop(0)

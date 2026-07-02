@@ -27,6 +27,7 @@ from helix.domain.events import (
     BuildDeleteRequested,
     BuildFinished,
     BuildIterated,
+    BuildOpenRequested,
     BuildProgress,
     BuildRenamed,
     BuildStarted,
@@ -35,7 +36,6 @@ from helix.domain.events import (
 )
 from helix.domain.models import AppKind, BuildKind
 from helix.logging_setup import get_logger
-from helix.services.prompts import build_3d_model_prompt, build_task_prompt
 from helix.ui.build_status import BuildStatusBoard
 from helix.ui.commands_view import CommandsDialog
 from helix.ui.connections_dialog import ConnectionsDialog
@@ -46,6 +46,7 @@ from helix.ui.orb import PresenceOrb
 from helix.ui.settings_view import SettingsView
 from helix.ui.shader_orb import ShaderOrb
 from helix.ui.theme import CYAN, LINE
+from helix.ui.workers import QtWorker
 
 try:  # the in-app web view needs PyQt6-WebEngine; without it, apps open in the system browser
     from helix.ui.app_viewer import AppViewer
@@ -63,6 +64,7 @@ class HelixMainWindow(QMainWindow):
     _buildProgressSignal = pyqtSignal(object)
     _buildFinishedSignal = pyqtSignal(object)
     _deleteRequestSignal = pyqtSignal(object)
+    _openRequestSignal = pyqtSignal(object)
     _selfChangeProgressSignal = pyqtSignal(object)
     _selfChangeFinishedSignal = pyqtSignal(object)
 
@@ -101,7 +103,9 @@ class HelixMainWindow(QMainWindow):
         self.launcher = LauncherView(
             container.builds, container.agents, container.tasks, container.knowledge
         )
-        self.settings = SettingsView(container.settings, container.connections, container.gmail)
+        self.settings = SettingsView(
+            container.settings, container.connections, container.gmail, container.calendar
+        )
         self._stack.addWidget(self.console)  # 0
         self._stack.addWidget(self.launcher)  # 1
         self._stack.addWidget(self.settings)  # 2
@@ -163,6 +167,9 @@ class HelixMainWindow(QMainWindow):
         # A delete the model proposed → one real human confirmation in the Console before anything is removed.
         container.bus.subscribe(BuildDeleteRequested, self._deleteRequestSignal.emit)
         self._deleteRequestSignal.connect(self._on_delete_requested)
+        # "Open it" by voice → open the build exactly as a menu click would (read-only, no confirm).
+        container.bus.subscribe(BuildOpenRequested, self._openRequestSignal.emit)
+        self._openRequestSignal.connect(lambda ev: self._open_app(ev.slug))
         # Background-build lifecycle → the status board (tiles/legend/orb) + the Console (status line /
         # spoken announcement). Started fires the instant a build begins so the UI shows it at once.
         container.bus.subscribe(BuildStarted, self._buildStartedSignal.emit)
@@ -176,6 +183,16 @@ class HelixMainWindow(QMainWindow):
         container.bus.subscribe(SelfChangeFinished, self._selfChangeFinishedSignal.emit)
         self._selfChangeProgressSignal.connect(self._on_self_change_progress)
         self._selfChangeFinishedSignal.connect(self._on_self_change_finished)
+
+        # The heartbeat — the shell's ONE cadence timer (always-on = the app stays open; QTimers drive
+        # everything): it speaks due reminders and fires scheduled agents, which then report in through
+        # the same announce path builds use.
+        self._agent_workers: set[QtWorker] = set()
+        self._agent_running = False
+        self._heartbeat = QTimer(self)
+        self._heartbeat.setInterval(15_000)
+        self._heartbeat.timeout.connect(self._on_heartbeat)
+        self._heartbeat.start()
 
     def _build_nav(self) -> QWidget:
         bar = QWidget()
@@ -331,15 +348,9 @@ class HelixMainWindow(QMainWindow):
 
     def _enqueue_edit(self, app, change: str) -> None:
         """Queue an in-place iterate of an EXISTING build. Passing its exact name resolves to the same
-        slug, so the Forge edits in place and never forks a near-duplicate. Shared by the menu card edit
-        and the viewer's live edit box."""
-        q = self._c.build_queue
-        if app.build_kind == BuildKind.MODEL:
-            q.enqueue(app.name, change, kind=BuildKind.MODEL, prompt=build_3d_model_prompt(app.name, change))
-        elif app.build_kind == BuildKind.TASK:
-            q.enqueue(app.name, change, kind=BuildKind.TASK, prompt=build_task_prompt(app.name, change))
-        else:
-            q.enqueue(app.name, change, kind=BuildKind.APP)
+        slug, so the Forge edits in place and never forks a near-duplicate — and picks the edit-aware
+        prompt itself. Shared by the menu card edit and the viewer's live edit box."""
+        self._c.build_queue.enqueue(app.name, change, kind=app.build_kind)
         self.console.status.setText(f"Updating {app.name}…")
 
     def _on_delete_requested(self, ev: object) -> None:
@@ -377,6 +388,50 @@ class HelixMainWindow(QMainWindow):
             )
         self._refresh_build_ui()
 
+    # ----- the heartbeat: reminders + scheduled agents -----
+    def _on_heartbeat(self) -> None:
+        try:
+            due = self._c.reminders.pop_due()
+            if due:
+                # Announce ALL of this tick's due reminders in ONE spoken line. Speaking them back-to-back
+                # with separate speak() calls raced the TTS preemption guard and cross-wired the warm
+                # player's completion lines (e.g. waking from sleep with several overdue at once).
+                self.console.announce_reminder("; ".join(r.text for r in due))
+        except Exception:
+            _LOG.exception("reminder check failed")
+        if self._agent_running:
+            return  # one scheduled agent at a time; the next tick picks up the rest
+        try:
+            due = self._c.scheduler.due_now()
+        except Exception:
+            _LOG.exception("agent schedule check failed")
+            return
+        if due:
+            self._run_scheduled_agent(due[0])  # one per tick — waking from a long sleep never stampedes
+
+    def _run_scheduled_agent(self, agent) -> None:
+        self._agent_running = True
+        self._c.scheduler.mark_ran(agent.name)  # stamp FIRST so a slow run can't double-fire its slot
+        name = agent.name
+        worker = QtWorker(lambda _emit: self._c.agents.run(name))
+        self._agent_workers.add(worker)
+        worker.finished_ok.connect(lambda report, n=name: self.console.announce_agent_report(n, report))
+        worker.failed.connect(
+            lambda err, n=name: self.console.announce_agent_report(n, f"hit a snag: {err}")
+        )
+        worker.finished.connect(lambda w=worker: self._retire_agent_worker(w))
+        worker.start()
+
+    def _retire_agent_worker(self, worker: QtWorker) -> None:
+        self._agent_workers.discard(worker)
+        worker.deleteLater()
+        self._agent_running = False
+
+    def _shutdown_heartbeat(self) -> None:
+        self._heartbeat.stop()
+        for worker in list(self._agent_workers):
+            worker.wait(2000)
+
     def closeEvent(self, event) -> None:
         # If real work is in flight, give the user a decision point rather than silently abandoning it.
         active, pending = self._c.build_queue.snapshot()  # both are lists of build names
@@ -396,6 +451,7 @@ class HelixMainWindow(QMainWindow):
         # Reap the background build queue FIRST: kill the coder subprocess before anything else tears
         # down, so closing mid-build never orphans claude.exe (it would keep billing + lock the workspace).
         for teardown in (
+            self._shutdown_heartbeat,  # stop the cadence + join any in-flight scheduled agent
             self._c.build_queue.shutdown,
             self._c.selfdev_lane.shutdown,
             self._stop_app_servers,  # kill any backend-app servers so they don't outlive HELIX / hold a port

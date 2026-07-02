@@ -72,6 +72,17 @@ class BuildDeleteRequested(Event):
 
 
 @dataclass(frozen=True)
+class BuildOpenRequested(Event):
+    """The model asked to OPEN a build ("open it", "show me the tip calculator") — the UI resolves the
+    slug and opens it exactly as a menu click would. Read-only from the model's side.
+
+    slug: the resolved workspace slug; name: the user-facing name (for the announcement)."""
+
+    slug: str
+    name: str
+
+
+@dataclass(frozen=True)
 class BuildStarted(Event):
     """A background build just began — the tile turns yellow, it joins the Console legend, and the orb
     goes to its working hue. Fired by the Forge the moment the workspace is marked building, so the UI

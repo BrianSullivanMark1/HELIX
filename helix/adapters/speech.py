@@ -201,12 +201,88 @@ def _rate_string(multiplier: object) -> str:
     return f"+{pct}%" if pct >= 0 else f"{pct}%"
 
 
+class _WarmMediaPlayer:
+    """One persistent STA PowerShell MediaPlayer, fed MP3 paths over stdin.
+
+    The old design spawned a fresh powershell per utterance — 0.5-1s of dead air before every spoken
+    line, plus a blind 3-second sleep when the duration never resolved. Keeping one warm player makes
+    consecutive lines start instantly, and playback now ends on the player's actual position rather
+    than a guess. stop() kills the process (instant hush); the next utterance warms a fresh one.
+    """
+
+    _SCRIPT = (
+        "Add-Type -AssemblyName PresentationCore;"
+        "$mp=New-Object System.Windows.Media.MediaPlayer;"
+        "$mp.Volume=1.0;"
+        "while($true){"
+        "$line=[Console]::In.ReadLine();"
+        "if($line -eq $null -or $line -eq ''){break};"
+        "$ok='DONE';"
+        "try{"
+        "$mp.Open([uri]$line);"
+        "Start-Sleep -Milliseconds 60;"
+        "$mp.Play();"
+        "$d=$null;"
+        "for($i=0;$i -lt 50;$i++){if($mp.NaturalDuration.HasTimeSpan){$d=$mp.NaturalDuration.TimeSpan;break};Start-Sleep -Milliseconds 100};"
+        "if($d){"
+        "$end=(Get-Date).AddMilliseconds([int]$d.TotalMilliseconds + 1500);"
+        "while((Get-Date) -lt $end){if($mp.Position -ge $d){break};Start-Sleep -Milliseconds 80}"
+        "}else{Start-Sleep -Seconds 3};"
+        "$mp.Stop()"
+        "}catch{$ok='FAIL'};"
+        "[Console]::Out.WriteLine($ok)"
+        "}"
+    )
+
+    def __init__(self) -> None:
+        self._proc: subprocess.Popen | None = None
+        self._lock = threading.Lock()
+
+    def _ensure_locked(self) -> subprocess.Popen:
+        if self._proc is None or self._proc.poll() is not None:
+            self._proc = subprocess.Popen(
+                ["powershell", "-NoProfile", "-STA", "-Command", self._SCRIPT],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                text=True, encoding="utf-8", bufsize=1, creationflags=_NO_WINDOW,
+            )
+        return self._proc
+
+    def play(self, path: str) -> bool:
+        """Play one MP3, blocking until it finishes. False = failed OR stopped (the caller's generation
+        guard tells those apart — a killed player just makes readline return '')."""
+        with self._lock:
+            try:
+                proc = self._ensure_locked()
+                proc.stdin.write(path + "\n")
+                proc.stdin.flush()
+            except Exception:
+                self._kill_locked()
+                return False
+        try:
+            line = proc.stdout.readline()  # blocks for the utterance's real duration
+        except Exception:
+            return False
+        return line.strip() == "DONE"
+
+    def stop(self) -> None:
+        with self._lock:
+            self._kill_locked()
+
+    def _kill_locked(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+        self._proc = None
+
+
 class EdgeSpeechOut:
     """Neural TTS via edge-tts (Microsoft's online voices), so HELIX can speak with a chosen accent.
 
-    edge-tts synthesizes an MP3 from the reply text over the network; we play it blocking through the
-    Windows Media Player COM object (no Qt event loop needed — speak() runs on a worker thread and
-    returns when playback ends, so the mic re-arms only after HELIX finishes). If synthesis or playback
+    edge-tts synthesizes an MP3 from the reply text over the network; playback goes through one warm
+    STA MediaPlayer process (no Qt event loop needed — speak() runs on a worker thread and returns
+    when playback ends, so the mic re-arms only after HELIX finishes). If synthesis or playback
     fails — offline, no WMP — it falls back to the local OS voice, so a reply is always spoken.
     """
 
@@ -220,7 +296,7 @@ class EdgeSpeechOut:
         self._rate = rate_provider
         self._fallback = fallback if fallback is not None else OsSpeechOut()
         self._lock = threading.Lock()
-        self._proc: subprocess.Popen | None = None
+        self._player = _WarmMediaPlayer()
         # Per-utterance generation guard: each speak() gets a fresh gen; stop() records the gen it
         # stopped. A KILLED playback is identified by gen (not a shared bool), so a CONCURRENT speak()
         # can't reset the flag and make the killed utterance fall back to the OS voice (two voices).
@@ -296,42 +372,15 @@ class EdgeSpeechOut:
             raise RuntimeError("MP3 playback here is Windows-only")
         if self._is_stopped(gen):
             return
-        # Play the MP3 via WPF's MediaPlayer (Media Foundation; present on every Windows) and block for
-        # its natural duration. PowerShell runs STA, which MediaPlayer requires. A non-zero exit (e.g.
-        # the file won't open) propagates so speak() falls back to the OS voice.
-        script = (
-            "Add-Type -AssemblyName PresentationCore;"
-            "$mp=New-Object System.Windows.Media.MediaPlayer;"
-            f"$mp.Open([uri]'{path}');"
-            "$mp.Volume=1.0;"
-            "Start-Sleep -Milliseconds 60;"
-            "$mp.Play();"
-            "$d=$null;"
-            "for($i=0;$i -lt 50;$i++){if($mp.NaturalDuration.HasTimeSpan){$d=$mp.NaturalDuration.TimeSpan;break};Start-Sleep -Milliseconds 100};"
-            "if($d){Start-Sleep -Milliseconds ([int]$d.TotalMilliseconds + 80)}else{Start-Sleep -Seconds 3};"
-            "$mp.Stop();$mp.Close();"
-        )
-        with self._lock:
-            self._proc = subprocess.Popen(
-                ["powershell", "-NoProfile", "-STA", "-Command", script],
-                creationflags=_NO_WINDOW,
-            )
-            proc = self._proc
-        proc.wait()
-        with self._lock:
-            self._proc = None
-        if not self._is_stopped(gen) and proc.returncode not in (0, None):
-            raise RuntimeError(f"playback exited {proc.returncode}")
+        # The warm player blocks until playback really ends. A failure propagates so speak() falls back
+        # to the OS voice — unless this utterance was stopped on purpose (the kill makes play() False).
+        if not self._player.play(path) and not self._is_stopped(gen):
+            raise RuntimeError("playback failed")
 
     def stop(self) -> None:
         # Mark the current (and any earlier) utterance stopped, so its in-flight speak() treats the kill
         # as intentional — and a LATER speak() (higher gen) is unaffected, so it can't be un-stopped.
         with self._lock:
             self._stopped_gen = self._gen
-            if self._proc and self._proc.poll() is None:
-                try:
-                    self._proc.kill()
-                except Exception:
-                    pass
-            self._proc = None
+        self._player.stop()
         self._fallback.stop()
