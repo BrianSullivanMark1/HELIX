@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from helix.adapters.agent_sdk_chat import PreferredChat
 from helix.domain.models import Message, Role
 from helix.ports.llm import Reply, Text, ToolSpec, Turn
@@ -203,3 +205,24 @@ def test_preferred_chat_falls_back_when_subscription_fails():
     chat = PreferredChat(sub, api)
     reply = chat.chat([Turn(Role.USER, (Text("hi"),))])
     assert reply.text == "api reply"
+
+
+def test_sdk_options_are_token_safe_and_sandboxed():
+    # The ClaudeAgentOptions the brain builds must (a) NEVER pass --bare (it disables
+    # subscription-token auth — a real regression we hit), (b) keep --no-session-persistence, (c)
+    # run in a neutral cwd, (d) offer web tools only, (e) clear ANTHROPIC_API_KEY so an inherited
+    # key can't silently bill the API, (f) load no filesystem settings.
+    pytest.importorskip("claude_agent_sdk")
+    from helix.adapters.agent_sdk_chat import _Sinks, SubscriptionBrain
+
+    brain = SubscriptionBrain(lambda: "sk-ant-oat01-fake", "sys", workdir="C:/neutral")
+    opts = brain._options((), "claude-sonnet-4-6", "low", _Sinks())
+    assert "bare" not in (opts.extra_args or {}), "--bare breaks subscription-token auth"
+    assert "no-session-persistence" in (opts.extra_args or {})
+    assert str(opts.cwd) == "C:/neutral"
+    assert opts.tools == ["WebSearch", "WebFetch"]
+    for shell in ("Bash", "Edit", "Write", "Read"):
+        assert shell in opts.disallowed_tools
+    assert opts.env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat01-fake"
+    assert opts.env.get("ANTHROPIC_API_KEY") == ""  # inherited key must not reach claude.exe
+    assert opts.setting_sources == []

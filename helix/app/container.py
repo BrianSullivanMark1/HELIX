@@ -181,7 +181,7 @@ class Container:
         # usage pool as Claude Desktop — through the official Agent SDK + the local claude.exe,
         # instead of pay-per-token API billing. Tools are late-bound below (registry ctor cycle);
         # without a token everything stays on the API key exactly as before.
-        self.subscription = SubscriptionBrain(_oauth, CONSOLE_SYSTEM)
+        self.subscription = SubscriptionBrain(_oauth, CONSOLE_SYSTEM, workdir=str(self.paths.data))
         # Plain no-tool chat (profile distiller, voice-identity notes, …): subscription first.
         self.chat = PreferredChat(self.subscription, api_chat)
 

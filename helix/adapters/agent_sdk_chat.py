@@ -12,9 +12,12 @@ Design:
     HELIX's tools ride into it as in-process MCP tools whose callbacks dispatch straight into
     ToolRegistry. Built-in Claude Code tools are OFF except WebSearch/WebFetch (and the file/shell
     tools are additionally disallowed) — the orb must never gain file or shell access through this
-    path. `setting_sources=[]` + `--bare` so the user's Claude Code config/CLAUDE.md/auto-memory
-    never leaks into the orb, and `--no-session-persistence` so the (untrusted) transcript is not
-    written to ~/.claude/projects.
+    path. Isolation: `setting_sources=[]` (no user/project settings, MCP servers, or hooks), a
+    NEUTRAL working dir with no CLAUDE.md (so no project instructions auto-load), and
+    `--no-session-persistence` (the untrusted transcript is not written to ~/.claude/projects).
+    NOTE: `--bare` would also block the CLI's own user-level auto-memory, but it DISABLES
+    subscription-token auth outright ("Not logged in"), so it is NOT used — the user's own
+    auto-memory may load, an accepted low-risk tradeoff on a single-user machine.
   - Agents/watchers and the distillers run hermetic one-shot `query()` calls (no session, no
     persistence). Each carries its OWN sinks in its closure — NO shared per-run state and NO global
     lock — so an orb turn, a background watcher, a distiller, and a mid-turn think_harber can all run
@@ -73,10 +76,12 @@ class SubscriptionBrain:
         oauth_provider: Callable[[], str | None],
         system: str,
         tools=None,  # ToolRegistry | None — specs() + dispatch(); bridged as in-process MCP tools
+        workdir: str | None = None,  # a neutral cwd (no CLAUDE.md) so project files can't leak in
     ) -> None:
         self._oauth = oauth_provider
         self._system = system
         self._tools = tools
+        self._workdir = workdir
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._closed = False
@@ -175,9 +180,10 @@ class SubscriptionBrain:
             mcp_servers=mcp,
             allowed_tools=allowed + ["WebSearch", "WebFetch"],
             setting_sources=[],   # no user/project settings, MCP servers, or hooks
-            # --bare: no auto-memory / CLAUDE.md / keychain / plugin sync. --no-session-persistence:
-            # the untrusted transcript is never written to ~/.claude/projects.
-            extra_args={"bare": None, "no-session-persistence": None},
+            # --no-session-persistence: the untrusted transcript is never written to ~/.claude/
+            # projects. (NOT --bare — it breaks subscription-token auth; see the module docstring.)
+            extra_args={"no-session-persistence": None},
+            cwd=self._workdir,    # neutral dir: no project CLAUDE.md to auto-discover
             max_turns=_MAX_TURNS,
             env=env,
             cli_path=resolve_claude_cli(),
