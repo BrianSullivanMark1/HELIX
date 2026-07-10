@@ -62,8 +62,8 @@ def _bob(seed: int) -> bytes:
 # ----- the acoustic front end -----
 
 def test_embedding_separates_two_voices():
-    a1, a2 = embed_pcm(_alice(1)), embed_pcm(_alice(2))
-    b1 = embed_pcm(_bob(1))
+    a1, a2 = embed_pcm(_alice(1)).dsp, embed_pcm(_alice(2)).dsp
+    b1 = embed_pcm(_bob(1)).dsp
     assert a1 is not None and a2 is not None and b1 is not None
     same = float(a1 @ a2)
     cross = float(a1 @ b1)
@@ -71,7 +71,7 @@ def test_embedding_separates_two_voices():
 
 
 def test_embedding_is_unit_norm():
-    e = embed_pcm(_alice(3))
+    e = embed_pcm(_alice(3)).dsp
     assert abs(float(np.linalg.norm(e)) - 1.0) < 1e-4
 
 
@@ -96,8 +96,8 @@ def test_broadband_noise_has_no_speaker_evidence():
 def test_pitch_magnitude_separates_proportional_speakers():
     # Two voices whose (offset, IQR) pitch stats are proportional must NOT collapse to the same pitch
     # feature — per-block L2 on the 2-dim block used to keep only the direction.
-    low = embed_pcm(_voice(110.0, (500.0, 1300.0, 2400.0), seed=5))
-    high = embed_pcm(_voice(220.0, (500.0, 1300.0, 2400.0), seed=5))
+    low = embed_pcm(_voice(110.0, (500.0, 1300.0, 2400.0), seed=5)).dsp
+    high = embed_pcm(_voice(220.0, (500.0, 1300.0, 2400.0), seed=5)).dsp
     assert low is not None and high is not None
     assert float(low @ high) < 0.98  # same formants, an octave apart — must not be identical
 

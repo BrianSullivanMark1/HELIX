@@ -82,7 +82,15 @@ class AgentService:
             last_run=now.isoformat() if schedule else None,
         )
         with self._lock:  # read-modify-write must be atomic vs the heartbeat's mark_ran
-            self._save([a for a in self.list() if a.name != agent.name] + [agent])
+            # Replace CASE-INSENSITIVELY — exists()/find() match that way, so an exact-case filter
+            # here would keep 'GitHub Watcher' AND add 'github watcher', both firing on schedule.
+            # A retune also keeps the prior pause state: updating a goal must never silently resume
+            # a watcher the user put to sleep.
+            key = agent.name.strip().lower()
+            prior = next((a for a in self.list() if a.name.strip().lower() == key), None)
+            if prior is not None:
+                agent.enabled = prior.enabled
+            self._save([a for a in self.list() if a.name.strip().lower() != key] + [agent])
         self._changed()
         return agent
 

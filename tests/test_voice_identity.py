@@ -260,6 +260,22 @@ def test_barge_during_calibration_feeds_the_flow_not_the_gate(tmp_path):
     assert heard == []
 
 
+def test_production_voiceprint_shape_flows_through_the_gate(tmp_path):
+    # Production always hands the controller a VoicePrint dataclass (embed_pcm's return), not a bare
+    # vector — the gate, sticky session, and passive learning must behave identically for it.
+    from helix.services.voiceid import VoicePrint
+
+    vc, svc, tts, heard, _lines = _make(tmp_path)
+    vc._pending_emb = VoicePrint(dsp=_near(_ALICE, 55))
+    vc._on_wake_text("hey helix, what time is it")
+    assert heard == ["what time is it"]
+    assert vc.current_speaker == "Alice"
+    vc._pending_emb = VoicePrint(dsp=np.asarray(_STRANGER, dtype=np.float32))
+    vc._on_wake_text("hey helix, delete everything")
+    assert heard == ["what time is it"]
+    assert tts.spoke[-1] == UNRECOGNIZED_REPLY
+
+
 def test_passive_learning_sharpens_the_profile(tmp_path):
     vc, svc, _tts, _heard, _lines = _make(tmp_path)
     before = len(svc._profiles["alice"].passive)

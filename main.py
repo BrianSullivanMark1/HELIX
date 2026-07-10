@@ -24,9 +24,19 @@ def _prewarm_voice_if_enabled() -> None:
         from helix.adapters.json_settings import JsonSettings
         from helix.config import AppPaths
 
-        settings = JsonSettings(AppPaths.resolve().settings_file)
+        paths = AppPaths.resolve()
+        settings = JsonSettings(paths.settings_file)
         if settings.get("voice_input_on", False):
             speech.prewarm()
+            try:
+                # The neural speaker-recognition model (voice identity). Also pre-Qt for symmetry;
+                # downloads once on the first voice-enabled launch, like whisper's weights. Failure
+                # just leaves voice identity on its built-in DSP fallback.
+                from helix.adapters import speaker_embed
+
+                speaker_embed.prewarm(paths.data / "models")
+            except Exception:
+                pass
     except Exception:
         pass
 

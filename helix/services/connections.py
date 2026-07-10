@@ -13,6 +13,7 @@ import re
 import urllib.error
 import urllib.request
 from typing import Callable
+from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urlsplit, urlunsplit
 
 from helix.domain.connections import KNOWN_SERVICES, Connection, service_for_url
 from helix.logging_setup import get_logger
@@ -138,18 +139,42 @@ class ConnectionsService:
         headers = {"User-Agent": "HELIX", "Accept": "*/*"}
         for name, template in svc.auth:
             headers[name] = _AUTH_PLACEHOLDER.sub(lambda m: self.value(m.group(1)), template)
+        if svc.query:
+            # Query-param auth (SAM.gov): attach server-side too — and strip any same-named param the
+            # model may have guessed, so the stored key always wins and never needs to be known.
+            parts = urlsplit(url)
+            reserved = {name for name, _t in svc.query}
+            q = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in reserved]
+            for name, template in svc.query:
+                q.append((name, _AUTH_PLACEHOLDER.sub(lambda m: self.value(m.group(1)), template)))
+            url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
         req = urllib.request.Request(url, headers=headers)
         try:
             # _OPENER refuses redirects, so the token can never be re-sent to a host the allow-list didn't
             # clear (no SSRF / credential exfiltration via a 3xx, no http downgrade).
             with _OPENER.open(req, timeout=timeout) as r:
-                return r.read(_MAX_BODY).decode("utf-8", "replace")
+                return self._scrub(svc, r.read(_MAX_BODY).decode("utf-8", "replace"))
         except urllib.error.HTTPError as e:
             try:
                 detail = e.read(2000).decode("utf-8", "replace")
             except Exception:  # noqa: BLE001
                 detail = ""
-            return f"call_api {svc.label} returned HTTP {e.code}. {detail}".strip()
+            return self._scrub(svc, f"call_api {svc.label} returned HTTP {e.code}. {detail}".strip())
         except Exception as e:  # noqa: BLE001 - never raise into the tool loop
-            _LOG.warning("call_api failed for %s: %s", svc.label, e)
-            return f"call_api error reaching {svc.label}: {e}"
+            # Scrub BEFORE logging too — a URLError can embed the full request URL, which for
+            # query-param-auth services (SAM.gov) would write the key into helix.log.
+            _LOG.warning("call_api failed for %s: %s", svc.label, self._scrub(svc, str(e)))
+            return self._scrub(svc, f"call_api error reaching {svc.label}: {e}")
+
+    def _scrub(self, svc, text: str) -> str:
+        """Redact this service's secret values anywhere in text returned to the model — a body or an
+        error message that echoes the request URL (query-param auth) must never expose the key, in
+        raw OR percent-encoded form."""
+        for f in svc.fields:
+            v = self.value(f.key)
+            if v:
+                text = text.replace(v, "•••")
+                for encoded in (quote(v, safe=""), quote_plus(v)):  # %20 and + variants both
+                    if encoded != v:
+                        text = text.replace(encoded, "•••")
+        return text

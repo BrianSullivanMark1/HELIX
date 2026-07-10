@@ -1,6 +1,7 @@
 """HelixMainWindow — the shell: the Presence orb as the window background, nav + pages floating on top."""
 from __future__ import annotations
 
+import re
 import socket
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, QUrl, pyqtSignal
@@ -479,12 +480,35 @@ class HelixMainWindow(QMainWindow):
         name = agent.name
         worker = QtWorker(lambda _emit: self._c.agents.run(name))
         self._agent_workers.add(worker)
-        worker.finished_ok.connect(lambda report, n=name: self.console.announce_agent_report(n, report))
-        worker.failed.connect(
-            lambda err, n=name: self.console.announce_agent_report(n, f"hit a snag: {err}")
-        )
+        worker.finished_ok.connect(lambda report, n=name: self._on_scheduled_report(n, report))
+        worker.failed.connect(lambda err, n=name: self._on_scheduled_failure(n, err))
         worker.finished.connect(lambda w=worker: self._retire_agent_worker(w))
         worker.start()
+
+    def _on_scheduled_report(self, name: str, report: object) -> None:
+        """Sentinel rule: a SCHEDULED agent speaks only when it found something. 'QUIET' (the watcher
+        convention) or an empty report makes no sound — the status line notes it and that's all. A
+        manually-run agent (run_agent by voice) is unaffected: its report returns via the tool result."""
+        text = " ".join(str(report or "").split())
+        # A LEADING quiet-token counts even with model garnish ('QUIET — nothing new', '**QUIET**'):
+        # real findings never open with the token, so a first-word match can't hide one. The two
+        # known non-findings a scheduled run can emit — a renamed/deleted agent ("No agent named…")
+        # and a tool-budget stall — are the same spoken-noise class: status line only.
+        first = re.match(r"[\W_]*([A-Za-z]+)", text)
+        if not text or (first and first.group(1).upper() == "QUIET"):
+            self.console.status.setText(f"{name}: all quiet.")
+            return
+        if text.startswith("No agent named") or text.startswith("I got stuck"):
+            _LOG.info("scheduled agent %r returned a non-report: %s", name, text[:120])
+            self.console.status.setText(f"{name}: no report this run.")
+            return
+        self.console.announce_agent_report(name, text)
+
+    def _on_scheduled_failure(self, name: str, err: str) -> None:
+        # A watcher firing every N minutes must not SPEAK its failures (offline overnight would chant
+        # 'hit a snag' on repeat) — log it, show it on the status line, stay silent.
+        _LOG.warning("scheduled agent %r failed: %s", name, err)
+        self.console.status.setText(f"{name} hit a snag — see the log.")
 
     def _retire_agent_worker(self, worker: QtWorker) -> None:
         self._agent_workers.discard(worker)

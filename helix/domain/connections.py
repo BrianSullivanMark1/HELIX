@@ -33,6 +33,10 @@ class Service:
     hosts: tuple[str, ...]              # API hostnames these credentials authenticate
     fields: tuple[Connection, ...]      # the credential field(s) to collect (env-var name + label + hint)
     auth: tuple[tuple[str, str], ...]   # request headers to attach; {ENV_NAME} → that field's value
+    # Some services (SAM.gov) authenticate via a query parameter instead of a header. Same contract:
+    # (param-name, template) pairs attached SERVER-SIDE after the allow-list check, so the key is
+    # never chosen by or returned to the model.
+    query: tuple[tuple[str, str], ...] = ()
 
     @property
     def env(self) -> str:
@@ -68,6 +72,13 @@ KNOWN_SERVICES: tuple[Service, ...] = (
             ("APCA-API-KEY-ID", "{ALPACA_API_KEY}"),
             ("APCA-API-SECRET-KEY", "{ALPACA_SECRET_KEY}"),
         ),
+    ),
+    Service(
+        "sam", "SAM.gov", ("api.sam.gov",),
+        fields=(Connection("SAM_API_KEY", "SAM.gov API key",
+                           "public API key from your SAM.gov account profile"),),
+        auth=(),
+        query=(("api_key", "{SAM_API_KEY}"),),  # SAM.gov authenticates via query param, not a header
     ),
 )
 

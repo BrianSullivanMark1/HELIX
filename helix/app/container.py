@@ -59,6 +59,95 @@ def _migrate_agents(settings: JsonSettings, agent_store: JsonSettings) -> None:
     settings.set("agents", [])  # leave a tombstone (not delete) — JsonSettings has no delete
 
 
+# THE SENTINEL: default background watchers, shipped as ordinary scheduled agents (data, not shell —
+# rename/pause/delete them like anything else). Each goal ends with the QUIET convention: the shell
+# only speaks a scheduled report when something actually crossed a threshold, so an unconnected or
+# uneventful watcher makes no sound. Lookback windows match each cadence, so a persisting condition
+# is flagged when it CROSSES its threshold rather than re-announced forever (agent runs are
+# stateless by design). Seeded once per version; deleting one is honored forever.
+_WATCHERS_SEED_VERSION = 1
+# Every goal carries the same operating rules: a six-tool-call budget per run (batch independent
+# call_api requests into ONE round and keep the last round for the reply — running out mid-gather
+# must still end in a spoken summary or QUIET, never a stall), small payloads (limit/per_page kept
+# low — responses are re-sent to the model on every round), and the QUIET convention.
+_BUDGET_RULE = (
+    " You have a budget of six tool calls for this run: batch independent call_api requests together "
+    "in one round, keep payloads small, and always leave the final round to speak your reply — if "
+    "you run low, summarize what you have instead of fetching more."
+)
+_DEFAULT_WATCHERS: tuple[tuple[str, str, str], ...] = (
+    ("Morning Brief",
+     "Deliver Brian's spoken morning brief: ONE plain-prose summary under 100 words of what happened "
+     "overnight, no markdown, no lists read aloud. Batch these in one round: GitHub — call_api "
+     "https://api.github.com/user/repos?per_page=40&sort=pushed (note overnight pushes to repos named "
+     "like BRMS, MRP, WMS, or APS, and whether Brendan, Alex, Kate, or Thoa look quiet for two or "
+     "more days); Alpaca — https://api.alpaca.markets/v2/positions for drift away from commodities, "
+     "industrials, and hard assets, or any tilt toward financials or insurance; SAM.gov — "
+     "https://api.sam.gov/opportunities/v2/search?postedFrom=YESTERDAY&postedTo=TODAY&limit=10"
+     "&title=manufacturing with MM/dd/yyyy dates from the current date in context. With a spare call, "
+     "check open PRs on the most active of those repos "
+     "(https://api.github.com/repos/OWNER/REPO/pulls?state=open&per_page=20) for any older than 24 "
+     "hours. Skip any service call_api says isn't connected — never mention missing keys. If "
+     "genuinely nothing happened, say so in one short sentence." + _BUDGET_RULE,
+     "every morning at 8"),
+    ("GitHub Watcher",
+     "Watch GitHub for Brian's team. Call call_api https://api.github.com/user/repos?per_page=40"
+     "&sort=pushed and focus on repos named like BRMS, MRP, WMS, or APS. Flag ONLY: a push in the "
+     "last two hours whose message signals a breaking change (breaking, revert, rollback, hotfix, "
+     "force), or an open pull request that crossed the 24-hour mark within the last two hours — check "
+     "https://api.github.com/repos/OWNER/REPO/pulls?state=open&per_page=20 and compare created_at to "
+     "the current time in context, batching the PR checks in one round. Speak at most three short "
+     "sentences naming the repo and person. If nothing matches, or GitHub isn't connected, reply "
+     "with exactly: QUIET" + _BUDGET_RULE,
+     "every 2 hours"),
+    ("Slack Watcher",
+     "Watch Slack for urgent messages aimed at Brian or his team. Use call_api on read endpoints: "
+     "https://slack.com/api/conversations.list?limit=50&exclude_archived=true&types=public_channel,"
+     "private_channel,im then, batched in one round, "
+     "https://slack.com/api/conversations.history?channel=CHANNEL_ID&limit=20&oldest=UNIX_SECONDS "
+     "(35 minutes ago, from the current time in context) for the three or four busiest channels. "
+     "Flag ONLY messages from the last 35 minutes that read urgent: mentions of Brian, or words like "
+     "urgent, ASAP, down, broken, blocked, or a customer escalation. One short sentence per flag, "
+     "three at most. If nothing urgent, or Slack isn't connected, reply with exactly: QUIET"
+     + _BUDGET_RULE,
+     "every 30 minutes"),
+    ("Portfolio Watcher",
+     "Watch Brian's Alpaca portfolio for allocation drift. Call call_api "
+     "https://api.alpaca.markets/v2/positions and reason from the tickers you know. Brian's strategy "
+     "favors commodities, industrials, and hard assets (Kiyosaki, Dalio, Jiang); financial and "
+     "insurance exposure should stay minimal. Flag ONLY a clear tilt: financials or insurance above "
+     "roughly ten percent of portfolio value, or any single position drifting past a third of the "
+     "portfolio. Two short sentences at most. If allocation looks fine, or Alpaca isn't connected, "
+     "reply with exactly: QUIET" + _BUDGET_RULE,
+     "every 3 hours"),
+    ("Procurement Watcher",
+     "Watch SAM.gov for new federal solicitations relevant to Brian's business. Call call_api "
+     "https://api.sam.gov/opportunities/v2/search?postedFrom=YESTERDAY&postedTo=TODAY&limit=10"
+     "&title=manufacturing using MM/dd/yyyy dates from the current date in context, and batch one or "
+     "two more title keywords in the same round: MES, compliance. Flag solicitations matching "
+     "manufacturing software, MES, MRP, WMS, or compliance tooling — title, agency, and response "
+     "deadline, one line each, three at most. If nothing new matches, or SAM.gov isn't connected, "
+     "reply with exactly: QUIET" + _BUDGET_RULE,
+     "every morning at 9"),
+)
+
+
+def _seed_watchers(agent_store: JsonSettings, agents) -> None:
+    """Seed the default sentinel watchers ONCE per seed version. The store-level version key (not a
+    field on the agents — _save would drop it) makes this idempotent AND makes deletion stick: a
+    watcher the user removed never comes back on the next launch. Never raises — a seeding hiccup
+    must not stop HELIX from starting."""
+    try:
+        if int(agent_store.get("watchers_seed_version") or 0) >= _WATCHERS_SEED_VERSION:
+            return
+        for name, goal, hint in _DEFAULT_WATCHERS:
+            if not agents.exists(name):  # never clobber a user's same-named agent
+                agents.add(name, goal, schedule_hint=hint)
+        agent_store.set("watchers_seed_version", _WATCHERS_SEED_VERSION)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class Container:
     def __init__(self) -> None:
         # Foundation
@@ -215,6 +304,7 @@ class Container:
         _migrate_agents(self.settings, self.agent_store)
         self.agents = AgentService(self.agent_store, self.conversation, bus=self.bus, clock=self.clock)
         self.tools.bind_agents(self.agents)  # late-bind: agents → conversation → tools, so it can't be ctor-passed
+        _seed_watchers(self.agent_store, self.agents)  # the sentinel: default watchers, once per version
         # Which scheduled agents are due — the shell's heartbeat (main_window) asks this every tick.
         self.scheduler = AgentScheduler(self.agents, self.clock)
         self.restart = Restarter(self.paths.root / "main.py", self.paths.root).restart

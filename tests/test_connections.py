@@ -121,7 +121,9 @@ def test_service_for_url_matching():
     assert service_for_url("https://evil.example.com/slack.com").id != "slack" \
         if service_for_url("https://evil.example.com/slack.com") else True  # path can't spoof host
     assert service_for_url("https://evil.example.com") is None
-    assert {s.env for s in KNOWN_SERVICES} == {"SLACK_TOKEN", "GITHUB_TOKEN", "ALPACA_API_KEY"}
+    assert {s.env for s in KNOWN_SERVICES} == {
+        "SLACK_TOKEN", "GITHUB_TOKEN", "ALPACA_API_KEY", "SAM_API_KEY",
+    }
 
 
 def test_call_api_alpaca_needs_both_keys_and_sends_both_headers(tmp_path, monkeypatch):

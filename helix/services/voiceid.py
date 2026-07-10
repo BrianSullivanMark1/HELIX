@@ -97,10 +97,11 @@ def _l2(v):
     return v / n if n > 1e-9 else v
 
 
-def embed_pcm(pcm: bytes) -> "object | None":
-    """A voice-print embedding (float32, EMBED_DIM, unit-norm) from 16 kHz mono int16 PCM — or None
+def _dsp_embed(pcm: bytes) -> "object | None":
+    """The classical voice-print (float32, EMBED_DIM, unit-norm) from 16 kHz mono int16 PCM — or None
     when the clip has too little voiced audio to say anything about the speaker (e.g. a bare 'stop').
-    Pure numpy; a few milliseconds even for the longest utterance."""
+    Pure numpy; a few milliseconds even for the longest utterance. Doubles as the VOICING GATE for
+    the neural backend: silence, noise, and blips never reach either matcher."""
     try:
         import numpy as np
 
@@ -182,18 +183,62 @@ def embed_pcm(pcm: bytes) -> "object | None":
 
 
 # ---------------------------------------------------------------------------
+# Voice-prints: one utterance, up to two embeddings
+# ---------------------------------------------------------------------------
+@dataclass
+class VoicePrint:
+    """The acoustic evidence one utterance carries. `dsp` is the built-in classical embedding
+    (always present when the clip passed the voicing gate); `neural` is the CAM++ 512-dim embedding
+    when the speaker model is loaded — far stronger across rooms, distances, and days."""
+    dsp: object | None = None
+    neural: object | None = None
+
+
+def _as_print(emb) -> "VoicePrint | None":
+    """Accept either a VoicePrint or a bare vector (treated as a DSP print) — the compatibility shim
+    that keeps every caller and test that hands raw arrays working unchanged."""
+    if emb is None or isinstance(emb, VoicePrint):
+        return emb
+    return VoicePrint(dsp=emb)
+
+
+def embed_pcm(pcm: bytes) -> "VoicePrint | None":
+    """The utterance's voice-print(s) from 16 kHz mono int16 PCM — or None when the clip has too
+    little voiced audio to say anything about the speaker. The DSP path runs first as the voicing
+    gate; the neural embedding is added whenever the speaker model is pre-warmed."""
+    dsp = _dsp_embed(pcm)
+    if dsp is None:
+        return None
+    neural = None
+    try:
+        # Module-level cached session, pre-warmed in main.py before Qt (mirrors WhisperSpeechIn).
+        # Imported lazily so voice identity never hard-depends on onnxruntime being installed.
+        from helix.adapters import speaker_embed
+
+        if speaker_embed.ready():
+            neural = speaker_embed.embed(pcm)
+    except Exception:  # noqa: BLE001 — no neural evidence just means the DSP fallback decides
+        neural = None
+    return VoicePrint(dsp=dsp, neural=neural)
+
+
+# ---------------------------------------------------------------------------
 # Profiles + matching
 # ---------------------------------------------------------------------------
 _ENROLL_CAP = 24      # calibration embeddings kept per user (recalibrations rotate the oldest out)
 _PASSIVE_CAP = 48     # passively-learned embeddings kept per user (ring: newest wins)
 _TOP_K = 3            # score = mean similarity of the K best-matching stored samples
-_ABS_FLOOR = 0.60     # never accept below this cosine similarity, however loose the self-stats are
-_ABS_CEIL = 0.90      # never demand more than this, however tight the self-stats are
-_MARGIN = 0.035       # best user must beat the runner-up by this much (only with ≥2 profiles)
-_SIGMA_FLOOR = 0.04   # assumed score spread while a profile is still young
-_RAMP_STEP = 0.004    # the accept bar rises this much per stored sample…
-_RAMP_CEIL = 0.85     # …but never above this, so a tight same-session profile can't lock its owner out
-_LEARN_HEADROOM = 0.04  # passive learning wants a match this far above the accept bar
+_MIN_NEURAL = 3       # a profile needs this many neural samples before the neural matcher takes over
+
+# Per-backend decision constants. The DSP embedding self-clusters tightly (its scores run high for
+# everyone), so its bars sit high; the neural embedding separates real speakers with far more room
+# (same-speaker ≈ 0.5–0.8, different ≈ 0.0–0.35 on this model), so its bars sit lower and its margin
+# demands a much clearer winner. Same self-calibrating machinery either way.
+#              floor  ceil  margin sigma_floor ramp_step ramp_ceil learn_headroom
+_TUNING = {
+    "dsp":    (0.60,  0.90, 0.035, 0.04,       0.004,    0.85,     0.04),
+    "neural": (0.42,  0.78, 0.10,  0.05,       0.005,    0.62,     0.05),
+}
 
 
 @dataclass
@@ -208,16 +253,30 @@ class MatchResult:
 @dataclass
 class _Profile:
     name: str
-    enroll: list = field(default_factory=list)   # list[list[float]] — calibration embeddings
-    passive: list = field(default_factory=list)  # list[list[float]] — passively learned
+    # Sample entries are {"d": [floats]|None, "n": [floats]|None} — one utterance, both backends.
+    enroll: list = field(default_factory=list)   # calibration samples
+    passive: list = field(default_factory=list)  # passively learned samples
     notes: str = ""                              # identity model distilled from calibration chat
     created: float = 0.0
     updated: float = 0.0
 
-    def samples(self):
+    def matrix(self, backend: str):
+        """All stored embeddings for one backend as a float32 matrix — or None when it has none."""
         import numpy as np
-        rows = self.enroll + self.passive
+        key = "d" if backend == "dsp" else "n"
+        rows = [e[key] for e in self.enroll + self.passive if e.get(key)]
         return np.asarray(rows, dtype=np.float32) if rows else None
+
+    def count(self, backend: str) -> int:
+        key = "d" if backend == "dsp" else "n"
+        return sum(1 for e in self.enroll + self.passive if e.get(key))
+
+
+def _sample_entry(print_: VoicePrint) -> dict:
+    return {
+        "d": [round(float(x), 5) for x in print_.dsp] if print_.dsp is not None else None,
+        "n": [round(float(x), 5) for x in print_.neural] if print_.neural is not None else None,
+    }
 
 
 class VoiceIdService:
@@ -232,14 +291,33 @@ class VoiceIdService:
         self._load()
 
     # ----- persistence -----
+    @staticmethod
+    def _load_samples(entries) -> list:
+        """Sample entries from disk — v2 dicts pass through; v1 plain float-lists become DSP-only
+        entries, so profiles registered before the neural upgrade keep working and then sharpen as
+        passive learning adds neural samples on top."""
+        out = []
+        for e in entries or []:
+            try:  # one corrupt entry drops ITSELF, never the profile (let alone every user's)
+                if isinstance(e, dict):
+                    d, n = e.get("d"), e.get("n")
+                    if d or n:
+                        out.append({"d": [float(x) for x in d] if d else None,
+                                    "n": [float(x) for x in n] if n else None})
+                elif isinstance(e, (list, tuple)) and e:
+                    out.append({"d": [float(x) for x in e], "n": None})
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def _load(self) -> None:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             for u in raw.get("users", []):
                 p = _Profile(
                     name=str(u.get("name", "")).strip(),
-                    enroll=[list(map(float, e)) for e in u.get("enroll", [])],
-                    passive=[list(map(float, e)) for e in u.get("passive", [])],
+                    enroll=self._load_samples(u.get("enroll")),
+                    passive=self._load_samples(u.get("passive")),
                     notes=str(u.get("notes", "")),
                     created=float(u.get("created", 0.0)),
                     updated=float(u.get("updated", 0.0)),
@@ -253,12 +331,12 @@ class VoiceIdService:
 
     def _save_locked(self) -> None:
         data = {
-            "version": 1,
+            "version": 2,
             "users": [
                 {
                     "name": p.name,
-                    "enroll": [[round(x, 5) for x in e] for e in p.enroll],
-                    "passive": [[round(x, 5) for x in e] for e in p.passive],
+                    "enroll": p.enroll,
+                    "passive": p.passive,
                     "notes": p.notes,
                     "created": p.created,
                     "updated": p.updated,
@@ -291,89 +369,127 @@ class VoiceIdService:
             return p.notes if p else ""
 
     # ----- matching -----
-    def _score_locked(self, profile: _Profile, emb) -> float:
+    @staticmethod
+    def _score(rows, emb) -> float:
         import numpy as np
-        rows = profile.samples()
-        if rows is None or not rows.size:
-            return 0.0
         sims = rows @ np.asarray(emb, dtype=np.float32)  # all unit-norm → dot = cosine
         k = min(_TOP_K, sims.size)
         return float(np.sort(sims)[-k:].mean())
 
-    def _self_stats_locked(self, profile: _Profile) -> tuple[float, float]:
+    @staticmethod
+    def _self_stats(rows, sigma_floor: float) -> tuple[float, float]:
         """(µ, σ) of this user's own top-K scores when their stored samples are matched against each
         other — i.e. what a genuine utterance from them typically scores. Self-calibrating: young
         profiles get a generous spread; rich profiles tighten automatically."""
         import numpy as np
-        rows = profile.samples()
         if rows is None or len(rows) < 3:
             return 0.80, 0.10  # too young to know — be generous
         sims = rows @ rows.T
         np.fill_diagonal(sims, -1.0)
         k = min(_TOP_K, len(rows) - 1)
         per = np.sort(sims, axis=1)[:, -k:].mean(axis=1)
-        return float(per.mean()), max(float(per.std()), _SIGMA_FLOOR)
+        return float(per.mean()), max(float(per.std()), sigma_floor)
+
+    def _judge_locked(self, profile: _Profile, print_: VoicePrint):
+        """Score one profile against one utterance on the profile's STRONGEST usable backend:
+        neural once it holds enough neural samples (and the utterance has a neural print), else the
+        DSP fallback. Returns (backend, score, accept_at, confident_at) or None (no common backend)."""
+        backend = "dsp"
+        if print_.neural is not None and profile.count("neural") >= _MIN_NEURAL:
+            backend = "neural"
+        emb = print_.neural if backend == "neural" else print_.dsp
+        rows = profile.matrix(backend)
+        if emb is None or rows is None or not rows.size:
+            return None
+        floor, ceil, _margin, sigma_floor, ramp_step, ramp_ceil, headroom = _TUNING[backend]
+        score = self._score(rows, emb)
+        mu, sigma = self._self_stats(rows, sigma_floor)
+        accept_at = min(max(mu - 1.5 * sigma, floor), ceil)
+        # A profile mostly knows one room, one mood, one distance — its self-similarity is
+        # unrealistically tight, so cap the bar on a slow ramp that rises with sample count and never
+        # exceeds a livable ceiling. The ramp applies at EVERY size (a hard cutoff at some n would
+        # make the bar jump in one utterance and lock the real owner out the next morning). This is
+        # the "recognition improves with use" curve, applied to the threshold itself.
+        accept_at = min(accept_at, min(ramp_ceil, floor + ramp_step * len(rows)))
+        # Learn passively from matches comfortably ABOVE the accept bar (relative to the actual bar —
+        # a bar stricter than acceptance would mean the profile never loosens with real life).
+        confident_at = min(accept_at + headroom, ceil)
+        return backend, score, accept_at, confident_at
 
     def identify(self, emb) -> MatchResult:
-        """Match one utterance embedding against every registered profile. `emb` may be None (clip too
-        short) → no_evidence. With no profiles registered the gate is open: name=None but callers must
-        check has_profiles() to know the gate is inactive."""
-        if emb is None:
+        """Match one utterance's voice-print against every registered profile. Accepts a VoicePrint
+        or a bare vector (DSP); None (clip too short) → no_evidence. With no profiles registered the
+        gate is open: name=None, but callers must check has_profiles() to know the gate is inactive.
+
+        Decision procedure (scores are only comparable WITHIN a backend, and each profile has its own
+        self-calibrated bar — so no sorting across profiles by score or by headroom):
+          1. every profile is judged on its strongest usable backend;
+          2. the ACCEPTED set = profiles whose score clears their own bar;
+          3. a neural acceptance outranks any DSP acceptance (the trained model is the far stronger
+             discriminator — mixed households mid-upgrade must not let a loose DSP bar steal a match);
+          4. within the winning backend the highest raw score wins, and it must beat EVERY other
+             profile judged on that backend (accepted or not) by that backend's margin — one voice
+             scoring like two different people is too close to call, however many rivals there are."""
+        print_ = _as_print(emb)
+        if print_ is None:
             return MatchResult(None, no_evidence=True)
         with self._lock:
             if not self._profiles:
                 return MatchResult(None)
-            scored = sorted(
-                ((self._score_locked(p, emb), p) for p in self._profiles.values()),
-                key=lambda t: t[0], reverse=True,
-            )
-            best_score, best = scored[0]
-            mu, sigma = self._self_stats_locked(best)
-            accept_at = min(max(mu - 1.5 * sigma, _ABS_FLOOR), _ABS_CEIL)
-            # A profile mostly knows one room, one mood, one distance — its self-similarity is
-            # unrealistically tight, so cap the bar on a slow ramp that rises with sample count and
-            # never exceeds a livable ceiling. The ramp applies at EVERY size (a hard cutoff at some n
-            # would make the bar jump ~0.72→0.88 in one utterance and lock the real owner out the next
-            # morning). This is the "recognition improves with use" curve, applied to the threshold.
-            n = len(best.enroll) + len(best.passive)
-            accept_at = min(accept_at, min(_RAMP_CEIL, _ABS_FLOOR + _RAMP_STEP * n))
-            if best_score < accept_at:
+            judged = []  # (backend, score, accept_at, confident_at, profile)
+            for p in self._profiles.values():
+                j = self._judge_locked(p, print_)
+                if j is not None:
+                    backend, score, accept_at, confident_at = j
+                    judged.append((backend, score, accept_at, confident_at, p))
+            if not judged:
+                return MatchResult(None, no_evidence=True)
+            accepted = [j for j in judged if j[1] >= j[2]]
+            if not accepted:
+                best_score = max(j[1] for j in judged)
                 return MatchResult(None, score=best_score)
-            if len(scored) > 1 and best_score - scored[1][0] < _MARGIN:
-                return MatchResult(None, score=best_score)  # two profiles too close to call
-            # Learn passively from matches comfortably ABOVE the accept bar (relative to the actual
-            # bar, not the raw self-stats — a bar stricter than acceptance would mean the profile only
-            # ever learns from utterances it already knows perfectly, and never loosens with real life).
-            confident = best_score >= min(accept_at + _LEARN_HEADROOM, _ABS_CEIL)
+            backend = "neural" if any(j[0] == "neural" for j in accepted) else "dsp"
+            pool = [j for j in accepted if j[0] == backend]
+            _b, best_score, _a, confident_at, best = max(pool, key=lambda t: t[1])
+            margin = _TUNING[backend][2]
+            for other_backend, score, _oa, _oc, p in judged:
+                if p is best or other_backend != backend:
+                    continue
+                if best_score - score < margin:
+                    return MatchResult(None, score=best_score)  # two profiles too close to call
+            confident = best_score >= confident_at
             return MatchResult(best.name, score=best_score, confident=confident)
 
     # ----- learning -----
     def add_passive(self, name: str, emb) -> None:
-        """Quietly sharpen a profile with a confidently-matched utterance (ring-buffered)."""
-        if emb is None:
+        """Quietly sharpen a profile with a confidently-matched utterance (ring-buffered). This is
+        also how pre-neural profiles upgrade themselves: every confidently-matched utterance adds a
+        neural sample, and once enough accumulate the neural matcher takes over automatically."""
+        print_ = _as_print(emb)
+        if print_ is None:
             return
         with self._lock:
             p = self._profiles.get(name.lower())
             if p is None:
                 return
-            p.passive.append([float(x) for x in emb])
+            p.passive.append(_sample_entry(print_))
             if len(p.passive) > _PASSIVE_CAP:
                 del p.passive[: len(p.passive) - _PASSIVE_CAP]
             p.updated = time.time()
             self._save_locked()
 
     def register(self, name: str, embeddings: list, notes: str = "") -> bool:
-        """Create (or extend, on recalibration) a profile from calibration embeddings."""
-        embs = [e for e in embeddings if e is not None]
+        """Create (or extend, on recalibration) a profile from calibration voice-prints."""
+        prints = [pr for pr in (_as_print(e) for e in embeddings) if pr is not None]
         name = (name or "").strip()
-        if not name or not embs:
+        if not name or not prints:
             return False
         with self._lock:
             p = self._profiles.get(name.lower())
             if p is None:
                 p = _Profile(name=name, created=time.time())
                 self._profiles[name.lower()] = p
-            p.enroll.extend([float(x) for x in e] for e in embs)
+            p.enroll.extend(_sample_entry(pr) for pr in prints)
             if len(p.enroll) > _ENROLL_CAP:  # recalibration rotates the oldest prints out
                 del p.enroll[: len(p.enroll) - _ENROLL_CAP]
             if notes.strip():
