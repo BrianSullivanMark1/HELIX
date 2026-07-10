@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Callable
@@ -43,6 +45,38 @@ from helix.logging_setup import get_logger
 from helix.ports.llm import Reply, Text, Turn, Usage
 
 _LOG = get_logger("subscription")
+
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+_windows_patched = False
+
+
+def _hide_child_windows() -> None:
+    """The Agent SDK spawns claude.exe via anyio.open_process WITHOUT the no-window flag, so on
+    Windows a blank console window flashes up on every turn (HELIX runs windowed, like the coder
+    adapter which already passes CREATE_NO_WINDOW). Wrap anyio.open_process ONCE to OR in that flag —
+    idempotent, no-op off Windows or if anyio is absent. Must run before the SDK's first spawn (which
+    includes its own `claude --version` check), so callers invoke it before connect()/query()."""
+    global _windows_patched
+    if _windows_patched or sys.platform != "win32":
+        _windows_patched = True
+        return
+    try:
+        import anyio
+
+        orig = anyio.open_process
+        if getattr(orig, "_helix_no_window", False):
+            _windows_patched = True
+            return
+
+        async def _no_window(command, **kwargs):
+            kwargs["creationflags"] = kwargs.get("creationflags", 0) | _NO_WINDOW
+            return await orig(command, **kwargs)
+
+        _no_window._helix_no_window = True
+        anyio.open_process = _no_window
+        _windows_patched = True
+    except Exception:  # noqa: BLE001 — a failed patch just means the window may flash; never fatal
+        pass
 
 ORB_MODEL = "claude-sonnet-4-6"   # fast conversational turns (mirrors the API path's tiering)
 DEEP_MODEL = "claude-opus-4-8"    # think_harder escalation + hermetic heavy lifting
@@ -273,6 +307,7 @@ class SubscriptionBrain:
         always drops the session first, so the next turn starts clean and no dead consumer lingers.
         `history` seeds a freshly-(re)connected session; it is NOT re-sent on the retry (which reuses
         a fresh session too) beyond the first attempt's own freshness."""
+        _hide_child_windows()  # before any SDK spawn — no blank console window on every turn
         names = tuple(tool_names)
         with self._orb_lock:  # orb turns only — never held while a bridged tool re-enters the brain
             self._orb_sinks.on_progress = on_progress
@@ -331,6 +366,7 @@ class SubscriptionBrain:
         is a distiller with its own. Its sinks live in its own closure — no lock, so it runs
         concurrently with the orb and can even be re-entered from an orb turn's bridged tool. Raises
         on failure."""
+        _hide_child_windows()  # before any SDK spawn — no blank console window on every turn
         sinks = _Sinks(on_progress=on_progress, cancel=cancel, on_tool=on_tool)
         return self._run(self._hermetic(prompt, tuple(tool_names), model, effort, sinks, system))
 

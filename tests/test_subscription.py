@@ -207,6 +207,35 @@ def test_preferred_chat_falls_back_when_subscription_fails():
     assert reply.text == "api reply"
 
 
+def test_child_windows_are_hidden_on_windows():
+    # The blank claude.exe console popup fix: our wrapper must OR CREATE_NO_WINDOW into the
+    # anyio.open_process call the SDK uses to spawn claude.exe.
+    import sys
+    if sys.platform != "win32":
+        pytest.skip("window suppression is Windows-only")
+    import anyio
+    import helix.adapters.agent_sdk_chat as mod
+
+    captured = {}
+
+    async def _fake_open_process(command, **kwargs):
+        captured.update(kwargs)
+        return "proc"
+
+    orig = anyio.open_process
+    mod._windows_patched = False  # force a fresh patch over our fake
+    anyio.open_process = _fake_open_process
+    try:
+        mod._hide_child_windows()
+        import asyncio
+        asyncio.new_event_loop().run_until_complete(anyio.open_process(["x"], env={}))
+        flag = mod._NO_WINDOW
+        assert captured.get("creationflags", 0) & flag == flag, "CREATE_NO_WINDOW not applied"
+    finally:
+        anyio.open_process = orig
+        mod._windows_patched = False
+
+
 def test_sdk_options_are_token_safe_and_sandboxed():
     # The ClaudeAgentOptions the brain builds must (a) NEVER pass --bare (it disables
     # subscription-token auth — a real regression we hit), (b) keep --no-session-persistence, (c)
