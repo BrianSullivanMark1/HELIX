@@ -184,10 +184,42 @@ def test_narrate_is_silent_while_muted(_app):
     vc._run = lambda fn, done: ran.append(1)  # spy: narrate dispatches TTS via _run
     vc.narrate("shaping the body")
     assert ran == [1]  # speaks a progress note when live
-    ran.clear()
     vc.set_muted(True)
+    ran.clear()  # sleeping now speaks a one-time "going to sleep" confirmation — clear it before the check
     vc.narrate("adding the arc reactor")
-    assert ran == []  # muted → no spoken progress note (HELIX would otherwise hear itself)
+    assert ran == []  # asleep → no spoken progress note (HELIX would otherwise hear itself)
+
+
+def test_sleep_and_wake_speak_a_spoken_confirmation(_app):
+    # Verbal confirmation: sleeping/waking each speak one line, so you know the command landed off-screen.
+    from helix.ui.voice import _SLEEP_CONFIRM, _WAKE_CONFIRM
+
+    vc = _live_voice()
+    vc.enabled = lambda: True  # confirmations only speak when hands-free voice is on
+    spoken: list = []
+    vc._run = lambda fn, done: spoken.append(vc._speaking_text)  # capture what speak() queued
+    vc.set_muted(True)
+    assert vc.is_muted() and spoken == [_SLEEP_CONFIRM]
+    vc.set_muted(False)
+    assert not vc.is_muted() and spoken == [_SLEEP_CONFIRM, _WAKE_CONFIRM]
+
+
+def test_wake_word_wakes_from_sleep(_app):
+    # "Sleep until you hear your name": saying the wake word alone brings HELIX back from sleep.
+    vc = _live_voice()
+    vc.set_muted(True)
+    assert vc.is_muted()
+    vc._on_muted_text("HELIX")
+    assert not vc.is_muted()
+
+
+def test_sleep_wake_tolerate_mishearings_and_the_name(_app):
+    # The whole point: waking is forgiving. Mis-hearings and "HELIX <anything>" all bring it back.
+    vc = _live_voice()
+    for phrase in ("wake up", "un mute", "un-mute", "wakey wakey", "HELIX wake up", "HELIX are you there"):
+        vc.set_muted(True)
+        vc._on_muted_text(phrase)
+        assert not vc.is_muted(), phrase
 
 
 def test_console_attachment_chips_toggle_host_visibility(_app, tmp_path):

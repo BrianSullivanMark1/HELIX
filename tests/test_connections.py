@@ -116,10 +116,50 @@ def test_service_for_url_matching():
     assert service_for_url("https://slack.com/api/conversations.list").id == "slack"
     assert service_for_url("https://api.github.com/user/repos").id == "github"
     assert service_for_url("https://files.slack.com/x").id == "slack"  # subdomain
+    assert service_for_url("https://paper-api.alpaca.markets/v2/account").id == "alpaca"
+    assert service_for_url("https://data.alpaca.markets/v2/stocks/AAPL/trades/latest").id == "alpaca"
     assert service_for_url("https://evil.example.com/slack.com").id != "slack" \
         if service_for_url("https://evil.example.com/slack.com") else True  # path can't spoof host
     assert service_for_url("https://evil.example.com") is None
-    assert {s.env for s in KNOWN_SERVICES} == {"SLACK_TOKEN", "GITHUB_TOKEN"}
+    assert {s.env for s in KNOWN_SERVICES} == {"SLACK_TOKEN", "GITHUB_TOKEN", "ALPACA_API_KEY"}
+
+
+def test_call_api_alpaca_needs_both_keys_and_sends_both_headers(tmp_path, monkeypatch):
+    s = _svc(tmp_path)
+    # One credential alone is not "connected" — Alpaca needs the key id AND the secret.
+    s.set_value("ALPACA_API_KEY", "AK-id-123")
+    out = s.call_api("https://paper-api.alpaca.markets/v2/account")
+    assert "isn't connected" in out and "Alpaca" in out
+
+    s.set_value("ALPACA_SECRET_KEY", "sec-secret-999")
+    captured = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b'{"status":"ACTIVE","cash":"1000"}'
+
+    import helix.services.connections as mod
+
+    def fake_open(req, timeout=0):
+        # urllib capitalizes header keys; Alpaca (like all HTTP) treats them case-insensitively.
+        captured["id"] = req.get_header("Apca-api-key-id")
+        captured["secret"] = req.get_header("Apca-api-secret-key")
+        captured["auth"] = req.get_header("Authorization")
+        return _Resp()
+
+    monkeypatch.setattr(mod._OPENER, "open", fake_open)
+    out = s.call_api("https://paper-api.alpaca.markets/v2/account")
+    assert out == '{"status":"ACTIVE","cash":"1000"}'
+    assert captured["id"] == "AK-id-123"           # both credentials attached as headers, server-side
+    assert captured["secret"] == "sec-secret-999"
+    assert captured["auth"] is None                # Alpaca uses its own headers, not a Bearer token
+    assert "sec-secret-999" not in out             # the secret is never leaked back to the model
 
 
 def test_managed_keys_are_reused_from_helix_not_re_prompted(tmp_path):

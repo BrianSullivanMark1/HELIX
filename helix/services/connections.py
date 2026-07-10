@@ -9,6 +9,7 @@ the user pastes it.
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from typing import Callable
@@ -22,6 +23,7 @@ _LOG = get_logger("connections")
 
 CONNECTIONS_FILE = "connections.json"  # a build declares its needed keys here
 _MAX_BODY = 200_000                    # cap a call_api response so a huge payload can't blow up context
+_AUTH_PLACEHOLDER = re.compile(r"\{([A-Z0-9_]+)\}")  # {ENV_NAME} in a Service.auth header template
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -128,13 +130,15 @@ class ConnectionsService:
         if svc is None:
             names = ", ".join(s.label for s in KNOWN_SERVICES)
             return (f"call_api error: that host isn't a connectable service. I can only read: {names}.")
-        token = self.value(svc.env)
-        if not token:
+        if any(not self.value(f.key) for f in svc.fields):
             return (f"call_api error: {svc.label} isn't connected yet. Ask the user to add the "
-                    f"{svc.label} token in Settings → Connections (or the build's Connect panel).")
-        req = urllib.request.Request(
-            url, headers={"Authorization": "Bearer " + token, "User-Agent": "HELIX", "Accept": "*/*"},
-        )
+                    f"{svc.label} key in Settings → Connections.")
+        # Attach the saved credential(s) as this service's auth headers. Each {ENV_NAME} in a template is
+        # filled from the store here, server-side, so a token is never returned to or chosen by the model.
+        headers = {"User-Agent": "HELIX", "Accept": "*/*"}
+        for name, template in svc.auth:
+            headers[name] = _AUTH_PLACEHOLDER.sub(lambda m: self.value(m.group(1)), template)
+        req = urllib.request.Request(url, headers=headers)
         try:
             # _OPENER refuses redirects, so the token can never be re-sent to a host the allow-list didn't
             # clear (no SSRF / credential exfiltration via a 3xx, no http downgrade).

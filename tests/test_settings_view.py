@@ -65,3 +65,23 @@ def test_status_pills_reflect_set_state(_app):
     # the Claude key status (first registered) shows Set; an unset optional key shows Not set
     labels = [lbl.text() for lbl, _ in view._statuses]
     assert "● Set" in labels and "○ Not set" in labels
+
+
+def test_audio_device_selection_saves(_app):
+    s, c = _Settings(), _Conns()
+    view = SettingsView(s, c)
+    if view._mic_combo is None or view._out_combo is None:
+        pytest.skip("QtMultimedia not available in this environment")
+    # Simulate picking specific devices (real device ids aren't present headless) and confirm they persist.
+    view._mic_combo.addItem("USB Earphones Mic", "mic-device-id-42")
+    view._mic_combo.setCurrentIndex(view._mic_combo.count() - 1)
+    view._out_combo.addItem("USB Earphones", "out-device-id-99")
+    view._out_combo.setCurrentIndex(view._out_combo.count() - 1)
+    view._save()
+    assert s.get("audio_input_id") == "mic-device-id-42"
+    assert s.get("audio_output_id") == "out-device-id-99"
+
+    # A saved device that isn't currently enumerated is preserved as a placeholder (earphones unplugged),
+    # so re-opening Settings and saving doesn't silently drop the choice.
+    view.reload()
+    assert view._mic_combo.findData("mic-device-id-42") >= 0

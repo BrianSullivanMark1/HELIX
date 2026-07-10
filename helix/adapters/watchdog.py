@@ -136,7 +136,9 @@ def watchdog_main(pid: int, data_dir: Path, entry: Path, root: Path) -> int:
             kwargs["creationflags"] = _detached_flags()
         else:
             kwargs["start_new_session"] = True
-        subprocess.Popen(_app_cmd(entry), **kwargs)
+        # --relaunch: the crashed app may not have fully released its single-instance lock yet, so the new
+        # process must wait for and take over the lock rather than mistake the corpse for a live rival.
+        subprocess.Popen(_app_cmd(entry) + ["--relaunch"], **kwargs)
     except Exception:  # noqa: BLE001
         return 1
     return 0

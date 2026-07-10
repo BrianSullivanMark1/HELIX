@@ -27,6 +27,15 @@ def main(argv: list[str] | None = None) -> int:
 
         return watchdog_main(args.pid, Path(args.data), Path(args.entry), Path(args.root))
 
+    # Backstop single-instance guard for the `helix` console-script entry, which reaches here WITHOUT
+    # going through main.py's gate. Idempotent: on the normal main.py path we already hold the lock, so
+    # this is a no-op. (This path skips the voice pre-warm anyway, so guarding here costs nothing extra.)
+    from helix.app.single_instance import become_primary_or_signal
+    from helix.config import AppPaths
+
+    if not become_primary_or_signal(AppPaths.resolve().data, is_relaunch=False):
+        return 0
+
     from helix.app.bootstrap import run_app  # imported lazily — this pulls in PyQt6
 
     return run_app()

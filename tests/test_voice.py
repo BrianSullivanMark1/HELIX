@@ -7,17 +7,58 @@ from __future__ import annotations
 
 import array
 
+import pytest
+
 from helix.ui.voice import (
     VadSegmenter,
     _pcm_rms,
+    device_id_str,
     is_dismissal,
-    is_mute,
+    is_sleep,
     is_stop,
-    is_unmute,
+    is_wake,
     speakable,
     split_visuals,
     split_wake,
 )
+
+
+class _FakeDevice:
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    def id(self) -> bytes:
+        return self._raw
+
+
+def test_device_id_str_round_trips_every_byte():
+    # latin-1 keeps all 256 byte values, so a saved id matches the same device exactly on the next run.
+    raw = bytes(range(256))
+    encoded = device_id_str(_FakeDevice(raw))
+    assert encoded.encode("latin-1") == raw
+    assert device_id_str(_FakeDevice(b"")) == ""
+
+
+def _peak(pcm: bytes) -> int:
+    a = array.array("h")
+    a.frombytes(pcm)
+    return max((abs(s) for s in a), default=0)
+
+
+def test_normalize16_lifts_quiet_speech_and_leaves_loud_alone():
+    pytest.importorskip("numpy")
+    from helix.ui.voice import _normalize16
+
+    quiet = array.array("h", [1500, -1500] * 400).tobytes()
+    boosted = _normalize16(quiet)
+    assert 4 * 1500 <= _peak(boosted) <= 32767  # meaningfully lifted toward full scale, never clips over
+
+    loud = array.array("h", [30000, -30000] * 400).tobytes()
+    assert _normalize16(loud) == loud  # already near full scale — untouched
+
+    assert _normalize16(b"") == b""  # empty is a no-op
+    silence = array.array("h", [0] * 100).tobytes()
+    assert _normalize16(silence) == silence  # pure silence — no divide-by-zero, no boost
 
 
 def _pcm(amplitude: int, samples: int) -> bytes:
@@ -86,16 +127,19 @@ def test_is_stop_includes_explicit_build_stop_phrases():
     assert not is_stop("build a halting problem demo")  # not a whole-utterance stop
 
 
-def test_is_mute_and_unmute():
-    for phrase in ("mute", "mute yourself", "mute the mic", "stop listening", "pause listening", "mic off"):
-        assert is_mute(phrase), phrase
-    for phrase in ("unmute", "unmute yourself", "resume listening", "start listening", "mic on",
-                   "you can listen again"):
-        assert is_unmute(phrase), phrase
-    # mute/unmute and stop never cross-fire (mute must NOT stop a build, stop must NOT mute)
-    assert not is_mute("stop") and not is_stop("mute")
-    assert not is_mute("build a mute button app")  # not a whole-utterance mute
-    assert not is_unmute("") and not is_mute("")
+def test_is_sleep_and_wake():
+    for phrase in ("sleep", "go to sleep", "going to sleep", "go to sleep now", "sleep mode", "take a nap",
+                   "mute", "mute the mic", "stop listening", "pause listening", "mic off"):  # legacy phrasings still work
+        assert is_sleep(phrase), phrase
+    for phrase in ("wake", "wake up", "wake up now", "wakey wakey", "awake", "you awake",
+                   "unmute", "un mute", "un-mute", "unmuted", "resume listening", "start listening",
+                   "start listening again", "mic on", "you can listen again"):  # legacy + real mis-hearings
+        assert is_wake(phrase), phrase
+    # sleep/wake and stop never cross-fire (sleep must NOT stop a build, stop must NOT sleep the mic)
+    assert not is_sleep("stop") and not is_stop("sleep")
+    assert not is_sleep("build a sleep timer app")  # not a whole-utterance sleep
+    assert not is_wake("wake me up at seven")        # not a whole-utterance wake
+    assert not is_wake("") and not is_sleep("")
 
 
 def test_is_dismissal():

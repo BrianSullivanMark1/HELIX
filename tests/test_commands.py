@@ -27,7 +27,7 @@ def test_commands_dialog_renders(_app):
 
 def test_groups_cover_the_real_actions():
     flat = "\n".join(f"{k} {a}" for _, rows in COMMAND_GROUPS for k, a in rows).lower()
-    for kw in ("helix", "mute", "unmute", "stop build", "rename", "delete", "run my", "improve helix",
+    for kw in ("helix", "sleep", "wake", "stop build", "rename", "delete", "run my", "improve helix",
                "attach", "goodbye"):
         assert kw in flat, kw
 

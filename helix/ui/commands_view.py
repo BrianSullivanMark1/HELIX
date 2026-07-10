@@ -44,15 +44,22 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("“stop” · “stop build” · “cancel the build” · “abort”", "Halts the build that's running now."),
         ("Esc, or tap the orb", "The same as saying “stop”."),
     )),
-    ("Mute the mic — your build keeps running", (
-        ("“mute” · “stop listening” · “mic off”", "Pauses the mic so HELIX stops hearing you."),
-        ("“unmute” · “resume listening” · “mic on”", "Starts listening to you again."),
-        ("🎙 Mute / ▶ Resume button", "The same pause/resume, by hand, beside the text box."),
+    ("Sleep the mic — your build keeps running", (
+        ("“sleep” · “go to sleep” · “stop listening”", "Rests the mic so HELIX stops hearing you."),
+        ("“wake” · “HELIX” · “start listening”", "Wakes the mic and starts listening to you again."),
+        ("😴 Sleep / ▶ Wake button", "The same rest/wake, by hand, beside the text box."),
     )),
     ("Voice & session", (
         ("🔊 Voice button", "Turn hands-free listening on or off — never stops a build."),
         ("“goodbye” · “that's all”", "Ends the voice session, back to wake-word only."),
         ("📎 Attach", "Add files or a folder as context for your next message."),
+    )),
+    ("Who's speaking — voice recognition", (
+        ("“Hey, I am Brian”", "Registers your voice: a short, friendly calibration chat, then HELIX "
+                              "knows you. Anyone in the house can register their own voice."),
+        ("“recalibrate my voice”", "Refreshes your voice profile any time with a quick guided chat."),
+        ("Unrecognized voices", "Once someone is registered, spoken commands from voices HELIX doesn't "
+                                "know are never acted on — it only offers to register them."),
     )),
     ("Improve HELIX itself", (
         ("“improve HELIX: …”", "Drafts a change to HELIX's own code for you to approve."),

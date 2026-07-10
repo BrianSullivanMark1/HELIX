@@ -332,15 +332,17 @@ class ToolRegistry:
                 ToolSpec(
                     name="call_api",
                     description=(
-                        "Read live data from a service the user has CONNECTED (Slack, GitHub) by GETting "
-                        "one of its API URLs — HELIX attaches the user's saved token for you. Use it to "
-                        "answer questions about their accounts: recent Slack messages, open GitHub PRs or "
-                        "issues, statuses, etc. Pass the full https API URL (e.g. "
-                        "'https://slack.com/api/conversations.list' or "
-                        "'https://api.github.com/user/repos'). READ-ONLY (GET only) and limited to "
-                        "connected services — it cannot reach anything else or change anything. If it says "
-                        "a service isn't connected, tell the user to add its token in Settings → "
-                        "Connections; never ask them to paste a token into the chat."
+                        "Read live data from a service the user has CONNECTED (Slack, GitHub, Alpaca) by "
+                        "GETting one of its API URLs — HELIX attaches the user's saved credentials for you. "
+                        "Use it to answer questions about their accounts: recent Slack messages, open "
+                        "GitHub PRs or issues, an Alpaca portfolio or positions, statuses, etc. Pass the "
+                        "full https API URL (e.g. 'https://slack.com/api/conversations.list', "
+                        "'https://api.github.com/user/repos', or "
+                        "'https://paper-api.alpaca.markets/v2/positions'). READ-ONLY (GET only) and limited "
+                        "to connected services — it cannot reach anything else or change anything (so it "
+                        "reads an Alpaca account but can never place a trade). If it says a service isn't "
+                        "connected, tell the user to add its key in Settings → Connections; never ask them "
+                        "to paste a token into the chat."
                     ),
                     input_schema={
                         "type": "object",

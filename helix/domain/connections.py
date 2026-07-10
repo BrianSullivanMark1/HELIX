@@ -21,24 +21,54 @@ class Connection:
 
 @dataclass(frozen=True)
 class Service:
-    """A known external service the orb/agents can read via call_api, using a stored token. The token is
-    kept under `env` (the same name a built app would read from the environment), so connecting a service
-    once makes it available to both call_api and any build that declares that key."""
+    """A known external service the orb/agents can read via call_api, using stored credential(s). Each
+    field is a credential the user pastes, kept under the same env-var name a built app would read — so
+    connecting a service once (in Settings → Connections) makes it available to call_api AND to any build
+    that declares that key. `auth` says how the stored value(s) attach to a request: a list of
+    (header-name, template) pairs where {ENV_NAME} is filled with that field's value — a Bearer token for
+    most services, or several custom headers for ones like Alpaca that need a key id + secret."""
 
     id: str
     label: str
-    env: str                 # env-var name the token is stored under (e.g. "SLACK_TOKEN")
-    hosts: tuple[str, ...]   # API hostnames this token authenticates
-    hint: str                # placeholder for the entry field
+    hosts: tuple[str, ...]              # API hostnames these credentials authenticate
+    fields: tuple[Connection, ...]      # the credential field(s) to collect (env-var name + label + hint)
+    auth: tuple[tuple[str, str], ...]   # request headers to attach; {ENV_NAME} → that field's value
+
+    @property
+    def env(self) -> str:
+        """The primary credential's env-var name — the 'is it connected?' key and a back-compat accessor."""
+        return self.fields[0].key
+
+    @property
+    def hint(self) -> str:
+        return self.fields[0].hint
 
 
 # The services call_api will authenticate to. Deliberately small + explicit: call_api refuses any host
 # NOT in this list, so it can never be steered (e.g. by injected content) to reach an arbitrary or
-# internal address or to leak the token. Extend this tuple to add a service.
+# internal address or to leak a token. Extend this tuple to add a service.
 KNOWN_SERVICES: tuple[Service, ...] = (
-    Service("slack", "Slack", "SLACK_TOKEN", ("slack.com",), "xoxp-… (user) or xoxb-… (bot)"),
-    Service("github", "GitHub", "GITHUB_TOKEN", ("api.github.com", "github.com"),
-            "ghp_… or github_pat_…"),
+    Service(
+        "slack", "Slack", ("slack.com",),
+        fields=(Connection("SLACK_TOKEN", "Slack token", "xoxp-… (user) or xoxb-… (bot)"),),
+        auth=(("Authorization", "Bearer {SLACK_TOKEN}"),),
+    ),
+    Service(
+        "github", "GitHub", ("api.github.com", "github.com"),
+        fields=(Connection("GITHUB_TOKEN", "GitHub token", "ghp_… or github_pat_…"),),
+        auth=(("Authorization", "Bearer {GITHUB_TOKEN}"),),
+    ),
+    Service(
+        "alpaca", "Alpaca", ("api.alpaca.markets", "paper-api.alpaca.markets", "data.alpaca.markets"),
+        fields=(
+            Connection("ALPACA_API_KEY", "Alpaca API key ID", "PK… (paper) or AK… (live)"),
+            Connection("ALPACA_SECRET_KEY", "Alpaca secret key", "the matching secret"),
+        ),
+        auth=(
+            ("APCA-API-KEY-ID", "{ALPACA_API_KEY}"),
+            ("APCA-API-SECRET-KEY", "{ALPACA_SECRET_KEY}"),
+        ),
+    ),
 )
 
 

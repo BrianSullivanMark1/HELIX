@@ -1,4 +1,5 @@
-"""The Console shows the recent conversation on load (persists across launches)."""
+"""Console history: the launch view is ORB-ONLY (nothing replayed), while _load_history stays able
+to render the stored conversation — including stripping inline viz JSON — when explicitly invoked."""
 from __future__ import annotations
 
 import os
@@ -58,7 +59,19 @@ def _bubbles(cv):
     return out
 
 
-def test_console_renders_recent_history_on_load(_app):
+def test_console_launch_is_orb_only_nothing_replayed(_app):
+    # Orb-only default: even with stored history, construction renders NO bubbles — the first thing
+    # on screen is the orb alone. The history itself stays in the store (and the model's context).
+    at = datetime(2026, 6, 29, 12, 0, 0)
+    conv = _Conv([
+        Message(Role.USER, "what's the weather?", at),
+        Message(Role.ASSISTANT, "Clear and 72.", at),
+    ])
+    cv = ConsoleView(conv, _Settings())
+    assert _bubbles(cv) == []
+
+
+def test_load_history_renders_recent_history_when_invoked(_app):
     at = datetime(2026, 6, 29, 12, 0, 0)
     msgs = [
         Message(Role.USER, "what's the weather?", at),
@@ -68,6 +81,7 @@ def test_console_renders_recent_history_on_load(_app):
     ]
     conv = _Conv(msgs)
     cv = ConsoleView(conv, _Settings())
+    cv._load_history()
     assert conv.asked == 50  # asked for the last 50
     rendered = _bubbles(cv)
     # all four, in order, on the correct sides
@@ -83,6 +97,7 @@ def test_console_history_strips_inline_viz_json(_app):
     # An assistant reply that carried a chart block should show only its prose in the bubble, not raw JSON.
     reply = 'Here are the numbers.\n```viz {"type":"table","columns":["A"],"rows":[["1"]]}```'
     cv = ConsoleView(_Conv([Message(Role.ASSISTANT, reply, datetime(2026, 6, 29, 12, 0, 0))]), _Settings())
+    cv._load_history()
     texts = [t for _, t in _bubbles(cv)]
     assert texts == ["Here are the numbers."]
     assert all("viz" not in t and "{" not in t for t in texts)

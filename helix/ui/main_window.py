@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import socket
 
-from PyQt6.QtCore import QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices
+from PyQt6.QtCore import QEvent, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QGraphicsDropShadowEffect,
@@ -91,14 +91,27 @@ class HelixMainWindow(QMainWindow):
         ov = QVBoxLayout(overlay)
         ov.setContentsMargins(0, 0, 0, 0)
         ov.setSpacing(0)
-        ov.addWidget(self._build_nav())
+        # ORB-ONLY DEFAULT: the nav bar is hidden while the Console (the orb) is showing — the orb IS
+        # the interface. A thin invisible strip along the top edge reveals the nav on hover; leaving
+        # the nav tucks it away again. Any non-Console page keeps the nav visible (the way back).
+        self._reveal_strip = QWidget()
+        self._reveal_strip.setFixedHeight(12)
+        self._reveal_strip.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._reveal_strip.installEventFilter(self)
+        self._nav_bar = self._build_nav()
+        self._nav_bar.installEventFilter(self)
+        ov.addWidget(self._reveal_strip)
+        ov.addWidget(self._nav_bar)
+        # Show the nav briefly at launch so it stays discoverable, then tuck it away to orb-only.
+        self._set_nav_hidden(False)
+        QTimer.singleShot(5000, lambda: self._set_nav_hidden(True) if self._on_console() else None)
 
         self._stack = QStackedWidget()
         self.console = ConsoleView(
             container.conversation, container.settings,
             container.speech_in, container.speech_out, self.orb,
             forge=container.forge, build_queue=container.build_queue,
-            selfdev_lane=container.selfdev_lane,
+            selfdev_lane=container.selfdev_lane, voice_id=container.voice_id,
         )
         self.launcher = LauncherView(
             container.builds, container.agents, container.tasks, container.knowledge
@@ -115,11 +128,18 @@ class HelixMainWindow(QMainWindow):
         self._viewer_target: object | None = None  # the file/URL currently shown, for "open in browser"
         self._viewer_slug: str | None = None  # the build currently open in the viewer (for live reload)
         self._app_ports: dict[str, int] = {}  # slug -> port of a backend app's local server, shown in-app
+        self._viewer_float = False  # a 3D model is showing as a floating card over the orb
         if self._viewer is not None:
             self._viewer.closeRequested.connect(self._close_viewer)
             self._viewer.openExternallyRequested.connect(self._open_current_externally)
             self._viewer.editRequested.connect(self._on_viewer_edit)  # live "Edit with AI" bar
             self._stack.addWidget(self._viewer)  # 3
+            # A floating model dismisses with ONE tap on the space around the card (or Esc) — no
+            # navigating. The tap lands on the viewer's transparent margin (childAt → None).
+            self._viewer.installEventFilter(self)
+            esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self._viewer)
+            esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            esc.activated.connect(self._close_viewer)
         # The Knowledge manager — a native widget (no WebEngine), reused for whichever base is opened. Its
         # stack index is captured (not a fixed constant) since the optional viewer above may or may not
         # have been added before it.
@@ -228,6 +248,47 @@ class HelixMainWindow(QMainWindow):
     def _show_commands(self) -> None:
         CommandsDialog(self).exec()
 
+    # ----- orb-only chrome -----
+    def _on_console(self) -> bool:
+        return self._stack.currentIndex() == _CONSOLE
+
+    def _set_nav_hidden(self, hidden: bool) -> None:
+        self._nav_bar.setVisible(not hidden)
+        self._reveal_strip.setVisible(hidden)  # the hover target exists only while the nav is tucked away
+
+    def eventFilter(self, obj, event) -> bool:
+        # NOTE: filtered widgets receive events DURING __init__ (polish/show), before later attributes
+        # exist — every cross-attribute lookup here must be construction-order safe (getattr).
+        # Hover the top edge → reveal the nav; leave the nav → tuck it away (Console only).
+        if obj is self._reveal_strip and event.type() in (QEvent.Type.HoverEnter, QEvent.Type.Enter):
+            self._set_nav_hidden(False)
+        elif (
+            obj is self._nav_bar and event.type() == QEvent.Type.Leave
+            and getattr(self, "_stack", None) is not None and self._on_console()
+        ):
+            self._set_nav_hidden(True)
+        # A floating 3D model: one tap on the empty space around the card dismisses back to the orb.
+        elif (
+            obj is getattr(self, "_viewer", None) and self._viewer_float
+            and event.type() == QEvent.Type.MouseButtonPress
+            and self._viewer.childAt(event.position().toPoint()) is None
+        ):
+            self._close_viewer()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _set_viewer_float(self, on: bool) -> None:
+        """Present the in-app viewer as a floating card over the orb (3D models) or full-bleed (apps).
+        Same widget, same live-reload bookkeeping — only the presentation changes (AppViewer styles
+        its inner card, so the margins around it stay genuinely transparent for the orb)."""
+        if self._viewer is None:
+            return
+        on = bool(on)
+        if on == self._viewer_float:
+            return
+        self._viewer_float = on
+        self._viewer.set_floating(on)
+
     # ----- navigation -----
     def _nav(self, index: int) -> None:
         if index == _MENU:
@@ -236,9 +297,12 @@ class HelixMainWindow(QMainWindow):
 
     def _go(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
+        # Orb-only: the Console is just the orb — no nav. Every other page keeps the way back visible.
+        self._set_nav_hidden(index == _CONSOLE)
 
     def _on_settings_saved(self) -> None:
         self.console.refresh_key_state()
+        self.console.reapply_audio_devices()  # a new mic choice takes effect without a restart
         self._go(_CONSOLE)
 
     def _on_restart_requested(self) -> None:
@@ -481,6 +545,9 @@ class HelixMainWindow(QMainWindow):
         if app.kind == AppKind.HTML and app.entry_point:
             target = ws / app.entry_point
             if self._viewer is not None:  # render inside HELIX — no browser tabs
+                # A 3D model surfaces as a FLOATING card over the orb (one tap outside dismisses);
+                # an app takes the full page.
+                self._set_viewer_float(app.build_kind == BuildKind.MODEL)
                 self._viewer_target = target
                 self._viewer_slug = slug
                 self._viewer.load(target, app.name)
@@ -510,6 +577,7 @@ class HelixMainWindow(QMainWindow):
         if port is None:
             return
         url = f"http://127.0.0.1:{port}"
+        self._set_viewer_float(False)  # backend apps are full-page
         self._viewer_slug = slug
         self._viewer_target = url
         self._viewer.show_starting(app.name)
@@ -580,17 +648,24 @@ class HelixMainWindow(QMainWindow):
 
     def _close_viewer(self) -> None:
         slug = self._viewer_slug
+        was_current = self._viewer is not None and self._stack.currentWidget() is self._viewer
         if self._viewer is not None:
             self._viewer.clear()  # stop the page (animation/audio) and free the GL surface
         self._viewer_slug = None
+        self._set_viewer_float(False)
         if slug and slug in self._app_ports:  # leaving a backend app — stop its server, free the port
             self._c.tasks.stop(slug)
             self._app_ports.pop(slug, None)
-        self._go(_MENU)
+        # Dismiss lands on the orb — but only when the viewer was actually showing. A background close
+        # (its build deleted while the user browses another page) must not hijack navigation.
+        if was_current:
+            self._go(_CONSOLE)
 
     def _close_knowledge_view(self) -> None:
+        was_current = self._stack.currentWidget() is self._knowledge_view
         self._knowledge_slug = None
-        self._go(_MENU)
+        if was_current:
+            self._go(_CONSOLE)  # dismiss lands on the orb, not a menu
 
     def _sync_knowledge_view(self, event: object) -> None:
         """Reflect a change to the OPEN knowledge base in the manager: re-point + retitle on a rename,

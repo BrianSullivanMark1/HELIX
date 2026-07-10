@@ -19,6 +19,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 import wave
 from pathlib import Path
 from typing import Callable
@@ -28,6 +29,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from helix.logging_setup import get_logger
 from helix.ports.speech import SpeechIn, SpeechOut
 from helix.ports.stores import SettingsStore
+from helix.services import voiceid
 from helix.ui.orb import OrbState
 from helix.ui.workers import QtWorker
 
@@ -41,6 +43,9 @@ except Exception:  # pragma: no cover - depends on the host's Qt plugins
 _LOG = get_logger("voice")
 
 VOICE_SETTING = "voice_input_on"  # hands-free mic on/off; persisted, default off
+AUDIO_INPUT_SETTING = "audio_input_id"    # chosen mic (QAudioDevice id); "" = system default
+AUDIO_OUTPUT_SETTING = "audio_output_id"  # chosen speaker, for the Settings 'Test' button only — HELIX's
+                                          # own voice always follows the Windows DEFAULT output device
 
 # --- Energy-based voice-activity detection (VAD). Threshold is ADAPTIVE — it tracks the ambient
 # noise floor, so it works across mics instead of a single fixed level that mis-fires on one. ----
@@ -215,22 +220,40 @@ _STOP_FORMS = re.compile(
     r"be\s+quiet|never\s*mind|that'?s\s+enough|enough|shut\s*up|hush|shush|quiet)$",
     re.IGNORECASE,
 )
-# MUTE / UNMUTE — pause/resume the user's mic WITHOUT stopping a build (the opposite of a stop command).
-# Whole-utterance matches only, so "mute the alarm app" or "stop listening to the radio build" don't fire.
-_MUTE_FORMS = re.compile(
-    r"^(?:mute(?:\s+(?:yourself|me|the\s+mic|my\s+mic|mic))?|stop\s+listening|pause\s+listening|"
-    r"stop\s+the\s+mic|mic\s+off)$",
+# SLEEP / WAKE — pause/resume the user's mic WITHOUT stopping a build (the opposite of a stop command).
+# "sleep" rests the mic; "wake" — or just saying the wake word "HELIX" — brings it back. Whole-utterance
+# matches only, so "build a sleep-timer app" or "wake me at seven" don't fire. Legacy mute/unmute
+# phrasings stay accepted (old habits keep working), but the spoken + on-screen language is sleep/wake.
+_SLEEP_FORMS = re.compile(
+    r"^(?:"
+    r"(?:go(?:ing)?\s+(?:to\s+|2\s+)?)?sleep(?:\s+(?:now|mode|please))?|goto\s+sleep|take\s+a\s+nap|"
+    r"mute(?:\s+(?:yourself|me|the\s+mic|my\s+mic|mic))?|stop\s+listening|pause\s+listening|"
+    r"stop\s+the\s+mic|mic\s+off"
+    r")$",
     re.IGNORECASE,
 )
-_UNMUTE_FORMS = re.compile(
-    r"^(?:unmute(?:\s+(?:yourself|me|the\s+mic|mic))?|start\s+listening|resume\s+listening|"
-    r"listen\s+again|mic\s+on|you\s+can\s+listen(?:\s+again)?)$",
+_WAKE_FORMS = re.compile(
+    r"^(?:"
+    r"wake(?:\s*up)?(?:\s+now|\s+please)?|wakey(?:\s+wakey)?|(?:are\s+you\s+|you\s+)?awake|"
+    r"un\s*mute(?:d)?(?:\s+(?:yourself|me|the\s+mic|mic))?|start\s+listening(?:\s+again)?|"
+    r"resume\s+listening|listen(?:ing)?\s+again|mic\s+on|you\s+can\s+listen(?:\s+again)?"
+    r")$",
     re.IGNORECASE,
 )
+# Permissive wake hint — used ONLY while asleep, where the only possible outcomes are wake or stop, so a
+# greedy match is free: any whiff of wake/listen brings HELIX back rather than stranding you muted.
+_WAKE_HINT = re.compile(r"\b(?:wake|awake|wakey|woke|listen(?:ing)?|un\s*mute[d]?|mic\s*on)\b", re.IGNORECASE)
+
+# What HELIX SAYS OUT LOUD when it sleeps / wakes, so you know the command landed even away from the
+# screen. The sleep line deliberately carries no wake trigger words ("HELIX"/"wake"/"listen") — the open
+# mic would otherwise hear the confirmation and instantly wake itself.
+_SLEEP_CONFIRM = "Going to sleep."
+_WAKE_CONFIRM = "Awake and listening."
 
 
 def _clean_command(text: str) -> str:
-    t = re.sub(r"[.!,?]+", " ", (text or "").lower())
+    # Hyphens/underscores become spaces too, so a mis-transcribed "un-mute" / "wake-up" still matches.
+    t = re.sub(r"[.!,?\-_]+", " ", (text or "").lower())
     t = _STOP_FILLERS.sub(" ", t)
     return " ".join(t.split())
 
@@ -240,17 +263,58 @@ def is_stop(text: str) -> bool:
     return bool(_STOP_FORMS.match(_clean_command(text)))
 
 
-def is_mute(text: str) -> bool:
-    """True when the whole utterance asks to pause the mic (mute the user), not stop a build."""
-    return bool(_MUTE_FORMS.match(_clean_command(text)))
+def is_sleep(text: str) -> bool:
+    """True when the whole utterance asks HELIX to sleep (rest the mic), not stop a build."""
+    return bool(_SLEEP_FORMS.match(_clean_command(text)))
 
 
-def is_unmute(text: str) -> bool:
-    """True when the whole utterance asks to resume listening (unmute the user)."""
-    return bool(_UNMUTE_FORMS.match(_clean_command(text)))
+def is_wake(text: str) -> bool:
+    """True when the whole utterance asks HELIX to wake (resume listening)."""
+    return bool(_WAKE_FORMS.match(_clean_command(text)))
+
+
+def _wants_wake(text: str) -> bool:
+    """Permissive wake test used ONLY while asleep, where the only outcomes are wake or stop — so a greedy
+    match is free. True if HELIX is named (the wake word wakes it — 'sleep until you hear your name'), the
+    utterance is a wake phrase, or a SHORT utterance carries a wake hint. Gating the fuzzy hint to short
+    utterances keeps ambient chatter that merely contains 'listen'/'wake' ('did you listen to the game')
+    from waking it, while 'wake' / 'wake up now' / 'mic on' still do."""
+    if split_wake(text)[0]:
+        return True
+    if is_wake(text):
+        return True
+    cleaned = _clean_command(text)
+    return len(cleaned.split()) <= 3 and bool(_WAKE_HINT.search(cleaned))
+
+
+def _normalize16(pcm: bytes, target_peak: float = 0.9, max_gain: float = 8.0) -> bytes:
+    """Boost a quiet utterance toward full scale before transcription — soft speech or a distant/quiet mic
+    (earphones across the room) transcribes far better when it isn't near-silent. Peak-normalizes with a
+    CAPPED gain, so real speech is lifted without a near-silent clip being blown up into loud hiss. No-op
+    if the clip is already loud, empty, or numpy is unavailable."""
+    usable = len(pcm) - (len(pcm) % 2)
+    if usable <= 0:
+        return pcm
+    try:
+        import numpy as np
+
+        x = np.frombuffer(pcm[:usable], dtype="<i2")
+        if x.size == 0:
+            return pcm
+        peak = int(np.abs(x).max())
+        if peak <= 0:
+            return pcm
+        gain = min(max_gain, target_peak * 32767.0 / peak)
+        if gain <= 1.05:  # already close enough to full scale — leave it be
+            return pcm
+        y = np.clip(np.rint(x.astype(np.float32) * gain), -32768, 32767).astype("<i2")
+        return y.tobytes()
+    except Exception:
+        return pcm
 
 
 def _write_wav16(data: bytes, path: str) -> None:
+    data = _normalize16(data)  # lift quiet speech so the transcriber hears it clearly
     with wave.open(path, "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)  # Int16
@@ -264,6 +328,29 @@ def _mono16k_format():
     fmt.setChannelCount(1)
     fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
     return fmt
+
+
+def device_id_str(device) -> str:
+    """A stable, round-trippable string id for a QAudioDevice — latin-1 preserves every raw byte, so the
+    saved id matches exactly on the next run. '' for a null/absent device."""
+    try:
+        return bytes(device.id()).decode("latin-1")
+    except Exception:
+        return ""
+
+
+def _resolve_input_device(settings: "SettingsStore | None"):
+    """The QAudioDevice for the user's chosen mic — or the system default, which is also the fallback when
+    the saved device isn't currently present (e.g. earphones that are unplugged, so voice keeps working
+    on the built-in mic). None if QtMultimedia isn't available."""
+    if not _MULTIMEDIA:
+        return None
+    want = (settings.get(AUDIO_INPUT_SETTING, "") if settings is not None else "") or ""
+    if want:
+        for dev in QMediaDevices.audioInputs():
+            if device_id_str(dev) == want:
+                return dev
+    return QMediaDevices.defaultAudioInput()
 
 
 class VadSegmenter:
@@ -332,7 +419,7 @@ class WakeWordListener(QObject):
     level = pyqtSignal(float)  # 0..1 mic level, for a live meter
     bands = pyqtSignal(list)   # per-band FFT energies (0..1), for the orb's spectral ring
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, settings: "SettingsStore | None" = None) -> None:
         super().__init__(parent)
         self._source = None
         self._io = None
@@ -344,7 +431,7 @@ class WakeWordListener(QObject):
         if not _MULTIMEDIA:
             return
         try:
-            device = QMediaDevices.defaultAudioInput()
+            device = _resolve_input_device(settings)
             if device is None or device.isNull():
                 return
             self._device = device
@@ -409,7 +496,7 @@ class MicRecorder(QObject):
     """Push-to-talk capture via QAudioSource, written out as a 16 kHz mono WAV for transcription.
     Optional/guarded: if the backend or an input device is missing, is_available() is False."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, settings: "SettingsStore | None" = None) -> None:
         super().__init__(parent)
         self._source = None
         self._io = None
@@ -420,7 +507,7 @@ class MicRecorder(QObject):
         if not _MULTIMEDIA:
             return
         try:
-            device = QMediaDevices.defaultAudioInput()
+            device = _resolve_input_device(settings)
             if device is None or device.isNull():
                 return
             self._device = device
@@ -494,7 +581,9 @@ class VoiceController(QObject):
     level = pyqtSignal(float)          # 0..1 mic level while listening
     bands = pyqtSignal(list)           # per-band FFT energies for the orb's spectral ring
     stopRequested = pyqtSignal()       # the user said "stop" — the Console cancels any pending reply
-    mutedChanged = pyqtSignal(bool)    # the mic was muted/unmuted — the Console updates its control
+    mutedChanged = pyqtSignal(bool)    # the mic slept/woke — the Console updates its control
+    identityLine = pyqtSignal(str, str)  # (what was heard, HELIX's spoken line) from the voice-identity
+                                         # gate / calibration chat — shown in the transcript, never a turn
 
     def __init__(
         self,
@@ -502,11 +591,19 @@ class VoiceController(QObject):
         speech_out: SpeechOut,
         settings: SettingsStore,
         parent: QObject | None = None,
+        voice_id: "voiceid.VoiceIdService | None" = None,
     ) -> None:
         super().__init__(parent)
         self._stt = speech_in
         self._tts = speech_out
         self._settings = settings
+        # Voice identity: who is speaking. Optional — without the service the gate is open and
+        # behavior is exactly the single-user HELIX of before.
+        self._voice_id = voice_id
+        self._flow = voiceid.EnrollmentFlow(voice_id) if voice_id is not None else None
+        self._pending_emb = None           # the current utterance's voice-print (set on the worker)
+        self.current_speaker: str | None = None   # who spoke the command recognized() is emitting
+        self._session_speaker: str | None = None  # who opened the live session (sticky for short follow-ups)
         self._workers: set[QtWorker] = set()
         self._listener: WakeWordListener | None = None
         self._recorder: MicRecorder | None = None
@@ -529,8 +626,21 @@ class VoiceController(QObject):
     # ----- capability -----
     def mic_available(self) -> bool:
         if self._mic_ok is None:
-            self._mic_ok = _MULTIMEDIA and WakeWordListener().is_available()
+            self._mic_ok = _MULTIMEDIA and WakeWordListener(settings=self._settings).is_available()
         return self._mic_ok
+
+    def reload_audio_input(self) -> None:
+        """Re-open the mic on the currently-selected input device (Settings just changed it) so a new mic
+        takes effect without a restart. The device is read fresh on every (re)arm, so a later re-arm also
+        picks it up; this just makes the switch immediate when hands-free is already listening."""
+        self._mic_ok = None  # re-probe: the chosen device may differ in availability
+        if self._listener is None:
+            return
+        try:
+            self._stop_wake()
+            self._start_wake()
+        except Exception:
+            pass
 
     def can_listen(self) -> bool:
         """Hands-free can run only if the mic works AND the STT model is loaded (pre-warmed). We never
@@ -571,7 +681,7 @@ class VoiceController(QObject):
         self._stop_wake()
         if not self.can_listen():
             return False
-        self._listener = WakeWordListener(self)
+        self._listener = WakeWordListener(self, self._settings)
         if not self._listener.is_available():
             self._listener = None
             return False
@@ -600,6 +710,11 @@ class VoiceController(QObject):
     def _end_session(self) -> None:
         self._session = False
         self._session_timer.stop()
+        self._session_speaker = None
+        # A calibration chat abandoned mid-way (the user walked off) lapses with the session, so the
+        # flow can never keep swallowing speech forever.
+        if self._flow is not None and self._flow.active:
+            self._flow.cancel()
 
     # ----- state machine -----
     def _set_state(self, state: str) -> None:
@@ -626,50 +741,57 @@ class VoiceController(QObject):
         except Exception:
             return None
 
-    # ----- mute (pause the mic without stopping a build) -----
+    # ----- sleep / wake (rest the mic without stopping a build) -----
     def is_muted(self) -> bool:
         return self._muted
 
-    def set_muted(self, on: bool) -> None:
-        """Pause/resume listening. Muting does NOT end the session or stop a build — it only changes what
-        HELIX acts on; the listener stays live (when enabled) so an 'unmute'/'stop' still works by voice.
-        Mute is refused when nothing is actually listening (so we never advertise a muted mic that wasn't
-        live, leaving an escape-less state); UNMUTE is always honored, so recovery is never blocked."""
+    def set_muted(self, on: bool, announce: bool = True) -> None:
+        """Put the mic to SLEEP / WAKE it. Sleeping does NOT end the session or stop a build — it only
+        changes what HELIX acts on; the listener stays live (when enabled) so 'wake', the wake word
+        'HELIX', or a 'stop' still work by voice. Sleep is refused when nothing is actually listening (so
+        we never advertise a slept mic that wasn't live, leaving an escape-less state); WAKE is always
+        honored, so recovery is never blocked. When `announce`, HELIX speaks a one-line confirmation so
+        you know the state changed even away from the screen."""
         on = bool(on)
         if on and not self.can_listen():
             return
         if on == self._muted:
             return
         self._muted = on
-        if on:  # going quiet — hush any in-flight narration so a mute feels immediate
+        if on:  # going quiet — drop the narration flag so a slept mic never speaks progress notes
             self._narrating = False
-            try:
-                self._tts.stop()
-            except Exception:
-                pass
         self.mutedChanged.emit(on)
+        if announce and self.enabled() and self._tts.available():
+            # speak() preempts any in-flight narration AND drives state speaking -> idle (re-arming the
+            # listener), so 'wake' / the wake word can still be heard right after the confirmation.
+            self.speak(_SLEEP_CONFIRM if on else _WAKE_CONFIRM)
+        else:
+            if on:  # no spoken confirmation — hush any in-flight narration so sleep still feels immediate
+                try:
+                    self._tts.stop()
+                except Exception:
+                    pass
+            self._set_state("idle")
 
     def toggle_muted(self) -> None:
         self.set_muted(not self._muted)
 
     def _on_muted_text(self, text: str) -> None:
-        # While muted, ignore everything EXCEPT a short unmute or stop phrase — so you can always come back
-        # (or halt a build) by voice, but HELIX never starts a turn or build from your muted speech.
+        # Asleep: the ONLY outcomes are WAKE or STOP, so wake-matching is greedy (a false positive is
+        # free) — any whiff of 'wake'/'listen'/the wake word brings HELIX back instead of stranding you.
+        # Everything else is dropped: a slept mic never starts a turn or a build from your speech.
         self._barge_busy = False
         t = (text or "").strip()
-        if not t or len(t.split()) > 5:
+        if t and _wants_wake(t):
+            self.set_muted(False)  # speaks the wake confirmation and re-arms the listener (owns state)
             return
-        if is_unmute(t):
-            self.set_muted(False)
-        elif is_stop(t):
-            try:
-                self._tts.stop()
-            except Exception:
-                pass
+        if t and is_stop(t):
+            self._hush()
             self.stopRequested.emit()
+        self._set_state("idle")  # dropped or stopped — re-arm the wake listener
 
     def _on_utterance(self, pcm: bytes) -> None:
-        # Muted: route to the mute handler — only an unmute/stop phrase acts; all other speech is dropped.
+        # Asleep: route to the sleep handler — only a wake/stop phrase acts; all other speech is dropped.
         if self._muted:
             if self._barge_busy:
                 return
@@ -689,7 +811,7 @@ class VoiceController(QObject):
             if path is None:
                 return
             self._barge_busy = True
-            self._transcribe(path, self._on_barge_text)
+            self._transcribe(path, self._on_barge_text, pcm)
             return
         if self._state != "idle":  # transcribing / thinking — ignore
             return
@@ -697,7 +819,7 @@ class VoiceController(QObject):
         if path is None:
             return
         self._set_state("transcribing")
-        self._transcribe(path, self._on_wake_text)
+        self._transcribe(path, self._on_wake_text, pcm)
 
     def _hush(self) -> None:
         """Silence any in-flight speech/narration immediately."""
@@ -706,6 +828,122 @@ class VoiceController(QObject):
         except Exception:
             pass
         self._narrating = False
+
+    # ----- voice identity (who is speaking) -----
+    def _take_emb(self):
+        """The current utterance's voice-print, computed on the transcription worker. Read-once."""
+        emb, self._pending_emb = self._pending_emb, None
+        return emb
+
+    def _say_identity(self, heard: str, reply: str) -> None:
+        """Speak (and surface in the transcript) a line from the identity gate / calibration chat.
+        These lines never touch the conversation store — a stranger's words are not history."""
+        self.identityLine.emit(heard, reply)
+        self.speak(reply)
+
+    def _after_flow(self, heard: str, reply: str | None) -> None:
+        """Deliver a calibration-flow line; on completion, adopt the new speaker and distill their
+        identity notes in the background."""
+        flow = self._flow
+        if reply:
+            self._start_session()  # keep the calibration chat alive across its questions
+            self._say_identity(heard, reply)
+        else:
+            self._set_state("idle")
+        name = getattr(flow, "last_registered", None)
+        if name and not flow.active:
+            flow.last_registered = None
+            self.current_speaker = name
+            self._session_speaker = name
+            if self._voice_id is not None:
+                self._voice_id.distill_notes(name, getattr(flow, "last_answers", []))
+
+    def _flow_intercept(self, text: str) -> bool:
+        """While a registration/recalibration chat is open, route speech to it instead of the model.
+        Returns True when the utterance was consumed."""
+        flow = self._flow
+        if flow is None or not flow.active or not text:
+            return False
+        if is_stop(text) or is_dismissal(text):
+            flow.cancel()
+            self.interrupt()
+            return True
+        matched, after = split_wake(text)
+        # PEEK at the voice-print — only consume it if the flow accepts the utterance. On a lapse the
+        # caller re-gates this same utterance, and destroying its print here would blind the gate
+        # (identify(None) = no-evidence, which a live session would then mis-attribute).
+        reply = flow.handle(after if matched and after else text, self._pending_emb)
+        if reply is None:
+            return False  # not for the flow (it lapsed) — the caller re-gates the utterance
+        self._pending_emb = None
+        self._after_flow(text, reply)
+        return True
+
+    def _gate(self, command: str) -> bool:
+        """The voice-identity gate, run just before a captured command becomes a model turn.
+        True → proceed (current_speaker is set); False → the gate consumed the utterance (it spoke
+        the registration offer, started calibration, etc.) and the command must NOT run."""
+        svc, flow = self._voice_id, self._flow
+        self.current_speaker = None
+        if svc is None:
+            return True
+        emb = self._take_emb()
+        has = svc.has_profiles()
+        res = svc.identify(emb)
+        name = res.name
+        intro = voiceid.introduction_name(command)
+        if voiceid.wants_recalibration(command):
+            if name:
+                self._say_identity(command, flow.start(name, emb, recal=True))
+            elif not has:
+                self._say_identity(command, flow.ask_name())
+            else:
+                self._say_identity(command, flow.offer())  # a stranger can't refresh anyone's profile
+            self._start_session()
+            return False
+        if intro:
+            if name and res.confident and intro.lower() == name.lower():
+                self._session_speaker = name
+                self._start_session()
+                self._say_identity(command, f"I know your voice, {name}. What can I do for you?")
+                return False
+            if name and res.confident:
+                # A confidently-matched voice claiming a different name never re-enrolls under it —
+                # that would graft this voice onto a second identity.
+                self._say_identity(
+                    command,
+                    f"You sound like {name} to me. If someone new wants to register, "
+                    "they should say it themselves — I am, then their name.",
+                )
+                return False
+            self._start_session()
+            self._say_identity(command, flow.start(intro, emb))
+            return False
+        if voiceid.wants_registration(command):
+            if name:
+                self._say_identity(
+                    command, f"Your voice is already registered, {name}. "
+                    "Say: recalibrate my voice, to refresh it.")
+            else:
+                self._start_session()
+                self._say_identity(command, flow.ask_name())
+            return False
+        if not has:
+            return True  # nobody registered yet — single-user trust, exactly as before
+        if name:
+            self.current_speaker = name
+            self._session_speaker = name
+            if res.confident:  # quietly sharpen the profile with this utterance
+                threading.Thread(
+                    target=svc.add_passive, args=(name, emb), daemon=True, name="helix-voiceid"
+                ).start()
+            return True
+        if res.no_evidence and self._session and self._session_speaker:
+            # Too short to judge, but it's a follow-up inside a session a recognized speaker opened.
+            self.current_speaker = self._session_speaker
+            return True
+        self._say_identity(command, flow.offer())  # the ONE reply an unrecognized voice gets
+        return False
 
     def _on_barge_text(self, text: str) -> None:
         # While HELIX is busy (speaking a reply OR building), two things cut through: a SHORT stop
@@ -729,27 +967,36 @@ class VoiceController(QObject):
         if self._state == "thinking" and not self._narrating:
             # A model turn already in flight can't be redirected — only a stop phrase acts (above).
             return
+        if self._flow is not None and self._flow.active:
+            # Mid-calibration barge (answering over a spoken question): the open flow owns it — never
+            # let it fall into the gate, which would clobber the flow state or start a turn mid-chat.
+            self._hush()
+            if self._flow_intercept(t):
+                return
         self._hush()  # the name cuts the voice off mid-sentence
         if is_stop(command):
             self.stopRequested.emit()
             self._set_state("idle")
             return
-        if is_mute(command):
+        if is_sleep(command):  # 'sleep' rests the mic; set_muted speaks the confirmation and re-arms
             self.set_muted(True)
-            self._set_state("idle")
             return
-        self._start_session()
         if not command:
+            self._start_session()
             self._say("Yes?")  # called by name mid-speech — acknowledge and listen
             return
+        if not self._gate(command):
+            return  # gate consumed it — and no session opens for a refused voice
+        self._start_session()
         self._set_state("thinking")
         self.recognized.emit(command)
 
     def _on_wake_text(self, text: str) -> None:
         text = (text or "").strip()
-        if self._muted:  # a mute landed WHILE this was transcribing — honor only unmute/stop, drop the rest
+        if self._muted:  # a sleep landed WHILE this transcribed — the sleep handler owns wake/stop + state
             self._on_muted_text(text)
-            self._set_state("idle")
+            return
+        if self._flow_intercept(text):  # an open registration/recalibration chat owns the mic
             return
         matched, after = split_wake(text)
         if self._session and is_dismissal(text):
@@ -763,18 +1010,26 @@ class VoiceController(QObject):
         else:
             self._set_state("idle")  # not addressed to HELIX — keep listening
             return
-        if is_mute(command):  # "mute / stop listening" — pause the mic; never a turn, never a build-stop
-            self.set_muted(True)
+        if is_sleep(command):  # "sleep / stop listening" — rest the mic; never a turn, never a build-stop
+            self.set_muted(True)  # set_muted speaks the confirmation and re-arms the listener
+            return
+        if is_wake(command):  # already awake — consume it so 'wake' never becomes a model turn
             self._set_state("idle")
             return
         if is_stop(command):  # "stop / be quiet / never mind" — hush and keep listening, no new turn
             self.interrupt()
             self.stopRequested.emit()
             return
-        self._start_session()
         if not command:
+            self._start_session()
             self._say("Yes?")  # bare "HELIX" — acknowledge and wait for the command
             return
+        if not self._gate(command):
+            # The gate consumed it — and CRUCIALLY no session opens for a refused voice. A session
+            # waives the wake-word requirement for the whole room, so opening one on a stranger's
+            # utterance would turn every later overheard sentence into a spoken refusal loop.
+            return
+        self._start_session()
         self._set_state("thinking")
         self.recognized.emit(command)
 
@@ -783,7 +1038,7 @@ class VoiceController(QObject):
         if self._state != "idle" or not self.can_listen():
             return False
         self._stop_wake()  # release the device so the recorder can take it
-        self._recorder = MicRecorder(self)
+        self._recorder = MicRecorder(self, self._settings)
         if not self._recorder.is_available() or not self._recorder.start():
             self._recorder = None
             self._set_state("idle")
@@ -817,21 +1072,28 @@ class VoiceController(QObject):
         except Exception:
             self._set_state("idle")
             return
-        self._transcribe(path, self._on_ptt_text)
+        # pcm rides along so push-to-talk gets a voice-print like every other path — without it the
+        # gate would judge PTT on no evidence and refuse the machine's own registered owner.
+        self._transcribe(path, self._on_ptt_text, data)
 
     def _on_ptt_text(self, text: str) -> None:
         text = (text or "").strip()
         if not text:
             self._set_state("idle")
             return
-        if self._muted:  # paused (incl. a mute that landed mid-capture): only unmute/stop, never a turn
+        if self._muted:  # asleep (incl. a sleep that landed mid-capture): only wake/stop act, never a turn
             self._on_muted_text(text)
-            self._set_state("idle")
             return
-        if is_mute(text):  # push-to-talk "mute" pauses the mic instead of starting a turn
+        if self._flow_intercept(text):  # an open registration/recalibration chat owns the mic
+            return
+        if is_sleep(text):  # push-to-talk "sleep" rests the mic instead of starting a turn
             self.set_muted(True)
+            return
+        if is_wake(text):  # already awake — don't send 'wake' to the model
             self._set_state("idle")
             return
+        if not self._gate(text):
+            return  # gate consumed it — and no session opens for a refused voice
         self._start_session()
         self._set_state("thinking")
         self.recognized.emit(text)
@@ -912,17 +1174,32 @@ class VoiceController(QObject):
         self.speak(text)
 
     # ----- workers -----
-    def _transcribe(self, path: str, on_text: Callable[[str], None]) -> None:
-        def work(_emit: Callable[[str], None]) -> str:
+    def _transcribe(self, path: str, on_text: Callable[[str], None], pcm: bytes | None = None) -> None:
+        def work(_emit: Callable[[str], None]):
+            emb = None
             try:
-                return self._stt.transcribe(Path(path))
+                if pcm is not None and self._voice_id is not None:
+                    try:
+                        emb = voiceid.embed_pcm(pcm)
+                    except Exception:
+                        emb = None
+                return (self._stt.transcribe(Path(path)), emb)
             finally:
                 try:
                     os.remove(path)
                 except OSError:
                     pass
 
-        self._run(work, on_text)
+        def done(result) -> None:
+            # The (text, voice-print) pair travels TOGETHER through the worker result, and the print
+            # is published on the UI thread immediately before its own handler runs. Two overlapping
+            # transcriptions (a barge racing a fresh wake capture) therefore can never cross-pair a
+            # command with the other speaker's voice — a shared slot written on the worker thread did.
+            text, emb = result if isinstance(result, tuple) else (result, None)
+            self._pending_emb = emb
+            on_text(text)
+
+        self._run(work, done)
 
     def _run(self, fn: Callable[[Callable[[str], None]], object], on_done: Callable[..., None]) -> None:
         worker = QtWorker(fn)

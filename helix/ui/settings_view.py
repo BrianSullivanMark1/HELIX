@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -27,6 +28,58 @@ from helix.adapters.speech import DEFAULT_TTS_VOICE, TTS_VOICES, edge_available
 from helix.domain.connections import KNOWN_SERVICES
 from helix.ports.stores import SettingsStore
 from helix.ui.theme import CYAN, LINE, MUTED, STATUS_DONE
+from helix.ui.voice import AUDIO_INPUT_SETTING, AUDIO_OUTPUT_SETTING, device_id_str
+
+try:  # QtMultimedia ships with PyQt6 but needs platform plugins; degrade to no device pickers if absent.
+    from PyQt6.QtMultimedia import (
+        QAudio,
+        QAudioFormat,
+        QAudioSink,
+        QAudioSource,
+        QMediaDevices,
+    )
+
+    _AUDIO = True
+except Exception:  # pragma: no cover - depends on the host's Qt plugins
+    _AUDIO = False
+
+
+def _chime_pcm(sample_rate: int, channels: int = 1) -> bytes:
+    """A short, click-free two-tone chime as 16-bit mono/stereo PCM — the 'test sound' for an output."""
+    import array
+    import math
+
+    def tone(freq: float, ms: int, vol: float = 0.4) -> array.array:
+        n = int(sample_rate * ms / 1000)
+        attack, release = 0.02 * sample_rate, 0.05 * sample_rate
+        buf = array.array("h")
+        for i in range(n):
+            env = min(1.0, i / max(1.0, attack), (n - i) / max(1.0, release))
+            s = int(vol * env * 32767 * math.sin(2 * math.pi * freq * i / sample_rate))
+            s = max(-32768, min(32767, s))
+            for _ in range(max(1, channels)):
+                buf.append(s)
+        return buf
+
+    out = array.array("h")
+    out += tone(659.25, 170)  # E5
+    out += tone(880.0, 260)   # A5
+    return out.tobytes()
+
+
+def _peak_rms(pcm: bytes) -> float:
+    """Peak RMS of 16-bit LE mono PCM (stdlib only) — how loud the test mic heard you."""
+    import array
+    import math
+
+    usable = len(pcm) - (len(pcm) % 2)
+    if usable <= 0:
+        return 0.0
+    samples = array.array("h")
+    samples.frombytes(pcm[:usable])
+    if not samples:
+        return 0.0
+    return math.sqrt(sum(s * s for s in samples) / len(samples))
 
 
 class SettingsView(QWidget):
@@ -42,6 +95,14 @@ class SettingsView(QWidget):
         self._conn_fields: list[tuple[str, QLineEdit]] = []  # (env-var name, field)
         # (status QLabel, getter) pairs refreshed on load + save so each row shows Set / Not set at a glance.
         self._statuses: list[tuple[QLabel, Callable[[], str]]] = []
+        # Audio device pickers (mic + output). Only built when QtMultimedia loaded; refs kept for save/test.
+        self._mic_combo: QComboBox | None = None
+        self._out_combo: QComboBox | None = None
+        self._mic_src = None  # live QAudioSource during a mic test
+        self._mic_io = None
+        self._mic_peak = 0.0
+        self._test_sink = None  # live QAudioSink during an output test (kept alive so it isn't GC'd)
+        self._test_buf = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(36, 22, 36, 18)
@@ -91,18 +152,21 @@ class SettingsView(QWidget):
             "knowledge search still works using keywords.",
             self._voyage, lambda: self._settings.get("voyage_api_key", "") or "",
         ))
-        # Service tokens (Slack, GitHub, …) your apps and agents read, or the orb's read-only call_api uses.
+        # Service keys (Slack, GitHub, Alpaca, …) your apps and agents read, or the orb's read-only
+        # call_api uses. One row per credential — a service that needs two (e.g. Alpaca's key id + secret)
+        # shows both. Everything is entered HERE, once; builds then use it automatically.
         if self._connections is not None:
             for svc in KNOWN_SERVICES:
-                field = self._password(svc.hint)
-                self._conn_fields.append((svc.env, field))
-                form.addWidget(self._field_row(
-                    f"{svc.label}", f"{svc.label} token",
-                    f"Optional. Lets apps, flows, and agents you build read your {svc.label} account, and "
-                    f"the orb answer questions about it. Stored on this machine only; never written into a "
-                    f"build's files or sent anywhere except {svc.label}. Format: {svc.hint}.",
-                    field, (lambda env=svc.env: self._connections.value(env) or ""),
-                ))
+                for conn in svc.fields:
+                    field = self._password(conn.hint)
+                    self._conn_fields.append((conn.key, field))
+                    form.addWidget(self._field_row(
+                        conn.label, f"{svc.label} — {conn.label}",
+                        f"Optional. Lets apps, flows, and agents you build read your {svc.label} account, "
+                        f"and the orb answer questions about it. Stored on this machine only; never written "
+                        f"into a build's files or sent anywhere except {svc.label}. Format: {conn.hint}.",
+                        field, (lambda key=conn.key: self._connections.value(key) or ""),
+                    ))
         # Gmail — read-only inbox (an address + a Google App Password). Two fields, one status.
         if self._gmail is not None:
             self._gmail_addr = QLineEdit()
@@ -113,6 +177,15 @@ class SettingsView(QWidget):
         if self._calendar is not None:
             self._calendar_url = self._password("https://calendar.google.com/calendar/ical/…/basic.ics")
             form.addWidget(self._calendar_section())
+
+        # ── Audio devices — which mic HELIX hears you on, and testing your speakers/earphones ──
+        if _AUDIO:
+            form.addSpacing(4)
+            form.addWidget(self._section(
+                "Audio devices",
+                "Pick the microphone HELIX listens through, and test that your speakers or earphones work.",
+            ))
+            form.addWidget(self._audio_devices_widget())
 
         # ── Appearance & voice ──
         form.addSpacing(4)
@@ -315,6 +388,200 @@ class SettingsView(QWidget):
         self._statuses.append((status, lambda: "set" if self._calendar.configured() else ""))
         return box
 
+    # ----- audio devices -----
+    def _audio_devices_widget(self) -> QWidget:
+        """Microphone + output pickers, each with a Test button, plus a shortcut to Windows sound settings.
+        HELIX's own voice always plays to the WINDOWS DEFAULT output (your earphones when they're
+        connected) — the output picker here is for testing a specific device before you rely on it."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(8)
+
+        # Microphone: routes hands-free + push-to-talk capture to the chosen device.
+        lay.addWidget(self._device_label("Microphone (HELIX listens here)"))
+        self._mic_combo = QComboBox()
+        self._mic_status = QLabel("")
+        self._mic_status.setStyleSheet(f"color:{MUTED};font-size:12px;")
+        mic_test = QPushButton("🎤 Test mic")
+        mic_test.setToolTip("Listen for ~2 seconds and show how well this mic hears you")
+        mic_test.clicked.connect(self._test_mic)
+        lay.addLayout(self._device_row(self._mic_combo, mic_test))
+        lay.addWidget(self._mic_status)
+
+        # Output: HELIX follows the Windows default, but you can test ANY device to confirm it plays.
+        lay.addWidget(self._device_label("Sound output (test your speakers / earphones)"))
+        self._out_combo = QComboBox()
+        self._out_status = QLabel("")
+        self._out_status.setStyleSheet(f"color:{MUTED};font-size:12px;")
+        out_test = QPushButton("🔊 Test")
+        out_test.setToolTip("Play a short chime through the selected device")
+        out_test.clicked.connect(self._test_output)
+        lay.addLayout(self._device_row(self._out_combo, out_test))
+        lay.addWidget(self._out_status)
+
+        note = QLabel(
+            "HELIX speaks through your Windows default output — your earphones automatically once they're "
+            "connected. Use “Test” to confirm a device works before you step away."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{MUTED};font-size:12px;")
+        lay.addWidget(note)
+        sound_btn = QPushButton("Open Windows sound settings")
+        sound_btn.clicked.connect(self._open_sound_settings)
+        srow = QHBoxLayout()
+        srow.addWidget(sound_btn)
+        srow.addStretch(1)
+        lay.addLayout(srow)
+
+        self._populate_audio_devices()
+        return box
+
+    @staticmethod
+    def _device_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet("font-weight:600;")
+        return lbl
+
+    @staticmethod
+    def _device_row(combo: QComboBox, button: QPushButton) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(combo, stretch=1)
+        row.addWidget(button)
+        return row
+
+    def _populate_audio_devices(self) -> None:
+        """Fill both combos from the current devices and re-select the saved choice. Called on load and
+        each reload, so devices that come and go (Bluetooth earphones) refresh. A saved device that isn't
+        present right now is kept as a placeholder row so saving while it's unplugged never drops it."""
+        if not _AUDIO or self._mic_combo is None or self._out_combo is None:
+            return
+        saved_in = (self._settings.get(AUDIO_INPUT_SETTING, "") or "")
+        saved_out = (self._settings.get(AUDIO_OUTPUT_SETTING, "") or "")
+        try:
+            inputs = QMediaDevices.audioInputs()
+        except Exception:
+            inputs = []
+        try:
+            outputs = QMediaDevices.audioOutputs()
+        except Exception:
+            outputs = []
+        for combo, saved, devices, default_label in (
+            (self._mic_combo, saved_in, inputs, "System default"),
+            (self._out_combo, saved_out, outputs, "System default (HELIX uses this)"),
+        ):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(default_label, "")
+            for dev in devices:
+                combo.addItem(dev.description(), device_id_str(dev))
+            if saved and combo.findData(saved) < 0:
+                combo.addItem("Selected device — not connected", saved)
+            idx = combo.findData(saved)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+
+    @staticmethod
+    def _input_device(data: str):
+        if data:
+            for dev in QMediaDevices.audioInputs():
+                if device_id_str(dev) == data:
+                    return dev
+        return QMediaDevices.defaultAudioInput()
+
+    @staticmethod
+    def _output_device(data: str):
+        if data:
+            for dev in QMediaDevices.audioOutputs():
+                if device_id_str(dev) == data:
+                    return dev
+        return QMediaDevices.defaultAudioOutput()
+
+    def _test_output(self) -> None:
+        if not _AUDIO or self._out_combo is None:
+            return
+        dev = self._output_device(self._out_combo.currentData() or "")
+        if dev is None or dev.isNull():
+            self._out_status.setText("No output device available.")
+            return
+        fmt = QAudioFormat()
+        fmt.setSampleRate(44100)
+        fmt.setChannelCount(1)
+        fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+        try:
+            self._test_buf = QBuffer(self)
+            self._test_buf.setData(QByteArray(_chime_pcm(44100, 1)))
+            self._test_buf.open(QIODevice.OpenModeFlag.ReadOnly)
+            self._test_sink = QAudioSink(dev, fmt, self)
+            self._test_sink.stateChanged.connect(self._on_sink_state)
+            self._test_sink.start(self._test_buf)
+            self._out_status.setText("Playing a test chime…")
+        except Exception:
+            self._out_status.setText("Couldn't play through this device.")
+
+    def _on_sink_state(self, state) -> None:
+        if state in (QAudio.State.IdleState, QAudio.State.StoppedState):
+            try:
+                if self._test_sink is not None:
+                    self._test_sink.stop()
+            except Exception:
+                pass
+            self._out_status.setText("Done. Heard the chime? Then this device works.")
+
+    def _test_mic(self) -> None:
+        if not _AUDIO or self._mic_combo is None:
+            return
+        dev = self._input_device(self._mic_combo.currentData() or "")
+        if dev is None or dev.isNull():
+            self._mic_status.setText("No microphone available.")
+            return
+        fmt = QAudioFormat()
+        fmt.setSampleRate(16000)
+        fmt.setChannelCount(1)
+        fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+        try:
+            self._mic_src = QAudioSource(dev, fmt, self)
+            self._mic_io = self._mic_src.start()
+        except Exception:
+            self._mic_status.setText("Couldn't open this microphone.")
+            return
+        if self._mic_io is None:
+            self._mic_src = None
+            self._mic_status.setText("Couldn't open this microphone.")
+            return
+        self._mic_peak = 0.0
+        self._mic_io.readyRead.connect(self._on_mic_ready)
+        self._mic_status.setText("Listening… say something.")
+        QTimer.singleShot(2000, self._finish_mic_test)
+
+    def _on_mic_ready(self) -> None:
+        if self._mic_io is None:
+            return
+        chunk = bytes(self._mic_io.readAll())
+        if chunk:
+            self._mic_peak = max(self._mic_peak, _peak_rms(chunk))
+
+    def _finish_mic_test(self) -> None:
+        try:
+            if self._mic_src is not None:
+                self._mic_src.stop()
+        except Exception:
+            pass
+        self._mic_src = None
+        self._mic_io = None
+        peak = self._mic_peak
+        if peak >= 250:
+            self._mic_status.setText(f"Heard you clearly ✓  (level {int(min(100, peak / 80))}%)")
+        elif peak >= 60:
+            self._mic_status.setText("Picked up some sound — try speaking up, or move the mic closer.")
+        else:
+            self._mic_status.setText("No sound detected. Check the mic is connected and not muted.")
+
+    @staticmethod
+    def _open_sound_settings() -> None:
+        QDesktopServices.openUrl(QUrl("ms-settings:sound"))
+
     def _refresh_statuses(self) -> None:
         for label, getter in self._statuses:
             try:
@@ -349,6 +616,7 @@ class SettingsView(QWidget):
             self._gmail_pw.setText(self._gmail.app_password())
         if self._calendar is not None:
             self._calendar_url.setText(self._calendar.url())
+        self._populate_audio_devices()  # refresh the device lists (earphones may have come/gone)
         self._refresh_statuses()
 
     def _save(self) -> None:
@@ -365,6 +633,9 @@ class SettingsView(QWidget):
             self._gmail.set_credentials(self._gmail_addr.text(), self._gmail_pw.text())
         if self._calendar is not None:
             self._calendar.set_url(self._calendar_url.text())
+        if _AUDIO and self._mic_combo is not None and self._out_combo is not None:
+            self._settings.set(AUDIO_INPUT_SETTING, self._mic_combo.currentData() or "")
+            self._settings.set(AUDIO_OUTPUT_SETTING, self._out_combo.currentData() or "")
         self._refresh_statuses()
         self._status.setText("Saved.")
         self.saved.emit()

@@ -25,11 +25,16 @@ from helix.logging_setup import get_logger
 _LOG = get_logger("speech")
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-DEFAULT_STT_MODEL = "base.en"  # good CPU default: fast, English-only, decent on short spoken commands
+DEFAULT_STT_MODEL = "small.en"   # accuracy-first default: far better on the wake word + short commands
+                                 # than base.en, still CPU-friendly (~1s/utterance). Weights live in the
+                                 # user's HF cache and are pre-warmed before Qt.
+_FALLBACK_STT_MODEL = "base.en"  # if the preferred model can't load (offline / not yet downloaded), fall
+                                 # back so hands-free voice still works instead of going dark.
 
 # One model instance per size, shared across every WhisperSpeechIn. Heavy to build (and downloads
 # weights on first use), so we keep it alive once loaded.
 _MODELS: dict[str, object] = {}
+_ACTIVE_MODEL: str | None = None  # the size prewarm actually loaded (preferred, or the fallback)
 
 
 def stt_importable() -> bool:
@@ -53,14 +58,26 @@ def prewarm(model_size: str = DEFAULT_STT_MODEL, device: str = "cpu") -> bool:
     MUST be called from the desktop entry point BEFORE constructing QApplication (see module docstring):
     building ctranslate2 after Qt is up crashes the process on Windows. Best-effort — returns False if
     faster-whisper isn't installed or the model can't be built, so the caller can keep voice disabled."""
+    global _ACTIVE_MODEL
     if not stt_importable():
         return False
-    try:
-        if model_size not in _MODELS:
-            _MODELS[model_size] = _build_model(model_size, device)
-        return True
-    except Exception:
-        return False
+    # Try the preferred model, then the lighter fallback — so a machine that can't fetch/build small.en
+    # still gets working voice on base.en rather than none. Record what actually loaded (active_model()).
+    for size in (model_size, _FALLBACK_STT_MODEL):
+        try:
+            if size not in _MODELS:
+                _MODELS[size] = _build_model(size, device)
+            _ACTIVE_MODEL = size
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def active_model() -> str:
+    """The STT model size prewarm actually loaded (the preferred one, or the fallback if that failed). The
+    container builds WhisperSpeechIn with this, so transcription always uses what's really in memory."""
+    return _ACTIVE_MODEL or DEFAULT_STT_MODEL
 
 
 def stt_ready(model_size: str = DEFAULT_STT_MODEL) -> bool:
@@ -92,10 +109,17 @@ class WhisperSpeechIn:
             if model is None:
                 model = _build_model(self._model_size, self._device)
                 _MODELS[self._model_size] = model
-            # beam_size=1 (greedy) is fastest and plenty for short spoken commands. initial_prompt
-            # biases the decoder toward the wake word so "HELIX" is mis-heard less often.
+            # beam_size=5 (beam search) is markedly more accurate than greedy on short spoken commands —
+            # worth the ~1s. `hotwords` biases the decoder toward the wake word AND the control phrases
+            # that MOST need to land ("HELIX", "go to sleep", "wake up", "stop"), so an uncommon word like
+            # HELIX is mis-heard far less. condition_on_previous_text=False keeps each clip independent, so
+            # a previous utterance never drags the next transcription off course.
             segments, _info = model.transcribe(
-                str(wav_path), language="en", beam_size=1, initial_prompt="HELIX."
+                str(wav_path),
+                language="en",
+                beam_size=5,
+                condition_on_previous_text=False,
+                hotwords="HELIX, hey HELIX, wake up, go to sleep, stop, never mind, goodbye",
             )
             return " ".join(seg.text for seg in segments).strip()
         except Exception as exc:

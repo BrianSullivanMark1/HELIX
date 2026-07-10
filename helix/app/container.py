@@ -17,7 +17,7 @@ from helix.adapters.git_repo import GitRepo
 from helix.adapters.json_settings import JsonSettings
 from helix.adapters.restart import Restarter
 from helix.adapters.signal_bus import SignalBus
-from helix.adapters.speech import EdgeSpeechOut, OsSpeechOut, WhisperSpeechIn
+from helix.adapters.speech import EdgeSpeechOut, OsSpeechOut, WhisperSpeechIn, active_model
 from helix.adapters.sqlite_store import SqliteStore
 from helix.adapters.system_clock import SystemClock
 from helix.adapters.voyage_embed import VoyageEmbedder
@@ -43,6 +43,7 @@ from helix.services.prompts import CONSOLE_SYSTEM, DEEP_THINK_SYSTEM
 from helix.services.selfdev import SelfDevService
 from helix.services.selfdev_lane import SelfDevLane
 from helix.services.tools import ToolRegistry
+from helix.services.voiceid import VoiceIdService
 
 
 def _migrate_agents(settings: JsonSettings, agent_store: JsonSettings) -> None:
@@ -220,9 +221,13 @@ class Container:
 
         # Voice (optional; both degrade to text-only / silent if unavailable). TTS uses the chosen
         # neural accent (edge-tts), falling back to the local OS voice when offline/unavailable.
-        self.speech_in = WhisperSpeechIn()
+        self.speech_in = WhisperSpeechIn(active_model())  # use whatever prewarm loaded (preferred/fallback)
         self.speech_out = EdgeSpeechOut(
             lambda: self.settings.get("tts_voice"),
             lambda: self.settings.get("tts_rate"),
             fallback=OsSpeechOut(),
         )
+        # Voice identity: registered voice profiles + the per-utterance speaker decision. A DEDICATED
+        # file (like agents/reminders): profiles sharpen passively while builds may be running, and the
+        # Forge guard byte-reverts helix_settings.json. Embeddings only — never audio.
+        self.voice_id = VoiceIdService(self.paths.data / "helix_voices.json", chat=self.chat)

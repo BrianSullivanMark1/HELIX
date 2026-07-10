@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 # Let QtWebEngine render heavier WebGL (high-poly 3D models) without the GPU process being killed — the
 # "sandbox limit" symptom: a blank viewer on a big mesh. Force GPU use even on blocklisted/integrated
@@ -19,9 +18,7 @@ os.environ.setdefault(
     "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --disable-gpu-sandbox",
 )
 
-import time
-
-from PyQt6.QtCore import Qt, QLockFile
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from helix.adapters.git_repo import GitRepo
@@ -29,6 +26,7 @@ from helix.adapters.json_settings import JsonSettings
 from helix.adapters.restart import Restarter
 from helix.adapters.watchdog import clear_clean_exit, mark_clean_exit, spawn_watchdog
 from helix.app.container import Container
+from helix.app.single_instance import start_activation_server
 from helix.config import AppPaths
 from helix.logging_setup import get_logger, setup_logging
 from helix.ui.main_window import HelixMainWindow
@@ -39,18 +37,20 @@ _LAST_GOOD = "last_good_commit"
 _HEALING = "healing_in_progress"
 
 
-def _acquire_instance_lock(data_dir: Path) -> QLockFile | None:
-    """One HELIX per data dir. QLockFile clears stale locks from dead processes itself; the short retry
-    loop covers the restart path, where the old process may not have released the lock yet. Returns the
-    held lock (keep it alive for the process lifetime), or None when another live instance owns it."""
-    lock = QLockFile(str(data_dir / "helix.lock"))
-    deadline = time.monotonic() + 10.0
-    while True:
-        if lock.tryLock(0):
-            return lock
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(0.25)
+def _raise_window(window) -> None:
+    """Bring the already-running window to the foreground when a second launch pings the activation
+    server (single_instance). On Windows the OS may only flash the taskbar if it blocks the focus
+    steal — acceptable; the point is that a second icon click surfaces HELIX rather than doing nothing."""
+    try:
+        window.setWindowState(
+            (window.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive
+        )
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        QApplication.alert(window, 0)
+    except Exception:
+        _LOG.exception("could not raise the window for a second launch")
 
 
 def run_app(argv: list[str] | None = None) -> int:
@@ -61,14 +61,8 @@ def run_app(argv: list[str] | None = None) -> int:
     app.setApplicationName("HELIX")
     apply_theme(app)
 
-    # Single instance BEFORE any state is touched: a second launch (double-click races, a watchdog
-    # relaunch crossing a manual one) must not fight the first over the mic, the DB, and the lock files.
-    paths = AppPaths.resolve().ensure()
-    instance_lock = _acquire_instance_lock(paths.data)
-    if instance_lock is None:
-        _LOG.info("another HELIX instance is already running — exiting")
-        return 0
-
+    # Single instance is already guaranteed upstream in main.py (a per-data-dir lock taken BEFORE the
+    # voice pre-warm, so a duplicate launch never even reaches here). This process holds that lock.
     try:
         container = Container()
         window = HelixMainWindow(container)
@@ -77,6 +71,14 @@ def run_app(argv: list[str] | None = None) -> int:
         if _self_heal():
             return 0  # a fresh, restored process was spawned
         raise
+
+    # Start listening for second-launch pings AS EARLY AS POSSIBLE — before the (potentially several-
+    # second) interrupted-work recovery below — so a second desktop-icon click during a cold boot still
+    # surfaces this window instead of doing nothing. Raising a not-yet-shown window just shows it early.
+    # Best-effort: the hard single-instance guarantee is the lock held since main.py; this is the nicety.
+    window._activation_server = start_activation_server(
+        app, container.paths.data, lambda: _raise_window(window)
+    )
 
     # Clean up anything a previous crash/kill/power-loss left half-done before the menu is shown: partial
     # builds, and leaked self-change draft worktrees/branches.

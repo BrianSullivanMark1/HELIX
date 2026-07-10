@@ -12,7 +12,7 @@ from pathlib import Path
 from PyQt6.QtCore import QUrl, pyqtSignal
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from helix.ui.chat_input import ChatInput
 from helix.ui.theme import CYAN, LINE, MUTED
@@ -32,6 +32,16 @@ class AppViewer(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        # Everything lives on an inner "card" frame. Normally it's full-bleed and invisible; when the
+        # main window floats a 3D model over the orb (set_floating), the OUTER margins inset the card
+        # and only the CARD gets the opaque rounded style — so the margins around it stay genuinely
+        # transparent and the orb glows through (styling the whole widget would paint the full rect).
+        self._card = QFrame()
+        self._card.setObjectName("ViewerCard")
+        card = QVBoxLayout(self._card)
+        card.setContentsMargins(0, 0, 0, 0)
+        card.setSpacing(0)
+        root.addWidget(self._card)
 
         bar = QWidget()
         bar.setStyleSheet(f"border-bottom:1px solid {LINE};")
@@ -59,7 +69,7 @@ class AppViewer(QWidget):
         row.addWidget(edit_btn)
         row.addWidget(reload_btn)
         row.addWidget(browser)
-        root.addWidget(bar)
+        card.addWidget(bar)
 
         self._web = QWebEngineView()
         # Built models load Three.js from a CDN, so a local file:// page must be allowed to fetch remote
@@ -70,7 +80,7 @@ class AppViewer(QWidget):
         # If a very heavy model kills the render/GPU process, show a helpful message instead of a blank
         # page (and let Reload retry) — rather than the silent "sandbox limit" failure.
         self._web.page().renderProcessTerminated.connect(self._on_render_crash)
-        root.addWidget(self._web, stretch=1)
+        card.addWidget(self._web, stretch=1)
 
         # Live "Edit with AI" bar — hidden until you press Edit. Typing a change and pressing Update
         # iterates THIS build in place (the main window resolves it by the open build's slug — no name
@@ -91,7 +101,18 @@ class AppViewer(QWidget):
         erow.addWidget(self._edit_status)
         erow.addWidget(update_btn)
         self._edit_bar.setVisible(False)
-        root.addWidget(self._edit_bar)
+        card.addWidget(self._edit_bar)
+
+    def set_floating(self, on: bool) -> None:
+        """Present as a floating card inset from the window edges (a 3D model over the orb) or as the
+        normal full-bleed page (apps). The card itself stays OPAQUE on purpose — a transparent
+        QWebEngine background is unreliable across GPUs (see the ShaderOrb note in the main window)."""
+        m = 56 if on else 0
+        self.layout().setContentsMargins(m, max(0, m - 22), m, m)
+        self._card.setStyleSheet(
+            "QFrame#ViewerCard{background:#0a0e14;border:1px solid rgba(63,224,224,0.25);"
+            "border-radius:14px;}" if on else ""
+        )
 
     def _toggle_edit(self) -> None:
         show = not self._edit_bar.isVisible()

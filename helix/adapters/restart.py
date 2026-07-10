@@ -19,6 +19,9 @@ class Restarter:
     def restart(self) -> None:
         frozen = getattr(sys, "frozen", False)
         cmd = [sys.executable] if frozen else [sys.executable, str(self._entry)]
+        # Mark this as a self-relaunch so the new process WAITS for us to release the single-instance lock
+        # and then takes over, instead of treating us (still shutting down) as a rival and bouncing off.
+        cmd.append("--relaunch")
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         subprocess.Popen(cmd, cwd=str(self._root), close_fds=True, creationflags=creationflags)
         # The caller (UI) quits the current app; the freshly spawned process loads the new code.

@@ -81,6 +81,7 @@ class ConversationService:
         on_progress: ProgressFn | None = None,
         cancel: CancelToken | None = None, allow_builds: bool = True, persist: bool = True,
         knowledge_sources: list[tuple[str, str]] | None = None,
+        speaker_context: str | None = None,
     ) -> str:
         # Only the brief history read-modify-writes are locked — NOT the model/tool loop. Builds run in
         # the background (the build tools just enqueue), so a turn is now milliseconds plus model latency;
@@ -108,6 +109,12 @@ class ConversationService:
             if profile_text:
                 last = turns[-1]
                 turns[-1] = Turn(last.role, last.blocks + (Text(profile_text),))
+        # WHO SPOKE this turn (voice identity) — ephemeral like the profile block, so the model can
+        # address the recognized speaker by name and use their identity notes without any of it being
+        # persisted or the system prompt losing byte-stability.
+        if persist and speaker_context and turns:
+            last = turns[-1]
+            turns[-1] = Turn(last.role, last.blocks + (Text(speaker_context),))
         if attachments_text:
             # Attached files/folders ride along as EPHEMERAL context on this turn only — appended to the
             # current (last) user turn, never written to history, so a big attachment isn't replayed on
