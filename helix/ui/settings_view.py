@@ -85,10 +85,12 @@ def _peak_rms(pcm: bytes) -> float:
 class SettingsView(QWidget):
     saved = pyqtSignal()
 
-    def __init__(self, settings: SettingsStore, connections=None, gmail=None, calendar=None) -> None:
+    def __init__(self, settings: SettingsStore, connections=None, gmail=None, calendar=None,
+                 subscription=None) -> None:
         super().__init__()
         self.setObjectName("Panel")
         self._settings = settings
+        self._subscription = subscription          # SubscriptionBrain — reports which brain is live
         self._connections = connections           # save/load service tokens used by agents + call_api
         self._gmail = gmail                        # read-only Gmail inbox credentials (address + app password)
         self._calendar = calendar                  # read-only calendar (the private iCal URL is the secret)
@@ -144,6 +146,14 @@ class SettingsView(QWidget):
             "stored locally and only ever used for the Claude calls you make.",
             self._key, lambda: self._settings.get("claude_api_key", "") or "",
         ))
+        # Live "which brain is running" line — so it's never a mystery whether HELIX is drawing on the
+        # subscription or the metered API. Reflects SAVED settings + real capability (token present AND
+        # the Claude Code app reachable), refreshed on open and after Save.
+        self._brain_status = QLabel()
+        self._brain_status.setWordWrap(True)
+        self._brain_status.setContentsMargins(2, 2, 2, 0)
+        form.addWidget(self._brain_status)
+        self._refresh_brain_status()
 
         # ── Optional integrations, grouped ──
         form.addSpacing(4)
@@ -605,6 +615,36 @@ class SettingsView(QWidget):
             label.setText("● Set" if has else "○ Not set")
             label.setStyleSheet(f"font-size:12px;color:{STATUS_DONE if has else MUTED};")
 
+    def _refresh_brain_status(self) -> None:
+        """Show which brain the next turn will use, from SAVED settings + real capability. The
+        subscription is preferred but only active when a token is saved AND the local Claude Code app
+        is reachable; otherwise HELIX runs on the API key. Honest about the in-between states."""
+        amber = "#e0a13f"
+        token = (self._settings.get("claude_code_oauth_token") or "").strip()
+        key = (self._settings.get("claude_api_key") or "").strip()
+        sub_live = self._subscription is not None and self._subscription.active()
+        if sub_live:
+            text = "● Running on your Claude subscription — off the API meter."
+            color, tip = STATUS_DONE, ("Conversation, watchers, and builds draw on your Claude plan, "
+                                       "the same usage pool as Claude Desktop. No restart needed.")
+        elif key:
+            text = "● Running on the API meter (Console billing)."
+            color = amber
+            tip = ("A subscription token is saved, but the Claude Code app isn't reachable, so HELIX "
+                   "is using the API key. Make sure the Claude desktop app is installed."
+                   if token else
+                   "Add a subscription token above to switch to your Claude plan and stop metered billing.")
+        elif token:
+            text = "○ Token saved, but the Claude Code app isn't reachable — no billing path is active."
+            color, tip = amber, ("HELIX drives the Claude desktop app's local engine; install/open "
+                                 "Claude desktop, or add an API key as a fallback.")
+        else:
+            text = "○ Not connected — add a subscription token (recommended) or an API key above."
+            color, tip = MUTED, ""
+        self._brain_status.setText(text)
+        self._brain_status.setStyleSheet(f"font-size:12px;font-weight:600;color:{color};")
+        self._brain_status.setToolTip(tip)
+
     # ----- load / save -----
     def reload(self) -> None:
         self._oauth_token.setText(self._settings.get("claude_code_oauth_token", "") or "")
@@ -633,6 +673,7 @@ class SettingsView(QWidget):
             self._calendar_url.setText(self._calendar.url())
         self._populate_audio_devices()  # refresh the device lists (earphones may have come/gone)
         self._refresh_statuses()
+        self._refresh_brain_status()
 
     def _save(self) -> None:
         self._settings.set("claude_code_oauth_token", self._oauth_token.text().strip())
@@ -653,5 +694,6 @@ class SettingsView(QWidget):
             self._settings.set(AUDIO_INPUT_SETTING, self._mic_combo.currentData() or "")
             self._settings.set(AUDIO_OUTPUT_SETTING, self._out_combo.currentData() or "")
         self._refresh_statuses()
+        self._refresh_brain_status()  # a just-saved token flips this to "on your subscription" at once
         self._status.setText("Saved.")
         self.saved.emit()

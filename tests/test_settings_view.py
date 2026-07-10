@@ -67,6 +67,56 @@ def test_status_pills_reflect_set_state(_app):
     assert "● Set" in labels and "○ Not set" in labels
 
 
+class _Sub:
+    """Mirrors SubscriptionBrain.active(): live only when a token is saved AND the engine is present."""
+    def __init__(self, settings, capable=True):
+        self._settings = settings
+        self._capable = capable  # SDK + Claude Code CLI reachable
+
+    def active(self):
+        token = (self._settings.get("claude_code_oauth_token") or "").strip()
+        return self._capable and bool(token)
+
+
+def test_brain_status_shows_subscription_when_active(_app):
+    s = _Settings()
+    s.d["claude_code_oauth_token"] = "sk-ant-oat01-tok"
+    view = SettingsView(s, _Conns(), subscription=_Sub(s, capable=True))
+    assert "on your claude subscription" in view._brain_status.text().lower()
+
+
+def test_brain_status_shows_api_meter_when_only_key(_app):
+    s = _Settings()
+    s.d["claude_api_key"] = "sk-ant-key"
+    view = SettingsView(s, _Conns(), subscription=_Sub(s, capable=True))
+    assert "on the api meter" in view._brain_status.text().lower()
+
+
+def test_brain_status_flags_token_saved_but_cli_unreachable(_app):
+    # token present, engine NOT reachable, no key → honest in-between state
+    s = _Settings()
+    s.d["claude_code_oauth_token"] = "sk-ant-oat01-tok"
+    view = SettingsView(s, _Conns(), subscription=_Sub(s, capable=False))
+    txt = view._brain_status.text().lower()
+    assert "token saved" in txt and "reachable" in txt
+
+
+def test_brain_status_not_connected_when_empty(_app):
+    s = _Settings()
+    view = SettingsView(s, _Conns(), subscription=_Sub(s, capable=True))
+    assert "not connected" in view._brain_status.text().lower()
+
+
+def test_brain_status_flips_to_subscription_after_saving_a_token(_app):
+    s = _Settings()
+    view = SettingsView(s, _Conns(), subscription=_Sub(s, capable=True))
+    assert "not connected" in view._brain_status.text().lower()
+    view._oauth_token.setText("sk-ant-oat01-fresh")
+    view._save()
+    assert s.get("claude_code_oauth_token") == "sk-ant-oat01-fresh"
+    assert "on your claude subscription" in view._brain_status.text().lower()
+
+
 def test_audio_device_selection_saves(_app):
     s, c = _Settings(), _Conns()
     view = SettingsView(s, c)

@@ -118,7 +118,8 @@ class HelixMainWindow(QMainWindow):
             container.builds, container.agents, container.tasks, container.knowledge
         )
         self.settings = SettingsView(
-            container.settings, container.connections, container.gmail, container.calendar
+            container.settings, container.connections, container.gmail, container.calendar,
+            subscription=container.subscription,
         )
         self._stack.addWidget(self.console)  # 0
         self._stack.addWidget(self.launcher)  # 1
