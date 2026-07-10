@@ -80,7 +80,12 @@ class AnthropicChat:
     def _client_for_current_key(self) -> anthropic.Anthropic:
         key = (self._key_provider() or "").strip()
         if not key:
-            raise MissingApiKey("Add your Claude API key in Settings to start building.")
+            # Reached only when the subscription path is unavailable (no token, no CLI, or it failed)
+            # AND no API key is set — name both so a token-only user knows their options.
+            raise MissingApiKey(
+                "Claude isn't reachable right now. Check your subscription token (run "
+                "claude setup-token) or add a Claude API key in Settings."
+            )
         if self._client is None or self._client_key != key:
             self._client = anthropic.Anthropic(api_key=key)
             self._client_key = key

@@ -121,13 +121,27 @@ class SettingsView(QWidget):
         form.setContentsMargins(0, 2, 12, 4)
         form.setSpacing(8)
 
-        # ── Required: the Claude key ──
-        form.addWidget(self._section("HELIX", "Your key stays on this machine — used only for the Claude calls you trigger."))
+        # ── Required: connect Claude (one of the two) ──
+        form.addWidget(self._section(
+            "HELIX", "Connect Claude one of two ways — both stay on this machine. With BOTH set, the "
+            "subscription token is preferred and the API key becomes the fallback."
+        ))
+        self._oauth_token = self._password("sk-ant-oat01-…")
+        form.addWidget(self._field_row(
+            "Claude subscription token", "Claude subscription token (Claude Code)",
+            "RECOMMENDED — runs HELIX's conversation, watchers, and app-building on your Claude "
+            "Pro/Max subscription (the same usage pool as Claude Desktop) instead of pay-per-token "
+            "API billing. One-time setup: open a terminal, run: claude setup-token — approve in the "
+            "browser, then paste the token here. Note: apps you build that make their OWN Claude "
+            "calls still need the API key below.",
+            self._oauth_token, lambda: self._settings.get("claude_code_oauth_token", "") or "",
+        ))
         self._key = self._password("sk-ant-…")
         form.addWidget(self._field_row(
             "Claude API key", "Claude API key",
-            "Powers everything HELIX does — the conversation and the apps it builds. Get one at "
-            "console.anthropic.com. It's stored locally and only ever used for the Claude calls you make.",
+            "Alternative to the subscription token — bills per token at console.anthropic.com. Also "
+            "acts as the fallback when a subscription turn fails (expired token, plan limits). It's "
+            "stored locally and only ever used for the Claude calls you make.",
             self._key, lambda: self._settings.get("claude_api_key", "") or "",
         ))
 
@@ -593,6 +607,7 @@ class SettingsView(QWidget):
 
     # ----- load / save -----
     def reload(self) -> None:
+        self._oauth_token.setText(self._settings.get("claude_code_oauth_token", "") or "")
         self._key.setText(self._settings.get("claude_api_key", "") or "")
         self._tripo.setText(self._settings.get("tripo_api_key", "") or "")
         self._voyage.setText(self._settings.get("voyage_api_key", "") or "")
@@ -620,6 +635,7 @@ class SettingsView(QWidget):
         self._refresh_statuses()
 
     def _save(self) -> None:
+        self._settings.set("claude_code_oauth_token", self._oauth_token.text().strip())
         self._settings.set("claude_api_key", self._key.text().strip())
         self._settings.set("tripo_api_key", self._tripo.text().strip())
         self._settings.set("voyage_api_key", self._voyage.text().strip())

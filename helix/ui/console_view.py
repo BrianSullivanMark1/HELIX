@@ -692,7 +692,7 @@ class ConsoleView(QWidget):
         self._banner.setObjectName("Card")
         brow = QHBoxLayout(self._banner)
         brow.setContentsMargins(16, 10, 12, 10)
-        msg = QLabel("Add your Claude API key to start building apps.")
+        msg = QLabel("Connect Claude to start — a subscription token or API key, in Settings.")
         msg.setObjectName("Banner")
         open_btn = QPushButton("Open Settings")
         open_btn.setObjectName("Primary")
@@ -847,9 +847,16 @@ class ConsoleView(QWidget):
         # context — it just isn't replayed onto the screen at startup (_load_history remains available).
 
     # ----- public -----
+    def _has_claude_auth(self) -> bool:
+        """Either credential works: an API key (Console billing) or a Claude Code token (the user's
+        Claude subscription — same usage pool as Claude Desktop)."""
+        return bool(
+            (self._settings.get("claude_api_key") or "").strip()
+            or (self._settings.get("claude_code_oauth_token") or "").strip()
+        )
+
     def refresh_key_state(self) -> None:
-        has_key = bool((self._settings.get("claude_api_key") or "").strip())
-        self._banner.setVisible(not has_key)
+        self._banner.setVisible(not self._has_claude_auth())
 
     def reapply_audio_devices(self) -> None:
         """After Settings changes the input device, switch the live mic over without a restart."""
@@ -1115,12 +1122,13 @@ class ConsoleView(QWidget):
             self._add_bubble("you", text)
             self._stop()
             return
-        if not (self._settings.get("claude_api_key") or "").strip():
-            # No key yet: don't send (it would fail with a raw error and leave a dangling user turn that
-            # breaks the NEXT request). Keep what they typed and point them straight at Settings.
+        if not self._has_claude_auth():
+            # No credential yet: don't send (it would fail with a raw error and leave a dangling user
+            # turn that breaks the NEXT request). Keep what they typed and point them at Settings.
             if text:
                 self._input.setText(text)
-            self._add_bubble("helix", "Add your Claude API key first, then I'll build.")
+            self._add_bubble("helix", "Connect Claude first — a Claude Code token (uses your Claude "
+                                      "subscription) or an API key, in Settings.")
             self._add_actions([("Open Settings", self.openSettingsRequested.emit)])
             return
         prompt = text or "Here are some files — take a look."  # allow an attachment-only message

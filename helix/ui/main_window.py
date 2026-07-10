@@ -542,6 +542,7 @@ class HelixMainWindow(QMainWindow):
             self._shutdown_heartbeat,  # stop the cadence + join any in-flight scheduled agent
             self._c.build_queue.shutdown,
             self._c.selfdev_lane.shutdown,
+            self._c.subscription.shutdown,  # close the SDK session + its claude.exe cleanly
             self._stop_app_servers,  # kill any backend-app servers so they don't outlive HELIX / hold a port
             (self._viewer.clear if self._viewer is not None else lambda: None),
             self.console.shutdown,

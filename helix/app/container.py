@@ -9,6 +9,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from helix.adapters.agent_sdk_chat import PreferredChat, SubscriptionBrain
 from helix.adapters.anthropic_chat import AnthropicChat
 from helix.adapters.api_coder import ApiCoder
 from helix.adapters.claude_code_cli import ClaudeCodeCli
@@ -169,16 +170,33 @@ class Container:
         # Model tiering: the conversation runs on Sonnet (fast — thinking off, low effort) for snappy
         # routing/confirming/chat; a hard question escalates to Opus with deep thinking via think_harder;
         # builds use the most capable coder. All can research the web.
-        self.chat = AnthropicChat(
+        api_chat = AnthropicChat(
             _key, model="claude-sonnet-4-6", web_search=True, thinking="disabled", effort="low",
         )
         deep_chat = AnthropicChat(
             _key, model="claude-opus-4-8", web_search=True, thinking="adaptive", effort="high",
         )
+        # THE SUBSCRIPTION BRAIN: when a Claude Code token is connected (Settings → `claude
+        # setup-token`), conversation/agents/distillers run on the user's Claude PLAN — the same
+        # usage pool as Claude Desktop — through the official Agent SDK + the local claude.exe,
+        # instead of pay-per-token API billing. Tools are late-bound below (registry ctor cycle);
+        # without a token everything stays on the API key exactly as before.
+        self.subscription = SubscriptionBrain(_oauth, CONSOLE_SYSTEM)
+        # Plain no-tool chat (profile distiller, voice-identity notes, …): subscription first.
+        self.chat = PreferredChat(self.subscription, api_chat)
 
         def _deep_think(question: str, on_progress=None, cancel=None) -> str:
             if cancel is not None and getattr(cancel, "is_set", lambda: False)():
                 return ""  # the user already stopped — don't fire the (expensive) Opus escalation
+            if self.subscription.active():
+                try:
+                    return self.subscription.run_hermetic(
+                        f"{DEEP_THINK_SYSTEM}\n\n---\n\n{question}",
+                        model="claude-opus-4-8", effort="high",
+                        on_progress=on_progress, cancel=cancel,
+                    ) or "I couldn't reason that through just now — try rephrasing?"
+                except Exception:  # noqa: BLE001 — fall back to the API escalation below
+                    pass
             reply = deep_chat.chat([Turn(Role.USER, (Text(question),))], system=DEEP_THINK_SYSTEM)
             # Meter the Opus escalation like the main loop does — it's the most expensive call path, and
             # was previously invisible to the usage ledger.
@@ -292,9 +310,10 @@ class Container:
         # The orb quietly learns who the user is: a background distiller (same fast chat model) keeps a
         # compact profile in the DB, injected into each Console turn like the time anchor. No knobs.
         self.profile = ProfileService(self.chat, self.store, self.clock)
+        self.subscription._tools = self.tools  # late-bind (tools → services ctor cycle, like agents)
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM,
-            knowledge=self.knowledge, profile=self.profile,
+            knowledge=self.knowledge, profile=self.profile, subscription=self.subscription,
         )
         # Agents persist in a DEDICATED file (not the guarded settings file): scheduled agents write
         # last_run mid-build via the heartbeat, and the orb can create/pause an agent while a build runs

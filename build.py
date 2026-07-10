@@ -84,6 +84,13 @@ def main(argv: list[str] | None = None) -> int:
     # template as DATA that a static scan misses — collect both in full so PDF/Word ingestion works frozen.
     for pkg in ("pypdf", "docx"):
         args += ["--collect-all", pkg]
+    # The subscription brain imports the Agent SDK lazily (inside functions), so the static scan misses
+    # it — pull in the CODE (submodules), not the data. --collect-all would sweep the SDK's bundled
+    # _bundled/claude.exe (~248 MB) into every build; HELIX drives the DESKTOP APP's claude.exe via
+    # cli_path, so that copy is dead weight. mcp ships JSON schema data the SDK loads, so collect it in
+    # full.
+    args += ["--collect-submodules", "claude_agent_sdk"]
+    args += ["--collect-all", "mcp"]
     # scipy 1.16 added a compiled helper (scipy._cyutility) that scipy.linalg/ndimage import at startup;
     # PyInstaller 6.12's bundled scipy hook predates it and skips it, so the frozen app dies importing
     # materials.py (gaussian_filter -> scipy.ndimage -> scipy.linalg -> _cyutility). Pull it in explicitly.

@@ -104,6 +104,7 @@ def run_app(argv: list[str] | None = None) -> int:
     # restart path so the old process frees the mic before the new one opens it.
     app.aboutToQuit.connect(container.build_queue.shutdown)
     app.aboutToQuit.connect(container.selfdev_lane.shutdown)
+    app.aboutToQuit.connect(container.subscription.shutdown)  # close the SDK session + its claude.exe
     app.aboutToQuit.connect(window.console.shutdown)
     app.aboutToQuit.connect(container.store.close)
 

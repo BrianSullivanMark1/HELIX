@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from helix.domain.errors import BuildCancelled
 from helix.domain.models import Message, Role
+from helix.logging_setup import get_logger
 from helix.ports.clock import Clock
 from helix.ports.coder import ProgressFn
 from helix.ports.llm import ChatModel, Text, ToolResult, Turn
@@ -20,6 +21,8 @@ from helix.services.tools import ToolRegistry
 if TYPE_CHECKING:
     from helix.services.knowledge import KnowledgeService
     from helix.services.profile import ProfileService
+
+_LOG = get_logger("conversation")
 
 STOPPED_REPLY = "Okay, I stopped."  # shown (not spoken) when the user halts a turn; UI may offer cleanup
 
@@ -62,6 +65,7 @@ class ConversationService:
         system: str,
         knowledge: "KnowledgeService | None" = None,
         profile: "ProfileService | None" = None,
+        subscription=None,
     ) -> None:
         self._chat = chat
         self._tools = tools
@@ -71,6 +75,7 @@ class ConversationService:
         self._system = system
         self._knowledge = knowledge  # ambient auto-recall of the user's saved knowledge (orb turns only)
         self._profile = profile      # the distilled who-is-the-user block, injected on orb turns
+        self._subscription = subscription  # SubscriptionBrain — turns on the user's Claude plan when active
         # A turn is a read-modify-write over the shared history. The Console and an Agent run on
         # separate worker threads against this one service, so serialize whole turns — otherwise their
         # appends interleave and the API gets a malformed (e.g. two-user-in-a-row) turn list.
@@ -95,47 +100,30 @@ class ConversationService:
             # An agent run is hermetic: its goal and report never touch the shared Console transcript, so
             # it can't evict real turns from the window or be 'remembered' as if the user typed it.
             turns = [Turn(Role.USER, (Text(user_text),))]
-        # Anchor the model to the REAL current time every turn. Without this it has no idea what "today"
-        # is or the user's timezone, so it guesses dates — and it mis-converts the Unix-epoch timestamps
-        # that Slack/GitHub/email return (e.g. Slack's "ts"). This is the fix for wrong message dates.
-        if turns:
-            last = turns[-1]
-            turns[-1] = Turn(last.role, last.blocks + (Text(self._now_context()),))
-        # Who the user is — the distilled profile rides along like the time anchor (ephemeral, never
-        # persisted, cache-friendly because the system prompt stays byte-stable). Orb turns only: an
-        # agent run stays hermetic.
-        if persist and self._profile is not None and turns:
+        # EPHEMERAL per-turn context, collected once and used by BOTH brains (API loop and the
+        # subscription session): the real-time anchor, the distilled profile, who spoke (voice
+        # identity), attachments, and ambient knowledge. Appended to the LAST user turn for the API
+        # path (never persisted, cache-friendly because the system prompt stays byte-stable).
+        extras: list[str] = [self._now_context()]
+        if persist and self._profile is not None:
             profile_text = self._profile.context()
             if profile_text:
-                last = turns[-1]
-                turns[-1] = Turn(last.role, last.blocks + (Text(profile_text),))
-        # WHO SPOKE this turn (voice identity) — ephemeral like the profile block, so the model can
-        # address the recognized speaker by name and use their identity notes without any of it being
-        # persisted or the system prompt losing byte-stability.
-        if persist and speaker_context and turns:
-            last = turns[-1]
-            turns[-1] = Turn(last.role, last.blocks + (Text(speaker_context),))
+                extras.append(profile_text)
+        if persist and speaker_context:
+            extras.append(speaker_context)
         if attachments_text:
-            # Attached files/folders ride along as EPHEMERAL context on this turn only — appended to the
-            # current (last) user turn, never written to history, so a big attachment isn't replayed on
-            # every later turn (and doesn't bloat the saved transcript). The text is already fenced and
-            # marked untrusted by the attachments service.
-            if turns:
-                last = turns[-1]
-                turns[-1] = Turn(last.role, last.blocks + (Text(attachments_text),))
-            else:
-                turns = [Turn(Role.USER, (Text(attachments_text),))]
-        # Ambient knowledge: when the message clearly matches something the user saved, surface it as
-        # EPHEMERAL context (appended to this turn only, never persisted — exactly like attachments) so the
-        # orb answers from their own material without being told to search. Interactive orb only (persist);
-        # an agent retrieves explicitly. auto_context is high-precision, so most turns inject nothing.
-        if persist and self._knowledge is not None and turns:
+            extras.append(attachments_text)
+        if persist and self._knowledge is not None:
             knowledge_text, ksources = self._knowledge.auto_context_with_sources(user_text)
             if knowledge_text:
-                last = turns[-1]
-                turns[-1] = Turn(last.role, last.blocks + (Text(knowledge_text),))
+                extras.append(knowledge_text)
                 if knowledge_sources is not None:
                     knowledge_sources.extend(ksources)  # surfaced to the UI as a citation chip
+        if turns:
+            last = turns[-1]
+            turns[-1] = Turn(last.role, last.blocks + tuple(Text(x) for x in extras))
+        else:
+            turns = [Turn(Role.USER, tuple(Text(x) for x in extras))]
         specs = self._tools.specs()
         if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete/run tools
             specs = [s for s in specs if s.name not in BUILD_TOOLS]
@@ -147,6 +135,53 @@ class ConversationService:
             if self._profile is not None:
                 self._profile.after_turn()  # background; never delays the reply
             return out
+
+        # THE SUBSCRIPTION BRAIN: when the user has connected their Claude Code token, turns run on
+        # their Claude subscription (the same usage pool as Claude Desktop) instead of API billing.
+        # Orb turns ride a persistent SDK session (the session carries model-side history, so only
+        # this turn's text + context is sent, plus a compact recent transcript to prime a session
+        # that's fresh after a restart); agent runs stay hermetic one-shots. Persistence and tool
+        # digests behave identically to the API path.
+        if self._subscription is not None and self._subscription.active():
+            if cancel is not None and cancel.is_set():  # pre-cancelled: don't query or pollute the session
+                return finish(STOPPED_REPLY)
+            names = tuple(s.name for s in specs)
+            prompt = "\n\n".join([user_text, *extras])
+            dispatched: list[str] = []  # tools that RAN this turn (their side effects are real)
+
+            def _on_tool(name: str, digest: str) -> None:
+                dispatched.append(name)
+                if persist:
+                    self._remember_tool(name, digest)
+
+            try:
+                if persist:
+                    text = self._subscription.run_orb_turn(
+                        prompt, names, history=self._recent_digest(),
+                        on_progress=on_progress, cancel=cancel, on_tool=_on_tool,
+                    )
+                else:
+                    text = self._subscription.run_hermetic(
+                        prompt, names, on_progress=on_progress, cancel=cancel, on_tool=_on_tool,
+                    )
+                if cancel is not None and cancel.is_set():
+                    return finish(STOPPED_REPLY)
+                # finish() runs OUTSIDE this try: a persistence hiccup must NOT be mistaken for a
+                # model failure and re-run the whole turn (double answer, double side effects).
+                subscription_text = text or "I got stuck — could you rephrase?"
+            except Exception:  # noqa: BLE001
+                if dispatched:
+                    # Tools with real side effects (a build enqueued, a reminder set) already ran. Do
+                    # NOT re-run the whole turn on the API path — that would double them. Surface a
+                    # soft partial instead.
+                    _LOG.warning("subscription turn failed after tools ran (%s); not re-running",
+                                 dispatched, exc_info=True)
+                    return finish("I started on that but hit a snag partway — check whether it went "
+                                  "through before asking again.")
+                _LOG.warning("subscription turn failed; falling back to the API path", exc_info=True)
+                subscription_text = None
+            if subscription_text is not None:
+                return finish(subscription_text)
 
         reply = None
         try:
@@ -231,6 +266,18 @@ class ConversationService:
         digest = f"[Earlier tool result — {name} (replayed by HELIX, not typed by the user)]\n{text}"
         with self._lock:
             self._store.append(Message(Role.TOOL, digest, self._clock.now()))
+
+    def _recent_digest(self, limit: int = 12) -> str:
+        """A compact recent transcript for priming a fresh subscription session after a restart —
+        the last few user/assistant lines only (TOOL digests excluded; the SDK session re-earns its
+        own). Empty when there's no prior conversation."""
+        msgs = [m for m in self._store.recent(limit) if m.role in (Role.USER, Role.ASSISTANT)]
+        # Drop THIS turn's just-appended user line (persist wrote it before we got here).
+        if msgs and msgs[-1].role == Role.USER:
+            msgs = msgs[:-1]
+        lines = [f"{'You' if m.role == Role.USER else 'HELIX'}: {(m.text or '').strip()[:400]}"
+                 for m in msgs[-8:]]
+        return "\n".join(lines)
 
     def _history_turns(self) -> list[Turn]:
         # TOOL digests replay as user-role context blocks (the API has no bare 'tool' text role); they

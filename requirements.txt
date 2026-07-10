@@ -5,6 +5,7 @@
 # --- Core (required) ---
 PyQt6>=6.7            # the desktop UI (single runtime)
 anthropic>=0.40       # the model layer: drives the conversation and the API-based coder
+claude-agent-sdk>=0.2 # the subscription brain — runs turns on the user's Claude plan via claude.exe
 httpx>=0.27           # HTTP client for the Tripo neural-3D adapter (also a transitive anthropic dep)
 
 # --- Knowledge: document ingestion ---
