@@ -106,9 +106,11 @@ class ShaderOrb(QWidget):
                 pass
 
 
-# A transparent Three.js energy core: a Fresnel-lit, audio-reactive sphere with an additive outer glow.
-# Fresnel is simple, robust GLSL (no fragile noise), so it compiles reliably; if anything fails the page
-# never sets the ready title and the QPainter orb shows instead.
+# The V3 Presence: a dark glass sphere etched with a living circuit (charge pulses racing the traces,
+# twinkling junction pads, a breathing reactor heart, a hard fresnel rim), a tight neon halo, three
+# gyroscopic energy rings carrying in-hue charge packets, and an orbiting spark field. Dark always —
+# the body stays near-black; only the energy glows. All GLSL is simple sin/fract/smoothstep so it
+# compiles reliably; if anything fails the page never sets the ready title and the QPainter orb shows.
 _ORB_HTML = r"""<!doctype html><html><head><meta charset="utf-8" />
 <style>html,body{margin:0;height:100%;background:transparent;overflow:hidden}#c{width:100%;height:100%}</style>
 <script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }</script>
@@ -116,20 +118,21 @@ _ORB_HTML = r"""<!doctype html><html><head><meta charset="utf-8" />
 <script type="module">
 import * as THREE from "three";
 const READY = "helix-orb-ready";
+// Per-state params. Colour is the STATE's voice; a build status (below) overrides the hue outright.
 const STATES = {
-  idle:        { col: [0.25, 0.88, 0.88], glow: 0.45, speed: 0.25 },
-  listening:   { col: [0.25, 0.88, 0.88], glow: 0.85, speed: 0.6 },
-  transcribing:{ col: [0.30, 0.95, 0.95], glow: 0.95, speed: 1.3 },
-  thinking:    { col: [0.96, 0.70, 0.22], glow: 0.7,  speed: 0.9 },
-  speaking:    { col: [1.00, 0.78, 0.34], glow: 1.0,  speed: 0.8 },
+  idle:        { col: [0.16, 0.55, 1.00], glow: 0.42, speed: 0.55 },
+  listening:   { col: [0.20, 0.66, 1.00], glow: 0.80, speed: 1.0 },
+  transcribing:{ col: [0.30, 0.80, 1.00], glow: 0.95, speed: 2.2 },
+  thinking:    { col: [1.00, 0.62, 0.16], glow: 0.72, speed: 1.6 },
+  speaking:    { col: [1.00, 0.74, 0.24], glow: 1.00, speed: 1.3 },
 };
-// Build-status colours own the hue (yellow/green/red); null = normal conversational colour.
-const STATUS = { working: [1.0, 0.81, 0.27], done: [0.25, 0.88, 0.48], error: [1.0, 0.36, 0.38] };
-let cur = STATES.idle, tgt = STATES.idle, level = 0.0, bands = new Array(16).fill(0), statusCol = null;
-window.orbState = (s) => { tgt = STATES[s] || STATES.idle; };
+const STATUS = { working: [1.0, 0.78, 0.20], done: [0.22, 0.92, 0.42], error: [1.0, 0.30, 0.32] };
+let cur = { col:[0.16,0.55,1.0], glow:0.42, speed:0.55 }, tgt = STATES.idle;
+let level = 0.0, bands = new Array(16).fill(0), statusCol = null;
+window.orbState  = (s) => { tgt = STATES[s] || STATES.idle; };
 window.orbStatus = (s) => { statusCol = STATUS[s] || null; };
-window.orbLevel = (v) => { level = Math.max(0, Math.min(1, +v || 0)); };
-window.orbBands = (a) => { if (Array.isArray(a)) bands = a; };
+window.orbLevel  = (v) => { level = Math.max(0, Math.min(1, +v || 0)); };
+window.orbBands  = (a) => { if (Array.isArray(a)) bands = a; };
 
 try {
   const el = document.getElementById("c");
@@ -139,56 +142,171 @@ try {
   const resize = () => renderer.setSize(el.clientWidth, el.clientHeight);
   el.appendChild(renderer.domElement); resize();
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100); camera.position.z = 3.2;
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100); camera.position.z = 3.4;
   const fixCam = () => { camera.aspect = el.clientWidth / el.clientHeight; camera.updateProjectionMatrix(); };
-  fixCam();
-  addEventListener("resize", () => { resize(); fixCam(); });
+  fixCam(); addEventListener("resize", () => { resize(); fixCam(); });
 
-  const uni = { uTime: { value: 0 }, uColor: { value: new THREE.Color(0.25,0.88,0.88) },
-                uGlow: { value: 0.45 }, uLevel: { value: 0 } };
-  const vert = `varying vec3 vN; varying vec3 vV; uniform float uTime; uniform float uLevel;
-    void main(){ vec3 p = position;
-      float w = sin(p.y*6.0 + uTime*2.0)*0.02 + sin(p.x*5.0 - uTime*1.5)*0.02;
-      p += normal * (w * (0.6 + uLevel*2.5));
-      vec4 mv = modelViewMatrix * vec4(p,1.0);
-      vN = normalize(normalMatrix * normal); vV = normalize(-mv.xyz);
-      gl_Position = projectionMatrix * mv; }`;
-  const frag = `varying vec3 vN; varying vec3 vV; uniform vec3 uColor; uniform float uGlow; uniform float uLevel;
-    void main(){ float fres = pow(1.0 - max(dot(vN, vV), 0.0), 2.2);
-      float core = 0.18 + 0.5*uGlow;
-      vec3 c = uColor * (core + fres*1.6) + uColor*uLevel*0.8;
-      float a = clamp(fres*1.3 + core*0.5 + uLevel*0.3, 0.0, 1.0);
-      gl_FragColor = vec4(c, a); }`;
-  const mat = new THREE.ShaderMaterial({ uniforms: uni, vertexShader: vert, fragmentShader: frag,
-    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
-  const core = new THREE.Mesh(new THREE.IcosahedronGeometry(1.0, 24), mat); scene.add(core);
+  const uni = {
+    uTime:  { value: 0 },
+    uColor: { value: new THREE.Color(0.16, 0.55, 1.0) },
+    uGlow:  { value: 0.42 },
+    uLevel: { value: 0 },
+  };
 
-  const glowMat = new THREE.ShaderMaterial({ uniforms: uni,
-    vertexShader: `varying vec3 vN; varying vec3 vV; void main(){ vec4 mv = modelViewMatrix*vec4(position,1.0);
-      vN = normalize(normalMatrix*normal); vV = normalize(-mv.xyz); gl_Position = projectionMatrix*mv; }`,
-    fragmentShader: `varying vec3 vN; varying vec3 vV; uniform vec3 uColor; uniform float uGlow;
-      void main(){ float f = pow(1.0 - max(dot(vN,vV),0.0), 3.0);
-        gl_FragColor = vec4(uColor, f * (0.35 + uGlow*0.5)); }`,
-    transparent: true, blending: THREE.AdditiveBlending, side: THREE.BackSide, depthWrite: false });
-  scene.add(new THREE.Mesh(new THREE.IcosahedronGeometry(1.5, 8), glowMat));
+  // 1. The core: a dark glass sphere etched with a LIVING CIRCUIT.
+  const coreVert = `
+    varying vec3 vN; varying vec3 vV; varying vec3 vL;
+    void main(){
+      vL = position;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vN = normalize(normalMatrix * normal);
+      vV = normalize(-mv.xyz);
+      gl_Position = projectionMatrix * mv;
+    }`;
+  const coreFrag = `
+    varying vec3 vN; varying vec3 vV; varying vec3 vL;
+    uniform vec3 uColor; uniform float uTime; uniform float uGlow; uniform float uLevel;
+    float h21(vec2 p){ p = fract(p*vec2(123.34, 345.45)); p += dot(p, p+34.345); return fract(p.x*p.y); }
+    void main(){
+      vec3 n = normalize(vL);
+      float lat = acos(clamp(n.y, -1.0, 1.0));
+      float lon = atan(n.z, n.x);
+      // fine circuit grid in spherical coords - sparse wires over a near-black body
+      float NLat = 20.0, NLon = 32.0;
+      vec2 cell = vec2(floor(lon/6.2831853*NLon), floor(lat/3.1415927*NLat));
+      vec2 f = vec2(fract(lon/6.2831853*NLon), fract(lat/3.1415927*NLat));
+      float hx = h21(cell + 7.0), hy = h21(cell + 41.0);
+      float lineU = (hx > 0.62) ? smoothstep(0.030, 0.0, min(f.x, 1.0-f.x)) : 0.0;
+      float lineV = (hy > 0.58) ? smoothstep(0.030, 0.0, min(f.y, 1.0-f.y)) : 0.0;
+      float wire = max(lineU, lineV);
+      // charge pulses race along the wires
+      float pulseU = pow(0.5 + 0.5*sin(lat*11.0 - uTime*2.8 + hx*6.28), 14.0);
+      float pulseV = pow(0.5 + 0.5*sin(lon*9.0 + uTime*2.3 + hy*6.28), 14.0);
+      float charge = lineU*pulseU*2.2 + lineV*pulseV*2.2;
+      // a few lit pads at junctions, twinkling on their own clocks
+      float pad = 0.0;
+      float hp = h21(cell + 99.0);
+      if (hp > 0.855) {
+        float d = length(f - 0.5);
+        float tw = 0.5 + 0.5*sin(uTime*(1.5 + hp*3.0) + hp*40.0);
+        pad = smoothstep(0.11, 0.0, d) * (0.25 + 0.85*tw);
+      }
+      // reactor heart: front-facing inner glow that breathes
+      float face = max(dot(vN, vV), 0.0);
+      float breathe = 0.80 + 0.20*sin(uTime*1.1);
+      float heart = pow(face, 4.0) * breathe * (0.30 + 0.75*uLevel);
+      // fresnel rim - the hard neon edge
+      float fres = pow(1.0 - face, 3.0);
+      // dark body first, energy on top; never a white flood, never a bright disc
+      vec3 body = vec3(0.006, 0.010, 0.018) + vec3(0.010, 0.016, 0.028)*face;
+      vec3 c = body
+             + uColor * wire   * (0.10 + 0.16*uGlow)
+             + uColor * charge * (1.10 + 1.40*uGlow)
+             + uColor * pad    * (0.55 + 0.65*uGlow)
+             + uColor * heart  * (0.16 + 0.38*uGlow)
+             + uColor * fres   * (0.80 + 0.95*uGlow);
+      c += vec3(1.0) * charge * 0.10 * uGlow;  // a white-hot pin in the racing charges only
+      gl_FragColor = vec4(c, 1.0);
+    }`;
+  const core = new THREE.Mesh(
+    new THREE.SphereGeometry(1.0, 96, 96),
+    new THREE.ShaderMaterial({ uniforms: uni, vertexShader: coreVert, fragmentShader: coreFrag })
+  );
+  scene.add(core);
 
+  // 2. A tight neon halo hugging the rim - depth, never a bright disc.
+  const halo = new THREE.Mesh(
+    new THREE.SphereGeometry(1.07, 48, 48),
+    new THREE.ShaderMaterial({ uniforms: uni,
+      vertexShader: `varying vec3 vN; varying vec3 vV; void main(){ vec4 mv = modelViewMatrix*vec4(position,1.0);
+        vN = normalize(normalMatrix*normal); vV = normalize(-mv.xyz); gl_Position = projectionMatrix*mv; }`,
+      fragmentShader: `varying vec3 vN; varying vec3 vV; uniform vec3 uColor; uniform float uGlow;
+        void main(){ float f = pow(1.0 - max(dot(vN,vV),0.0), 3.0);
+          gl_FragColor = vec4(uColor, f * (0.05 + uGlow*0.11)); }`,
+      transparent: true, blending: THREE.AdditiveBlending, side: THREE.BackSide, depthWrite: false })
+  );
+  scene.add(halo);
+
+  // 3. Gyroscope: three thin energy rings on tilted axes carrying in-hue charge packets.
+  const gyro = new THREE.Group(); scene.add(gyro);
+  const RINGS = [
+    { r: 1.30, tube: 0.016, tiltX: 1.15, tiltZ: 0.00, packets: 3.0, flow:  1.6 },
+    { r: 1.46, tube: 0.012, tiltX: 2.05, tiltZ: 0.85, packets: 5.0, flow: -1.1 },
+    { r: 1.62, tube: 0.009, tiltX: 0.45, tiltZ: 2.30, packets: 2.0, flow:  0.8 },
+  ];
+  for (const cfg of RINGS) {
+    const u = { uTime: uni.uTime, uColor: uni.uColor, uGlow: uni.uGlow, uLevel: uni.uLevel,
+                uPk: { value: cfg.packets }, uFlow: { value: cfg.flow } };
+    const mat = new THREE.ShaderMaterial({ uniforms: u,
+      vertexShader: `varying float vAng; void main(){ vAng = atan(position.y, position.x);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `varying float vAng; uniform vec3 uColor; uniform float uTime; uniform float uGlow;
+        uniform float uLevel; uniform float uPk; uniform float uFlow;
+        void main(){
+          float packet = pow(0.5 + 0.5*sin(vAng*uPk - uTime*uFlow*2.2), 18.0);
+          float base = 0.16 + 0.14*uGlow;
+          float a = base + packet*(1.0 + uLevel*0.8);
+          // keep the packet IN HUE: a clipped multiplier washes every colour to white
+          vec3 c = uColor*(base*1.1) + uColor*packet*(1.25 + uLevel*0.6) + vec3(1.0)*packet*0.10;
+          gl_FragColor = vec4(c, clamp(a, 0.0, 1.0));
+        }`,
+      transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(cfg.r, cfg.tube, 8, 220), mat);
+    const holder = new THREE.Group();
+    holder.rotation.x = cfg.tiltX; holder.rotation.z = cfg.tiltZ;
+    holder.add(ring); gyro.add(holder);
+  }
+
+  // 4. Spark field: a few hundred points in tilted orbital shells, twinkling, swelling with voice.
+  const N = 420, pos = new Float32Array(N*3), seed = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const a = Math.random()*Math.PI*2, b = Math.acos(2*Math.random()-1);
+    const r = 1.25 + Math.random()*0.95;
+    pos[i*3]   = r*Math.sin(b)*Math.cos(a);
+    pos[i*3+1] = r*Math.cos(b)*0.75;
+    pos[i*3+2] = r*Math.sin(b)*Math.sin(a);
+    seed[i] = Math.random();
+  }
+  const pGeo = new THREE.BufferGeometry();
+  pGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  pGeo.setAttribute("aSeed", new THREE.BufferAttribute(seed, 1));
+  const sparks = new THREE.Points(pGeo, new THREE.ShaderMaterial({ uniforms: uni,
+    vertexShader: `attribute float aSeed; varying float vS; uniform float uTime; uniform float uLevel;
+      void main(){ vS = aSeed;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float tw = 0.5 + 0.5*sin(uTime*(0.8 + aSeed*2.6) + aSeed*40.0);
+        gl_PointSize = (1.4 + 3.2*aSeed*tw + uLevel*3.0) * (300.0 / -mv.z) * 0.01;
+        gl_Position = projectionMatrix * mv; }`,
+    fragmentShader: `varying float vS; uniform vec3 uColor; uniform float uTime; uniform float uGlow;
+      void main(){ float d = length(gl_PointCoord - 0.5); if (d > 0.5) discard;
+        float tw = 0.5 + 0.5*sin(uTime*(0.8 + vS*2.6) + vS*40.0);
+        float a = smoothstep(0.5, 0.0, d) * tw * (0.25 + 0.55*uGlow);
+        gl_FragColor = vec4(uColor*(0.8 + tw*0.6), a); }`,
+    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+  scene.add(sparks);
+
+  // drive
   const clock = new THREE.Clock(); let started = false; let phase = 0;
   (function loop(){
     requestAnimationFrame(loop);
-    const dt = clock.getDelta();
-    // ease state
+    const dt = Math.min(clock.getDelta(), 0.05);
     for (const k of ["glow","speed"]) cur[k] += (tgt[k]-cur[k])*0.06;
     const colTgt = statusCol || tgt.col;  // a build status overrides the conversational hue
     for (let i=0;i<3;i++) cur.col[i] += (colTgt[i]-cur.col[i])*0.06;
-    phase += dt * cur.speed;
-    const bandAvg = bands.length ? bands.reduce((a,b)=>a+ (+b||0),0)/bands.length : 0;
+    phase += dt * (0.8 + cur.speed);
+    const bandAvg = bands.length ? bands.reduce((a,b)=>a+(+b||0),0)/bands.length : 0;
     const energy = Math.min(1, level + bandAvg);
     uni.uTime.value = phase;
     uni.uColor.value.setRGB(cur.col[0], cur.col[1], cur.col[2]);
     uni.uGlow.value = cur.glow;
     uni.uLevel.value = energy;
-    core.rotation.y += dt*0.3*(1+cur.speed); core.rotation.x += dt*0.12;
-    const s = 1.0 + 0.05*Math.sin(phase*2.0) + energy*0.12; core.scale.setScalar(s);
+    core.rotation.y += dt*0.10*(1 + cur.speed*0.6);
+    core.rotation.x  = 0.35 + 0.05*Math.sin(phase*0.3);
+    gyro.rotation.y += dt*0.22*(1 + cur.speed*0.5);
+    gyro.rotation.x  = 0.12*Math.sin(phase*0.22);
+    sparks.rotation.y -= dt*0.05*(1 + cur.speed*0.3);
+    const s = 1.0 + 0.035*Math.sin(phase*1.6) + energy*0.10;
+    core.scale.setScalar(s);
     renderer.render(scene, camera);
     if (!started){ started = true; document.title = READY; }  // first frame OK -> reveal the WebGL orb
   })();
