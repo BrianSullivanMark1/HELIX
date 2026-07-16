@@ -18,12 +18,17 @@ from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QRadialGradient
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
-from helix.ui.theme import AMBER, CYAN, GOLD, STATUS_DONE, STATUS_ERROR, STATUS_WORKING
+from helix.ui.theme import AMBER, GOLD, STATUS_DONE, STATUS_ERROR, STATUS_WORKING
 
-# Dark electronic body, so the circuitry glows against it.
-BODY_HI = "#2b3b4b"
-BODY_MID = "#14202b"
-BODY_EDGE = "#05090d"
+# The V3 idle hue: deep electric blue (the theme CYAN stays for the rest of the UI; the Presence
+# itself runs bluer — the same palette as the GPU orb, so both layers read as ONE presence).
+ELECTRIC = "#2a8cff"
+
+# Dark electronic body, so the circuitry glows against it. V3: darker still — near-black glass;
+# only the energy glows.
+BODY_HI = "#16202c"
+BODY_MID = "#0a1118"
+BODY_EDGE = "#030609"
 
 
 class OrbState(Enum):
@@ -150,6 +155,101 @@ def _build_smoke(seed: int = 0x536D) -> list[tuple[float, float, float, float]]:
     ]
 
 
+# The V3 gyroscope: three tilted energy rings orbiting the sphere, each carrying bright charge
+# packets. (radius_factor, tilt_degrees, flatten, speed, packets, phase) — pure data, so the live
+# widget and the app-icon renderer draw the same rings.
+_GYRO: tuple[tuple[float, float, float, float, int, float], ...] = (
+    (1.34, -16.0, 0.34, 1.00, 3, 0.00),
+    (1.52, 32.0, 0.42, -0.70, 2, 0.37),
+    (1.68, 76.0, 0.30, 0.50, 2, 0.71),
+)
+
+
+def _build_sparks(seed: int = 0x5350) -> list[tuple[float, float, float, float, float, float]]:
+    """Orbiting spark seeds: (angle0, radius_factor, tilt_rad, flatten, speed, size)."""
+    rng = random.Random(seed)
+    return [
+        (
+            rng.uniform(0, 2 * math.pi), rng.uniform(1.12, 1.85), rng.uniform(0, math.pi),
+            rng.uniform(0.25, 0.6), rng.uniform(0.3, 1.0), rng.uniform(0.5, 1.0),
+        )
+        for _ in range(46)
+    ]
+
+
+_SPARKS = _build_sparks()
+
+
+def _gyro_point(a: float, rf: float, tilt_rad: float, flat: float) -> tuple[float, float, float]:
+    """A ring/orbit point in unit coords: (x, y, depth) — depth > 0 means in FRONT of the sphere,
+    so the two halves can be drawn under and over the body for a cheap, convincing 3-D read."""
+    ex, ey = math.cos(a), math.sin(a) * flat
+    x = ex * math.cos(tilt_rad) - ey * math.sin(tilt_rad)
+    y = ex * math.sin(tilt_rad) + ey * math.cos(tilt_rad)
+    return x * rf, y * rf, math.sin(a)
+
+
+def _paint_gyro(
+    p: QPainter, cx: float, cy: float, r: float, *, t: float, warm: float, glow: float,
+    cold, warm_color, front: bool,
+) -> None:
+    """One depth half of the gyroscope: thin in-hue ring arcs + bright charge packets. Called twice —
+    behind the body first, then over the glass — so the rings genuinely orbit the sphere."""
+    n = 72
+    for rf, tilt_deg, flat, speed, packets, ph in _GYRO:
+        tilt = math.radians(tilt_deg)
+        pen = QPen(_col(cold, warm_color, warm, int(110 * glow)))
+        pen.setWidthF(max(1.2, r * 0.012))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        prev = None
+        for i in range(n + 1):
+            a = 2 * math.pi * i / n
+            ux, uy, depth = _gyro_point(a, rf, tilt, flat)
+            pt = QPointF(cx + ux * r, cy + uy * r)
+            if prev is not None and (depth > 0) == front and (prev[1] > 0) == front:
+                p.drawLine(prev[0], pt)
+            prev = (pt, depth)
+        p.setPen(Qt.PenStyle.NoPen)
+        for k in range(packets):  # the racing charges — an in-hue glow with a white-hot pin
+            a = ((t * 0.016 * speed + ph + k / packets) % 1.0) * 2 * math.pi
+            ux, uy, depth = _gyro_point(a, rf, tilt, flat)
+            if (depth > 0) != front:
+                continue
+            nx, ny = cx + ux * r, cy + uy * r
+            rad = r * 0.040
+            comet = QRadialGradient(QPointF(nx, ny), rad)
+            comet.setColorAt(0.0, _col("#ffffff", warm_color, warm * 0.5, int(200 * glow)))
+            comet.setColorAt(0.35, _col(cold, warm_color, warm, int(190 * glow)))
+            comet.setColorAt(1.0, _col(cold, warm_color, warm, 0))
+            p.setBrush(comet)
+            p.drawEllipse(QPointF(nx, ny), rad, rad)
+
+
+def _paint_sparks(
+    p: QPainter, cx: float, cy: float, r: float, *, t: float, warm: float, glow: float,
+    cold, warm_color, front: bool,
+) -> None:
+    """One depth half of the orbiting spark field — tiny twinkling embers around the presence."""
+    p.setPen(Qt.PenStyle.NoPen)
+    for a0, rf, tilt, flat, speed, size in _SPARKS:
+        a = a0 + t * 0.006 * speed
+        ux, uy, depth = _gyro_point(a, rf, tilt, flat)
+        if (depth > 0) != front:
+            continue
+        tw = 0.5 + 0.5 * math.sin(t * 0.05 * (0.6 + speed) + a0 * 7.0)
+        alpha = int(95 * glow * tw)
+        if alpha <= 3:
+            continue
+        nx, ny = cx + ux * r, cy + uy * r
+        rad = r * 0.016 * size * (0.7 + 0.6 * tw)
+        dot = QRadialGradient(QPointF(nx, ny), rad)
+        dot.setColorAt(0.0, _col(cold, warm_color, warm, alpha))
+        dot.setColorAt(1.0, _col(cold, warm_color, warm, 0))
+        p.setBrush(dot)
+        p.drawEllipse(QPointF(nx, ny), rad, rad)
+
+
 def paint_orb(
     p: QPainter,
     cx: float,
@@ -166,7 +266,7 @@ def paint_orb(
     thinking: bool = False,
     accent: float = 0.0,
     spin: float = 0.0,
-    cold=CYAN,
+    cold=ELECTRIC,
     warm_color=GOLD,
 ) -> None:
     """Draw the electronic Presence orb (sphere radius r, centred at cx,cy). Shared by the live widget
@@ -201,6 +301,12 @@ def paint_orb(
     aura.setColorAt(1.0, _col(cold, warm_color, warm, 0))
     p.setBrush(aura)
     p.drawEllipse(center, r * 1.8, r * 1.8)
+
+    # 2b. The far half of the V3 gyroscope + spark field — BEHIND the body, so the rings orbit it.
+    _paint_sparks(p, cx, cy, r, t=t, warm=warm, glow=glow, cold=cold, warm_color=warm_color,
+                  front=False)
+    _paint_gyro(p, cx, cy, r, t=t, warm=warm, glow=glow, cold=cold, warm_color=warm_color,
+                front=False)
 
     # 3. Dark electronic body.
     hx, hy = cx - r * 0.3, cy - r * 0.34
@@ -328,12 +434,19 @@ def paint_orb(
     p.drawEllipse(center, r, r)
     p.restore()
 
-    # 6. Specular glint.
+    # 6. Specular glint — restrained: a hint of glass, never a fog.
     spec = QRadialGradient(QPointF(hx, hy), r * 0.26)
-    spec.setColorAt(0.0, QColor(255, 255, 255, 130))
+    spec.setColorAt(0.0, QColor(255, 255, 255, 70))
     spec.setColorAt(1.0, QColor(255, 255, 255, 0))
     p.setBrush(spec)
     p.drawEllipse(QPointF(hx, hy), r * 0.26, r * 0.26)
+
+    # 6b. The near half of the gyroscope + sparks — OVER the glass, completing the 3-D orbit.
+    _paint_gyro(p, cx, cy, r, t=t, warm=warm, glow=glow, cold=cold, warm_color=warm_color,
+                front=True)
+    _paint_sparks(p, cx, cy, r, t=t, warm=warm, glow=glow, cold=cold, warm_color=warm_color,
+                  front=True)
+    p.setPen(Qt.PenStyle.NoPen)
 
     # 7. Thinking — the amber arc sweeps around the sphere.
     if thinking:
@@ -363,9 +476,10 @@ class PresenceOrb(QWidget):
         self._state = OrbState.IDLE
         self._status = OrbStatus.NONE
         self._p = dict(_PARAMS[OrbState.IDLE])
-        # Eased base colours: the whole orb mixes between these two. Conversational colouring rides cyan→
-        # gold; a build status overrides both toward one hue (yellow/green/red), eased so it fades, not snaps.
-        self._cold = QColor(CYAN)
+        # Eased base colours: the whole orb mixes between these two. Conversational colouring rides
+        # electric-blue→gold; a build status overrides both toward one hue (yellow/green/red), eased
+        # so it fades, not snaps.
+        self._cold = QColor(ELECTRIC)
         self._warm = QColor(GOLD)
         self._phase = 0.0
         self._spin = 0.0
@@ -398,7 +512,7 @@ class PresenceOrb(QWidget):
         pair = _STATUS_COLORS.get(self._status)
         if pair is not None:
             return QColor(pair[0]), QColor(pair[1])
-        return QColor(CYAN), QColor(GOLD)
+        return QColor(ELECTRIC), QColor(GOLD)
 
     def set_level(self, level: float) -> None:
         self._level_target = max(0.0, min(1.0, float(level)))

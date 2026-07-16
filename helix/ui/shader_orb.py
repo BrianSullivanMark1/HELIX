@@ -10,6 +10,7 @@ Console keeps handling tap-to-talk exactly as before.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QSizePolicy, QStackedLayout, QWidget
@@ -52,6 +53,9 @@ class ShaderOrb(QWidget):
                 self._view = None  # any setup hiccup → keep the painter orb only
 
     def _init_webgl(self, lay: QStackedLayout) -> None:
+        html = _orb_html()
+        if html is None:  # no bundled three.js → the painter orb simply stays
+            return
         view = QWebEngineView(self)
         view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         view.page().setBackgroundColor(Qt.GlobalColor.transparent)
@@ -60,7 +64,7 @@ class ShaderOrb(QWidget):
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
         )
         view.titleChanged.connect(self._on_title)
-        view.setHtml(_ORB_HTML)
+        view.setHtml(html)
         view.hide()
         lay.addWidget(view)
         self._view = view
@@ -111,12 +115,28 @@ class ShaderOrb(QWidget):
 # gyroscopic energy rings carrying in-hue charge packets, and an orbiting spark field. Dark always —
 # the body stays near-black; only the energy glows. All GLSL is simple sin/fract/smoothstep so it
 # compiles reliably; if anything fails the page never sets the ready title and the QPainter orb shows.
-_ORB_HTML = r"""<!doctype html><html><head><meta charset="utf-8" />
+#
+# SELF-CONTAINED on purpose: three.js is BUNDLED (helix/ui/assets/three.min.js, spliced into the page
+# at load) and the orb code is a classic script — no CDN fetch, no import maps, no ES modules. The
+# original CDN import worked in dev but silently failed in the frozen app, leaving the painter orb
+# where the V3 Presence should be; a fully inline page removes every environmental dependency.
+
+
+def _orb_html() -> str | None:
+    """The orb page with the bundled three.js spliced in — or None when the asset is missing
+    (a broken install just keeps the painter orb; never a blank layer)."""
+    try:
+        three = (Path(__file__).parent / "assets" / "three.min.js").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return _ORB_HTML_TEMPLATE.replace("/*__THREE_JS__*/", three)
+
+
+_ORB_HTML_TEMPLATE = r"""<!doctype html><html><head><meta charset="utf-8" />
 <style>html,body{margin:0;height:100%;background:transparent;overflow:hidden}#c{width:100%;height:100%}</style>
-<script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }</script>
+<script>/*__THREE_JS__*/</script>
 </head><body><div id="c"></div>
-<script type="module">
-import * as THREE from "three";
+<script>
 const READY = "helix-orb-ready";
 // Per-state params. Colour is the STATE's voice; a build status (below) overrides the hue outright.
 const STATES = {
