@@ -101,6 +101,26 @@ def _encode(im, has_alpha: bool) -> tuple[bytes | None, str]:
     return (raw, "image/jpeg") if raw else (None, "image/jpeg")
 
 
+def capture_screen() -> Image | None:
+    """Grab the user's screen (all monitors) → a model-ready Image block. The V3 sight faculty:
+    "look at my screen" captures the display through the same normalize/downscale/encode path as an
+    attached image, so what the model sees is exactly what the user sees. Ephemeral like every image —
+    the pixels are never persisted. None when capture isn't possible (no Pillow, headless, locked)."""
+    try:
+        from PIL import ImageGrab
+    except Exception:  # noqa: BLE001 — no Pillow: no sight, never a crash
+        _LOG.warning("Pillow not available; cannot capture the screen")
+        return None
+    try:
+        im = ImageGrab.grab(all_screens=True)
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return encode_image_bytes(buf.getvalue())
+    except Exception as exc:  # noqa: BLE001 — a locked/headless session degrades to 'no image'
+        _LOG.warning("could not capture the screen: %s", exc)
+        return None
+
+
 def load_images(paths, max_images: int = MAX_IMAGES) -> list[Image]:
     """Load up to `max_images` attached image files into model-ready blocks; unreadable ones drop out."""
     out: list[Image] = []

@@ -27,6 +27,43 @@ CONNECTIONS_FILE = "connections.json"  # a build declares its needed keys here
 _MAX_BODY = 200_000                    # cap a call_api response so a huge payload can't blow up context
 _AUTH_PLACEHOLDER = re.compile(r"\{([A-Z0-9_]+)\}")  # {ENV_NAME} in a Service.auth header template
 
+# Every service the orb may CONNECT just in time (the V3 flow: no settings wall — the model calls
+# connect_service the moment a key is missing and a masked panel opens). Maps the words a user might
+# say to a service id; ids cover call_api's KNOWN_SERVICES plus the HELIX-managed engine keys that
+# live in Settings (Tripo holograms, Blockade environments, Voyage embeddings). Pure data.
+#   id -> (label, store, field-specs) where store is "secrets" (env-var names in the secrets store)
+#   or "settings" (a Settings key), and each field is (storage-key, field-label, hint).
+CONNECTABLE: dict[str, tuple[str, str, tuple[tuple[str, str, str], ...]]] = {
+    **{
+        s.id: (s.label, "secrets", tuple((f.key, f.label, f.hint) for f in s.fields))
+        for s in KNOWN_SERVICES
+    },
+    "tripo": ("Tripo (high-detail holograms)", "settings",
+              (("tripo_api_key", "Tripo API key", "tsk_…"),)),
+    "blockade": ("Blockade Labs (360° environments)", "settings",
+                 (("blockade_api_key", "Blockade Labs API key", "from your Blockade account"),)),
+    "voyage": ("Voyage (vault search embeddings)", "settings",
+               (("voyage_api_key", "Voyage API key", "pa-…"),)),
+}
+
+_CONNECT_ALIASES: dict[str, str] = {
+    "sam.gov": "sam", "samgov": "sam", "sam gov": "sam", "procurement": "sam",
+    "blockade labs": "blockade", "skybox": "blockade",
+}
+
+
+def resolve_connectable(word: str) -> str | None:
+    """Map a spoken/typed service name ("Slack", "sam.gov", "tripo") to a CONNECTABLE id, or None."""
+    w = " ".join((word or "").strip().lower().split())
+    if w in CONNECTABLE:
+        return w
+    if w in _CONNECT_ALIASES:
+        return _CONNECT_ALIASES[w]
+    for sid, (label, _store, _fields) in CONNECTABLE.items():
+        if w and (w == label.lower() or label.lower().startswith(w)):
+            return sid
+    return None
+
 
 def _fence_body(svc_label: str, body: str) -> str:
     """Wrap a service response as UNTRUSTED external data with a nonce-tagged fence (like prompts._fenced
@@ -145,8 +182,8 @@ class ConnectionsService:
             names = ", ".join(s.label for s in KNOWN_SERVICES)
             return (f"call_api error: that host isn't a connectable service. I can only read: {names}.")
         if any(not self.value(f.key) for f in svc.fields):
-            return (f"call_api error: {svc.label} isn't connected yet. Ask the user to add the "
-                    f"{svc.label} key in Settings → Connections.")
+            return (f"call_api error: {svc.label} isn't connected yet. Call connect_service with "
+                    f"service '{svc.id}' to open a secure key panel for the user.")
         # Attach the saved credential(s) as this service's auth headers. Each {ENV_NAME} in a template is
         # filled from the store here, server-side, so a token is never returned to or chosen by the model.
         headers = {"User-Agent": "HELIX", "Accept": "*/*"}

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from helix.domain.errors import BuildCancelled
 from helix.domain.models import Message, Role
+from helix.domain.vocabulary import friendly_tool_label
 from helix.logging_setup import get_logger
 from helix.ports.clock import Clock
 from helix.ports.coder import ProgressFn
@@ -59,6 +60,13 @@ BUILD_TOOLS = frozenset(
         # Reminder/agent writes stay human-driven too. READS stay allowed: an agent may check the
         # calendar, the inbox, and the pending reminders — that's what a morning brief is made of.
         "set_reminder", "cancel_reminder", "set_agent_enabled",
+        # The just-in-time key panel is human-driven only — content an unattended watcher processes
+        # (an email, a Slack message) must never be able to pop a credential prompt at the user.
+        "connect_service",
+        # Screen sight is human-driven only: an unattended agent must never photograph the user's
+        # display — whatever is on it (a password manager, a bank page) would ride into a run that
+        # processes untrusted content.
+        "view_screen",
         # Disk WRITES are human-driven only (and gated by the Settings toggle besides) — an
         # autonomous agent may list folders and read files like any other read faculty, but text
         # inside a file must never be able to make an unattended agent write to the user's disk.
@@ -189,6 +197,10 @@ class ConversationService:
                 self._lessons.after_turn(user_text, user)  # background; learn a rule from a correction
             if self._user_memory is not None:
                 self._user_memory.after_turn(user)  # background; distill durable facts
+                if images and text and text != STOPPED_REPLY:
+                    # Vision auto-training: what HELIX just SAW teaches its long-term memory —
+                    # durable visual facts distill in the background, per speaker.
+                    self._user_memory.after_image_turn(user, user_text, text)
             return out
 
         # THE SUBSCRIPTION BRAIN: when the user has connected their Claude Code token, turns run on
@@ -367,30 +379,14 @@ class ConversationService:
 
     @staticmethod
     def _progress_label(tool: str, args: dict) -> str:
-        if tool == "build_app":
-            return f"Building {args.get('name', 'your app')}…"
-        if tool == "build_task":
-            return f"Building the {args.get('name', 'flow')} flow…"
-        if tool == "build_3d_model":
-            return f"Modeling {args.get('name', 'it')}…"
-        if tool == "create_agent":
-            return f"Saving the {args.get('name', 'agent')} agent…"
-        if tool == "delete_build":
-            return f"Removing {args.get('name', 'it')}…"
-        if tool == "think_harder":
-            return "Thinking it through…"
-        if tool == "search_knowledge":
-            return "Checking your knowledge…"
-        if tool == "check_email":
-            return "Checking your inbox…"
-        if tool == "list_folder":
-            return "Looking through the folder…"
-        if tool == "read_file":
-            return "Reading the file…"
-        if tool == "write_file":
-            return "Writing the file…"
-        if tool == "remember":
-            return "Saving that…"
-        if tool == "create_knowledge":
-            return f"Starting the {args.get('name', 'knowledge')} base…"
-        return "Working…"
+        """One voice for tool narration: the vocabulary's speakable phrase, personalized with the
+        build's name when the call carries one (so 'Building Tip Calculator…' beats 'Building that')."""
+        name = str(args.get("name") or "").strip()
+        if name and tool in ("build_app", "build_task", "build_3d_model", "create_agent",
+                             "delete_build", "rename_build"):
+            verb = {
+                "build_app": "Building", "build_task": "Building", "build_3d_model": "Projecting",
+                "create_agent": "Saving", "delete_build": "Removing", "rename_build": "Renaming",
+            }[tool]
+            return f"{verb} {name}…"
+        return friendly_tool_label(tool) + "…"

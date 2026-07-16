@@ -108,3 +108,52 @@ def test_empty_distillation_keeps_existing(monkeypatch):
     for _ in range(memory_mod._DISTILL_EVERY):
         s.after_turn()
     assert "A kept fact" in s.facts()
+
+
+# ----- V3 visual memory: an image turn TEACHES the long-term memory -----
+
+def test_image_turn_distills_visual_facts(monkeypatch):
+    monkeypatch.setattr(memory_mod.threading, "Thread", _ImmediateThread)
+    chat = _Chat("The garage breaker panel is a Square D QO 200A.")
+    s = _svc(chat=chat)
+    s.after_image_turn("", "what breaker panel is this?", "That's a Square D QO 200-amp panel.")
+    assert any("Square D" in f for f in s.facts())
+    # The distiller saw the exchange, not the pixels (images are ephemeral by design).
+    assert "Square D QO 200-amp" in chat.prompts[-1]
+
+
+def test_image_turn_facts_are_per_speaker_and_appended(monkeypatch):
+    monkeypatch.setattr(memory_mod.threading, "Thread", _ImmediateThread)
+    s = _svc(chat=_Chat("Rex is a brindle boxer."))
+    s.add("Works at Acme", user="brian")
+    s.after_image_turn("brian", "what breed is my dog?", "He's a brindle boxer.")
+    facts = s.facts(user="brian")
+    assert "Works at Acme" in facts and "Rex is a brindle boxer." in facts
+    assert s.facts(user="sarah") == []  # another speaker's memory untouched
+
+
+def test_image_turn_with_nothing_durable_adds_nothing(monkeypatch):
+    monkeypatch.setattr(memory_mod.threading, "Thread", _ImmediateThread)
+    s = _svc(chat=_Chat(""))  # model finds nothing durable
+    s.add("A kept fact")
+    s.after_image_turn("", "read this error", "It's a missing DLL error.")
+    assert s.facts() == ["A kept fact"]
+
+
+def test_image_turn_dedupes_and_caps_new_facts(monkeypatch):
+    monkeypatch.setattr(memory_mod.threading, "Thread", _ImmediateThread)
+    s = _svc(chat=_Chat("A kept fact\nNew fact one\nNew fact two\nNew fact three\nNew fact four"))
+    s.add("A kept fact")
+    s.after_image_turn("", "look", "seen")
+    facts = s.facts()
+    assert facts.count("A kept fact") == 1          # no duplicate of a known fact
+    assert "New fact four" not in facts             # at most three new facts per image turn
+    assert {"New fact one", "New fact two", "New fact three"} <= set(facts)
+
+
+def test_image_turn_with_empty_answer_never_calls_the_model(monkeypatch):
+    monkeypatch.setattr(memory_mod.threading, "Thread", _ImmediateThread)
+    chat = _Chat("should never be used")
+    s = _svc(chat=chat)
+    s.after_image_turn("", "look at this", "")
+    assert chat.prompts == [] and s.facts() == []

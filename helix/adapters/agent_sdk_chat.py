@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from helix.adapters.claude_code_cli import resolve_claude_cli
-from helix.domain.tool_labels import friendly_tool_label
+from helix.domain.vocabulary import friendly_tool_label
 from helix.logging_setup import get_logger
 from helix.ports.llm import Reply, Text, ToolOutput, Turn, Usage
 

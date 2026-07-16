@@ -26,6 +26,7 @@ from helix.domain.events import (
     BuildCreated,
     BuildDeleted,
     BuildDeleteRequested,
+    ConnectRequested,
     BuildFinished,
     BuildIterated,
     BuildOpenRequested,
@@ -67,6 +68,7 @@ class HelixMainWindow(QMainWindow):
     _buildFinishedSignal = pyqtSignal(object)
     _deleteRequestSignal = pyqtSignal(object)
     _openRequestSignal = pyqtSignal(object)
+    _connectRequestSignal = pyqtSignal(object)
     _selfChangeProgressSignal = pyqtSignal(object)
     _selfChangeFinishedSignal = pyqtSignal(object)
 
@@ -200,6 +202,10 @@ class HelixMainWindow(QMainWindow):
         # "Open it" by voice → open the build exactly as a menu click would (read-only, no confirm).
         container.bus.subscribe(BuildOpenRequested, self._openRequestSignal.emit)
         self._openRequestSignal.connect(lambda ev: self._open_app(ev.slug))
+        # Just-in-time connect: the model asked for a key → a masked panel opens right here. The user
+        # pastes the value into the PANEL (never chat); the model never sees it.
+        container.bus.subscribe(ConnectRequested, self._connectRequestSignal.emit)
+        self._connectRequestSignal.connect(self._on_connect_requested)
         # Background-build lifecycle → the status board (tiles/legend/orb) + the Console (status line /
         # spoken announcement). Started fires the instant a build begins so the UI shows it at once.
         container.bus.subscribe(BuildStarted, self._buildStartedSignal.emit)
@@ -439,6 +445,16 @@ class HelixMainWindow(QMainWindow):
         # The model asked to delete ev.name; get one real human click, then perform it via the registry
         # (which removes the build or agent and publishes the refresh/viewer events).
         self.console.offer_delete(ev.name, lambda: self._c.tools.confirm_delete(ev.name))
+
+    def _on_connect_requested(self, ev: object) -> None:
+        # Just-in-time connect: the masked key panel, right where the conversation is. The value goes
+        # straight to the secrets/settings store — never through the model, never into the transcript.
+        from helix.ui.connections_dialog import show_connect_panel
+
+        show_connect_panel(
+            self, ev.service_id, ev.reason,
+            connections=self._c.connections, settings=self._c.settings,
+        )
 
     def _on_self_change_progress(self, ev: object) -> None:
         self.console.on_build_progress("self-change", ev.line)

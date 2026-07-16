@@ -83,6 +83,20 @@ class BuildOpenRequested(Event):
 
 
 @dataclass(frozen=True)
+class ConnectRequested(Event):
+    """The model asked to CONNECT an outside service just in time (a key is needed for a watcher, a
+    build, a hologram engine, or call_api). The UI opens a small masked key panel naming the service
+    and why; the user pastes the value into IT — never into chat, never spoken — and it lands in the
+    same secrets/settings store as before. The model never sees a key's value.
+
+    service_id: a JIT-connectable service id (see services/connections.py CONNECTABLE);
+    reason: one plain-words line for the panel ("the Slack watcher needs a token")."""
+
+    service_id: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class BuildStarted(Event):
     """A background build just began — the tile turns yellow, it joins the Console legend, and the orb
     goes to its working hue. Fired by the Forge the moment the workspace is marked building, so the UI

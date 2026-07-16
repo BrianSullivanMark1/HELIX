@@ -52,6 +52,22 @@ current facts unchanged. If there are none, output nothing.
 """
 
 
+VISUAL_DISTILL_SYSTEM = """\
+You maintain HELIX's long-term VISUAL memory. HELIX just looked at an image for its user and answered
+a question about it. From that exchange, extract the durable facts about the user and their WORLD that
+the image revealed — the kind worth recalling weeks later without the photo: what a thing IS (make,
+model, breed, brand), what it looks like, whose it is, where it lives ("the breaker panel in the garage
+is a Square D QO 200A", "Rex is a brindle boxer", "the workshop has a 4x8 CNC table").
+
+Rules:
+- Output AT MOST three facts, one per line, each short and atomic. Usually one; often none.
+- ONLY durable facts about the user's own world. NOTHING transient (an error on screen, a webpage,
+  today's weather, a document being read), nothing generic ("dogs have four legs"), no restating the
+  question, no instructions.
+- If the exchange revealed nothing durable, output NOTHING (empty).
+"""
+
+
 class MemoryService:
     def __init__(self, chat: ChatModel, store, mem_store, clock: Clock) -> None:
         self._chat = chat
@@ -128,6 +144,51 @@ class MemoryService:
 
     def users(self) -> list[str]:
         return [u for u in self._read_all().keys()]
+
+    # ----- vision auto-training: an image turn TEACHES the memory (V3 sight faculty) -----
+    def after_image_turn(self, user: str, question: str, answer: str) -> None:
+        """Fire-and-forget: distill durable VISUAL facts from an image exchange in the background.
+        The pixels are already gone (images are ephemeral); what HELIX said it SAW is the record —
+        so "what was that breaker model?" is answerable next week from memory, no photo needed."""
+        q = " ".join((question or "").split())[:400]
+        a = " ".join((answer or "").split())[:800]
+        if not a:
+            return
+        threading.Thread(
+            target=self._distill_visual, args=(_norm_user(user), q, a),
+            daemon=True, name="helix-visual-memory",
+        ).start()
+
+    def _distill_visual(self, user: str, question: str, answer: str) -> None:
+        try:
+            existing = self.facts(user)
+            prompt = (
+                "FACTS ALREADY KNOWN:\n" + ("\n".join(existing) if existing else "(none yet)")
+                + f"\n\nTHE IMAGE EXCHANGE:\nUser asked: {question or '(sent an image with no words)'}"
+                + f"\nHELIX looked and answered: {answer}"
+                + "\n\nOutput only the NEW durable visual facts now (or nothing)."
+            )
+            reply = self._chat.chat([Turn(Role.USER, (Text(prompt),))], system=VISUAL_DISTILL_SYSTEM)
+            try:
+                u = reply.usage
+                self._store.record_usage(u.input_tokens, u.output_tokens, u.cost_usd)
+            except Exception:  # noqa: BLE001
+                pass
+            new_facts = self._parse(reply.text or "")
+            if not new_facts:
+                return
+            with self._busy:
+                data = self._read_all()
+                facts = list(data.get(user) or [])
+                known = {f.lower() for f in facts}
+                # Dedupe against what's already known FIRST, then cap — a restated old fact must not
+                # eat one of the (at most three) new-fact slots an image turn may add.
+                added = [f for f in new_facts if f.lower() not in known][:3]
+                if added:
+                    data[user] = (facts + added)[-_MAX_FACTS:]
+                    self._write_all(data)
+        except Exception:  # noqa: BLE001
+            _LOG.warning("visual memory distillation failed", exc_info=True)
 
     # ----- background auto-distillation (cadence like the profile) -----
     def after_turn(self, user: str = "") -> None:
