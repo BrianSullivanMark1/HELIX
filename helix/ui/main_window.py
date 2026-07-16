@@ -236,6 +236,10 @@ class HelixMainWindow(QMainWindow):
         self._remote = RemoteCompanion(container.remote)
         self._remote.start()
 
+        # The V3 boot cue: one short spoken "online" a few seconds after the shell is up, so the
+        # user hears the presence arrive (headphones, another room) without having to look.
+        QTimer.singleShot(4500, self.console.announce_online)
+
     def _build_nav(self) -> QWidget:
         bar = QWidget()
         bar.setStyleSheet(f"border-bottom:1px solid {LINE};")

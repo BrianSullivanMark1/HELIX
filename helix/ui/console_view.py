@@ -1871,6 +1871,12 @@ class ConsoleView(QWidget):
         # A reminder is something the USER asked for ("remind me at five") — always spoken.
         self._announce(f"Reminder: {text}")
 
+    def announce_online(self) -> None:
+        """The V3 boot cue — one short spoken line when the presence comes up, so a user on
+        headphones knows HELIX is online without looking. Fired once per launch by the main
+        window, a few seconds after the shell is up (lets the voice stack finish warming)."""
+        self._announce("HELIX V3 online.")
+
     def announce_agent_report(self, name: str, report: str) -> None:
         # A background watcher speaking up is UNPROMPTED. By default it lands silently — shown in the
         # transcript, the orb notes it — and is spoken aloud only if the user turned on proactive speech.
