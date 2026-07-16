@@ -28,6 +28,7 @@ from helix.services.selfdev_lane import SelfDevLane
 _LOG = get_logger("evolve")
 
 _QUIET_HOUR = 3                    # local hour the nightly window opens
+_QUIET_HOUR_END = 6                # …and closes: a daytime launch must not fire a "nightly" pass
 _LAST_RUN_KEY = "evolve_last_run"  # ISO date of the last pass — one pass per day
 _TAIL_LINES = 80                   # how much of helix.log the pass reads
 _TAIL_CAP = 8_000                  # chars — a runaway log line never bloats the prompt
@@ -86,10 +87,17 @@ class EvolveService:
         if self._settings.get("evolve_enabled") is False:  # missing = on
             return
         now = self._clock.now()
-        if now.hour < _QUIET_HOUR:
+        if not (_QUIET_HOUR <= now.hour < _QUIET_HOUR_END):  # the true overnight window only
             return
         today = now.date().isoformat()
         if self._settings.get(_LAST_RUN_KEY) == today:
+            return
+        # No brain connected yet (fresh install, no subscription token or API key): skip WITHOUT
+        # stamping — silently, not as a failure — so the first night after connecting just works.
+        if not (
+            (self._settings.get("claude_code_oauth_token") or "").strip()
+            or (self._settings.get("claude_api_key") or "").strip()
+        ):
             return
         # A draft already pending (or mid-flight) means the user has a change to review — don't
         # stack another. The date stays UNSTAMPED, so the pass still runs once the draft resolves.

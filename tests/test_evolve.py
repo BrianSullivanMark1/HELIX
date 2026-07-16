@@ -23,7 +23,9 @@ class _Chat:
 
 class _Settings:
     def __init__(self, d=None):
-        self.d = dict(d or {})
+        # A connected brain by default — the no-brain gate is exercised by its own test below.
+        self.d = {"claude_api_key": "sk-test"}
+        self.d.update(d or {})
 
     def get(self, key, default=None):
         return self.d.get(key, default)
@@ -107,6 +109,27 @@ def test_before_the_quiet_hours_skips():
     chat, settings = _Chat("A proposal."), _Settings()
     _svc(chat=chat, settings=settings, clock=_Clock(hour=2)).tick()
     assert chat.prompts == [] and "evolve_last_run" not in settings.d
+
+
+def test_a_daytime_launch_never_fires_the_nightly_pass():
+    # The window is 3-6 AM only: opening HELIX at 11 AM must not run a "nightly" pass at lunch.
+    chat, settings = _Chat("A proposal."), _Settings()
+    _svc(chat=chat, settings=settings, clock=_Clock(hour=11)).tick()
+    assert chat.prompts == [] and "evolve_last_run" not in settings.d
+
+
+def test_no_connected_brain_skips_silently_without_stamping():
+    # A fresh install has no subscription token and no API key: skip quietly, unstamped — the
+    # first night AFTER the user connects must still run.
+    chat = _Chat("A proposal.")
+    settings = _Settings({"claude_api_key": ""})
+    _svc(chat=chat, settings=settings).tick()
+    assert chat.prompts == [] and "evolve_last_run" not in settings.d
+    # An oauth token alone is a brain too.
+    settings2 = _Settings({"claude_api_key": "", "claude_code_oauth_token": "tok"})
+    lane = _Lane()
+    _svc(chat=_Chat("QUIET"), settings=settings2, lane=lane).tick()
+    assert settings2.d["evolve_last_run"] == "2026-07-16"
 
 
 def test_already_ran_today_skips():
