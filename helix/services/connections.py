@@ -38,12 +38,15 @@ CONNECTABLE: dict[str, tuple[str, str, tuple[tuple[str, str, str], ...]]] = {
         s.id: (s.label, "secrets", tuple((f.key, f.label, f.hint) for f in s.fields))
         for s in KNOWN_SERVICES
     },
-    "tripo": ("Tripo (high-detail holograms)", "settings",
-              (("tripo_api_key", "Tripo API key", "tsk_…"),)),
-    "blockade": ("Blockade Labs (360° environments)", "settings",
-                 (("blockade_api_key", "Blockade Labs API key", "from your Blockade account"),)),
-    "voyage": ("Voyage (vault search embeddings)", "settings",
-               (("voyage_api_key", "Voyage API key", "pa-…"),)),
+    # Engine keys write to the SECRETS store (guard-safe: the build guard byte-reverts the settings
+    # file mid-build, and a key pasted while a build runs must survive). The container's key getters
+    # check secrets first, then legacy Settings, then the environment.
+    "tripo": ("Tripo (high-detail holograms)", "secrets",
+              (("TRIPO_API_KEY", "Tripo API key", "tsk_…"),)),
+    "blockade": ("Blockade Labs (360° environments)", "secrets",
+                 (("BLOCKADE_API_KEY", "Blockade Labs API key", "from your Blockade account"),)),
+    "voyage": ("Voyage (vault search embeddings)", "secrets",
+               (("VOYAGE_API_KEY", "Voyage API key", "pa-…"),)),
 }
 
 _CONNECT_ALIASES: dict[str, str] = {

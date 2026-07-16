@@ -11,6 +11,7 @@ from helix.domain.events import (
     ConnectRequested,
 )
 from helix.domain.models import BuildKind, slugify
+from helix.domain.vocabulary import kind_label
 from helix.ports.coder import ProgressFn
 from helix.ports.events import EventBus
 from helix.ports.llm import ToolOutput, ToolSpec
@@ -23,6 +24,7 @@ if TYPE_CHECKING:  # AgentService -> ConversationService -> ToolRegistry would b
     from helix.services.build_queue import BuildQueue
     from helix.services.calendar import CalendarService
     from helix.services.connections import ConnectionsService
+    from helix.services.desktop import DesktopService
     from helix.services.files import FilesService
     from helix.services.gmail import GmailService
     from helix.services.knowledge import KnowledgeService
@@ -40,7 +42,8 @@ IMAGE_VIEW_LIMIT = 4  # how many located images find_images actually SHOWS the m
 
 
 def _enqueued_msg(name: str, ahead: int, label: str) -> str:
-    """The terse acknowledgement the model relays after a build is enqueued. label: '', 'flow', 'model'."""
+    """The terse acknowledgement the model relays after a build is enqueued.
+    label: '', 'protocol', 'hologram'."""
     thing = f"the {name} {label}".rstrip() if label else name
     if ahead == 0:
         return f"Starting {thing} now."
@@ -70,6 +73,7 @@ class ToolRegistry:
         user_memory: "MemoryService | None" = None,
         location: "LocationService | None" = None,
         workflows: "WorkflowService | None" = None,
+        desktop: "DesktopService | None" = None,
     ) -> None:
         self._forge = forge
         self._builds = builds
@@ -89,6 +93,7 @@ class ToolRegistry:
         self._user_memory = user_memory  # durable long-term facts about the user (remember_about_me)
         self._location = location  # the user's place(s), so local questions ground via web search
         self._workflows = workflows  # ordered pipelines of agents (create/run/list)
+        self._desktop = desktop  # JARVIS desktop control: open programs, media keys, machine status
 
     def bind_agents(self, agents: "AgentService") -> None:
         """Wire the agent store after construction (it depends on ConversationService, which depends on
@@ -127,15 +132,15 @@ class ToolRegistry:
             ToolSpec(
                 name="build_3d_model",
                 description=(
-                    "Conjure an interactive 3D model to SHOW the user what you're discussing. This makes "
-                    "either a single OBJECT they orbit (a device, a part, a character, a gear) OR a whole "
-                    "360° ENVIRONMENT / SCENE they look around inside (a backyard, a forest clearing, a "
-                    "room, a landscape) — decide from whether they'd stand INSIDE it (a place) or look AT "
-                    "it (an object). It opens in their browser. Use this to visualize an idea when a "
-                    "picture communicates faster than words. To CHANGE a model, call this again with the "
-                    "SAME name and the change (e.g. 'make it taller', 'make it sunset') and HELIX updates "
-                    "it in place. Only call after the user confirms — building spends Claude time, like "
-                    "build_app."
+                    "Project an interactive HOLOGRAM — a 3D visual — to SHOW the user what you're "
+                    "discussing. This makes either a single OBJECT they orbit (a device, a part, a "
+                    "character, a gear) OR a whole 360° ENVIRONMENT / SCENE they look around inside (a "
+                    "backyard, a forest clearing, a room, a landscape) — decide from whether they'd "
+                    "stand INSIDE it (a place) or look AT it (an object). It opens in their browser. "
+                    "Use this to visualize an idea when a picture communicates faster than words. To "
+                    "CHANGE a hologram, call this again with the SAME name and the change (e.g. 'make "
+                    "it taller', 'make it sunset') and HELIX updates it in place. Only call after the "
+                    "user confirms — building spends Claude time, like build_app."
                 ),
                 input_schema={
                     "type": "object",
@@ -143,15 +148,15 @@ class ToolRegistry:
                         "name": {
                             "type": "string",
                             "description": (
-                                "A short, human name for the model, e.g. 'Wall Camera Unit'. Reuse the "
-                                "exact same name to modify an existing model."
+                                "A short, human name for the hologram, e.g. 'Wall Camera Unit'. Reuse "
+                                "the exact same name to modify an existing hologram."
                             ),
                         },
                         "request": {
                             "type": "string",
                             "description": (
                                 "Plain-language description of what to visualize — or, when modifying an "
-                                "existing model, the change to make."
+                                "existing hologram, the change to make."
                             ),
                         },
                     },
@@ -162,25 +167,25 @@ class ToolRegistry:
             ToolSpec(
                 name="build_task",
                 description=(
-                    "Build a FLOW — a small program that DOES A THING when run (a script, an automation, "
-                    "a converter, a generator) instead of opening a screen. It runs in its own console "
-                    "and lands in the Flows tab; the user runs it on demand. Use this when they want an "
-                    "action performed repeatably, not an interactive app. To CHANGE a flow, call this "
-                    "again with the SAME name and the change. Only call AFTER the user confirms — "
-                    "building spends Claude time, like build_app."
+                    "Build a PROTOCOL — a small program that DOES A THING when run (a script, an "
+                    "automation, a converter, a generator) instead of opening a screen. It runs in its "
+                    "own console and lands in the Protocols tab; the user runs it on demand. Use this "
+                    "when they want an action performed repeatably, not an interactive app. To CHANGE a "
+                    "protocol, call this again with the SAME name and the change. Only call AFTER the "
+                    "user confirms — building spends Claude time, like build_app."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "A short, human name for the flow, e.g. 'Rename Downloads'.",
+                            "description": "A short, human name for the protocol, e.g. 'Rename Downloads'.",
                         },
                         "request": {
                             "type": "string",
                             "description": (
-                                "Plain-language description of what the flow should do — or, when "
-                                "modifying an existing flow, the change to make."
+                                "Plain-language description of what the protocol should do — or, when "
+                                "modifying an existing protocol, the change to make."
                             ),
                         },
                     },
@@ -196,7 +201,7 @@ class ToolRegistry:
             ToolSpec(
                 name="delete_build",
                 description=(
-                    "Permanently delete something the user made — an app, a flow, a 3D model, or an "
+                    "Permanently delete something the user made — an app, a protocol, a hologram, or an "
                     "agent — by its name. Use when the user clearly asks to remove or delete one of "
                     "their builds. This cannot be undone. HELIX will ask the user to confirm with one "
                     "click before anything is removed, so call this only when they've asked to delete it."
@@ -216,11 +221,11 @@ class ToolRegistry:
             ToolSpec(
                 name="open_build",
                 description=(
-                    "OPEN something the user built — an app, a 3D model, or a knowledge base — by name, "
+                    "OPEN something the user built — an app, a hologram, or a vault — by name, "
                     "exactly as if they clicked it in the menu ('open it', 'show me the tip calculator', "
-                    "'pull up the garden model'). It brings the build up on screen (and, for an app with "
-                    "its own local server, starts that server). For a FLOW that should DO its thing, use "
-                    "run_task instead."
+                    "'pull up the garden hologram'). It brings the build up on screen (and, for an app "
+                    "with its own local server, starts that server). For a PROTOCOL that should DO its "
+                    "thing, use run_task instead."
                 ),
                 input_schema={
                     "type": "object",
@@ -234,7 +239,7 @@ class ToolRegistry:
             ToolSpec(
                 name="rename_build",
                 description=(
-                    "Rename something the user made — an app, a flow, a 3D model, or an agent — to a new "
+                    "Rename something the user made — an app, a protocol, a hologram, or an agent — to a new "
                     "name, by talking. Use when the user asks to rename or 'call it …' one of their "
                     "builds. The build keeps everything else; only its display name changes."
                 ),
@@ -254,13 +259,13 @@ class ToolRegistry:
                 ToolSpec(
                     name="run_task",
                     description=(
-                        "Run one of the user's FLOWS by name — launch the script so it does its thing. "
-                        "Use when the user asks to run/start a flow they built. It opens in its own "
+                        "Run one of the user's PROTOCOLS by name — launch the script so it does its thing. "
+                        "Use when the user asks to run/start a protocol they built. It opens in its own "
                         "console; report that you've launched it."
                     ),
                     input_schema={
                         "type": "object",
-                        "properties": {"name": {"type": "string", "description": "The flow to run."}},
+                        "properties": {"name": {"type": "string", "description": "The protocol to run."}},
                         "required": ["name"],
                         "additionalProperties": False,
                     },
@@ -432,7 +437,7 @@ class ToolRegistry:
                         "HELIX — and read back the most relevant passages. Use this whenever the answer "
                         "might live in something they saved (their notes, their docs, 'what did I write "
                         "about X', a personal fact like a password or address they told you to remember). "
-                        "READ-ONLY. Pass a focused query; optionally name one base to search just it. "
+                        "READ-ONLY. Pass a focused query; optionally name one vault to search just it. "
                         "Then answer from what comes back in your own words; if it doesn't actually "
                         "answer, say so and offer to look elsewhere."
                     ),
@@ -445,7 +450,7 @@ class ToolRegistry:
                             },
                             "knowledge": {
                                 "type": "string",
-                                "description": "Optional: the name of one knowledge base to search. "
+                                "description": "Optional: the name of one vault to search. "
                                 "Omit to search across all of them.",
                             },
                         },
@@ -456,11 +461,11 @@ class ToolRegistry:
                 ToolSpec(
                     name="create_knowledge",
                     description=(
-                        "Create a KNOWLEDGE base — a named collection of the user's notes and documents "
+                        "Create a VAULT — a named collection of the user's notes and documents "
                         "that HELIX and its agents can later search. Use when the user wants to start a "
-                        "place to keep things ('make a knowledge base for my recipes', 'start a notes "
+                        "place to keep things ('make a vault for my recipes', 'start a notes "
                         "collection'). You can seed it with a first note. Creating it is instant and costs "
-                        "nothing. Reuse the SAME name to refer to an existing base. Confirm once first, "
+                        "nothing. Reuse the SAME name to refer to an existing vault. Confirm once first, "
                         "like the other builds."
                     ),
                     input_schema={
@@ -468,11 +473,11 @@ class ToolRegistry:
                         "properties": {
                             "name": {
                                 "type": "string",
-                                "description": "A short name for the base, e.g. 'Recipes' or 'Work notes'.",
+                                "description": "A short name for the vault, e.g. 'Recipes' or 'Work notes'.",
                             },
                             "note": {
                                 "type": "string",
-                                "description": "Optional first note to save into the new base.",
+                                "description": "Optional first note to save into the new vault.",
                             },
                         },
                         "required": ["name"],
@@ -484,7 +489,7 @@ class ToolRegistry:
                     description=(
                         "Save a note into the user's knowledge so it can be recalled later. Use when the "
                         "user tells you to remember or note something ('remember the wifi password is …', "
-                        "'note that the meeting moved to Friday'). Optionally name which base to file it "
+                        "'note that the meeting moved to Friday'). Optionally name which vault to file it "
                         "under; otherwise it goes to their default Notes. Saving is instant. This WRITES, "
                         "so only do it when the user asks you to remember/save something."
                     ),
@@ -497,7 +502,7 @@ class ToolRegistry:
                             },
                             "knowledge": {
                                 "type": "string",
-                                "description": "Optional: the name of the base to save it in.",
+                                "description": "Optional: the name of the vault to save it in.",
                             },
                         },
                         "required": ["note"],
@@ -516,7 +521,7 @@ class ToolRegistry:
                         "something lasting about themselves ('remember that my daughter's name is Ada', "
                         "'I'm a general contractor', 'I hate cilantro'). This is about the PERSON and is "
                         "recalled in every future conversation — different from `remember` (a note/document "
-                        "for their searchable knowledge). Keep the fact short and atomic."
+                        "for their searchable vault). Keep the fact short and atomic."
                     ),
                     input_schema={
                         "type": "object",
@@ -790,6 +795,65 @@ class ToolRegistry:
                         },
                     )
                 )
+        if self._desktop is not None:
+            tools += [
+                ToolSpec(
+                    name="open_program",
+                    description=(
+                        "Launch an INSTALLED program on this PC by its everyday name — 'open Excel', "
+                        "'pull up Chrome', 'open notepad'. It resolves the name against the Start "
+                        "Menu and PATH, so it can only reach what the user installed — never a file "
+                        "path. Use it the moment the user asks to open a program; if it says the "
+                        "program wasn't found, relay that plainly."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "The program's everyday name, e.g. 'excel' or 'chrome'.",
+                            },
+                        },
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="media_control",
+                    description=(
+                        "Press a media key on the user's machine — exactly as if they tapped it on "
+                        "the keyboard. Actions: play_pause, next, previous, mute, volume_up, "
+                        "volume_down. Use for 'pause the music', 'next track', 'turn it down', "
+                        "'mute it'. It acts on whatever the OS routes media keys to."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["play_pause", "next", "previous", "mute",
+                                         "volume_up", "volume_down"],
+                                "description": "Which media key to press.",
+                            },
+                        },
+                        "required": ["action"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="system_status",
+                    description=(
+                        "One plain line about this machine — cores, memory in use, disk free, "
+                        "battery. Use for 'how's the machine doing?', 'how much disk is left?', "
+                        "'what's the battery at?'. Relay the line in your own voice."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                ),
+            ]
         if self._selfdev is not None:
             tools.append(
                 ToolSpec(
@@ -985,10 +1049,10 @@ class ToolRegistry:
         # knows whether this is a fresh build or an in-place edit (build_* vs edit_* prompts).
         if name == "build_3d_model" and self._queue is not None:
             ahead = self._queue.enqueue(args["name"], args["request"], kind=BuildKind.MODEL)
-            return _enqueued_msg(args["name"], ahead, "model")
+            return _enqueued_msg(args["name"], ahead, "hologram")
         if name == "build_task" and self._queue is not None:
             ahead = self._queue.enqueue(args["name"], args["request"], kind=BuildKind.TASK)
-            return _enqueued_msg(args["name"], ahead, "flow")
+            return _enqueued_msg(args["name"], ahead, "protocol")
         if name == "list_builds" and self._queue is not None:
             return self._queue.status_line()
         if name == "prioritize_build" and self._queue is not None:
@@ -1034,7 +1098,7 @@ class ToolRegistry:
             seeded = note and self._knowledge.add_note(base.slug, note) is not None
             extra = " Saved your first note." if seeded else ""
             return (
-                f"Created the knowledge base '{base.name}'.{extra} Tell me to remember things and I'll "
+                f"Started the vault '{base.name}'.{extra} Tell me to remember things and I'll "
                 "keep them here."
             )
         if name == "remember" and self._knowledge is not None:
@@ -1074,6 +1138,8 @@ class ToolRegistry:
                         "or an unsupported format.")
             return ToolOutput(text=f"Looking at {path.name}.", images=(block,))
         if name == "view_screen":
+            from helix.services import images as imagesvc  # local: keeps the ports layer Pillow-free
+
             block = imagesvc.capture_screen()
             if block is None:
                 return "I couldn't capture the screen just now."
@@ -1081,6 +1147,12 @@ class ToolRegistry:
                 text="Looking at the screen now.",
                 images=(block,),
             )
+        if name == "open_program" and self._desktop is not None:
+            return self._desktop.open_program(args.get("name", ""))
+        if name == "media_control" and self._desktop is not None:
+            return self._desktop.media(args.get("action", ""))
+        if name == "system_status" and self._desktop is not None:
+            return self._desktop.system_status()
         if name == "write_file" and self._files is not None:
             # The service re-checks the Settings toggle itself, so a stale spec can't slip a write.
             return self._files.write_file(
@@ -1116,9 +1188,11 @@ class ToolRegistry:
             def clean(text: str) -> str:  # collapse the (untrusted) request to a one-line label
                 return " ".join(text.split())[:140]
 
-            # Include each build's kind so the model reuses the matching build_* verb to iterate and never
-            # forks a near-duplicate by guessing the wrong kind.
-            return "\n".join(f"- {a.name} [{a.build_kind.value}]: {clean(a.request)}" for a in apps)
+            # Include each build's kind (as its V3 display word) so the model reuses the matching
+            # build_* verb to iterate and never forks a near-duplicate by guessing the wrong kind.
+            return "\n".join(
+                f"- {a.name} [{kind_label(a.build_kind.value)}]: {clean(a.request)}" for a in apps
+            )
         if name == "open_build":
             return self._request_open(args["name"])
         if name == "rename_build":
@@ -1126,7 +1200,7 @@ class ToolRegistry:
         if name == "run_task" and self._tasks is not None:
             task = self._tasks.find(args["name"])
             if task is None:
-                return f"I don't see a flow called '{args['name']}'."
+                return f"I don't see a protocol called '{args['name']}'."
             return f"Running '{task.name}'." if self._tasks.run(task.slug) else f"Couldn't launch '{task.name}'."
         if name == "run_agent" and self._agents is not None:
             target = args["name"].strip().lower()
@@ -1211,7 +1285,7 @@ class ToolRegistry:
 
     def _request_open(self, name: str) -> str:
         """'Open it' by voice: resolve the build (slug or display name) and ask the UI to open it the
-        same way a menu click would. Agents are not openable; flows are runnable, not viewable."""
+        same way a menu click would. Agents are not openable; protocols are runnable, not viewable."""
         target = name.strip().lower()
         slug = slugify(name)
         app = next(

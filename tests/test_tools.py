@@ -113,7 +113,7 @@ def test_build_3d_model_enqueues_with_no_prompt_and_model_kind():
     assert job["name"] == "Wall Camera Unit"
     assert job["kind"] == BuildKind.MODEL
     assert job["prompt"] is None
-    assert "Starting" in out and "model" in out  # fast acknowledgement, not "Built"
+    assert "Starting" in out and "hologram" in out  # fast acknowledgement, not "Built"
 
 
 def test_build_app_enqueues_with_no_prompt_and_app_kind():
@@ -130,7 +130,7 @@ def test_build_task_enqueues_with_no_prompt_and_task_kind():
     job = queue.enqueued[0]
     assert job["kind"] == BuildKind.TASK
     assert job["prompt"] is None  # the Forge picks build_task_prompt vs edit_task_prompt itself
-    assert "flow" in out.lower()  # user-facing label is now "Flow" (the build_task tool name is unchanged)
+    assert "protocol" in out.lower()  # the V3 label (the build_task tool name is unchanged)
 
 
 def test_second_build_while_one_runs_is_queued_not_started():

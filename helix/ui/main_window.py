@@ -493,6 +493,10 @@ class HelixMainWindow(QMainWindow):
         except Exception:
             _LOG.exception("suggestion check failed")
         try:
+            self._c.evolve.tick()  # EVOLVE — returns instantly except one nightly background pass
+        except Exception:
+            _LOG.exception("evolve tick failed")
+        try:
             due = self._c.reminders.pop_due()
             if due:
                 # Announce ALL of this tick's due reminders in ONE spoken line. Speaking them back-to-back

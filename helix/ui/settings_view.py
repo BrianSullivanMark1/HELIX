@@ -1,8 +1,9 @@
 """SettingsView — clean, scannable settings.
 
-One required field (your Claude key) up top; every OPTIONAL integration grouped under "API Connections",
-each a single row with an at-a-glance Set/Not-set status and an ⓘ button that pops the detail — so the
-page stays uncluttered and easy to fill in. Long forms scroll; Save stays pinned at the bottom.
+One required field (your Claude key) up top. Service keys are NOT entered here: they're pasted into
+the just-in-time connect panel the orb opens mid-conversation, so Connections is a slim review-only
+manager — one row per service with a connected dot and a Remove. Long forms scroll; Save stays
+pinned at the bottom.
 """
 from __future__ import annotations
 
@@ -26,8 +27,8 @@ from PyQt6.QtWidgets import (
 )
 
 from helix.adapters.speech import DEFAULT_TTS_VOICE, TTS_VOICES, edge_available
-from helix.domain.connections import KNOWN_SERVICES
 from helix.ports.stores import SettingsStore
+from helix.services.connections import CONNECTABLE
 from helix.services.files import WRITE_ACCESS_KEY
 from helix.ui.theme import CYAN, LINE, MUTED, STATUS_DONE
 from helix.ui.voice import AUDIO_INPUT_SETTING, AUDIO_OUTPUT_SETTING, device_id_str
@@ -95,10 +96,10 @@ class SettingsView(QWidget):
         self._subscription = subscription          # SubscriptionBrain — reports which brain is live
         self._memory = memory                      # MemoryService — the "Manage long-term memory" browser
         self._remote = remote                      # RemoteService — the optional phone companion
-        self._connections = connections           # save/load service tokens used by agents + call_api
+        self._connections = connections           # review/remove tokens (set via the connect panel)
         self._gmail = gmail                        # read-only Gmail inbox credentials (address + app password)
         self._calendar = calendar                  # read-only calendar (the private iCal URL is the secret)
-        self._conn_fields: list[tuple[str, QLineEdit]] = []  # (env-var name, field)
+        self._conn_rows: list[tuple[str, QLabel, QPushButton]] = []  # (service id, dot, Remove)
         # (status QLabel, getter) pairs refreshed on load + save so each row shows Set / Not set at a glance.
         self._statuses: list[tuple[QLabel, Callable[[], str]]] = []
         # Audio device pickers (mic + output). Only built when QtMultimedia loaded; refs kept for save/test.
@@ -158,52 +159,26 @@ class SettingsView(QWidget):
         self._brain_status.setContentsMargins(2, 2, 2, 0)
         form.addWidget(self._brain_status)
         self._refresh_brain_status()
+        # Evolve — the overnight self-improvement drafter. It only ever DRAFTS; applying a change is
+        # always a separate, explicit approval, so the switch is safe to ship on by default.
+        self._evolve = QCheckBox(
+            "Evolve — draft one self-improvement overnight (never applies itself)"
+        )
+        form.addWidget(self._check_row(
+            self._evolve, "Evolve",
+            "Once a night, HELIX drafts ONE improvement to itself — a proposal you can read, then "
+            "approve or discard. It NEVER applies a change on its own; approving is always a "
+            "separate, explicit step. Turn this off to stop the overnight drafting entirely.",
+        ))
 
-        # ── Optional integrations, grouped ──
+        # ── Connections — review-only. Keys are pasted into the just-in-time connect panel ──
         form.addSpacing(4)
         form.addWidget(self._section(
-            "API Connections", "Optional. Add a key to unlock a feature — HELIX works fine without these."
+            "Connections",
+            "Keys are added in conversation — ask HELIX to connect a service and a secure panel "
+            "opens.",
         ))
-        self._tripo = self._password("tsk_…")
-        form.addWidget(self._field_row(
-            "Tripo — high-detail 3D models", "Tripo API key",
-            "Optional. Turns build_3d_model into recognizable, film-quality 3D (your description is sent to "
-            "Tripo to generate the mesh). Get a key at platform.tripo3d.ai. Without it, models use the "
-            "built-in basic-shape builder.",
-            self._tripo, lambda: self._settings.get("tripo_api_key", "") or "",
-        ))
-        self._voyage = self._password("pa-…")
-        form.addWidget(self._field_row(
-            "Voyage — smarter knowledge search", "Voyage API key",
-            "Optional. Lets HELIX search your saved knowledge by MEANING, not just matching words (e.g. "
-            "“how do I get in?” finds a note about the door code). Get a key at voyageai.com. Without it, "
-            "knowledge search still works using keywords.",
-            self._voyage, lambda: self._settings.get("voyage_api_key", "") or "",
-        ))
-        self._blockade = self._password("your Blockade Labs API key")
-        form.addWidget(self._field_row(
-            "Blockade Labs — 360° scenes", "Blockade Labs API key",
-            "Optional. Lets HELIX build a whole 360° ENVIRONMENT you can look around inside — “a backyard "
-            "at dusk”, “a forest clearing”, “a cozy office” — instead of a single object (that's Tripo). "
-            "Get a key at blockadelabs.com. Without it, scene requests fall back to the built-in shape "
-            "builder or an object.",
-            self._blockade, lambda: self._settings.get("blockade_api_key", "") or "",
-        ))
-        # Service keys (Slack, GitHub, Alpaca, …) your apps and agents read, or the orb's read-only
-        # call_api uses. One row per credential — a service that needs two (e.g. Alpaca's key id + secret)
-        # shows both. Everything is entered HERE, once; builds then use it automatically.
-        if self._connections is not None:
-            for svc in KNOWN_SERVICES:
-                for conn in svc.fields:
-                    field = self._password(conn.hint)
-                    self._conn_fields.append((conn.key, field))
-                    form.addWidget(self._field_row(
-                        conn.label, f"{svc.label} — {conn.label}",
-                        f"Optional. Lets apps, flows, and agents you build read your {svc.label} account, "
-                        f"and the orb answer questions about it. Stored on this machine only; never written "
-                        f"into a build's files or sent anywhere except {svc.label}. Format: {conn.hint}.",
-                        field, (lambda key=conn.key: self._connections.value(key) or ""),
-                    ))
+        form.addWidget(self._connections_manager())
         # Gmail — read-only inbox (an address + a Google App Password). Two fields, one status.
         if self._gmail is not None:
             self._gmail_addr = QLineEdit()
@@ -342,7 +317,7 @@ class SettingsView(QWidget):
         self._detail.addItem("Balanced — faster, lighter", "balanced")
         self._detail.addItem("High — native poly + detailed textures", "high")
         form.addWidget(self._labeled(
-            "3D model detail", "3D model detail",
+            "Hologram detail", "Hologram detail",
             "High keeps native polygon counts and detailed textures — best quality, heavier to render. "
             "Balanced is lighter and renders on any machine.",
             self._detail,
@@ -457,6 +432,59 @@ class SettingsView(QWidget):
         lay.addWidget(field)
         self._statuses.append((status, getter))
         return box
+
+    # ----- the Connections manager (review-only; values are pasted via the connect panel) -----
+    def _connections_manager(self) -> QWidget:
+        """One row per connectable service: a connected dot, the label, and Remove for a connected
+        one. No key is ever shown or edited here — asking HELIX to connect opens the panel."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(4)
+        for sid, (label, _store, _fields) in CONNECTABLE.items():
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            dot = QLabel()
+            dot.setFixedWidth(16)
+            name = QLabel(label)
+            remove = QPushButton("Remove")
+            remove.setStyleSheet("padding:4px 10px;font-size:12px;")
+            remove.setToolTip(f"Forget the saved {label} key(s) on this machine")
+            remove.clicked.connect(lambda _=False, s=sid: self._remove_connection(s))
+            row.addWidget(dot)
+            row.addWidget(name)
+            row.addStretch(1)
+            row.addWidget(remove)
+            lay.addLayout(row)
+            self._conn_rows.append((sid, dot, remove))
+        return box
+
+    def _service_connected(self, service_id: str) -> bool:
+        """Connected = EVERY credential the service needs has a value in its store."""
+        _label, store, fields = CONNECTABLE[service_id]
+        if store == "secrets":
+            if self._connections is None:
+                return False
+            return all((self._connections.value(key) or "").strip() for key, _lbl, _hint in fields)
+        return all(str(self._settings.get(key) or "").strip() for key, _lbl, _hint in fields)
+
+    def _remove_connection(self, service_id: str) -> None:
+        """Clear every stored value for this service (secrets or Settings) and refresh its row."""
+        _label, store, fields = CONNECTABLE[service_id]
+        for key, _lbl, _hint in fields:
+            if store == "secrets":
+                if self._connections is not None:
+                    self._connections.set_value(key, "")
+            else:
+                self._settings.set(key, "")
+        self._refresh_connection_rows()
+
+    def _refresh_connection_rows(self) -> None:
+        for sid, dot, remove in self._conn_rows:
+            connected = self._service_connected(sid)
+            dot.setText("●" if connected else "○")
+            dot.setStyleSheet(f"font-size:13px;color:{STATUS_DONE if connected else MUTED};")
+            remove.setVisible(connected)
 
     def _open_memory(self) -> None:
         from helix.ui.memory_view import MemoryDialog
@@ -812,9 +840,7 @@ class SettingsView(QWidget):
     def reload(self) -> None:
         self._oauth_token.setText(self._settings.get("claude_code_oauth_token", "") or "")
         self._key.setText(self._settings.get("claude_api_key", "") or "")
-        self._tripo.setText(self._settings.get("tripo_api_key", "") or "")
-        self._voyage.setText(self._settings.get("voyage_api_key", "") or "")
-        self._blockade.setText(self._settings.get("blockade_api_key", "") or "")
+        self._evolve.setChecked(bool(self._settings.get("evolve_enabled", True)))  # missing = ON
         detail = (self._settings.get("model_detail") or "balanced").lower()
         didx = self._detail.findData(detail)
         self._detail.setCurrentIndex(didx if didx >= 0 else 0)
@@ -827,9 +853,6 @@ class SettingsView(QWidget):
             rate = 1.0
         self._speed.setValue(int(round(max(0.8, min(2.0, rate)) * 10)))
         self._speed_lbl.setText(f"{self._speed.value() / 10:.1f}×")
-        if self._connections is not None:
-            for env, field in self._conn_fields:
-                field.setText(self._connections.value(env) or "")
         if self._gmail is not None:
             self._gmail_addr.setText(self._gmail.address())
             self._gmail_pw.setText(self._gmail.app_password())
@@ -847,21 +870,17 @@ class SettingsView(QWidget):
             self._remote_lan.setChecked(self._remote.lan())
             self._refresh_remote_info()
         self._populate_audio_devices()  # refresh the device lists (earphones may have come/gone)
+        self._refresh_connection_rows()  # a service connected mid-conversation shows up on reopen
         self._refresh_statuses()
         self._refresh_brain_status()
 
     def _save(self) -> None:
         self._settings.set("claude_code_oauth_token", self._oauth_token.text().strip())
         self._settings.set("claude_api_key", self._key.text().strip())
-        self._settings.set("tripo_api_key", self._tripo.text().strip())
-        self._settings.set("voyage_api_key", self._voyage.text().strip())
-        self._settings.set("blockade_api_key", self._blockade.text().strip())
+        self._settings.set("evolve_enabled", self._evolve.isChecked())
         self._settings.set("model_detail", self._detail.currentData())
         self._settings.set("tts_voice", self._voice.currentData())
         self._settings.set("tts_rate", round(self._speed.value() / 10, 1))
-        if self._connections is not None:
-            for env, field in self._conn_fields:
-                self._connections.set_value(env, field.text().strip())
         if self._gmail is not None:
             self._gmail.set_credentials(self._gmail_addr.text(), self._gmail_pw.text())
         if self._calendar is not None:
@@ -881,6 +900,7 @@ class SettingsView(QWidget):
         if _AUDIO and self._mic_combo is not None and self._out_combo is not None:
             self._settings.set(AUDIO_INPUT_SETTING, self._mic_combo.currentData() or "")
             self._settings.set(AUDIO_OUTPUT_SETTING, self._out_combo.currentData() or "")
+        self._refresh_connection_rows()
         self._refresh_statuses()
         self._refresh_brain_status()  # a just-saved token flips this to "on your subscription" at once
         self._status.setText("Saved.")

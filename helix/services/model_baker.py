@@ -118,7 +118,7 @@ class ModelBaker:
             # build that produced nothing. Leave a real page alone (and ship the render kit it imports);
             # otherwise explain.
             if not viewer.exists():
-                self._write_error(workspace, "The model build produced no model.json and no page.")
+                self._write_error(workspace, "The hologram build produced no model.json and no page.")
             else:
                 self._write_render_kit(workspace)
             return
@@ -146,7 +146,7 @@ class ModelBaker:
         except SpecError as exc:
             self._write_error(workspace, str(exc))
         except Exception as exc:  # never let a baking bug fail the whole build
-            self._write_error(workspace, f"Couldn't build the model: {exc}")
+            self._write_error(workspace, f"Couldn't build the hologram: {exc}")
 
     # ----- environment (360° scene) -----
     def _bake_environment(self, workspace: Path, spec: dict) -> None:
@@ -208,7 +208,7 @@ class ModelBaker:
 
         if engine == "neural":
             if not has_neural:
-                raise SpecError("High-detail (neural) modeling isn't enabled — add a Tripo API key in Settings.")
+                raise SpecError("High-detail (neural) holograms aren't enabled — add a Tripo API key in Settings.")
             return self._neural_glb(spec, workspace, prompt), False
 
         if engine == "auto":
@@ -222,23 +222,23 @@ class ModelBaker:
                         raise
                 except Exception as exc:
                     if not parts:
-                        raise SpecError(f"High-detail modeling failed: {exc}")
+                        raise SpecError(f"High-detail generation failed: {exc}")
                 # neural attempt failed but parts exist — fall through to the local mesh.
             if not parts:
                 if organic and not has_neural:
                     raise SpecError("This looks like an organic subject — add a Tripo API key in Settings "
-                                    "for a film-grade model.")
+                                    "for a film-grade hologram.")
                 raise SpecError("model.json needs a 'parts' list (or an enabled neural 'prompt').")
             return self._parametric_glb(parts), (organic and not has_neural)
 
         # engine == "parametric" (or anything unknown)
         if not parts:
-            raise SpecError("A parametric model needs a 'parts' list.")
+            raise SpecError("A parametric hologram needs a 'parts' list.")
         return self._parametric_glb(parts), False
 
     def _neural_glb(self, spec: dict, workspace: Path, prompt: str) -> bytes:
         if not prompt:
-            raise SpecError("A high-detail model needs a 'prompt' describing the subject.")
+            raise SpecError("A high-detail hologram needs a 'prompt' describing the subject.")
         image = spec.get("image")
         image_path = (workspace / image) if isinstance(image, str) and image else None
         glb = self._neural(prompt, image_path)  # type: ignore[misc]
@@ -468,7 +468,7 @@ class ModelBaker:
                 return man["name"]
         except Exception:
             pass
-        return "Model"
+        return "Hologram"
 
 
 # ----- texture helpers -----
@@ -821,7 +821,7 @@ _VIEWER_HTML = """<!doctype html>
         play.onclick = () => { playing = !playing; play.textContent = playing ? "Pause" : "Play";
           play.classList.toggle("on", !playing); };
       }
-    }, undefined, () => fail("Couldn't load the model mesh."));
+    }, undefined, () => fail("Couldn't load the hologram mesh."));
 
     addEventListener("resize", () => {
       camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
@@ -977,7 +977,7 @@ _ERROR_HTML = """<!doctype html>
 <!-- HELIX-GENERATED-VIEWER -->
 <html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Model</title>
+<title>Hologram</title>
 <style>
   html, body { margin: 0; height: 100%; background: __BG__; color: #9fc7c8;
     font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
@@ -986,6 +986,6 @@ _ERROR_HTML = """<!doctype html>
   h1 { color: __ACCENT__; font-size: 16px; font-weight: 600; margin: 0 0 8px; }
   p { font-size: 14px; line-height: 1.5; opacity: .85; }
 </style></head>
-<body><div class="card"><h1>This model didn't build</h1><p>__MSG__</p>
+<body><div class="card"><h1>This hologram didn't build</h1><p>__MSG__</p>
 <p>Try describing it again, or ask for a small change.</p></div></body></html>
 """

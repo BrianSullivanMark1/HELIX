@@ -8,7 +8,7 @@ from pathlib import Path
 from helix.domain.connections import KNOWN_SERVICES, service_for_url
 from helix.domain.models import AppKind
 from helix.services.builds import BuildService
-from helix.services.connections import ConnectionsService
+from helix.services.connections import CONNECTABLE, ConnectionsService, resolve_connectable
 
 
 class _Builds:
@@ -187,6 +187,33 @@ def test_a_pasted_secret_wins_over_a_managed_key(tmp_path):
     sec.set("ANTHROPIC_API_KEY", "from-secrets")
     s = ConnectionsService(_Builds(tmp_path), sec, managed={"ANTHROPIC_API_KEY": lambda: "from-settings"})
     assert s.value("ANTHROPIC_API_KEY") == "from-secrets"  # an explicit paste still takes precedence
+
+
+def test_connectable_covers_every_known_service_plus_the_engine_keys():
+    # The just-in-time connect panel and the Settings manager both iterate CONNECTABLE — it must
+    # span call_api's allow-list AND the engine keys, with a valid store on every entry.
+    assert set(CONNECTABLE) >= {s.id for s in KNOWN_SERVICES} | {"tripo", "blockade", "voyage"}
+    for label, store, fields in CONNECTABLE.values():
+        assert label and store in ("secrets", "settings") and fields
+        for key, field_label, _hint in fields:
+            assert key and field_label
+    # a KNOWN_SERVICES entry keeps its env-var keys in the secrets store
+    assert CONNECTABLE["slack"][1] == "secrets"
+    assert [k for k, _l, _h in CONNECTABLE["slack"][2]] == ["SLACK_TOKEN"]
+    # an engine key ALSO lives in the secrets store (guard-safe), under its env-var name
+    assert CONNECTABLE["tripo"][1] == "secrets"
+    assert [k for k, _l, _h in CONNECTABLE["tripo"][2]] == ["TRIPO_API_KEY"]
+
+
+def test_resolve_connectable_maps_spoken_names_ids_and_aliases():
+    assert resolve_connectable("Slack") == "slack"
+    assert resolve_connectable("  GITHUB ") == "github"
+    assert resolve_connectable("sam.gov") == "sam"      # alias
+    assert resolve_connectable("skybox") == "blockade"  # alias
+    assert resolve_connectable("tripo") == "tripo"
+    assert resolve_connectable("SAM.") == "sam"         # label prefix
+    assert resolve_connectable("teapot") is None
+    assert resolve_connectable("") is None
 
 
 def test_detect_entry_prefers_a_backend_main_py(tmp_path):

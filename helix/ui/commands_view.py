@@ -29,15 +29,15 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     )),
     ("Build things — just describe them", (
         ("“build a tip calculator”", "HELIX confirms, then builds an app into your menu."),
-        ("“show me a 3D heart”", "Conjures an interactive 3D model you can orbit and explore."),
-        ("“make a flow that renames my downloads”", "Builds a script you run on demand."),
-        ("“remember the wifi password”", "Saves a note to your searchable knowledge."),
+        ("“show me a 3D heart”", "Projects an interactive hologram you can orbit and explore."),
+        ("“make a protocol that renames my downloads”", "Builds a script you run on demand."),
+        ("“remember the wifi password”", "Saves a note to your searchable vault."),
         ("“save a morning-brief agent”", "Saves a standing goal you can run any time."),
     )),
     ("Change what you've made", (
         ("“make it taller” · “make the streak monthly”", "Iterates the build you're discussing, in place."),
-        ("“rename the tip calculator to Gratuity”", "Renames any app, flow, model, or agent."),
-        ("“run my morning brief”", "Runs a saved agent (or “run the cleanup flow”)."),
+        ("“rename the tip calculator to Gratuity”", "Renames any app, protocol, hologram, or agent."),
+        ("“run my morning brief”", "Runs a saved agent (or “run the cleanup protocol”)."),
         ("“delete the tip calculator”", "Removes it — after you confirm with one click."),
     )),
     ("Stop a build or a reply", (

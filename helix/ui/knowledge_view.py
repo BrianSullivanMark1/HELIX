@@ -1,10 +1,10 @@
-"""KnowledgeView — manage one knowledge base inside HELIX: add notes/files, search, remove documents.
+"""KnowledgeView — manage one vault inside HELIX: add notes/files, search, remove documents.
 
 Part of the immutable shell (like AppViewer), but deliberately a NATIVE Qt widget rather than a web view:
-a knowledge base is a document manager, not a built page, and a list + editor avoids the optional
+a vault is a document manager, not a built page, and a list + editor avoids the optional
 PyQt6-WebEngine dependency entirely (more robust in the frozen build). The user adds material four ways —
 paste a note, add files, add a folder, or drag files onto the panel — and the orb/agents search it
-elsewhere. All file work goes through KnowledgeService, which keeps everything inside the base's own
+elsewhere. All file work goes through KnowledgeService, which keeps everything inside the vault's own
 folder.
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 from helix.services.knowledge import KnowledgeService
 from helix.ui.theme import CYAN, LINE, MUTED, PANEL, STATUS_DONE
 
-_SOURCE_LABEL = {"note": "note", "file": "file", "folder": "folder", "task": "from a flow"}
+_SOURCE_LABEL = {"note": "note", "file": "file", "folder": "folder", "task": "from a protocol"}
 
 
 class _DocRow(QFrame):
@@ -121,7 +121,7 @@ class KnowledgeView(QWidget):
 
         # Search-this-base box: typing previews the passages the orb would find.
         self._search = QLineEdit()
-        self._search.setPlaceholderText("🔍 Search this knowledge…")
+        self._search.setPlaceholderText("🔍 Search this vault…")
         self._search.textChanged.connect(self._on_search)
         body.addWidget(self._search)
 
@@ -150,7 +150,7 @@ class KnowledgeView(QWidget):
         self._search.clear()  # clearing triggers _on_search → shows the document list
         self._note.clear()
         self._status.setText("")
-        self._title.setText(f"Knowledge › {name}")
+        self._title.setText(f"Vault › {name}")
         self._render_docs()
 
     def reload(self) -> None:
@@ -181,7 +181,7 @@ class KnowledgeView(QWidget):
     def _add_files(self) -> None:
         if self._slug is None:
             return
-        paths, _ = QFileDialog.getOpenFileNames(self, "Add files to this knowledge")
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add files to this vault")
         if paths:
             added = self._knowledge.add_files(self._slug, [Path(p) for p in paths])
             self._after_ingest(added, source="files")
@@ -189,7 +189,7 @@ class KnowledgeView(QWidget):
     def _add_folder(self) -> None:
         if self._slug is None:
             return
-        folder = QFileDialog.getExistingDirectory(self, "Add a folder to this knowledge")
+        folder = QFileDialog.getExistingDirectory(self, "Add a folder to this vault")
         if folder:
             added = self._knowledge.add_folder(self._slug, Path(folder))
             self._after_ingest(added, source="folder")
@@ -211,7 +211,7 @@ class KnowledgeView(QWidget):
         if self._slug is None:
             return
         confirm = QMessageBox.question(
-            self, "Remove", f"Remove “{title}” from this knowledge? This can’t be undone.",
+            self, "Remove", f"Remove “{title}” from this vault? This can’t be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

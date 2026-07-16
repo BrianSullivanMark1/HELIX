@@ -76,14 +76,14 @@ def test_fresh_app_gets_the_build_prompt_and_iteration_gets_the_edit_prompt():
     assert "Build a small, self-contained app" not in coder.prompts[1]
 
 
-def test_task_iteration_gets_the_edit_flow_prompt():
+def test_task_iteration_gets_the_edit_protocol_prompt():
     root = _build_repo()
     coder = _Coder(lambda ws, i: _w(ws / "main.py", "print('hi')"))
     forge = _forge(root, coder)
     forge.build("Renamer", "rename my downloads", kind=BuildKind.TASK)
-    assert "self-contained TASK" in coder.prompts[0]
+    assert "self-contained PROTOCOL" in coder.prompts[0]
     forge.build("Renamer", "also handle PDFs", kind=BuildKind.TASK)
-    assert "EDITING the existing flow" in coder.prompts[1]
+    assert "EDITING the existing protocol" in coder.prompts[1]
 
 
 def test_explicit_prompt_override_still_wins():

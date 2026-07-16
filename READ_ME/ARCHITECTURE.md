@@ -1,12 +1,14 @@
-# HELIX V2 — Architecture
+# HELIX V3 — Architecture
 
-> The technical source of truth: how the V2 rebuild is structured and *why*. For the product vision,
-> read [`BLUEPRINT.md`](BLUEPRINT.md).
+> The technical source of truth: how HELIX is structured and *why*. For the product vision, read
+> [`BLUEPRINT.md`](BLUEPRINT.md); for the V3 redesign charter, read [`V3_DESIGN.md`](V3_DESIGN.md).
 
 This is a ground-up rebuild of the prototype (which lives on the `main` branch). The prototype proved
 the idea; it also collapsed almost the entire UI into one ~3,900-line file with business logic, I/O, and
-Qt widgets interleaved. V2 keeps the *ideas* and discards the *structure* — and it has since grown from
-an app-builder into a full voice-first assistant with the same discipline.
+Qt widgets interleaved. V2 kept the *ideas* and discarded the *structure*, growing from an app-builder
+into a full voice-first assistant with the same discipline. V3 keeps the machine and redesigns the
+surface: the presentation-only vocabulary (App · Protocol · Agent · Hologram · Vault), sight
+(`view_screen` + visual memory), just-in-time connections, and the nightly Evolve drafter.
 
 ---
 
@@ -28,7 +30,7 @@ an app-builder into a full voice-first assistant with the same discipline.
 6. **Composition at the edge.** Wiring (which adapter implements which port) happens in exactly one
    place — `app/container.py`. Nothing else constructs an adapter.
 7. **Reads open, writes confirmed, untrusted content fenced.** Faculties that only read (files, inbox,
-   calendar, connected services, your own knowledge) are freely available; anything that spends, writes,
+   calendar, connected services, your own vault) are freely available; anything that spends, writes,
    or reaches out is confirmed. Everything a tool pulls in from the outside is wrapped as DATA the model
    must never treat as instructions.
 
@@ -61,12 +63,15 @@ helix/
 
   domain/              # PURE. No Qt, no I/O, no other helix layer.
     models.py          #   App (a Build), AppKind, BuildKind (app/task/agent/model/knowledge), Version, Message, slugify
+    vocabulary.py      #   the V3 words — kind_label/kind_title ("task"→"protocol", "model"→"hologram",
+                       #     "knowledge"→"vault"), legacy synonyms, and speakable tool labels. Presentation
+                       #     only: persisted kind strings never change. (tool_labels.py is a shim into it.)
     constitution.py    #   Commandments, PROTECTED_PREFIXES/FILES, SHELL_PREFIX, EDITABLE_PREFIXES, LOCKED_SETTINGS
     errors.py          #   Domain exceptions (ConfirmationRequired, ConstitutionViolation, BuildError, BuildCancelled, …)
-    events.py          #   EventBus payloads (BuildCreated/Iterated/Deleted/Started/Progress/Finished, SelfChange…)
-    knowledge.py       #   passage chunking for the knowledge RAG
+    events.py          #   EventBus payloads (BuildCreated/Iterated/Deleted/Started/Progress/Finished, SelfChange…,
+                       #     ConnectRequested — the model asked to connect a service just in time)
+    knowledge.py       #   passage chunking for the vault RAG
     connections.py     #   known connectable services (Slack/GitHub/Alpaca/SAM.gov) + how their key is attached
-    tool_labels.py     #   friendly spoken labels for tool calls ("call_api" → not "calawpee")
 
   ports/               # Protocols only — the seams.
     llm.py             #   ChatModel.chat(turns,*,system,tools)->Reply; blocks: Text/ToolUse/ToolResult/Image; ToolOutput
@@ -74,7 +79,7 @@ helix/
     repo.py            #   VersionedRepo: init/branch/commit/merge(--no-ff)/worktree/restore/diff
     stores.py          #   SettingsStore, MemoryStore, ConversationStore
     speech.py          #   SpeechIn (STT), SpeechOut (TTS)
-    embedder.py        #   Embedder — text→vector (knowledge RAG) and the speaker-embedding seam
+    embedder.py        #   Embedder — text→vector (vault RAG) and the speaker-embedding seam
     clock.py           #   Clock (now()) — no scattered datetime.now()
     events.py          #   EventBus: publish/subscribe
 
@@ -90,10 +95,10 @@ helix/
     json_settings.py   #   SettingsStore (one JSON file)
     speech.py          #   WhisperSpeechIn (faster-whisper) + EdgeSpeechOut/OsSpeechOut (neural + OS voice)
     speaker_embed.py   #   neural speaker embeddings (WeSpeaker CAM++ onnx) for voice identity
-    voyage_embed.py    #   text embeddings for the knowledge RAG (optional; keyword fallback otherwise)
+    voyage_embed.py    #   text embeddings for the vault RAG (optional; keyword fallback otherwise)
     gmail_imap.py      #   read-only Gmail over IMAP
     ical_http.py       #   read-only calendar over a private iCal URL
-    tripo3d.py / blockade_skybox.py  # hosted neural 3D-asset / skybox backends (optional, key-gated)
+    tripo3d.py / blockade_skybox.py  # hosted hologram-asset / skybox backends (optional, key-gated)
     watchdog.py        #   process/parent watchdog for auto-restart lifecycles
     system_clock.py · signal_bus.py · restart.py
 
@@ -102,15 +107,18 @@ helix/
     tools.py           #   ToolRegistry — maps model tool-calls to service methods (the model's "hands")
     prompts.py         #   the system + coder prompts, in one place
     forge.py · builds.py · build_queue.py · build_status.py · sandbox.py · cancel.py   # the maker + build lifecycle
-    selfdev.py · selfdev_lane.py                                                        # improve HELIX itself (gated)
-    model_baker.py · materials.py · render_kit.py                                       # bake declarative 3D → glb + viewer
+    selfdev.py · selfdev_lane.py · evolve.py    # improve HELIX itself (gated) + the nightly Evolve drafter
+    model_baker.py · materials.py · render_kit.py                                       # bake declarative holograms → glb + viewer
     agents.py · scheduler.py · workflows.py                                             # saved-goal automations + pipelines
     files.py           #   the user's disk: list/read always; write behind a toggle; find_images/view_image for vision
-    images.py          #   attached/located images → model-ready vision blocks (Pillow: orient, downscale, base64)
-    knowledge.py       #   searchable notes/documents + local RAG (search/create/remember)
-    memory.py · profile.py · lessons.py                                                 # long-term facts, who-you-are, learned prefs
+    images.py          #   attached/located images → model-ready vision blocks (Pillow: orient, downscale, base64);
+                       #     capture_screen for view_screen (ImageGrab off the GUI thread, ephemeral like every image)
+    knowledge.py       #   the Vault — searchable notes/documents + local RAG (search/create/remember)
+    memory.py · profile.py · lessons.py         # long-term facts, who-you-are, learned prefs; memory.py also
+                       #     distills durable VISUAL facts from image turns (after_image_turn, per speaker)
     location.py · recommend.py · suggestions.py                                         # place grounding, usage ledger, nudges
     connections.py     #   read-only call_api to connected services (host-allowlisted, redirect-refusing, secret-scrubbing)
+                       #     + CONNECTABLE, the just-in-time connect registry behind the connect_service tool
     gmail.py · calendar.py · reminders.py                                               # inbox/calendar reads + spoken timers
     remote.py          #   optional token-gated loopback companion
     voiceid.py         #   who is speaking — the per-utterance identity decision + enrollment flow
@@ -122,9 +130,11 @@ helix/
     voice.py                                # VoiceController — wake word, identity gate, streamed TTS, barge-in
     chat_input.py                           # the prompt box: Enter sends, and paste/drag an image to attach it
     console_view.py                         # the orb home + transcript + inline charts/tables + image previews + input
-    launcher_view.py                        # the Menu — Apps / Models / Agents / Tasks / Knowledge cards + Suggested
+    launcher_view.py                        # the Menu — Apps / Protocols / Agents / Holograms / Vault cards + Suggested
     settings_view.py · connections_dialog.py · commands_view.py · knowledge_view.py · memory_view.py
-    app_viewer.py                           # in-app web view for built HTML apps + 3D models (optional WebEngine)
+                                            #   connections_dialog also hosts show_connect_panel — the masked
+                                            #   just-in-time key panel a ConnectRequested event opens
+    app_viewer.py                           # in-app web view for built HTML apps + holograms (optional WebEngine)
     build_status.py · main_window.py        # the status board + the shell (stacked pages, nav, orb background)
 
   app/                 # Composition root.
@@ -157,7 +167,7 @@ Ports are `typing.Protocol`s so adapters need no inheritance and the domain stay
   two stores share one SQLite file (usage/cost, the version index, chat history).
 - **`SpeechIn` / `SpeechOut`** and **`Embedder`** — all optional; the real adapters report
   `available()==False` (or fall back) when the model/library isn't present, so voice, neural TTS, speaker
-  identity, and semantic knowledge search are purely additive.
+  identity, and semantic vault search are purely additive.
 - **`EventBus`** — decouples "a build finished / progressed" from "the UI refreshes." Services publish;
   the UI subscribes on the UI thread.
 
@@ -193,19 +203,24 @@ API. Persistence, tool digests, and behaviour are identical on both paths. `Pref
 (no-tool) chat — the distillers — to whichever brain is active.
 
 **Vision** flows on both paths: images the user attaches/pastes/drags ride on the user turn; images
-HELIX *locates* on disk (`find_images` / `view_image`) come back inside the tool result. `services/
-images.py` normalizes every image (EXIF-orient, downscale to ~1568px, re-encode, base64) before it's
-sent.
+HELIX *locates* on disk (`find_images` / `view_image`) come back inside the tool result; and
+`view_screen` captures the display itself (`images.capture_screen`, Pillow `ImageGrab` off the GUI
+thread) into the same pipeline. `services/images.py` normalizes every image (EXIF-orient, downscale to
+~1568px, re-encode, base64) before it's sent; every capture is ephemeral — never persisted. After an
+image turn answers, `MemoryService.after_image_turn` distills durable *visual* facts into per-speaker
+long-term memory in the background, so what HELIX saw stays answerable without the photo.
 
 ---
 
 ## 7. The Forge — building (the core maker loop)
 
-A **Build** is one of five kinds — **app, task/flow, agent, 3D model, or knowledge base** — and the user
-conjures every one by talking to the orb. `ToolRegistry` offers the build tools (`build_app`,
-`build_task`, `build_3d_model`, `create_agent`, `create_knowledge`, `create_workflow`, plus
-rename/open/run/delete). A delete or a self-change is never performed from the model loop alone — it asks
-the UI for one real human confirmation first.
+A creation (a **Build** internally) is one of five kinds — **app, protocol, agent, hologram, or
+vault** (persisted kinds `app / task / agent / model / knowledge`; the new words are rendered through
+`domain/vocabulary.py`) — and the user conjures every one by talking to the orb. `ToolRegistry` offers
+the build tools (`build_app`, `build_task`, `build_3d_model`, `create_agent`, `create_knowledge`,
+`create_workflow`, plus rename/open/run/delete — tool names are internal and never change). A delete or
+a self-change is never performed from the model loop alone — it asks the UI for one real human
+confirmation first.
 
 1. The user describes what they want; the model **confirms the spend in plain language** first (the
    system prompt has it ask before it builds).
@@ -213,10 +228,10 @@ the UI for one real human confirmation first.
    `git init`s it, writes the `.helixbuild.json` manifest (carrying its `BuildKind`), and commits a scaffold.
 3. The chosen `CoderAgent` runs in the workspace; the Forge snapshots the rest of the tree and reverts any
    write that escaped, then `BuildService.finalize` detects the entry point and commits the result to the
-   workspace repo. (Agents/knowledge skip the coder — they're saved instantly and cost nothing to create.)
+   workspace repo. (Agents/vaults skip the coder — they're saved instantly and cost nothing to create.)
 4. `EventBus` events refresh the Menu (rendered from `BuildService.categorized()`) and the status board.
-   Opening a build loads it in the in-app `AppViewer` (HTML app / 3D model), opens a knowledge manager, or
-   runs a flow in its own console.
+   Opening a creation loads it in the in-app `AppViewer` (HTML app / hologram), opens the vault manager,
+   or runs a protocol in its own console.
 
 Iterating ("make the streak monthly"), renaming, and deleting are the same path on the existing
 workspace — all reachable by conversation.
@@ -242,6 +257,12 @@ The gate: record pending → scan the diff against protected paths/shell → smo
 an isolated worktree) → revertible `--no-ff` merge → restart. A fingerprint over the Constitution pauses
 autonomous self-editing if the laws are tampered with. Drafting runs in a background lane so the orb
 isn't frozen. Built apps are sandboxed to their own workspace and told never to reach outside it.
+
+**Evolve** (`services/evolve.py`) is a *client* of this same gate, never a bypass: nightly it mines
+what the day produced (lessons from corrections, logged errors, failed builds, slow turns), picks the
+one most worthwhile improvement, and drafts it through the identical `improve_helix` pipeline — branch,
+smoke-check, constitution scan. It never applies anything itself; the draft waits for the user's
+explicit approval like any other self-change.
 
 ---
 
@@ -275,11 +296,15 @@ bundles it, so no credential or history can leak into a shipped build.
   this is deliberate.
 - **`call_api` is read-only and fenced.** GET-only, limited to connected services, refuses all redirects
   (so a token can't be exfiltrated), caps the body, and scrubs secrets from what the model sees.
+- **Keys are captured just in time, outside the model.** The `connect_service` tool only *requests* a
+  connection: it publishes a `ConnectRequested` event, the UI opens the masked `show_connect_panel`
+  naming the service and why, and the pasted value lands directly in the secrets/settings store. The
+  model never sees, speaks, or echoes a key's value — not even the one it asked for.
 - **File access is sealed and canonicalized.** Reads seal HELIX's own data/program folders (except
   `data/builds`); writes are behind a Settings toggle and additionally can't touch HELIX itself. Every
   path is canonicalized (drops `\\?\` prefixes, trailing dots/spaces) before a zone check, which fails
   closed. `find_images` honors the same seals.
-- **Untrusted content is fenced everywhere** — file/inbox/knowledge/API text and image contents are
+- **Untrusted content is fenced everywhere** — file/inbox/vault/API text and image contents are
   wrapped as DATA with a nonce, and the system prompt forbids treating any of it as instructions.
 - **The remote companion is off by default** — token-gated, loopback-only, and limited to read/ask +
   run-agent through the same tool fence.

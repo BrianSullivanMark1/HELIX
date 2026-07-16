@@ -1,3 +1,3 @@
-"""HELIX — a local-first desktop app-builder you talk to."""
+"""HELIX — a local-first, voice-first desktop AI presence you talk to."""
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"

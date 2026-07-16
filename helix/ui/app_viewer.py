@@ -266,9 +266,10 @@ class AppViewer(QWidget):
             "background:#080b0f;color:#9fc7c8;font-family:-apple-system,Segoe UI,sans-serif;text-align:center'>"
             "<div style='max-width:460px;padding:28px'>"
             "<div style='color:#3fe0e0;font-size:16px;font-weight:600;margin-bottom:8px'>"
-            "This model was too heavy to display</div>"
+            "This hologram was too heavy to display</div>"
             "<div style='font-size:14px;line-height:1.5;opacity:.85'>It likely exceeded this machine's "
-            "graphics memory. Try ⟳ Reload, or set 3D model detail to “Balanced” in Settings and rebuild.</div>"
+            "graphics memory. Try ⟳ Reload, or set the hologram detail to “Balanced” in Settings and "
+            "rebuild.</div>"
             "</div></body>"
         )
 

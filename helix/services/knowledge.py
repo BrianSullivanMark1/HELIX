@@ -40,6 +40,7 @@ from helix.domain.knowledge import (
     tokenize,
 )
 from helix.domain.models import App, BuildKind, slugify
+from helix.domain.vocabulary import kind_label
 from helix.logging_setup import get_logger
 from helix.ports.clock import Clock
 from helix.ports.events import EventBus
@@ -114,14 +115,14 @@ class KnowledgeService:
         name already taken by a DIFFERENT kind of build (so it can't silently alias onto an app/task)."""
         name = (name or "").strip()
         if not name:
-            raise BuildError("Give the knowledge base a name.")
+            raise BuildError("Give the vault a name.")
         slug = slugify(name)
         existing = next((a for a in self._builds.list() if a.slug == slug), None)
         if existing is not None:
             if existing.build_kind != BuildKind.KNOWLEDGE:
                 raise BuildError(
-                    f"There's already a {existing.build_kind.value} called '{existing.name}'. "
-                    "Choose a different name for the knowledge base."
+                    f"There's already a {kind_label(existing.build_kind.value)} called "
+                    f"'{existing.name}'. Choose a different name for the vault."
                 )
             return existing  # already exists — reuse it
         app = App.from_request(
@@ -315,13 +316,13 @@ class KnowledgeService:
         model answers from. A friendly plain message when there's nothing to search or nothing matched."""
         query = (query or "").strip()
         if not query:
-            return "Tell me what to look for in your knowledge."
+            return "Tell me what to look for in your vault."
         targets = self._resolve_targets(base_name)
         if isinstance(targets, str):
             return targets  # a friendly "no such base" / "no knowledge yet" message
         hits = self._gather_and_rank(query, targets, semantic=True)
         if not hits:
-            where = f" in {targets[0].name}" if base_name and targets else " in your saved knowledge"
+            where = f" in {targets[0].name}" if base_name and targets else " in your vault"
             return f"I couldn't find anything about that{where}."
         self._searches += 1
         return format_hits(hits, _new_nonce(self._searches))
@@ -386,12 +387,12 @@ class KnowledgeService:
         instead of a list when there's nothing to search (no bases) or the named base doesn't exist."""
         bases = self.bases()
         if not bases:
-            return "You haven't saved any knowledge yet. Tell me to remember something and I'll start a base."
+            return "You don't have a vault yet. Tell me to remember something and I'll start one."
         if base_name:
             one = self.find(base_name)
             if one is None:
                 names = ", ".join(b.name for b in bases)
-                return f"I don't have a knowledge base called '{base_name}'. You have: {names}."
+                return f"I don't have a vault called '{base_name}'. You have: {names}."
             return [one]
         return bases
 

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from helix.domain.errors import BuildCancelled, BuildError
 from helix.domain.events import BuildCreated, BuildDeleted, BuildIterated, BuildStarted
 from helix.domain.models import App, BuildKind, slugify
+from helix.domain.vocabulary import kind_label
 from helix.logging_setup import get_logger
 from helix.ports.coder import CoderAgent, ProgressFn
 from helix.ports.events import EventBus
@@ -29,11 +30,13 @@ if TYPE_CHECKING:
 
 _LOG = get_logger("forge")
 
-# Filler words dropped before a fuzzy build-name match, so "update my garden model" still resolves to the
-# build named "Garden Walkthrough". Conservative on purpose — only obvious connective/kind words.
+# Filler words dropped before a fuzzy build-name match, so "update my garden hologram" still resolves
+# to the build named "Garden Walkthrough". Conservative on purpose — only obvious connective/kind words
+# (the V3 words plus every V2 synonym the user may still say).
 _NAME_FILLER = frozenset({
     "the", "a", "an", "my", "your", "our", "this", "that", "please",
     "model", "models", "app", "apps", "application", "task", "tasks", "agent", "build", "3d",
+    "protocol", "protocols", "flow", "flows", "hologram", "holograms", "vault", "vaults",
 })
 
 
@@ -85,14 +88,14 @@ class ForgeService:
         iterating = prior is not None
         if kind is None:
             # Caller didn't classify: keep an existing build's kind on iteration (so a plain rebuild
-            # never silently moves a model out of the Models tab); new builds default to a plain app.
+            # never silently moves a hologram out of its tab); new builds default to a plain app.
             app.build_kind = prior.build_kind if prior else BuildKind.APP
         elif prior is not None and prior.build_kind != kind:
             # The name is taken by a DIFFERENT kind — refuse instead of silently flipping a model into a
             # task (or vice versa) and overwriting its workspace. Ask the user to pick another name.
             raise BuildError(
-                f"There's already a {prior.build_kind.value} called '{prior.name}'. "
-                f"Choose a different name for the new {kind.value}."
+                f"There's already a {kind_label(prior.build_kind.value)} called '{prior.name}'. "
+                f"Choose a different name for the new {kind_label(kind.value)}."
             )
         else:
             app.build_kind = kind
@@ -133,6 +136,16 @@ class ForgeService:
             self._data_dir / "helix_secrets.json",  # volatile: the user can connect a key mid-build
             self._data_dir / "helix_reminders.json",  # volatile: "set a timer" works mid-build too
             self._data_dir / "helix_agents.json",  # volatile: create/pause/mark_ran happen mid-build too
+            # Every other store a background distiller or the UI thread rewrites WHILE a build runs —
+            # long-term memory (incl. the V3 visual distiller), lessons, locations, usage, workflows,
+            # voice profiles. Without these, a mid-build "remember" or a passive voice-profile upgrade
+            # reads as the BUILD escaping: the user's data file gets reverted and a good build fails.
+            self._data_dir / "helix_memory.json",
+            self._data_dir / "helix_lessons.json",
+            self._data_dir / "helix_locations.json",
+            self._data_dir / "helix_usage.json",
+            self._data_dir / "helix_workflows.json",
+            self._data_dir / "helix_voices.json",
             *self._guard_files,
         )
         tree_sig = scan_tree(self._app_root, skip=skip)

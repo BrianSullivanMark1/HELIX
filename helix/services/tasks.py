@@ -147,19 +147,6 @@ class TaskService:
             except Exception:
                 pass
 
-    def terminate_all(self) -> None:
-        """Best-effort stop of any task processes HELIX launched (available; not called on a normal close,
-        since a task runs in its own console and is the user's to keep running)."""
-        with self._lock:
-            procs = list(self._procs.values())
-            self._procs.clear()
-        for proc in procs:
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-            except Exception:
-                pass
-
     def _prune(self) -> None:
         with self._lock:
             for slug in [s for s, p in self._procs.items() if p.poll() is not None]:

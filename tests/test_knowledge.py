@@ -230,7 +230,7 @@ def test_remove_doc_drops_it_from_index_and_disk(tmp_path):
 
 def test_search_scoping_and_no_bases(tmp_path):
     ks = _svc(tmp_path)
-    assert "haven't saved any knowledge" in ks.search("anything").lower()
+    assert "don't have a vault" in ks.search("anything").lower()
     work = ks.create("Work")
     home = ks.create("Home")
     ks.add_note(work.slug, "The office alarm code is 4815.")
@@ -240,7 +240,7 @@ def test_search_scoping_and_no_bases(tmp_path):
     assert "1623" not in ks.search("code", "Work")
     # unknown base name → friendly message naming what exists
     bad = ks.search("code", "Nonexistent")
-    assert "don't have a knowledge base" in bad and "Work" in bad
+    assert "don't have a vault" in bad and "Work" in bad
     # across all bases, both are reachable
     assert "4815" in ks.search("office alarm")
 

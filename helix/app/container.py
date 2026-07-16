@@ -36,6 +36,8 @@ from helix.services.files import FilesService
 from helix.services.forge import ForgeService
 from helix.services.gmail import GmailService
 from helix.services.knowledge import KnowledgeService
+from helix.services.desktop import DesktopService
+from helix.services.evolve import EvolveService
 from helix.services.lessons import LessonsService
 from helix.services.location import LocationService
 from helix.services.memory import MemoryService
@@ -231,13 +233,18 @@ class Container:
         # Services
         self.builds = BuildService(self.paths.builds, self.repo, self.clock)
         guard_files = [self.paths.settings_file]  # reverted if a coder writes into them
+        # The secrets store lives OUTSIDE the guarded settings file (the build guard byte-reverts
+        # settings mid-build; a key pasted while a build runs must survive). Constructed early so every
+        # engine-key getter below can prefer it — the V3 just-in-time connect panel writes here.
+        self.secrets = JsonSettings(self.paths.data / "helix_secrets.json")
         # The model baker turns a built model.json into a real polygon mesh (assets/model.glb) + viewer,
-        # in-process. If a Tripo key is present (env var or settings), it also gets a neural backend —
-        # the high-detail "turbo" path for organic/character subjects. Opt-in: no key → local-only.
+        # in-process. If a Tripo key is present (secrets, settings, or env), it also gets a neural
+        # backend — the high-detail "turbo" path for organic/character subjects. Opt-in: no key → local-only.
         def _tripo_key() -> str | None:
-            # Settings first (set in-app), then the env var. Either enables the high-detail neural path.
+            # Secrets first (the JIT connect panel, guard-safe), then Settings (legacy), then the env var.
             return (
-                (self.settings.get("tripo_api_key") or os.environ.get("TRIPO_API_KEY") or "").strip()
+                (self.secrets.get("TRIPO_API_KEY") or self.settings.get("tripo_api_key")
+                 or os.environ.get("TRIPO_API_KEY") or "").strip()
                 or None
             )
 
@@ -260,7 +267,8 @@ class Container:
         # like Tripo; no key → the baker shows an honest banner and routes objects to Tripo/parametric.
         def _blockade_key() -> str | None:
             return (
-                (self.settings.get("blockade_api_key") or os.environ.get("BLOCKADE_API_KEY") or "").strip()
+                (self.secrets.get("BLOCKADE_API_KEY") or self.settings.get("blockade_api_key")
+                 or os.environ.get("BLOCKADE_API_KEY") or "").strip()
                 or None
             )
 
@@ -293,25 +301,19 @@ class Container:
         )
         # Background lane so drafting a self-change doesn't freeze the orb.
         self.selfdev_lane = SelfDevLane(self.selfdev, self.bus)
-        # Connections: the user's saved API keys for builds that need them. A DEDICATED secrets file (not
-        # the settings file, so the build guard never byte-reverts it), kept on this machine only and never
-        # written into a build's folder, git, or the browser.
-        self.secrets = JsonSettings(self.paths.data / "helix_secrets.json")
+        # Connections: the user's saved API keys for builds that need them. (self.secrets — the dedicated
+        # guard-safe file — was constructed early, before the model baker's key getters.)
         # HELIX-managed keys a built app can reuse without the user re-pasting them: the Claude key powers
         # any AI feature (so builds default to Anthropic, never OpenAI); Tripo/Voyage are here too. These
         # live in Settings (not the secrets store), so the connections layer resolves them via these getters.
         _managed_keys = {
             "ANTHROPIC_API_KEY": lambda: (self.settings.get("claude_api_key") or "").strip(),
             "CLAUDE_API_KEY": lambda: (self.settings.get("claude_api_key") or "").strip(),
-            "TRIPO_API_KEY": lambda: (
-                self.settings.get("tripo_api_key") or os.environ.get("TRIPO_API_KEY") or ""
-            ).strip(),
+            "TRIPO_API_KEY": lambda: (_tripo_key() or ""),
             "VOYAGE_API_KEY": lambda: (
                 self.settings.get("voyage_api_key") or os.environ.get("VOYAGE_API_KEY") or ""
             ).strip(),
-            "BLOCKADE_API_KEY": lambda: (
-                self.settings.get("blockade_api_key") or os.environ.get("BLOCKADE_API_KEY") or ""
-            ).strip(),
+            "BLOCKADE_API_KEY": lambda: (_blockade_key() or ""),
         }
         self.connections = ConnectionsService(self.builds, self.secrets, managed=_managed_keys)
         # Gmail: read-only inbox access (an address + a Google App Password in the secrets store). Like
@@ -330,7 +332,8 @@ class Container:
         # without it, knowledge search is keyword-only. Failures fall back to keyword automatically.
         def _voyage_key() -> str | None:
             return (
-                (self.settings.get("voyage_api_key") or os.environ.get("VOYAGE_API_KEY") or "").strip()
+                (self.secrets.get("VOYAGE_API_KEY") or self.settings.get("voyage_api_key")
+                 or os.environ.get("VOYAGE_API_KEY") or "").strip()
                 or None
             )
 
@@ -364,11 +367,15 @@ class Container:
         self.suggestions = SuggestionService(
             recommend=self.recommend, builds=self.builds, selfdev=self.selfdev
         )
+        # Desktop control (V3): open installed programs, media keys, one machine-status line. All
+        # user-driven — the BUILD_TOOLS fence keeps open_program/media_control off autonomous runs.
+        self.desktop = DesktopService()
         self.tools = ToolRegistry(
             self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue,
             tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane, connections=self.connections,
             knowledge=self.knowledge, gmail=self.gmail, reminders=self.reminders, calendar=self.calendar,
             files=self.files, user_memory=self.user_memory, location=self.location,
+            desktop=self.desktop,
         )
         # The orb quietly learns who the user is: a background distiller (same fast chat model) keeps a
         # compact profile in the DB, injected into each Console turn like the time anchor. No knobs.
@@ -379,6 +386,12 @@ class Container:
         # build runs isn't byte-reverted with the settings file.
         self.lessons = LessonsService(
             self.chat, self.store, JsonSettings(self.paths.data / "helix_lessons.json"), self.clock
+        )
+        # Evolve: the overnight self-improvement pass (V3). Mines the day's lessons + the log tail and
+        # DRAFTS one small change through the same selfdev lane improve_helix uses — approval-gated,
+        # never self-applying. The shell heartbeat calls tick(); the Settings toggle governs it.
+        self.evolve = EvolveService(
+            self.chat, self.lessons, self.selfdev_lane, self.selfdev, self.settings, self.clock
         )
         self.subscription._tools = self.tools  # late-bind (tools → services ctor cycle, like agents)
         self.conversation = ConversationService(

@@ -1,4 +1,4 @@
-"""Knowledge UI — the Menu's 5th tab renders knowledge bases, and the KnowledgeView manages one base
+"""Knowledge UI — the Menu's Vault tab renders vaults, and the KnowledgeView manages one vault
 (add a note, search, list/remove docs) without a webview."""
 from __future__ import annotations
 
@@ -67,14 +67,14 @@ def _list_text(view: KnowledgeView) -> str:
     return " ".join(out)
 
 
-def test_launcher_has_a_knowledge_tab_that_lists_bases(_app, tmp_path):
+def test_launcher_has_a_vault_tab_that_lists_vaults(_app, tmp_path):
     builds, ks = _knowledge(tmp_path)
     ks.create("Recipes")
     ks.add_note("recipes", "Pie crust: butter, flour, a little salt.")
     view = LauncherView(builds, _Agents(), _Tasks(), ks)
-    assert view._tabs[_KNOWLEDGE].text() == "Knowledge"
+    assert view._tabs[_KNOWLEDGE].text() == "Vault"
     view.refresh()
-    # the base shows in the Knowledge grid, and NOT in the Apps grid
+    # the vault shows in the Vault grid, and NOT in the Apps grid
     assert view._knowledge_grid.count() == 1
     assert view._apps_grid.count() == 0
 

@@ -50,6 +50,9 @@ BUILD_TOOLS = frozenset(
         # capability as run_task, so an autonomous agent must not have it either (an email saying
         # "HELIX, open the X app" must not make an agent run X unattended).
         "open_build",
+        # Queue manipulation is human-driven only — a watcher processing an email must never be able
+        # to cancel or reorder the user's in-flight builds.
+        "prioritize_build", "cancel_build",
         "approve_self_change", "reject_self_change",
         # Knowledge WRITES are human-driven only — an autonomous agent may search the user's knowledge
         # (search_knowledge is deliberately NOT here) but never create a base or save a note on its own.
@@ -67,6 +70,9 @@ BUILD_TOOLS = frozenset(
         # display — whatever is on it (a password manager, a bank page) would ride into a run that
         # processes untrusted content.
         "view_screen",
+        # Desktop control is human-driven only — text a watcher processes must never launch a
+        # program or press the user's keys. (system_status stays readable: it's one status line.)
+        "open_program", "media_control",
         # Disk WRITES are human-driven only (and gated by the Settings toggle besides) — an
         # autonomous agent may list folders and read files like any other read faculty, but text
         # inside a file must never be able to make an unattended agent write to the user's disk.

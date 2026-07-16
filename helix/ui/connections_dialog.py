@@ -1,9 +1,9 @@
-"""ConnectionsDialog — the auto-generated 'paste your API keys' panel for a build.
+"""The masked key panels — where a credential is pasted, and the only place it's ever typed.
 
-Given what a build declared it needs (its Connection list), it renders one masked field per key with a
-friendly label + hint, pre-filled with any value already saved, and writes the values back through the
-ConnectionsService. The user never edits a file or sees a token in plaintext; keys live on the machine,
-never in the build's folder.
+Two panels share the pattern (one masked field per key, a friendly label + hint, saved through the
+store — never a file, never chat): ConnectionsDialog collects what a BUILD declared it needs, and
+ConnectPanel is the just-in-time panel the orb opens mid-conversation the moment a service key is
+missing. The user never sees a token in plaintext; keys live on this machine only.
 """
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ from PyQt6.QtWidgets import (
 )
 
 from helix.domain.connections import Connection
+from helix.ports.stores import SettingsStore
+from helix.services.connections import CONNECTABLE, ConnectionsService
 from helix.ui.theme import MUTED
 
 
@@ -83,3 +85,100 @@ class ConnectionsDialog(QDialog):
         for key, field in self._fields:
             self._set_value(key, field.text().strip())
         self.accept()
+
+
+class ConnectPanel(QDialog):
+    """The just-in-time connect panel for ONE service: the reason it's needed, a masked field per
+    credential, and a Connect button that writes straight to the right store (secrets or Settings).
+    An empty field writes nothing, so reconnecting never clears a value the user didn't retype."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        label: str,
+        reason: str,
+        store: str,
+        fields: tuple[tuple[str, str, str], ...],
+        *,
+        connections: ConnectionsService,
+        settings: SettingsStore,
+    ) -> None:
+        super().__init__(parent)
+        self._store = store
+        self._connections = connections
+        self._settings = settings
+        self._fields: list[tuple[str, QLineEdit]] = []
+        self.setWindowTitle(f"Connect {label}")
+        self.setModal(True)
+        self.setMinimumWidth(460)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 20, 22, 18)
+        root.setSpacing(10)
+
+        head = QLabel(f"Connect {label}")
+        head.setObjectName("Title")
+        root.addWidget(head)
+        if reason:
+            why = QLabel(reason)
+            why.setObjectName("Status")
+            why.setWordWrap(True)
+            root.addWidget(why)
+        note = QLabel(
+            "Paste the key below. It's saved on this machine only — never shown in chat."
+        )
+        note.setObjectName("Status")
+        note.setWordWrap(True)
+        root.addWidget(note)
+        root.addSpacing(4)
+
+        for _key, field_label, hint in fields:
+            root.addWidget(QLabel(field_label))
+            field = QLineEdit()
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            if hint:
+                field.setPlaceholderText(hint)
+            root.addWidget(field)
+            self._fields.append((_key, field))
+
+        row = QHBoxLayout()
+        self._connect_btn = QPushButton("Connect")
+        self._connect_btn.setObjectName("Primary")
+        self._connect_btn.clicked.connect(self._connect)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(self._connect_btn)
+        row.addWidget(cancel)
+        row.addStretch(1)
+        root.addLayout(row)
+
+    def _connect(self) -> None:
+        # Each NON-EMPTY field lands in its store — the value is never logged, echoed, or kept here.
+        for key, field in self._fields:
+            value = field.text().strip()
+            if not value:
+                continue
+            if self._store == "secrets":
+                self._connections.set_value(key, value)
+            else:
+                self._settings.set(key, value)
+        self.accept()
+
+
+def show_connect_panel(
+    parent: QWidget | None,
+    service_id: str,
+    reason: str,
+    *,
+    connections: ConnectionsService,
+    settings: SettingsStore,
+) -> None:
+    """Open the modal just-in-time connect panel for a CONNECTABLE service. An unknown id shows
+    nothing — the tool layer already told the model which services are connectable."""
+    spec = CONNECTABLE.get((service_id or "").strip().lower())
+    if spec is None:
+        return
+    label, store, fields = spec
+    ConnectPanel(
+        parent, label, reason, store, fields, connections=connections, settings=settings
+    ).exec()

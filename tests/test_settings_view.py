@@ -1,4 +1,4 @@
-"""SettingsView — the redesigned settings: a save round-trip and the at-a-glance Set/Not-set statuses."""
+"""SettingsView — the save round-trip, the slim review-only Connections manager, the statuses."""
 from __future__ import annotations
 
 import os
@@ -11,6 +11,7 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from helix.services.connections import CONNECTABLE  # noqa: E402
 from helix.ui.settings_view import SettingsView  # noqa: E402
 
 
@@ -47,24 +48,79 @@ def test_settings_renders_and_saves(_app):
     assert not view.grab().isNull()  # the redesigned form renders
 
     view._key.setText("sk-ant-abc")
-    view._voyage.setText("pa-xyz")
-    view._tripo.setText("tsk-123")
-    view._conn_fields[0][1].setText("xoxp-token")  # first known service (Slack)
     view._save()
 
     assert s.get("claude_api_key") == "sk-ant-abc"
-    assert s.get("voyage_api_key") == "pa-xyz"
-    assert s.get("tripo_api_key") == "tsk-123"
-    assert c.value(view._conn_fields[0][0]) == "xoxp-token"
 
 
 def test_status_pills_reflect_set_state(_app):
     s, c = _Settings(), _Conns()
     s.d["claude_api_key"] = "sk-ant-present"
     view = SettingsView(s, c)  # reload() runs in __init__
-    # the Claude key status (first registered) shows Set; an unset optional key shows Not set
+    # the Claude key status shows Set; the unset subscription token shows Not set
     labels = [lbl.text() for lbl, _ in view._statuses]
     assert "● Set" in labels and "○ Not set" in labels
+
+
+def test_connections_manager_shows_one_row_per_service(_app):
+    view = SettingsView(_Settings(), _Conns())
+    assert {sid for sid, _dot, _btn in view._conn_rows} == set(CONNECTABLE)
+    # nothing connected → every dot is hollow and every Remove is hidden; no key field exists
+    for _sid, dot, remove in view._conn_rows:
+        assert dot.text() == "○"
+        assert not remove.isVisibleTo(view)
+    assert not hasattr(view, "_conn_fields")
+
+
+def test_connected_service_shows_a_dot_and_remove_clears_it(_app):
+    s, c = _Settings(), _Conns()
+    c.set_value("SLACK_TOKEN", "xoxp-1")
+    view = SettingsView(s, c)
+    rows = {sid: (dot, btn) for sid, dot, btn in view._conn_rows}
+    dot, remove = rows["slack"]
+    assert dot.text() == "●" and remove.isVisibleTo(view)
+    remove.click()
+    assert c.value("SLACK_TOKEN") == ""  # cleared from the secrets store
+    assert dot.text() == "○" and not remove.isVisibleTo(view)
+
+
+def test_settings_store_service_connects_and_removes(_app, monkeypatch):
+    monkeypatch.setitem(
+        CONNECTABLE, "fakeco", ("FakeCo", "settings", (("fake_api_key", "FakeCo key", "fk-…"),))
+    )
+    s, c = _Settings(), _Conns()
+    s.d["fake_api_key"] = "fk-123"
+    view = SettingsView(s, c)
+    rows = {sid: (dot, btn) for sid, dot, btn in view._conn_rows}
+    dot, remove = rows["fakeco"]
+    assert dot.text() == "●"
+    remove.click()
+    assert s.get("fake_api_key") == ""  # cleared from Settings, not the secrets store
+    assert c.v == {}
+    assert dot.text() == "○"
+
+
+def test_two_credential_service_needs_both_to_show_connected(_app):
+    s, c = _Settings(), _Conns()
+    c.set_value("ALPACA_API_KEY", "AK-1")  # the secret is still missing
+    view = SettingsView(s, c)
+    dots = {sid: dot for sid, dot, _btn in view._conn_rows}
+    assert dots["alpaca"].text() == "○"
+    c.set_value("ALPACA_SECRET_KEY", "sec-2")
+    view.reload()
+    assert dots["alpaca"].text() == "●"
+
+
+def test_evolve_defaults_on_and_round_trips(_app):
+    s, c = _Settings(), _Conns()
+    view = SettingsView(s, c)
+    assert view._evolve.isChecked()  # a missing key means ON
+    view._evolve.setChecked(False)
+    view._save()
+    assert s.get("evolve_enabled") is False
+    s.set("evolve_enabled", True)
+    view.reload()
+    assert view._evolve.isChecked()
 
 
 class _Sub:

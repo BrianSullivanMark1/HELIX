@@ -1,10 +1,10 @@
 """LauncherView — the Menu: five tabs over what you've made.
 
   • Apps      — built apps that open a screen (Open / Rename / Remove).
-  • Models    — 3D models and animations the orb made to show you (build_3d_model) (Open / Rename / Remove).
+  • Protocols — built scripts that *do a thing* when run (Run / Rename / Remove).
   • Agents    — saved goals HELIX runs on demand (Run / Rename / Remove).
-  • Flows     — built scripts that *do a thing* when run (Run / Rename / Remove).
-  • Knowledge — searchable collections of the user's own notes/documents (Open / Rename / Remove).
+  • Holograms — 3D scenes and animations the orb made to show you (build_3d_model) (Open / Rename / Remove).
+  • Vault     — searchable collections of the user's own notes/documents (Open / Rename / Remove).
 
 Builds are data, not shell: they're freely removable. The tabs and New app are the immutable shell
 (Settings lives in the top-right of the window, so the menu doesn't repeat it).
@@ -108,7 +108,7 @@ class LauncherView(QWidget):
         self._builds = builds
         self._agents = agents
         self._tasks = tasks
-        self._knowledge = knowledge  # KnowledgeService — drives the Knowledge tab's cards + doc counts
+        self._knowledge = knowledge  # KnowledgeService — drives the Vault tab's cards + doc counts
         self._recommend = recommend  # RecommendService — the "Suggested" strip of most-used/neglected builds
         self._workers: set[QtWorker] = set()
         # slug -> BuildStatus|None, supplied by the main window's status board; drives the tile borders.
@@ -123,8 +123,8 @@ class LauncherView(QWidget):
         header = QHBoxLayout()
         self._tabs: dict[int, QPushButton] = {}
         for idx, label in (
-            (_APPS, "Apps"), (_MODELS, "Models"), (_AGENTS, "Agents"), (_TASKS, "Flows"),
-            (_KNOWLEDGE, "Knowledge"),
+            (_APPS, "Apps"), (_TASKS, "Protocols"), (_AGENTS, "Agents"), (_MODELS, "Holograms"),
+            (_KNOWLEDGE, "Vault"),
         ):
             btn = QPushButton(label)
             btn.setCheckable(True)
@@ -156,22 +156,23 @@ class LauncherView(QWidget):
             "No apps yet — go to the orb and describe one."
         )
         self._models_grid, models_page, self._models_empty = self._grid_page(
-            "No models yet — ask the orb to show you something in 3D."
+            "No holograms yet — ask the orb to show you something in 3D."
         )
         self._tasks_grid, tasks_page, self._tasks_empty = self._grid_page(
-            "No flows yet. Ask the orb to build a flow — a script that does something when you run it."
+            "No protocols yet. Ask the orb to build a protocol — a script that does something when "
+            "you run it."
         )
-        # The Tasks page gets its OWN status line — a Run result used to land on the hidden Agents-page
-        # label, so the user never saw it.
+        # The Protocols page gets its OWN status line — a Run result used to land on the hidden
+        # Agents-page label, so the user never saw it.
         self._tasks_status = QLabel("")
         self._tasks_status.setObjectName("Status")
-        self._tasks_status.setTextFormat(Qt.TextFormat.PlainText)  # shows flow run output — never rich text
+        self._tasks_status.setTextFormat(Qt.TextFormat.PlainText)  # protocol run output — never rich text
         self._tasks_status.setWordWrap(True)
         tasks_page.layout().addWidget(self._tasks_status)
 
         self._knowledge_grid, knowledge_page, self._knowledge_empty = self._grid_page(
-            "No knowledge yet. Tell the orb to remember something, or open a base here to add notes "
-            "and files HELIX can search."
+            "Nothing in the vault yet. Tell the orb to remember something, or open a vault here to "
+            "add notes and files HELIX can search."
         )
 
         self._stack.addWidget(apps_page)            # 0
@@ -276,7 +277,7 @@ class LauncherView(QWidget):
             run = QPushButton("▶ Run")
             run.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._run_task(s, n))
             edit = QPushButton("✨ Edit")
-            edit.setToolTip("Describe a change and HELIX updates this task live")
+            edit.setToolTip("Describe a change and HELIX updates this protocol live")
             edit.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self.editBuildRequested.emit(s, n))
             rename = QPushButton("✎ Rename")
             rename.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._rename_build(s, n))
@@ -427,8 +428,8 @@ class LauncherView(QWidget):
         return card
 
     def _knowledge_card(self, app) -> _Card:
-        """A card for a knowledge base — Open (manage its docs) / Rename / Remove. The subtitle shows how
-        much is in it rather than the build request, since a base is a living collection, not a one-shot
+        """A card for a vault — Open (manage its docs) / Rename / Remove. The subtitle shows how much
+        is in it rather than the build request, since a vault is a living collection, not a one-shot
         description."""
         count = self._knowledge.count(app.slug) if self._knowledge is not None else 0
         subtitle = f"{count} document{'s' if count != 1 else ''} · searchable by the orb"
@@ -548,7 +549,7 @@ class LauncherView(QWidget):
         if self._recommend is not None:
             self._recommend.record_run(slug)  # feed the Suggested strip
         ok = self._tasks.run(slug)
-        # Tasks open their own console; surface the outcome on the TASKS page, where the user is looking.
+        # Protocols open their own console; surface the outcome on THEIR page, where the user is looking.
         self._tasks_status.setText(
             f"Launched “{name}” in its own window."
             if ok else f"Couldn’t launch “{name}” — it may be missing a runnable main.py."
