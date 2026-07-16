@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -68,9 +69,11 @@ def _title_from_note(text: str) -> str:
 
 
 def _new_nonce(index: int) -> str:
-    """A fence nonce. Math.random/os.urandom-free determinism isn't required here, but the workflow
-    sandbox forbids randomness in some contexts; a counter-salted token is unique-enough per call."""
-    return f"{os.getpid():x}{index:04x}"
+    """A cryptographically-random fence nonce, like every other untrusted-data fence (prompts._fenced,
+    the attachments bundler). Ingested documents are attacker-controlled; a PREDICTABLE marker (the old
+    pid+counter) could be reproduced by a malicious note to forge the closing tag and 'break out' of the
+    fence into top-level instructions. `index` is ignored, kept for call-site compatibility."""
+    return secrets.token_hex(_NONCE_BYTES)
 
 
 class KnowledgeService:
@@ -88,6 +91,11 @@ class KnowledgeService:
         self._lock = threading.Lock()
         self._embed_lock = threading.Lock()  # guards the embedding cache file (not held across the network)
         self._searches = 0  # salts the search fence nonce without needing randomness
+        # Chunk cache: (slug, doc.file) -> ((mtime_ns, size), chunks). auto_context runs on EVERY orb
+        # turn; without this it re-read + re-chunked every stored doc each time (the "cheap" in the old
+        # docstring was false). Keyed by the file's mtime+size so an edited doc re-chunks automatically.
+        self._chunk_cache: dict[tuple[str, str], tuple[tuple[int, int], list[str]]] = {}
+        self._chunk_lock = threading.Lock()
 
     # ----- bases (a base is a workspace build with build_kind == KNOWLEDGE) -----
     def bases(self) -> list[App]:
@@ -393,19 +401,36 @@ class KnowledgeService:
         passages: list[tuple[str, str, str]] = []
         for base in bases:
             for doc in self._load_index(base.slug):
-                try:
-                    text = (self._workspace(base.slug) / doc.file).read_text(
-                        encoding="utf-8", errors="replace"
-                    )
-                except OSError:
-                    continue
-                for chunk in chunk_text(text):
+                for chunk in self._doc_chunks(base.slug, doc):
                     passages.append((base.name, doc.title, chunk))
         if semantic and self._embedder is not None and self._embedder.available():
             hits = self._semantic_rank(query, passages)
             if hits is not None:  # None = embedding unavailable/failed → fall back to keyword
                 return hits
         return rank_chunks(query, passages)
+
+    def _doc_chunks(self, slug: str, doc) -> list[str]:
+        """The chunks of one stored doc, cached by (mtime, size) so an unchanged doc is read + chunked
+        once, not on every turn. Returns [] if the file is missing/unreadable (skipped)."""
+        path = self._workspace(slug) / doc.file
+        try:
+            st = path.stat()
+            sig = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return []
+        key = (slug, doc.file)
+        with self._chunk_lock:
+            cached = self._chunk_cache.get(key)
+            if cached is not None and cached[0] == sig:
+                return cached[1]
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+        chunks = list(chunk_text(text))
+        with self._chunk_lock:
+            self._chunk_cache[key] = (sig, chunks)
+        return chunks
 
     # ----- optional semantic ranking (embeddings; falls back to keyword on any failure) -----
     def _semantic_rank(

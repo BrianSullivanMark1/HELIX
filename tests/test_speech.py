@@ -81,6 +81,55 @@ def test_narration_never_switches_to_the_os_voice():
     assert fb.spoke == []  # stayed in one voice (skipped), never the OS voice
 
 
+def test_speak_chunks_plays_every_sentence_in_order():
+    fb = _Fallback()
+    e = _edge(fb)
+    played: list[str] = []
+    e._synthesize = lambda text, gen=None: f"{text}.mp3"  # type: ignore[method-assign]
+    e._play = lambda p, gen=None: played.append(p)  # type: ignore[method-assign]
+    e.speak_chunks(["one.", "two.", "three."])
+    assert played == ["one..mp3", "two..mp3", "three..mp3"]  # concurrent render, in-order playback
+    assert fb.spoke == []
+
+
+def test_speak_chunks_single_delegates_to_one_shot():
+    fb = _Fallback()
+    e = _edge(fb)
+    played: list[str] = []
+    e._synthesize = lambda text, gen=None: f"{text}.mp3"  # type: ignore[method-assign]
+    e._play = lambda p, gen=None: played.append(p)  # type: ignore[method-assign]
+    e.speak_chunks(["just one sentence."])
+    assert played == ["just one sentence..mp3"]
+
+
+def test_speak_chunks_stops_after_a_stop():
+    fb = _Fallback()
+    e = _edge(fb)
+    played: list[str] = []
+
+    def play(p, gen=None):
+        played.append(p)
+        e._stopped_gen = e._gen  # a 'stop' lands after the first sentence plays
+
+    e._synthesize = lambda text, gen=None: f"{text}.mp3"  # type: ignore[method-assign]
+    e._play = play  # type: ignore[method-assign]
+    e.speak_chunks(["first.", "second.", "third."])
+    assert played == ["first..mp3"]  # the rest were dropped
+    assert fb.spoke == []            # a deliberate stop never falls back to the OS voice
+
+
+def test_speak_chunks_falls_back_per_failed_sentence():
+    fb = _Fallback()
+    e = _edge(fb)
+    played: list[str] = []
+    # the middle sentence fails to synthesize; the others render fine
+    e._synthesize = lambda text, gen=None: (_ for _ in ()).throw(RuntimeError("blip")) if "two" in text else f"{text}.mp3"  # type: ignore[method-assign]
+    e._play = lambda p, gen=None: played.append(p)  # type: ignore[method-assign]
+    e.speak_chunks(["one.", "two.", "three."])
+    assert played == ["one..mp3", "three..mp3"]  # the good ones still play, in order
+    assert fb.spoke == ["two."]                  # the failed one is spoken in the OS voice
+
+
 def test_a_later_utterance_cannot_unstop_an_earlier_killed_one():
     # The race #27 guards: while utterance A plays, B starts and stop()s A; A's killed playback must NOT
     # be mistaken for a failure and spoken in the OS voice just because B reset a shared flag.

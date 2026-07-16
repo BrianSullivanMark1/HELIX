@@ -6,8 +6,10 @@ no faster-whisper the voice controls stay hidden and it's a normal text app.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import tempfile
 from collections import deque
 from html import escape
 from pathlib import Path
@@ -19,6 +21,7 @@ from PyQt6.QtCore import (
     QPointF,
     QPropertyAnimation,
     QRectF,
+    QSize,
     Qt,
     QTimer,
     QVariantAnimation,
@@ -34,11 +37,13 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
     QPolygonF,
     QShortcut,
     QTextDocument,
 )
 from PyQt6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
@@ -57,7 +62,7 @@ from typing import TYPE_CHECKING
 from helix.domain.models import Role
 from helix.ports.speech import SpeechIn, SpeechOut
 from helix.ports.stores import SettingsStore
-from helix.services import attachments, voiceid
+from helix.services import attachments, images as imagesvc, voiceid
 from helix.services.cancel import CancelToken
 from helix.services.conversation import ConversationService
 from helix.ui.build_status import BuildStatus, LegendEntry
@@ -108,6 +113,8 @@ def _cleanup_answer(text: str) -> str:
     return "neither"
 
 
+_MAX_TRANSCRIPT_ROWS = 250  # cap the RENDERED transcript rows on an always-on session (history persists
+                            # in the store); the oldest rows scroll off and are freed.
 _VLABEL = int(Qt.AlignmentFlag.AlignVCenter)
 _RLABEL = int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 _HCENTER = int(Qt.AlignmentFlag.AlignHCenter)
@@ -611,8 +618,15 @@ class _AttachChip(QFrame):
         row = QHBoxLayout(self)
         row.setContentsMargins(9, 3, 5, 3)
         row.setSpacing(5)
-        glyph = "📁" if path.is_dir() else "📄"
-        label = QLabel(f"{glyph} {path.name}")
+        # An image chip shows a little thumbnail so the user sees what they attached at a glance; other
+        # files keep the folder/document glyph.
+        thumb = self._thumb(path) if imagesvc.is_image(path) else None
+        if thumb is not None:
+            row.addWidget(thumb)
+            label = QLabel(path.name)
+        else:
+            glyph = "📁" if path.is_dir() else "📄"
+            label = QLabel(f"{glyph} {path.name}")
         label.setTextFormat(Qt.TextFormat.PlainText)  # a filename is attacker-controlled — never rich text
         label.setStyleSheet("color:#cfeaea;border:none;background:transparent;")
         label.setToolTip(str(path))
@@ -627,6 +641,83 @@ class _AttachChip(QFrame):
         x.clicked.connect(lambda: on_remove(path))
         row.addWidget(label)
         row.addWidget(x)
+
+    @staticmethod
+    def _thumb(path: Path) -> "QLabel | None":
+        """A small rounded thumbnail of an attached image, or None if it can't be loaded."""
+        try:
+            pm = QPixmap(str(path))
+        except Exception:  # noqa: BLE001
+            return None
+        if pm.isNull():
+            return None
+        lbl = QLabel()
+        lbl.setPixmap(pm.scaled(
+            26, 26, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        lbl.setStyleSheet("border:none;background:transparent;")
+        return lbl
+
+
+def chip_strip(host: QWidget, height: int = 40) -> QScrollArea:
+    """Put a row of chips into a sideways-scrolling viewport.
+
+    A plain QHBoxLayout of QPushButtons reports its full combined width as the page's MINIMUM, and a
+    minimum drags the whole window with it — so a handful of in-flight builds (or suggestions) used to
+    push the window past the screen edge. Inside a scroll area the strip's minimum collapses to almost
+    nothing and any extra chips scroll sideways instead, so the window can never be widened by them.
+    """
+    area = QScrollArea()
+    area.setWidget(host)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+    area.setFixedHeight(height)  # one chip row + room for the scrollbar only when it's actually needed
+    return area
+
+
+class _ElidingLabel(QLabel):
+    """A single-line label that truncates long text with an ellipsis rather than stretching the app
+    window past the screen edge. Used for the Console status pill, which relays coder narration, watcher
+    reports, and error lines that can run very long — a plain QLabel's minimum width is its full one-line
+    text width, which for a long line forces the whole window off-screen (and a minimum overrides even a
+    maximum-size cap). Here the minimum width is ZERO (so it never props the window open) and the
+    preferred width is capped, so it can't stretch the app; the full text stays available as the tooltip."""
+
+    _CAP = 760  # the pill never gets wider than this — comfortably under any laptop screen
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self._full = ""
+        self.setWordWrap(False)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # type: ignore[override]
+        self._full = text or ""
+        self.setToolTip(self._full if len(self._full) > 40 else "")  # hover to read a truncated line
+        self._apply()
+
+    def text(self) -> str:  # callers read back the logical text, not the elided display
+        return self._full
+
+    def sizeHint(self) -> QSize:
+        # Based on the FULL text (capped), NOT the elided display — so the laid-out width is stable and
+        # eliding to it can't feed back into a progressive shrink.
+        pad = (self.width() - self.contentsRect().width()) if self.width() else 36
+        w = min(self.fontMetrics().horizontalAdvance(self._full) + pad + 2, self._CAP)
+        return QSize(w, super().sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(0, super().minimumSizeHint().height())  # never force the window wider
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply()
+
+    def _apply(self) -> None:
+        avail = self.contentsRect().width() or self._CAP
+        QLabel.setText(self, self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, avail))
 
 
 class ConsoleView(QWidget):
@@ -645,6 +736,7 @@ class ConsoleView(QWidget):
         build_queue=None,
         selfdev_lane=None,
         voice_id=None,
+        suggestions=None,
     ) -> None:
         super().__init__()
         self.setObjectName("Console")
@@ -655,6 +747,11 @@ class ConsoleView(QWidget):
         self._selfdev_lane = selfdev_lane  # background self-change drafts — cancel/status
         self._workers: set[QtWorker] = set()
         self._busy = False  # a CONVERSATIONAL turn is running (now short — builds left the turn)
+        self._connect_hint_shown = False  # dedupe the "connect Claude first" hint until auth appears
+        self._suggestions = suggestions  # SuggestionService — the quiet ANTICIPATE chip
+        self._suggest_ts = 0.0          # monotonic time of the last shown suggestion (rate-limit)
+        self._suggest_dismissed: set[str] = set()  # ids the user waved off this session — never re-nag
+        self._suggest_current: str = ""  # the id currently on the chip
         # follow-ups typed while a turn runs (never dropped): (text, from_voice, attach paths, speaker)
         self._pending_msgs: list[tuple[str, bool, list[Path], str | None]] = []
         self._attachments: list[Path] = []  # files/folders staged for the next message (like Claude)
@@ -726,8 +823,11 @@ class ConsoleView(QWidget):
         self._legend_row.setSpacing(8)
         self._legend_host = QWidget()
         self._legend_host.setLayout(self._legend_row)
-        self._legend_host.setVisible(False)
-        root.addWidget(self._legend_host)
+        self._legend_host.setStyleSheet("background: transparent;")
+        # Scrolled sideways so however many builds are in flight, the strip can never widen the window.
+        self._legend_strip = chip_strip(self._legend_host)
+        self._legend_strip.setVisible(False)
+        root.addWidget(self._legend_strip)
 
         # The conversation fills the full height — text scrolls all the way up — floating over the orb's
         # glow (bubbles are semi-opaque so they stay legible). The controls sit beneath it.
@@ -755,9 +855,14 @@ class ConsoleView(QWidget):
         _sb.rangeChanged.connect(self._on_scroll_range)
         _sb.valueChanged.connect(self._on_scroll_value)
 
-        # Status pill + voice toggle, beneath the conversation, over the orb's lower glow.
-        self.status = QLabel("Ready when you are.")
+        # Status pill + voice toggle, beneath the conversation, over the orb's lower glow. An eliding
+        # label so a long coder/watcher/error line truncates with an ellipsis instead of stretching the
+        # window past the screen edge (the full line is on the tooltip).
+        self.status = _ElidingLabel("Ready when you are.")
         self.status.setObjectName("Status")
+        # The status line shows coder narration + watcher report text — attacker-influenced. PlainText so
+        # a stray "<img src=…>" can't render as a remote-image beacon (QLabel auto-detects rich text).
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setStyleSheet(
             "QLabel#Status{background:rgba(8,11,15,0.92);color:#d4ecec;"
@@ -777,6 +882,16 @@ class ConsoleView(QWidget):
         vrow.addStretch(1)
         root.addLayout(vrow)
 
+        # ANTICIPATE chip: one quiet, dismissible nudge over the orb (a neglected build, a drafted change).
+        # Hidden until there's something worth surfacing; the ✕ waves it off for the session.
+        self._suggest_row = QHBoxLayout()
+        self._suggest_row.setContentsMargins(0, 0, 0, 0)
+        self._suggest_row.setSpacing(8)
+        self._suggest_host = QWidget()
+        self._suggest_host.setLayout(self._suggest_row)
+        self._suggest_host.setVisible(False)
+        root.addWidget(self._suggest_host)
+
         # Attachment chips: staged files/folders, shown above the input row, hidden when empty.
         self._attach_row = QHBoxLayout()
         self._attach_row.setContentsMargins(2, 0, 2, 0)
@@ -793,10 +908,11 @@ class ConsoleView(QWidget):
         self._talk.released.connect(self._talk_stop)
         self._attach_btn = QToolButton()
         self._attach_btn.setText("📎")
-        self._attach_btn.setToolTip("Attach files or a folder as context")
+        self._attach_btn.setToolTip("Attach an image (to analyze), files, or a folder — you can also paste or drag one in")
         self._attach_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._attach_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         amenu = QMenu(self._attach_btn)
+        amenu.addAction("Attach image…", self._attach_image)
         amenu.addAction("Attach files…", self._attach_files)
         amenu.addAction("Attach folder…", self._attach_folder)
         self._attach_btn.setMenu(amenu)
@@ -807,18 +923,33 @@ class ConsoleView(QWidget):
         )
         self._input = ChatInput("Tell HELIX what to build…")  # Enter sends · Shift+Enter = new line
         self._input.submitted.connect(self._send)
+        self._input.imagePasted.connect(self._on_image_pasted)          # paste/drop a screenshot
+        self._input.imageFilesPasted.connect(self._on_image_files_pasted)  # paste/drop image files
+        self._paste_temps: set[Path] = set()  # temp PNGs saved from clipboard images, reaped after use
         # Sleep: rest/wake the mic without stopping a build — the intuitive manual control, right by the
         # input. Shown only when hands-free voice is on. (Stopping a build is a separate "stop" action.)
         self._mute_btn = QPushButton("😴 Sleep")
         self._mute_btn.setToolTip("Put the mic to sleep — HELIX stops listening (your build keeps running)")
         self._mute_btn.clicked.connect(self._toggle_mute)
         self._mute_btn.setVisible(False)
+        # Stop is now the DELIBERATE interrupt: while HELIX is thinking or building the mic is deaf (so a
+        # baby/TV can't cancel the work by voice), so a visible Stop is the way to halt it on purpose.
+        # Hidden until there's something running.
+        self._stop_btn = QPushButton("■ Stop")
+        self._stop_btn.setToolTip("Stop what HELIX is doing right now (also: tap the orb, or press Esc)")
+        self._stop_btn.clicked.connect(self._stop)
+        self._stop_btn.setVisible(False)
+        self._stop_btn.setStyleSheet(
+            "QPushButton{background:rgba(8,11,15,0.93);border:1px solid #e0663f;border-radius:14px;"
+            "color:#e0663f;padding:8px 16px;} QPushButton:hover{border-color:#ff7a4f;color:#ff7a4f;}"
+        )
         send = QPushButton("Send")
         send.setObjectName("Primary")
         send.clicked.connect(self._send)
         row.addWidget(self._talk)
         row.addWidget(self._attach_btn)
         row.addWidget(self._input)
+        row.addWidget(self._stop_btn)
         row.addWidget(self._mute_btn)
         row.addWidget(send)
         root.addLayout(row)
@@ -840,11 +971,52 @@ class ConsoleView(QWidget):
         esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         esc.activated.connect(self._stop)
 
+        # Catch Ctrl+V app-wide so an image pastes into the chat from anywhere (see eventFilter). The
+        # input box handles its own paste; this covers the case where focus is on the orb / a bubble.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
         self.refresh_key_state()
         self._refresh_voice_ui()
         # Orb-only launch: the transcript starts EMPTY so the first thing you see is the orb, nothing
         # else. The conversation itself still persists — history stays in the store and in the model's
         # context — it just isn't replayed onto the screen at startup (_load_history remains available).
+        # EXCEPTION: a genuinely first-run user (empty store) gets a one-time greeting, so a brand-new
+        # install isn't a silent orb with no hint what to say. Returning users keep the clean orb.
+        QTimer.singleShot(0, self._maybe_first_run_greeting)
+
+    def showEvent(self, event) -> None:
+        # Give the text box focus whenever the Console comes up, so typing — and Ctrl+V of an image —
+        # just works without having to click into it first.
+        super().showEvent(event)
+        self._input.setFocus()
+
+    def _maybe_first_run_greeting(self) -> None:
+        try:
+            if self._conversation.recent_messages(1):
+                return  # returning user — keep the clean orb, no greeting
+        except Exception:  # noqa: BLE001 — never let a history hiccup block the greeting or the app
+            return
+        voice_ok = self._voice is not None and self._voice.supported()
+        wake = self._wake_word()
+        if not self._has_claude_auth():
+            self._add_bubble(
+                "helix",
+                "Hello — I'm HELIX. First, connect Claude in Settings (a subscription token or an API "
+                "key). Then just tell me what you'd like — like “build me a tip calculator”.",
+                animate=False,
+            )
+            self._add_actions([("Open Settings", self.openSettingsRequested.emit)])
+            return
+        how = (f"Say “{wake}” or tap the orb to talk, or just type below. "
+               if voice_ok else "Just type what you'd like below. ")
+        self._add_bubble(
+            "helix",
+            f"Hello — I'm HELIX. {how}Try “build me a tip calculator”, ask me anything, or say "
+            "“what can you do?”.",
+            animate=False,
+        )
 
     # ----- public -----
     def _has_claude_auth(self) -> bool:
@@ -856,7 +1028,10 @@ class ConsoleView(QWidget):
         )
 
     def refresh_key_state(self) -> None:
-        self._banner.setVisible(not self._has_claude_auth())
+        has = self._has_claude_auth()
+        self._banner.setVisible(not has)
+        if has:
+            self._connect_hint_shown = False  # once connected, a future disconnect may hint again
 
     def reapply_audio_devices(self) -> None:
         """After Settings changes the input device, switch the live mic over without a restart."""
@@ -878,12 +1053,40 @@ class ConsoleView(QWidget):
         self._on_tap()
 
     def eventFilter(self, obj, event) -> bool:
+        et = event.type()
+        # Ctrl+V ANYWHERE in the Console: if the clipboard holds an image and the text box (which
+        # pastes images itself) isn't focused, grab it. We only consume when there's actually an image,
+        # so a normal text paste is never disturbed. Installed app-wide, so it works whether focus is on
+        # the orb, a bubble, or nothing at all.
+        if et == QEvent.Type.KeyPress and self._is_paste_combo(event) and self._try_clipboard_image():
+            return True
         # The full-height transcript covers the orb, so route taps on its empty area to the orb too.
-        if event.type() == QEvent.Type.MouseButtonPress and obj in (
-            self._transcript, self._scroll.viewport()
-        ):
+        if et == QEvent.Type.MouseButtonPress and obj in (self._transcript, self._scroll.viewport()):
             self._on_tap()
+            return True  # CONSUME it — else the press also bubbles to mousePressEvent and _on_tap fires
+            #              twice, so the voice toggle flips back and "tap the orb" appears to do nothing.
         return super().eventFilter(obj, event)
+
+    @staticmethod
+    def _is_paste_combo(event) -> bool:
+        return (event.key() == Qt.Key.Key_V
+                and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
+
+    def _try_clipboard_image(self) -> bool:
+        """Stage a clipboard image when the Console is showing and the input box (which handles its own
+        paste) isn't focused. Returns True only when it actually consumed an image, so text paste into
+        the input — or anywhere else — is left completely alone."""
+        if not self.isVisible() or self._input.hasFocus():
+            return False
+        md = QGuiApplication.clipboard().mimeData()
+        if md is None or not md.hasImage():
+            return False
+        img = md.imageData()
+        if img is None:
+            return False
+        self._on_image_pasted(img)
+        self.status.setText("Image pasted — add a question, or just send to have me look.")
+        return True
 
     def _stop(self) -> None:
         """Interrupt the current turn: hush speech now, and actually halt a running build."""
@@ -938,7 +1141,7 @@ class ConsoleView(QWidget):
         if not target:
             self.status.setText("Voice off.")
         elif started:
-            self.status.setText("Listening — say “HELIX”.")
+            self.status.setText(f"Listening — say “{self._wake_word()}”.")
         elif voice.restart_required():
             # Honest about the real state: it's saved on, but the speech model only pre-warms at launch,
             # so it isn't actually listening yet. Offer a one-click restart instead of a silent "on".
@@ -956,11 +1159,15 @@ class ConsoleView(QWidget):
     def _on_muted_changed(self, muted: object) -> None:
         self._refresh_voice_ui()
         self.status.setText(
-            "Asleep — I'm not listening. Say “HELIX” or “wake” (or tap Wake) to bring me back." if muted
-            else "Awake and listening."
+            f"Asleep — I'm not listening. Say “{self._wake_word()}” or “wake” (or tap Wake) to bring me back."
+            if muted else "Awake and listening."
         )
 
     # ----- voice controls -----
+    def _wake_word(self) -> str:
+        """The spoken name shown in the UI hints — the user's configured word, or the default."""
+        return (self._settings.get("wake_word") or "").strip() or "HELIX"
+
     def _refresh_voice_ui(self) -> None:
         voice = self._voice
         if voice is None or not voice.supported():
@@ -993,16 +1200,17 @@ class ConsoleView(QWidget):
             f"color:{txt};padding:8px 18px;}} QPushButton:hover{{border-color:#3fe0e0;}}"
         )
         # Tell the truth: never say "say HELIX" when it isn't actually listening.
+        wake = self._wake_word()
         self._voice_btn.setText(
-            "🔊 Voice on — say “HELIX”" if listening
+            f"🔊 Voice on — say “{wake}”" if listening
             else ("🔊 Voice on · restart to listen" if needs_restart else "🔇 Voice off")
         )
         self._voice_btn.setToolTip(
-            "Listening for “HELIX”. Say “stop” to interrupt, “sleep” to rest the mic, “goodbye” to end."
+            f"Listening for “{wake}”. Tap the orb or press Esc to stop; say “sleep” to rest the mic."
             if listening else
             "Voice is on but needs a restart to start listening (the speech model loads at launch)."
             if needs_restart else
-            "Turn on hands-free voice — then just say “HELIX” (or tap the orb)."
+            f"Turn on hands-free voice — then just say “{wake}” (or tap the orb)."
         )
         self._talk.setVisible(True)
         self._talk.setEnabled(voice.can_listen())
@@ -1050,6 +1258,38 @@ class ConsoleView(QWidget):
         path = QFileDialog.getExistingDirectory(self, "Attach folder")
         if path:
             self._add_attachment(Path(path))
+
+    def _attach_image(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Attach image", "", "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.tif *.tiff)"
+        )
+        for p in paths:
+            self._add_attachment(Path(p))
+
+    def _on_image_pasted(self, image: object) -> None:
+        """A raw image pasted/dropped from the clipboard (a screenshot) — save it to a temp PNG and
+        stage it like any other image attachment. The temp file is reaped once the turn has read it."""
+        try:
+            handle, path = tempfile.mkstemp(suffix=".png", prefix="helix_paste_")
+            os.close(handle)
+        except OSError:
+            return
+        try:
+            if image is not None and not image.isNull() and image.save(path, "PNG"):
+                p = Path(path)
+                self._paste_temps.add(p)
+                self._add_attachment(p)
+            else:
+                os.remove(path)
+        except Exception:  # noqa: BLE001
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def _on_image_files_pasted(self, paths: list) -> None:
+        for p in paths:
+            self._add_attachment(Path(p))
 
     def _add_attachment(self, path: Path) -> None:
         if path in self._attachments:
@@ -1124,18 +1364,33 @@ class ConsoleView(QWidget):
             return
         if not self._has_claude_auth():
             # No credential yet: don't send (it would fail with a raw error and leave a dangling user
-            # turn that breaks the NEXT request). Keep what they typed and point them at Settings.
+            # turn that breaks the NEXT request). Keep what they typed and point them at Settings — but
+            # show the hint + action only ONCE, so hitting Send repeatedly doesn't stack duplicates.
             if text:
                 self._input.setText(text)
-            self._add_bubble("helix", "Connect Claude first — a Claude Code token (uses your Claude "
-                                      "subscription) or an API key, in Settings.")
-            self._add_actions([("Open Settings", self.openSettingsRequested.emit)])
+            if not self._connect_hint_shown:
+                self._add_bubble("helix", "Connect Claude first — a Claude Code token (uses your Claude "
+                                          "subscription) or an API key, in Settings.")
+                self._add_actions([("Open Settings", self.openSettingsRequested.emit)])
+                self._connect_hint_shown = True
+            self.status.setText("Connect Claude in Settings to start — I kept your message.")
             return
-        prompt = text or "Here are some files — take a look."  # allow an attachment-only message
+        image_paths = [p for p in attach_paths if imagesvc.is_image(p)]
+        other_paths = [p for p in attach_paths if not imagesvc.is_image(p)]
+        only_images = bool(attach_paths) and not other_paths
+        if text:
+            prompt = text
+        elif only_images:  # an image with no words — ask HELIX to describe it
+            prompt = ("Take a look at this image and tell me what's in it." if len(image_paths) == 1
+                      else "Take a look at these images and tell me what's in them.")
+        else:
+            prompt = "Here are some files — take a look."
         self._follow = True  # submitting always snaps the view to the bottom, even if scrolled up to read
-        self._add_bubble("you", text or "📎 (attached files)")
-        if attach_paths:
-            self._add_attach_note(attach_paths)
+        self._add_bubble("you", text or ("🖼 (attached image)" if only_images else "📎 (attached files)"))
+        if image_paths:
+            self._add_image_previews(image_paths)  # show what HELIX is looking at, inline
+        if other_paths:
+            self._add_attach_note(other_paths)
         if self._busy:
             # A conversational turn is mid-flight. Turns are short now (builds run in the background), so
             # queue this follow-up and run it the moment the current turn finishes — never drop it.
@@ -1154,6 +1409,33 @@ class ConsoleView(QWidget):
         self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
         QTimer.singleShot(0, self._scroll_to_bottom)
 
+    def _add_image_previews(self, image_paths: list[Path]) -> None:
+        """Show the attached image(s) inline on the user's side of the transcript (small, rounded), so
+        what HELIX is looking at is visible right there in the conversation. Loaded on the UI thread now,
+        before the worker reaps any clipboard temp file — the pixmap keeps its own copy."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addStretch(1)
+        shown = 0
+        for p in image_paths[:4]:  # a few thumbnails; more than that just clutters the turn
+            try:
+                pm = QPixmap(str(p))
+            except Exception:  # noqa: BLE001
+                continue
+            if pm.isNull():
+                continue
+            lbl = QLabel()
+            lbl.setPixmap(pm.scaled(
+                220, 220, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            lbl.setStyleSheet("border:1px solid rgba(63,224,224,0.35);border-radius:8px;")
+            row.addWidget(lbl)
+            shown += 1
+        if shown == 0:
+            return
+        self._tlayout.insertLayout(self._tlayout.count() - 1, row)
+        QTimer.singleShot(0, self._scroll_to_bottom)
+
     def _start_turn(
         self, text: str, from_voice: bool, attach_paths: list[Path] | None = None,
         speaker: str | None = None,
@@ -1161,6 +1443,7 @@ class ConsoleView(QWidget):
         self._cancelled = False
         self._cancel = CancelToken()
         self._busy = True
+        self._refresh_busy_ui()  # show the Stop button while the turn runs
         # Engaging acknowledges a finished build: clear a lingering green/red hue (back to yellow if a
         # build is still running, else blue) so the orb reflects the live conversation.
         if self._orb_status in (OrbStatus.DONE, OrbStatus.ERROR):
@@ -1188,18 +1471,31 @@ class ConsoleView(QWidget):
             )
 
         def _run(emit):
-            # Read + bundle the attachments OFF the UI thread (a folder can be large); the result rides
-            # along as ephemeral context for just this turn. If nothing readable came back (all binary/
-            # empty), say so explicitly so the model can't invent file contents.
+            # Read the attachments OFF the UI thread (a folder can be large; an image is resized/encoded).
+            # Images go to VISION (loaded, EXIF-oriented, downscaled, base64); text files/folders go to
+            # the fenced text bundle. Both ride along as ephemeral context for just this turn.
             atext = None
+            image_blocks = None
             if paths:
-                atext = attachments.bundle(paths, cancel=token) or (
-                    "(The attached items had no readable text — binary, images, or empty — so their "
-                    "contents aren't available.)"
-                )
+                image_paths, other_paths = imagesvc.split_images(paths)
+                if other_paths:
+                    atext = attachments.bundle(other_paths, cancel=token) or (
+                        "(The attached items had no readable text — binary or empty — so their "
+                        "contents aren't available.)"
+                    )
+                if image_paths:
+                    image_blocks = imagesvc.load_images(image_paths) or None
+                    # Reap the clipboard-image temp files now their bytes are loaded — only the
+                    # helix_paste_ temporaries we created, never the user's own image files.
+                    for p in image_paths:
+                        if Path(p).name.startswith("helix_paste_"):
+                            try:
+                                os.remove(p)
+                            except OSError:
+                                pass
             return self._conversation.run_turn(
-                text, attachments_text=atext, on_progress=emit, cancel=token,
-                knowledge_sources=sources_sink, speaker_context=speaker_ctx,
+                text, attachments_text=atext, images=image_blocks, on_progress=emit, cancel=token,
+                knowledge_sources=sources_sink, speaker_context=speaker_ctx, speaker=speaker,
             )
 
         worker = QtWorker(_run)
@@ -1211,11 +1507,35 @@ class ConsoleView(QWidget):
         worker.finished.connect(lambda w=worker: self._retire(w))
         worker.start()
 
-    def _on_progress(self, line: str) -> None:
-        # Live commentary as HELIX works: show every step on the status line, and (voice on) speak the
-        # milestones — narrate() paces them to speech so it's a fluent "doing this, next that", not chatter.
-        self.status.setText(line)
+    def _should_narrate(self) -> bool:
+        """Whether HELIX speaks its work-in-progress. Default is QUIET — the status line and the orb's
+        colour carry progress silently, so HELIX isn't chattering (or reading its own thinking aloud)
+        while it works. The user can opt into spoken milestones in Settings."""
+        return (self._settings.get("narration_mode") or "off") != "off"
+
+    def _sync_working(self) -> None:
+        """Tell the voice controller whether HELIX is busy on a BACKGROUND build / self-change, so the
+        mic goes deaf while it works (ambient speech can't cancel the job). Conversational turns are
+        already covered by the controller's thinking/speaking states."""
         if self._voice is not None:
+            building = self._queue is not None and self._queue.active_name() is not None
+            drafting = self._selfdev_lane is not None and self._selfdev_lane.busy()
+            self._voice.set_working(bool(building or drafting))
+        self._refresh_busy_ui()
+
+    def _refresh_busy_ui(self) -> None:
+        """Show the Stop button whenever there's something to stop (a turn, a build, or a draft)."""
+        if not hasattr(self, "_stop_btn"):
+            return
+        building = self._queue is not None and self._queue.active_name() is not None
+        drafting = self._selfdev_lane is not None and self._selfdev_lane.busy()
+        self._stop_btn.setVisible(bool(self._busy or building or drafting))
+
+    def _on_progress(self, line: str) -> None:
+        # Live commentary as HELIX works: always show every step on the status line; SPEAK the milestones
+        # only when the user opted into narration (default is quiet — the orb carries progress silently).
+        self.status.setText(line)
+        if self._voice is not None and self._should_narrate():
             self._voice.narrate(line)
 
     def _on_reply(self, text: object) -> None:
@@ -1258,7 +1578,7 @@ class ConsoleView(QWidget):
 
     def _idle_status(self) -> None:
         self.status.setText(
-            "Listening for “HELIX”…" if self._voice and self._voice.enabled()
+            f"Listening for “{self._wake_word()}”…" if self._voice and self._voice.enabled()
             else "Ready when you are."
         )
 
@@ -1273,11 +1593,16 @@ class ConsoleView(QWidget):
         for entry in entries:
             self._legend_row.addWidget(self._legend_chip(entry))
         self._legend_row.addStretch(1)
-        self._legend_host.setVisible(bool(entries))
+        self._legend_strip.setVisible(bool(entries))
 
     def _legend_chip(self, entry: "LegendEntry") -> QPushButton:
         color = _LEGEND_COLOR.get(entry.status, CYAN)
-        chip = QPushButton(f"●  {entry.name}")
+        chip = QPushButton()
+        # Bound each chip (elide a long name, cap the width) so many concurrent builds can't stretch the
+        # strip — and, since it's not scrolled, the whole window — past the screen edge. Full name lives
+        # in the tooltip.
+        chip.setMaximumWidth(220)
+        chip.setText("●  " + chip.fontMetrics().elidedText(entry.name, Qt.TextElideMode.ElideRight, 168))
         chip.setCursor(Qt.CursorShape.PointingHandCursor)
         chip.setToolTip(f"{entry.name} — {_LEGEND_WORD.get(entry.status, '')}. Click to open it.")
         chip.setStyleSheet(
@@ -1311,18 +1636,23 @@ class ConsoleView(QWidget):
     def on_build_started(self, name: str) -> None:
         """A build began — go to the working (yellow) hue. Tiles/legend are refreshed by the main window."""
         self.set_orb_status(OrbStatus.WORKING)
+        self._sync_working()  # shield the mic while the build runs
 
     # ----- background build announcements (bridged from the event bus by the main window) -----
     def on_build_progress(self, name: str, line: str) -> None:
-        """Live commentary from a background build — status line, and (voice on) the spoken milestones."""
+        """Live commentary from a background build — status line always; spoken only if narration is on."""
         self.status.setText(line)
-        if self._voice is not None:
+        self._sync_working()  # a build/draft is producing output → make sure the mic is shielded
+        if self._voice is not None and self._should_narrate():
             self._voice.narrate(line)
 
     def on_build_finished(
         self, name: str, ok: bool, error: str | None, stopped: bool, handle, iterating: bool = False
     ) -> None:
         """A background build ended — announce it tersely, or offer cleanup if it was stopped mid-run."""
+        # Deferred so the queue has settled (active_name cleared) before we re-check whether to lift the
+        # mic shield / hide the Stop button.
+        QTimer.singleShot(0, self._sync_working)
         if stopped:
             self._settle_orb_status()  # back to yellow (others still going) or blue
             if handle is not None:
@@ -1378,6 +1708,7 @@ class ConsoleView(QWidget):
         self, ok: bool, summary: str, branch: str, error: str | None, stopped: bool
     ) -> None:
         """A background self-change draft ended — announce whether it's ready to apply."""
+        QTimer.singleShot(0, self._sync_working)  # lift the mic shield once the draft lane is idle
         if stopped:
             self._announce("Stopped drafting that change.")
         elif ok:
@@ -1458,21 +1789,99 @@ class ConsoleView(QWidget):
             text, from_voice, attach_paths, speaker = self._pending_msgs.pop(0)
             self._start_turn(text, from_voice, attach_paths, speaker)
 
-    def _announce(self, msg: str) -> None:
+    def _announce(self, msg: str, *, speak: bool = True) -> None:
         self._add_bubble("helix", msg)
         self.status.setText(msg)
-        if self._voice is not None and self._voice.enabled():
+        if speak and self._voice is not None and self._voice.enabled():
             self._voice.speak(msg)
+
+    # ----- anticipate: a quiet, occasional suggestion chip -----
+    def maybe_suggest(self) -> None:
+        """Called from the heartbeat. Surfaces at most one nudge, and only rarely — never while HELIX is
+        busy or already showing one, at most once every ~25 min, and never a suggestion the user has
+        already waved off this session. Silent unless the user turned proactive speech on."""
+        import time
+        if self._suggestions is None or self._suggest_current or self._busy:
+            return
+        if self._voice is not None and self._voice.is_active():
+            return  # don't pop a chip mid-conversation
+        if time.monotonic() - self._suggest_ts < 25 * 60:
+            return
+        try:
+            cand = self._suggestions.candidate()
+        except Exception:  # noqa: BLE001 — a suggestion hiccup must never disturb the app
+            return
+        if cand is None or cand.id in self._suggest_dismissed:
+            return
+        self._show_suggestion(cand)
+
+    def _show_suggestion(self, cand) -> None:
+        import time
+        self._clear_suggestion_widgets()
+        self._suggest_current = cand.id
+        self._suggest_ts = time.monotonic()
+        dot = QLabel("💡")
+        text = QLabel(cand.text)
+        text.setTextFormat(Qt.TextFormat.PlainText)
+        text.setWordWrap(True)
+        text.setStyleSheet("color:#cfeaea;")
+        self._suggest_host.setStyleSheet(
+            "QWidget{background:rgba(13,20,27,0.72);border:1px solid rgba(63,224,224,0.3);border-radius:12px;}"
+        )
+        self._suggest_row.setContentsMargins(12, 6, 8, 6)
+        self._suggest_row.addWidget(dot)
+        self._suggest_row.addWidget(text, stretch=1)
+        if cand.open_slug:
+            open_btn = QPushButton("Open")
+            open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            open_btn.clicked.connect(lambda _c=False, s=cand.open_slug: self._act_suggestion(s))
+            self._suggest_row.addWidget(open_btn)
+        x = QToolButton()
+        x.setText("✕")
+        x.setCursor(Qt.CursorShape.PointingHandCursor)
+        x.setStyleSheet("QToolButton{color:#9fb3ba;border:none;background:transparent;}"
+                        "QToolButton:hover{color:#3fe0e0;}")
+        x.clicked.connect(self._dismiss_suggestion)
+        self._suggest_row.addWidget(x)
+        self._suggest_host.setVisible(True)
+        if bool(self._settings.get("proactive_speech", False)) and self._voice is not None \
+                and self._voice.enabled():
+            self._voice.speak(cand.text)
+
+    def _act_suggestion(self, slug: str) -> None:
+        self._dismiss_suggestion()
+        self.openBuildRequested.emit(slug)
+
+    def _dismiss_suggestion(self) -> None:
+        if self._suggest_current:
+            self._suggest_dismissed.add(self._suggest_current)
+        self._suggest_current = ""
+        self._clear_suggestion_widgets()
+        self._suggest_host.setVisible(False)
+
+    def _clear_suggestion_widgets(self) -> None:
+        while self._suggest_row.count():
+            item = self._suggest_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
 
     # ----- heartbeat announcements (reminders + scheduled agents; bridged by the main window) -----
     def announce_reminder(self, text: str) -> None:
+        # A reminder is something the USER asked for ("remind me at five") — always spoken.
         self._announce(f"Reminder: {text}")
 
     def announce_agent_report(self, name: str, report: str) -> None:
+        # A background watcher speaking up is UNPROMPTED. By default it lands silently — shown in the
+        # transcript, the orb notes it — and is spoken aloud only if the user turned on proactive speech.
+        # So the sentinel stays a calm ambient presence instead of talking at the room all day.
         text = " ".join((report or "").split())
         if len(text) > 600:
             text = text[:600] + "…"
-        self._announce(f"{name}: {text}" if text else f"{name} finished with nothing to report.")
+        speak = bool(self._settings.get("proactive_speech", False))
+        self._announce(
+            f"{name}: {text}" if text else f"{name} finished with nothing to report.", speak=speak
+        )
 
     def _add_actions(self, buttons: list[tuple[str, object]]) -> None:
         row = QHBoxLayout()
@@ -1491,6 +1900,7 @@ class ConsoleView(QWidget):
         worker.deleteLater()
         self._busy = False
         self._refresh_voice_ui()
+        self._refresh_busy_ui()  # hide the Stop button once the turn is done (unless a build is running)
         self._drain_pending()  # run the next queued follow-up (unless a cleanup offer is still open)
 
     def is_busy(self) -> bool:
@@ -1500,12 +1910,20 @@ class ConsoleView(QWidget):
     def shutdown(self) -> None:
         """Wait briefly for any in-flight worker so we never destroy a running QThread on close."""
         self._narr_timer.stop()  # don't let a pending narration fire into a torn-down view
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)  # drop the app-wide Ctrl+V hook before teardown
         if self._cancel is not None:
             self._cancel.cancel()  # break a mid-flight turn at its next cancel check before we wait
         if self._voice is not None:
             self._voice.shutdown()
         for worker in list(self._workers):
             worker.wait(3000)
+        for p in list(getattr(self, "_paste_temps", ())):  # reap any clipboard-image temp not yet used
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
     # ----- transcript rendering -----
     @staticmethod
@@ -1534,9 +1952,34 @@ class ConsoleView(QWidget):
             rowlay.addWidget(bubble)
             rowlay.addStretch(1)
         self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
+        self._trim_transcript()  # keep the on-screen widget count bounded on a long, always-on session
         if animate:  # historical (on-load) bubbles skip the fade + per-item scroll; we scroll once at the end
             self._animate_in(bubble)
             QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def _trim_transcript(self) -> None:
+        """Drop the oldest on-screen rows past a cap so a multi-day session's transcript can't grow without
+        bound (the full history stays in the store; this is only the rendered view). The final layout item
+        is the trailing stretch, so 'rows' = count - 1."""
+        while self._tlayout.count() - 1 > _MAX_TRANSCRIPT_ROWS:
+            item = self._tlayout.takeAt(0)
+            if item is None:
+                break
+            self._discard_layout_item(item)
+
+    def _discard_layout_item(self, item) -> None:
+        w = item.widget()
+        if w is not None:
+            w.setParent(None)
+            w.deleteLater()
+            return
+        lay = item.layout()
+        if lay is not None:
+            while lay.count():
+                sub = lay.takeAt(0)
+                if sub is not None:
+                    self._discard_layout_item(sub)
+            lay.deleteLater()
 
     def _load_history(self) -> None:
         """On launch, show the recent conversation so the chat persists across sessions instead of starting

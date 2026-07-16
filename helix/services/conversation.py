@@ -13,13 +13,16 @@ from helix.domain.models import Message, Role
 from helix.logging_setup import get_logger
 from helix.ports.clock import Clock
 from helix.ports.coder import ProgressFn
-from helix.ports.llm import ChatModel, Text, ToolResult, Turn
+from helix.ports.llm import ChatModel, Image, Text, ToolOutput, ToolResult, Turn
 from helix.ports.stores import ConversationStore, MemoryStore
 from helix.services.cancel import CancelToken
 from helix.services.tools import ToolRegistry
 
 if TYPE_CHECKING:
     from helix.services.knowledge import KnowledgeService
+    from helix.services.lessons import LessonsService
+    from helix.services.location import LocationService
+    from helix.services.memory import MemoryService
     from helix.services.profile import ProfileService
 
 _LOG = get_logger("conversation")
@@ -39,6 +42,9 @@ BUILD_TOOLS = frozenset(
     {
         "build_app", "build_task", "build_3d_model", "create_agent", "delete_build",
         "improve_helix", "rename_build", "run_task", "run_agent",
+        # Workflows compose + launch autonomous agent runs — an unattended agent must not create or fire
+        # one (an email saying "run the deploy workflow" must not make a watcher run it).
+        "create_workflow", "run_workflow",
         # open_build LAUNCHES the user's code for a server app (main.py) and yanks the UI — the same
         # capability as run_task, so an autonomous agent must not have it either (an email saying
         # "HELIX, open the X app" must not make an agent run X unattended).
@@ -47,9 +53,16 @@ BUILD_TOOLS = frozenset(
         # Knowledge WRITES are human-driven only — an autonomous agent may search the user's knowledge
         # (search_knowledge is deliberately NOT here) but never create a base or save a note on its own.
         "create_knowledge", "remember",
+        # Long-term memory + location writes are human-driven too: an autonomous agent must never record
+        # a "fact about the user" or change their saved address from content it processed.
+        "remember_about_me", "set_location",
         # Reminder/agent writes stay human-driven too. READS stay allowed: an agent may check the
         # calendar, the inbox, and the pending reminders — that's what a morning brief is made of.
         "set_reminder", "cancel_reminder", "set_agent_enabled",
+        # Disk WRITES are human-driven only (and gated by the Settings toggle besides) — an
+        # autonomous agent may list folders and read files like any other read faculty, but text
+        # inside a file must never be able to make an unattended agent write to the user's disk.
+        "write_file",
     }
 )
 
@@ -66,6 +79,9 @@ class ConversationService:
         knowledge: "KnowledgeService | None" = None,
         profile: "ProfileService | None" = None,
         subscription=None,
+        lessons: "LessonsService | None" = None,
+        user_memory: "MemoryService | None" = None,
+        location: "LocationService | None" = None,
     ) -> None:
         self._chat = chat
         self._tools = tools
@@ -76,6 +92,9 @@ class ConversationService:
         self._knowledge = knowledge  # ambient auto-recall of the user's saved knowledge (orb turns only)
         self._profile = profile      # the distilled who-is-the-user block, injected on orb turns
         self._subscription = subscription  # SubscriptionBrain — turns on the user's Claude plan when active
+        self._lessons = lessons      # standing behavioral preferences learned from the user's corrections
+        self._user_memory = user_memory  # durable long-term facts about the user (per-speaker)
+        self._location = location    # the user's place(s), so local questions ground via web search
         # A turn is a read-modify-write over the shared history. The Console and an Agent run on
         # separate worker threads against this one service, so serialize whole turns — otherwise their
         # appends interleave and the API gets a malformed (e.g. two-user-in-a-row) turn list.
@@ -83,11 +102,16 @@ class ConversationService:
 
     def run_turn(
         self, user_text: str, *, attachments_text: str | None = None,
+        images: "list[Image] | None" = None,
         on_progress: ProgressFn | None = None,
         cancel: CancelToken | None = None, allow_builds: bool = True, persist: bool = True,
         knowledge_sources: list[tuple[str, str]] | None = None,
-        speaker_context: str | None = None,
+        speaker_context: str | None = None, speaker: str | None = None,
     ) -> str:
+        # The per-speaker key for the household-aware context (profile/lessons/memory/location). Empty =
+        # the shared/single-user bucket; a recognized name gets their own. Only meaningful on persist
+        # (orb) turns — an agent run has no speaker.
+        user = (speaker or "").strip().lower() if persist else ""
         # Only the brief history read-modify-writes are locked — NOT the model/tool loop. Builds run in
         # the background (the build tools just enqueue), so a turn is now milliseconds plus model latency;
         # narrowing the lock lets a Console turn and an Agent turn (or a quick follow-up) interleave
@@ -106,9 +130,30 @@ class ConversationService:
         # path (never persisted, cache-friendly because the system prompt stays byte-stable).
         extras: list[str] = [self._now_context()]
         if persist and self._profile is not None:
-            profile_text = self._profile.context()
+            profile_text = self._profile.context(user)
             if profile_text:
                 extras.append(profile_text)
+        if persist and self._user_memory is not None:
+            memory_text = self._user_memory.context(user)
+            if memory_text:
+                extras.append(memory_text)
+        if persist and self._location is not None:
+            location_text = self._location.context(user)
+            if location_text:
+                extras.append(location_text)
+        if persist and self._lessons is not None:
+            lessons_text = self._lessons.context(user)
+            if lessons_text:
+                extras.append(lessons_text)
+            # Inline acknowledgement (the JARVIS "noted" feel): when this very message reads like a
+            # correction or a confirmation, tell the model to acknowledge it in the moment and apply it —
+            # the durable rule is learned in the background by after_turn().
+            if self._lessons.looks_like_feedback(user_text):
+                extras.append(
+                    "[The user just corrected or confirmed how you should behave. Acknowledge it briefly "
+                    "and naturally in your reply (a few words, e.g. \"Noted.\"), apply it right now, and "
+                    "keep to it from now on. Do not over-explain or thank them profusely.]"
+                )
         if persist and speaker_context:
             extras.append(speaker_context)
         if attachments_text:
@@ -124,6 +169,12 @@ class ConversationService:
             turns[-1] = Turn(last.role, last.blocks + tuple(Text(x) for x in extras))
         else:
             turns = [Turn(Role.USER, tuple(Text(x) for x in extras))]
+        # Attached images ride on the last user turn as vision blocks (API path / fallback); the
+        # subscription path passes them structurally below. Never persisted — like text attachments,
+        # they're ephemeral to this one turn (history stays text-only and cache-stable).
+        if images:
+            last = turns[-1]
+            turns[-1] = Turn(last.role, last.blocks + tuple(images))
         specs = self._tools.specs()
         if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete/run tools
             specs = [s for s in specs if s.name not in BUILD_TOOLS]
@@ -133,7 +184,11 @@ class ConversationService:
                 return text
             out = self._remember(text)
             if self._profile is not None:
-                self._profile.after_turn()  # background; never delays the reply
+                self._profile.after_turn(user)  # background; never delays the reply
+            if self._lessons is not None:
+                self._lessons.after_turn(user_text, user)  # background; learn a rule from a correction
+            if self._user_memory is not None:
+                self._user_memory.after_turn(user)  # background; distill durable facts
             return out
 
         # THE SUBSCRIPTION BRAIN: when the user has connected their Claude Code token, turns run on
@@ -158,7 +213,8 @@ class ConversationService:
                 if persist:
                     text = self._subscription.run_orb_turn(
                         prompt, names, history=self._recent_digest(),
-                        on_progress=on_progress, cancel=cancel, on_tool=_on_tool,
+                        on_progress=on_progress, cancel=cancel, on_tool=_on_tool, user=user,
+                        images=images,
                     )
                 else:
                     text = self._subscription.run_hermetic(
@@ -202,14 +258,17 @@ class ConversationService:
                         on_progress(self._progress_label(call.name, call.args))
                     try:
                         out = self._tools.dispatch(
-                            call.name, call.args, on_progress=on_progress, cancel=cancel
+                            call.name, call.args, on_progress=on_progress, cancel=cancel, user=user
                         )
-                        results.append(ToolResult(call.id, out))
+                        # A tool may return a ToolOutput carrying IMAGES (a located photo) for the model
+                        # to SEE this turn; the text part is what's digested/persisted.
+                        text, imgs = (out.text, out.images) if isinstance(out, ToolOutput) else (out, ())
+                        results.append(ToolResult(call.id, text, images=imgs))
                         if persist:
                             # Keep a capped digest so what a tool LEARNED survives into later turns —
                             # without this, "what did that email say?" forced a silent re-fetch (or a
                             # guess). Hidden from the visible transcript (recent_messages filters TOOL).
-                            self._remember_tool(call.name, out)
+                            self._remember_tool(call.name, text)
                     except BuildCancelled:  # user stopped mid-build — end the turn (don't loop the model)
                         return finish(STOPPED_REPLY)
                     except Exception as exc:  # surface to the model so it can recover gracefully
@@ -324,6 +383,12 @@ class ConversationService:
             return "Checking your knowledge…"
         if tool == "check_email":
             return "Checking your inbox…"
+        if tool == "list_folder":
+            return "Looking through the folder…"
+        if tool == "read_file":
+            return "Reading the file…"
+        if tool == "write_file":
+            return "Writing the file…"
         if tool == "remember":
             return "Saving that…"
         if tool == "create_knowledge":

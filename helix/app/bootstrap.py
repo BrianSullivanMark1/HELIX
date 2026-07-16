@@ -98,15 +98,12 @@ def run_app(argv: list[str] | None = None) -> int:
     app.aboutToQuit.connect(lambda: mark_clean_exit(container.paths.data))
 
     # Belt-and-suspenders: tear down on ANY exit path — including a restart's quit() / OS logoff, which
-    # bypass the window's closeEvent. Order matters (release the mic + join workers and reap the coder
-    # BEFORE closing the DB). All steps are idempotent, so a normal closeEvent close runs them twice
-    # harmlessly. console.shutdown releases the microphone + joins QtWorker threads — essential on the
-    # restart path so the old process frees the mic before the new one opens it.
-    app.aboutToQuit.connect(container.build_queue.shutdown)
-    app.aboutToQuit.connect(container.selfdev_lane.shutdown)
-    app.aboutToQuit.connect(container.subscription.shutdown)  # close the SDK session + its claude.exe
-    app.aboutToQuit.connect(window.console.shutdown)
-    app.aboutToQuit.connect(container.store.close)
+    # bypass the window's closeEvent. window.teardown() is the SINGLE full-cleanup path (it also stops the
+    # heartbeat and the backend-app servers, which the old partial hook here missed — leaking watcher
+    # timers + server processes on a restart). It's guarded to run once, so a normal closeEvent that
+    # already tore down is a harmless no-op here. console.shutdown (inside teardown) releases the mic +
+    # joins QtWorker threads — essential on restart so the old process frees the mic before the new opens it.
+    app.aboutToQuit.connect(window.teardown)
 
     window.show()
     _record_good(container)

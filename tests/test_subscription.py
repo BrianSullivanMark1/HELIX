@@ -49,7 +49,7 @@ class _Tools:
     def specs(self):
         return list(self._specs)
 
-    def dispatch(self, name, args, on_progress=None, cancel=None):
+    def dispatch(self, name, args, on_progress=None, cancel=None, user=""):
         return "dispatched"
 
 
@@ -73,12 +73,14 @@ class _Sub:
     def active(self):
         return self._active
 
-    def run_orb_turn(self, prompt, names, *, history="", on_progress=None, cancel=None, on_tool=None):
+    def run_orb_turn(self, prompt, names, *, history="", on_progress=None, cancel=None, on_tool=None,
+                     user="", images=None):
         if self._fail:
             if self._dispatch_before_fail and on_tool is not None:
                 on_tool("build_app", "started building")  # a real side effect happened first
             raise RuntimeError("plan limit reached")
         self.orb_calls.append((prompt, tuple(names), history))
+        self.last_images = images  # so a test can assert attached images reached the subscription
         if on_tool is not None:
             on_tool("list_apps", "two apps")
         return "subscription reply"
@@ -110,6 +112,17 @@ def test_orb_turn_routes_through_active_subscription():
     roles = [m.role for m in store.messages]
     assert Role.USER in roles and Role.ASSISTANT in roles  # persisted like any turn
     assert any(m.role == Role.TOOL for m in store.messages)  # the tool digest was remembered
+
+
+def test_attached_images_reach_the_subscription_turn():
+    from helix.ports.llm import Image
+    sub = _Sub()
+    svc, _store, api = _service(sub)
+    img = Image(media_type="image/jpeg", data="Zm9v")
+    out = svc.run_turn("what's in this photo?", images=[img])
+    assert out == "subscription reply"
+    assert api.calls == 0
+    assert sub.last_images == [img]  # the vision block rode into the subscription turn
 
 
 def test_agent_run_routes_hermetic_with_builds_denied():
@@ -255,3 +268,19 @@ def test_sdk_options_are_token_safe_and_sandboxed():
     assert opts.env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat01-fake"
     assert opts.env.get("ANTHROPIC_API_KEY") == ""  # inherited key must not reach claude.exe
     assert opts.setting_sources == []
+
+
+def test_web_tools_denied_for_autonomous_runs():
+    # Agents/watchers/distillers (web=False) get NO arbitrary web fetch — a WebFetch would be an egress
+    # channel bypassing call_api's host allowlist. The orb/think_harder (web=True) still get web.
+    pytest.importorskip("claude_agent_sdk")
+    from helix.adapters.agent_sdk_chat import _Sinks, SubscriptionBrain
+
+    brain = SubscriptionBrain(lambda: "sk-ant-oat01-fake", "sys", workdir="C:/neutral")
+    no_web = brain._options((), "claude-sonnet-4-6", "low", _Sinks(), web=False)
+    assert no_web.tools == []                                   # no built-in web tools available
+    assert "WebFetch" in no_web.disallowed_tools and "WebSearch" in no_web.disallowed_tools
+    assert not any("Web" in t for t in no_web.allowed_tools)
+
+    web = brain._options((), "claude-sonnet-4-6", "low", _Sinks(), web=True)
+    assert web.tools == ["WebSearch", "WebFetch"]               # user-driven runs keep web

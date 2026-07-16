@@ -366,21 +366,16 @@ class ForgeService:
         return ", ".join(names[:4]) + (f", and {extra} more" if extra > 0 else "")
 
     def _revert_escapes(self, escaped: list[str]) -> None:
+        # NOTE: `escaped` is computed by scan_tree/tree_changed with a `skip` set that includes the whole
+        # builds tree (self._builds.dir), so a write into ANOTHER build's folder is deliberately NOT an
+        # escape (it enables parallel builds — see test_build_into_a_sibling_workspace_is_allowed). There
+        # is therefore no builds-tree path to handle here; the protections that matter — source, settings,
+        # .git, hooks — are all outside that skip and are handled below.
         root = self._app_root.resolve()
-        builds_root = self._builds.dir.resolve()
         data_root = self._data_dir.resolve()
         source_rels: list[str] = []
-        siblings: set[Path] = set()
         for ap in escaped:
             rp = Path(ap).resolve()
-            if builds_root in rp.parents:
-                # a write into ANOTHER built app — revert that app's whole working tree to its commit.
-                # Checked before the root-relative test: the builds tree may live outside the app root.
-                try:
-                    siblings.add(builds_root / rp.relative_to(builds_root).parts[0])
-                except (ValueError, IndexError):
-                    pass
-                continue
             if data_root == rp or data_root in rp.parents:
                 continue  # db/log/settings: detected + refused (settings already byte-reverted)
             try:
@@ -395,11 +390,6 @@ class ForgeService:
                     _LOG.critical("could not remove planted git hook: %s", rp, exc_info=True)
             else:
                 source_rels.append(rel)
-        for sibling in siblings:
-            try:
-                self._repo.discard_changes(sibling)  # restore the sibling app to its last commit
-            except Exception:
-                _LOG.critical("could not revert escaped write to sibling build: %s", sibling, exc_info=True)
         if source_rels:
             try:
                 self._repo.restore_paths(self._app_root, source_rels)

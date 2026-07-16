@@ -69,6 +69,8 @@ class SqliteStore:
 
     def add_version(self, version: Version) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._conn.execute(
                 "INSERT OR REPLACE INTO versions(commit_sha, summary, at, pinned) VALUES (?,?,?,?)",
                 (version.commit, version.summary, version.at.isoformat(), int(version.pinned)),
@@ -77,6 +79,8 @@ class SqliteStore:
 
     def versions(self) -> list[Version]:
         with self._lock:
+            if self._closed:
+                return []
             rows = self._conn.execute("SELECT * FROM versions ORDER BY at DESC").fetchall()
         return [
             Version(
@@ -90,6 +94,8 @@ class SqliteStore:
 
     def set_pinned(self, commit: str) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._conn.execute("UPDATE versions SET pinned = (commit_sha = ?)", (commit,))
             self._conn.commit()
 
@@ -107,6 +113,8 @@ class SqliteStore:
 
     def recent(self, limit: int = 100) -> list[Message]:
         with self._lock:
+            if self._closed:
+                return []
             rows = self._conn.execute(
                 "SELECT * FROM messages ORDER BY id DESC LIMIT ?", (int(limit),)
             ).fetchall()

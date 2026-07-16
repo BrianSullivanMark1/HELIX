@@ -12,6 +12,8 @@ _FMT = "%H%x1f%s%x1f%cI"  # sha, subject, committer-date(ISO) joined by 0x1f
 # In a --windowed (frozen) build, a child process with no console flag flashes a console window. HELIX
 # fires many git calls (startup recovery, every build/iterate commit), so suppress the window every time.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_GIT_TIMEOUT = 60.0  # a git op that hasn't returned in a minute is stuck (a lock, an auth prompt, a
+                     # network hang) — kill it and surface an error instead of parking the worker forever
 
 
 class GitError(RuntimeError):
@@ -42,7 +44,10 @@ class GitRepo:
                 encoding="utf-8",
                 errors="replace",  # git emits UTF-8; don't crash on a non-ASCII app name/path
                 creationflags=_NO_WINDOW,  # no flashing console window in the packaged (--windowed) app
+                timeout=_GIT_TIMEOUT,  # a hung git must not park the build/recovery worker forever
             )
+        except subprocess.TimeoutExpired as exc:
+            raise GitError(f"git {' '.join(args)} timed out after {int(_GIT_TIMEOUT)}s") from exc
         except FileNotFoundError as exc:
             # Git isn't installed/on PATH — the most common first-build wall on a clean consumer machine.
             # Give a human, actionable message instead of a raw OSError the UI would discard.

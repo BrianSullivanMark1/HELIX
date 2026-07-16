@@ -117,6 +117,21 @@ def test_brain_status_flips_to_subscription_after_saving_a_token(_app):
     assert "on your claude subscription" in view._brain_status.text().lower()
 
 
+def test_file_write_toggle_defaults_off_and_round_trips(_app):
+    s, c = _Settings(), _Conns()
+    view = SettingsView(s, c)
+    assert not view._file_write.isChecked()  # writing is opt-in
+    view._file_write.setChecked(True)
+    view._save()
+    assert s.get("file_write_access") is True
+    view._file_write.setChecked(False)
+    view._save()
+    assert s.get("file_write_access") is False
+    s.set("file_write_access", True)
+    view.reload()
+    assert view._file_write.isChecked()
+
+
 def test_audio_device_selection_saves(_app):
     s, c = _Settings(), _Conns()
     view = SettingsView(s, c)

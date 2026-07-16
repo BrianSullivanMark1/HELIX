@@ -7,6 +7,8 @@ up to a few lines, then scrolls — so it stays as compact as a line edit until 
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import QTextEdit
@@ -15,6 +17,10 @@ from PyQt6.QtWidgets import QTextEdit
 # only as a fallback height before the widget is first laid out — once shown we measure it for real.
 _QSS_CHROME = 2 * 10 + 2 * 1
 
+# Image files that a paste/drop should ATTACH (for vision) rather than insert as a file path. Kept in
+# step with helix.services.images.IMAGE_EXTS; duplicated here so this low-level widget stays service-free.
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+
 
 class ChatInput(QTextEdit):
     """A multi-line text box with line-edit ergonomics: Enter submits, Shift/Ctrl+Enter inserts a
@@ -22,6 +28,8 @@ class ChatInput(QTextEdit):
     QSS) for free, and exposes text()/setText() so existing line-edit call sites barely change."""
 
     submitted = pyqtSignal()  # Enter pressed — the owner reads text() and sends, like returnPressed did
+    imagePasted = pyqtSignal(object)     # a raw image (QImage) pasted or dropped from the clipboard
+    imageFilesPasted = pyqtSignal(list)  # local image file paths (str) pasted or dropped in
 
     def __init__(self, placeholder: str = "", *, max_lines: int = 6) -> None:
         super().__init__()
@@ -57,6 +65,37 @@ class ChatInput(QTextEdit):
                 self.submitted.emit()            # plain Enter: send (mirrors QLineEdit.returnPressed)
             return
         super().keyPressEvent(event)
+
+    # ----- paste / drop an image → attach it for vision (instead of pasting a path or nothing) -----
+    @staticmethod
+    def _image_urls(source) -> list[str]:
+        if not source.hasUrls():
+            return []
+        out: list[str] = []
+        for u in source.urls():
+            if u.isLocalFile() and Path(u.toLocalFile()).suffix.lower() in _IMAGE_SUFFIXES:
+                out.append(u.toLocalFile())
+        return out
+
+    def canInsertFromMimeData(self, source) -> bool:
+        if source.hasImage() or self._image_urls(source):
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source) -> None:
+        # Local image FILE(s) first (a drag from a folder, or a "copy image" that carries a file URL) —
+        # attach them rather than pasting their path as text.
+        urls = self._image_urls(source)
+        if urls:
+            self.imageFilesPasted.emit(urls)
+            return
+        # Raw image bytes on the clipboard (a screenshot, "copy image" from a browser).
+        if source.hasImage():
+            image = source.imageData()
+            if image is not None:
+                self.imagePasted.emit(image)
+                return
+        super().insertFromMimeData(source)
 
     # ----- grow with the text, up to max_lines, then scroll -----
     def _on_doc_resized(self, *_args) -> None:

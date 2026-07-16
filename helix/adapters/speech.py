@@ -12,6 +12,7 @@ import; the container's WhisperSpeechIn then reuses the already-loaded model.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
 import platform
 import subprocess
@@ -89,9 +90,12 @@ def stt_ready(model_size: str = DEFAULT_STT_MODEL) -> bool:
 class WhisperSpeechIn:
     """Local STT via faster-whisper, using the module-level (pre-warmed) model cache."""
 
-    def __init__(self, model_size: str = DEFAULT_STT_MODEL, device: str = "cpu") -> None:
+    def __init__(
+        self, model_size: str = DEFAULT_STT_MODEL, device: str = "cpu", wake_word: Callable[[], str] | None = None
+    ) -> None:
         self._model_size = model_size
         self._device = device
+        self._wake_word = wake_word  # optional provider of the user's chosen wake word, biased in the decoder
 
     def available(self) -> bool:
         """True if faster-whisper is importable (the engine could be used)."""
@@ -114,12 +118,19 @@ class WhisperSpeechIn:
             # that MOST need to land ("HELIX", "go to sleep", "wake up", "stop"), so an uncommon word like
             # HELIX is mis-heard far less. condition_on_previous_text=False keeps each clip independent, so
             # a previous utterance never drags the next transcription off course.
+            hotwords = "HELIX, hey HELIX, wake up, go to sleep, stop, never mind, goodbye"
+            try:  # bias the decoder toward the user's chosen wake word too, so a custom name lands
+                custom = (self._wake_word() or "").strip() if self._wake_word is not None else ""
+                if custom and custom.lower() != "helix":
+                    hotwords = f"{custom}, hey {custom}, {hotwords}"
+            except Exception:  # noqa: BLE001 — a bad provider never breaks transcription
+                pass
             segments, _info = model.transcribe(
                 str(wav_path),
                 language="en",
                 beam_size=5,
                 condition_on_previous_text=False,
-                hotwords="HELIX, hey HELIX, wake up, go to sleep, stop, never mind, goodbye",
+                hotwords=hotwords,
             )
             return " ".join(seg.text for seg in segments).strip()
         except Exception as exc:
@@ -156,6 +167,9 @@ class OsSpeechOut:
                 self._kill_locked()
                 if system == "Windows":
                     script = (
+                        # Read stdin as UTF-8 — without this the fallback voice mangles em-dashes and
+                        # accented names (the text is piped in as UTF-8 below).
+                        "[Console]::InputEncoding=[System.Text.Encoding]::UTF8;"
                         "Add-Type -AssemblyName System.Speech;"
                         "(New-Object System.Speech.Synthesis.SpeechSynthesizer)"
                         ".Speak([Console]::In.ReadToEnd())"
@@ -175,6 +189,13 @@ class OsSpeechOut:
                 proc.wait()  # block until the utterance completes (or stop() kills it)
         except Exception as exc:
             _LOG.warning("TTS failed: %s", exc)
+
+    def speak_chunks(self, chunks: list[str], allow_fallback: bool = True) -> None:
+        """The OS voice synthesizes locally (no network), so a whole reply reads seamlessly as one
+        utterance — no per-sentence gap. Just join and speak."""
+        text = " ".join(c for c in (str(x).strip() for x in chunks) if c)
+        if text:
+            self.speak(text)
 
     def stop(self) -> None:
         with self._lock:
@@ -225,15 +246,71 @@ def _rate_string(multiplier: object) -> str:
     return f"+{pct}%" if pct >= 0 else f"{pct}%"
 
 
+# MPEG-audio frame tables — used to compute an MP3's exact play length in pure Python, so the warm
+# player can block for precisely the audio duration instead of polling MediaPlayer.Position. In a
+# pump-less console process Position never advances, so the old completion logic waited out its whole
+# grace/timeout — multiple seconds of dead air after every spoken sentence.
+_MP3_BR_V1 = (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0)  # MPEG-1 Layer III
+_MP3_BR_V2 = (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0)       # MPEG-2/2.5 L3
+_MP3_SR = {3: (44100, 48000, 32000, 0), 2: (22050, 24000, 16000, 0), 0: (11025, 12000, 8000, 0)}
+
+
+def mp3_duration_ms(path: str) -> int:
+    """Exact duration (ms) of an MP3, by summing its frame durations. Dependency-free and validated to
+    match the media engine's own NaturalDuration to the millisecond. Returns 0 if it can't be parsed
+    (a non-MP3 or truncated clip) — the player then falls back to detecting the length itself."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return 0
+    i, n, total = 0, len(data), 0.0
+    if data[:3] == b"ID3" and n >= 10:  # skip an ID3v2 tag if one is present (syncsafe size)
+        i = 10 + ((data[6] << 21) | (data[7] << 14) | (data[8] << 7) | data[9])
+    while i + 4 <= n:
+        if data[i] != 0xFF or (data[i + 1] & 0xE0) != 0xE0:  # frame sync
+            i += 1
+            continue
+        ver = (data[i + 1] >> 3) & 3
+        if ((data[i + 1] >> 1) & 3) != 1:  # Layer III only (edge-tts is L3)
+            i += 1
+            continue
+        bri = (data[i + 2] >> 4) & 0xF
+        sri = (data[i + 2] >> 2) & 3
+        pad = (data[i + 2] >> 1) & 1
+        if sri == 3 or bri in (0, 15):  # reserved sample-rate / free-or-bad bitrate
+            i += 1
+            continue
+        sr = _MP3_SR[ver][sri]
+        if ver == 3:  # MPEG-1
+            flen = (144000 * _MP3_BR_V1[bri]) // sr + pad
+            spf = 1152
+        else:         # MPEG-2 / 2.5 (edge-tts synthesizes 24 kHz → MPEG-2)
+            flen = (72000 * _MP3_BR_V2[bri]) // sr + pad
+            spf = 576
+        if flen <= 0:
+            i += 1
+            continue
+        total += spf / sr
+        i += flen
+    return int(total * 1000)
+
+
 class _WarmMediaPlayer:
     """One persistent STA PowerShell MediaPlayer, fed MP3 paths over stdin.
 
     The old design spawned a fresh powershell per utterance — 0.5-1s of dead air before every spoken
     line, plus a blind 3-second sleep when the duration never resolved. Keeping one warm player makes
-    consecutive lines start instantly, and playback now ends on the player's actual position rather
-    than a guess. stop() kills the process (instant hush); the next utterance warms a fresh one.
+    consecutive lines start instantly. Each request is 'path|milliseconds': the caller computes the
+    clip's EXACT length (mp3_duration_ms) and the player blocks for just that long — Position never
+    advances in this pump-less process, so the previous Position/grace logic sat as multi-second dead
+    air after every sentence. The player also Close()s the media so the caller can delete the temp
+    file immediately (an un-closed handle made os.remove() block ~4s — the same dead air, relocated).
+    stop() kills the process (instant hush); the next utterance warms a fresh one.
     """
 
+    _TAIL_MS = 150  # a short tail after the exact audio length, covering Play-start latency so the
+    #                 final syllable never clips even though we sleep a precise, computed duration.
     _SCRIPT = (
         "Add-Type -AssemblyName PresentationCore;"
         "$mp=New-Object System.Windows.Media.MediaPlayer;"
@@ -241,18 +318,24 @@ class _WarmMediaPlayer:
         "while($true){"
         "$line=[Console]::In.ReadLine();"
         "if($line -eq $null -or $line -eq ''){break};"
+        # Split 'path|ms' on the LAST '|' (a Windows path can't contain one) → the exact sleep length.
+        "$ix=$line.LastIndexOf('|');"
+        "$path=$line.Substring(0,$ix);"
+        "$ms=[int]$line.Substring($ix+1);"
         "$ok='DONE';"
         "try{"
-        "$mp.Open([uri]$line);"
-        "Start-Sleep -Milliseconds 60;"
+        "$mp.Open([uri]$path);"
+        # A brief bounded wait so the media is buffered before Play (otherwise a fixed sleep can start
+        # before playback does and clip the first syllable). Returns as soon as the length is known.
+        "for($i=0;$i -lt 40;$i++){if($mp.NaturalDuration.HasTimeSpan){break};Start-Sleep -Milliseconds 15};"
         "$mp.Play();"
-        "$d=$null;"
-        "for($i=0;$i -lt 50;$i++){if($mp.NaturalDuration.HasTimeSpan){$d=$mp.NaturalDuration.TimeSpan;break};Start-Sleep -Milliseconds 100};"
-        "if($d){"
-        "$end=(Get-Date).AddMilliseconds([int]$d.TotalMilliseconds + 1500);"
-        "while((Get-Date) -lt $end){if($mp.Position -ge $d){break};Start-Sleep -Milliseconds 80}"
-        "}else{Start-Sleep -Seconds 3};"
-        "$mp.Stop()"
+        # Block for the caller's exact duration; only when it's unknown fall back to the engine's own.
+        "if($ms -gt 0){Start-Sleep -Milliseconds $ms}"
+        "elseif($mp.NaturalDuration.HasTimeSpan){Start-Sleep -Milliseconds ([int]$mp.NaturalDuration.TimeSpan.TotalMilliseconds + 250)}"
+        "else{Start-Sleep -Seconds 3};"
+        # Stop AND Close — Close frees the file handle at once so the caller's os.remove doesn't block.
+        "$mp.Stop();"
+        "$mp.Close()"
         "}catch{$ok='FAIL'};"
         "[Console]::Out.WriteLine($ok)"
         "}"
@@ -271,13 +354,15 @@ class _WarmMediaPlayer:
             )
         return self._proc
 
-    def play(self, path: str) -> bool:
-        """Play one MP3, blocking until it finishes. False = failed OR stopped (the caller's generation
-        guard tells those apart — a killed player just makes readline return '')."""
+    def play(self, path: str, dur_ms: int = 0) -> bool:
+        """Play one MP3, blocking for its known duration `dur_ms` (+ a short tail) rather than polling
+        for completion. False = failed OR stopped (the caller's generation guard tells those apart — a
+        killed player just makes readline return ''). dur_ms<=0 → the player detects the length itself."""
+        sleep_ms = dur_ms + self._TAIL_MS if dur_ms > 0 else 0
         with self._lock:
             try:
                 proc = self._ensure_locked()
-                proc.stdin.write(path + "\n")
+                proc.stdin.write(f"{path}|{sleep_ms}\n")
                 proc.stdin.flush()
             except Exception:
                 self._kill_locked()
@@ -363,6 +448,90 @@ class EdgeSpeechOut:
                 except OSError:
                     pass
 
+    def speak_chunks(self, chunks: list[str], allow_fallback: bool = True) -> None:
+        """Speak a reply as several sentence chunks with NO audible gap between them: every chunk is
+        synthesized CONCURRENTLY up front, then played in order. The first (short) chunk is ready fast
+        (low first-word latency), and each later chunk is already rendered by the time we reach it — so
+        the pause the naive 'synthesize-then-play each' had is gone. Preemption/stop still works via the
+        per-utterance gen guard.
+
+        Temp files are reaped AFTER the whole reply (not between sentences): on Windows os.remove of a
+        just-played mp3 costs ~0.2s (handle/AV latency), which stacked into an audible gap between every
+        sentence — so it must never sit on the playback path."""
+        chunks = [c for c in (str(x).strip() for x in chunks) if c]
+        if not chunks:
+            return
+        if len(chunks) == 1:
+            self.speak(chunks[0], allow_fallback)
+            return
+        with self._lock:
+            self._gen += 1
+            gen = self._gen
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(chunks)),
+                                                    thread_name_prefix="helix-tts")
+        futures = [ex.submit(self._render_quiet, c, gen) for c in chunks]
+        rendered: list[str] = []  # every temp mp3 produced — deleted in one pass off the playback loop
+        try:
+            for i, fut in enumerate(futures):
+                if self._is_stopped(gen):
+                    break
+                try:
+                    path = fut.result()
+                except Exception:  # noqa: BLE001
+                    path = None
+                if path:
+                    rendered.append(path)
+                if self._is_stopped(gen):
+                    break
+                if path is None:  # this sentence failed to synthesize — speak just it in the OS voice
+                    if allow_fallback and not self._is_stopped(gen):
+                        self._fallback.speak(chunks[i])
+                    continue
+                try:
+                    self._play(path, gen)
+                except Exception:  # noqa: BLE001
+                    if not self._is_stopped(gen) and allow_fallback:
+                        self._fallback.speak(chunks[i])
+        finally:
+            # Gather any rendered-but-unplayed chunk (reachable on a stop), then delete them all off the
+            # playback path so no os.remove ever sat in the gap between two spoken sentences.
+            for f in futures:
+                if f.done() and not f.cancelled():
+                    try:
+                        leftover = f.result(timeout=0)
+                    except Exception:  # noqa: BLE001
+                        leftover = None
+                    if leftover and leftover not in rendered:
+                        rendered.append(leftover)
+            self._reap(rendered)
+            ex.shutdown(wait=False)
+
+    @staticmethod
+    def _reap(paths: list[str]) -> None:
+        """Delete temp mp3s on a background thread. os.remove of a just-played file can block ~0.2s on
+        Windows even after the player closes its handle (AV / filesystem latency), so this must never
+        run inline between two spoken sentences — hence one daemon thread, after playback."""
+        cleanup = [p for p in paths if p]
+        if not cleanup:
+            return
+
+        def _go() -> None:
+            for p in cleanup:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+        threading.Thread(target=_go, daemon=True, name="helix-tts-reap").start()
+
+    def _render_quiet(self, text: str, gen: int) -> str | None:
+        try:
+            if self._is_stopped(gen):
+                return None
+            return self._synthesize(text, gen)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _synthesize(self, text: str, gen: int | None = None) -> str:
         import edge_tts
 
@@ -396,9 +565,11 @@ class EdgeSpeechOut:
             raise RuntimeError("MP3 playback here is Windows-only")
         if self._is_stopped(gen):
             return
-        # The warm player blocks until playback really ends. A failure propagates so speak() falls back
-        # to the OS voice — unless this utterance was stopped on purpose (the kill makes play() False).
-        if not self._player.play(path) and not self._is_stopped(gen):
+        # Pass the clip's exact length so the player blocks for precisely that (deterministic; no
+        # Position polling and no multi-second grace between sentences). The warm player blocks until
+        # playback really ends. A failure propagates so speak() falls back to the OS voice — unless
+        # this utterance was stopped on purpose (the kill makes play() return False).
+        if not self._player.play(path, mp3_duration_ms(path)) and not self._is_stopped(gen):
             raise RuntimeError("playback failed")
 
     def stop(self) -> None:

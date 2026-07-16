@@ -24,6 +24,28 @@ from helix.ports.coder import CoderResult, ProgressFn
 
 _LOG = get_logger("coder.cli")
 
+
+def _kill_tree(proc) -> None:
+    """Kill the coder process AND its children. claude.exe spawns a child engine process; a bare
+    proc.kill() on Windows leaves that child orphaned (it keeps running and billing after a timeout or
+    a user 'stop'). taskkill /T tears down the whole tree; proc.kill() is the POSIX/fallback path."""
+    if proc is None or proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=10,
+            )
+            return
+        except Exception:  # noqa: BLE001 — fall through to a plain kill
+            pass
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+
 DEFAULT_MODEL = "claude-opus-4-8"
 TIMEOUT_SECONDS = 1800
 CLI_OVERRIDE_ENV = "HELIX_CLAUDE_CLI"
@@ -171,7 +193,7 @@ class ClaudeCodeCli:
 
         stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
         stderr_thread.start()
-        killer = threading.Timer(self._timeout, proc.kill)
+        killer = threading.Timer(self._timeout, lambda: _kill_tree(proc))
         killer.start()
 
         # Stop watcher: if the user cancels mid-build, kill the child so its stdout closes and the read
@@ -181,10 +203,7 @@ class ClaudeCodeCli:
         def _watch_cancel() -> None:
             while not watch_stop.wait(0.2):
                 if cancel is not None and cancel.is_set():
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                    _kill_tree(proc)  # kill the whole tree so no orphan child keeps running/billing
                     return
 
         cancel_thread = None

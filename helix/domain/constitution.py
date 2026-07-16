@@ -45,11 +45,15 @@ PROTECTED_FILES: tuple[str, ...] = (
     "helix/services/forge.py",  # the build sandbox + data guard
     "helix/services/sandbox.py",  # the shared containment primitives the gate + Forge rely on
     "helix/services/prompts.py",  # the prompts that frame the coder
+    "helix/services/connections.py",  # the call_api egress lockdown (host allowlist, redirect refusal, scrub)
+    "helix/services/files.py",  # the filesystem seal (private-zone canonicalization, write gate)
+    "helix/services/remote.py",  # the remote companion's auth + capability fence + bind policy
     "helix/config.py",  # path resolution — imported at startup
     "helix/logging_setup.py",  # imported at startup (runs before the gate loads)
     "helix/__init__.py",  # package init — runs on any import
     "helix/adapters/git_repo.py",  # the only code that executes git for the gate
     "helix/adapters/api_coder.py",  # the build sandbox (_safe_target)
+    "helix/adapters/agent_sdk_chat.py",  # the subscription brain's token/env isolation + tool allowlist
     "main.py",  # the launcher
 )
 SHELL_PREFIX = "helix/ui/"  # the entire front interface — the immutable shell

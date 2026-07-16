@@ -1,7 +1,10 @@
-"""Barge-in — the name "HELIX" interrupts speech; everything else in a noisy room does not.
+"""The focus shield + the echo test.
 
-Covers the echo test (HELIX must not wake on its own reply leaking into the mic) and the controller's
-barge flow: wake+command redirects mid-sentence, chatter is ignored, stop still stops.
+The echo test (is_echo) still guards HELIX from ever mistaking its own reply for a command. The barge
+contract CHANGED: HELIX no longer lets the room interrupt it by voice while it is thinking, speaking, or
+building — the mic is gated deaf during work and a deliberate stop is UI-only (tap the orb, Esc, or the
+Stop button). These tests lock the new behavior: the mic only captures a command when HELIX is genuinely
+idle, and ambient speech during work is dropped.
 """
 from __future__ import annotations
 
@@ -52,7 +55,9 @@ class _Settings:
 def _controller() -> tuple[VoiceController, _Tts, list[str], list[int]]:
     tts = _Tts()
     ctrl = VoiceController(_Stt(), tts, _Settings())
-    ctrl._run = lambda fn, on_done: (fn(lambda _s: None), on_done(""))  # run workers synchronously
+    # Run workers synchronously AND propagate the work's result to on_done (like the real QtWorker), so
+    # a transcription flows through to the wake handler.
+    ctrl._run = lambda fn, on_done: on_done(fn(lambda _s: None))
     heard: list[str] = []
     stops: list[int] = []
     ctrl.recognized.connect(heard.append)
@@ -60,7 +65,7 @@ def _controller() -> tuple[VoiceController, _Tts, list[str], list[int]]:
     return ctrl, tts, heard, stops
 
 
-# ---------- the echo test ----------
+# ---------- the echo test (unchanged: HELIX must never obey its own reply) ----------
 
 def test_wake_word_is_never_echo_when_reply_lacks_the_name():
     # TTS that never says "HELIX" cannot put the name in the mic — always the user.
@@ -80,8 +85,6 @@ def test_fresh_command_is_not_echo_even_when_reply_says_the_name():
 
 
 def test_short_real_command_not_dropped_when_reply_says_the_name():
-    # Regression: the wake word must not count as overlap evidence. "HELIX, make it red" against a reply
-    # that also says "HELIX" would otherwise score the name as a free hit (2/3 >= 0.6) and be dropped.
     spoken = "As HELIX, I can make that change now, sir."
     assert not is_echo("helix make it red", spoken)  # only 'make' overlaps → 1/2 = 0.5 < 0.6, lands
 
@@ -90,76 +93,66 @@ def test_no_speech_means_no_echo():
     assert not is_echo("helix hello", "")
 
 
-# ---------- the barge flow ----------
+# ---------- the focus shield: HELIX is deaf while it works ----------
 
-def test_name_plus_command_interrupts_and_redirects():
-    ctrl, tts, heard, stops = _controller()
+def test_command_is_captured_when_idle():
+    # Sanity: when genuinely idle, an utterance is transcribed and becomes a command.
+    ctrl, _tts, heard, _stops = _controller()
+    ctrl._stt.transcribe = lambda _p: "hey helix what time is it"
+    ctrl._state = "idle"
+    ctrl._on_utterance(b"\x20\x10" * 8000)
+    assert heard == ["what time is it"]
+
+
+def test_mic_is_deaf_while_thinking():
+    ctrl, _tts, heard, _stops = _controller()
+    ctrl._stt.transcribe = lambda _p: "hey helix build a chess app"
+    ctrl._state = "thinking"  # a turn is already in flight
+    ctrl._on_utterance(b"\x20\x10" * 8000)
+    assert heard == [] and ctrl._state == "thinking"  # the utterance was dropped, not transcribed
+
+
+def test_mic_is_deaf_while_speaking():
+    ctrl, _tts, heard, stops = _controller()
+    ctrl._stt.transcribe = lambda _p: "stop talking"
     ctrl._state = "speaking"
-    ctrl._speaking_text = "the report shows revenue climbing in the third quarter"
-    ctrl._on_barge_text("HELIX actually make it blue")
-    assert tts.stops >= 1          # speech was cut off mid-sentence
-    assert heard == ["actually make it blue"]
-    assert ctrl._state == "thinking"
-    assert stops == []             # a redirect is not a build-stop
+    ctrl._on_utterance(b"\x20\x10" * 8000)
+    # Even "stop" doesn't cut in by voice anymore — stopping is a deliberate UI action.
+    assert heard == [] and stops == [] and ctrl._state == "speaking"
 
 
-def test_random_noisy_house_chatter_is_ignored():
-    ctrl, tts, heard, stops = _controller()
-    ctrl._state = "speaking"
-    ctrl._speaking_text = "the report shows revenue climbing"
-    ctrl._on_barge_text("can somebody let the dog out please")
-    assert tts.stops == 0 and heard == [] and stops == []
-    assert ctrl._state == "speaking"  # HELIX keeps talking
+def test_mic_is_deaf_while_working_on_a_background_build():
+    ctrl, _tts, heard, _stops = _controller()
+    ctrl._stt.transcribe = lambda _p: "hey helix cancel that"
+    ctrl._state = "idle"          # a background build leaves the conversational state idle…
+    ctrl.set_working(True)        # …so the working flag is what shields the mic
+    ctrl._on_utterance(b"\x20\x10" * 8000)
+    assert heard == [] and ctrl._state == "idle"
 
 
-def test_own_voice_echo_does_not_interrupt():
-    ctrl, tts, heard, stops = _controller()
-    ctrl._state = "speaking"
-    ctrl._speaking_text = "HELIX is ready to build that timer for you, sir."
-    ctrl._on_barge_text("helix is ready to build that timer")
-    assert tts.stops == 0 and heard == [] and ctrl._state == "speaking"
+def test_set_working_clears_and_lets_commands_through_again():
+    ctrl, _tts, heard, _stops = _controller()
+    ctrl._stt.transcribe = lambda _p: "hey helix what's the weather"
+    ctrl.set_working(True)
+    ctrl.set_working(False)  # build finished — the shield lifts
+    ctrl._state = "idle"
+    ctrl._on_utterance(b"\x20\x10" * 8000)
+    assert heard == ["what's the weather"]
 
 
-def test_short_stop_still_stops_without_the_name():
-    ctrl, tts, heard, stops = _controller()
-    ctrl._state = "speaking"
-    ctrl._speaking_text = "here is the summary of your inbox"
-    ctrl._on_barge_text("stop talking")
-    assert tts.stops >= 1 and stops == [1] and heard == []
-
-
-def test_bare_name_mid_speech_gets_an_acknowledgement():
-    ctrl, tts, heard, stops = _controller()
-    ctrl._state = "speaking"
-    ctrl._speaking_text = "the long answer about the weather continues"
-    ctrl._on_barge_text("HELIX")
-    assert heard == []
-    assert "Yes?" in tts.spoke  # acknowledged, now listening
-    assert ctrl._session          # a session opened so the next utterance needs no wake word
-
-
-def test_thinking_turn_cannot_be_redirected_only_stopped():
-    ctrl, tts, heard, stops = _controller()
-    ctrl._state = "thinking"
-    ctrl._speaking_text = ""
-    ctrl._on_barge_text("HELIX build a chess app")
-    assert heard == [] and tts.stops == 0  # mid-turn redirect refused
-    ctrl._on_barge_text("stop")
-    assert stops == [1]  # but a stop always lands
-
+# ---------- speak-state bookkeeping (unchanged) ----------
 
 def test_stale_speak_completion_cannot_reset_a_newer_turn():
-    ctrl, tts, heard, stops = _controller()
-    ctrl._state = "thinking"  # a barge-in already moved the turn on
+    ctrl, _tts, _heard, _stops = _controller()
+    ctrl._state = "thinking"  # a newer turn already moved on
     ctrl._speak_gen = 7
     ctrl._speak_done(7)  # the killed utterance finally unwinds
     assert ctrl._state == "thinking"  # and must NOT knock the new turn back to idle
 
 
 def test_narration_never_clobbers_speaking_text_during_a_reply():
-    # Regression: a build-progress note arriving while a reply is audibly playing must NOT overwrite the
-    # echo slot (which would make HELIX judge its own reply against the note and obey it).
-    ctrl, tts, heard, stops = _controller()
+    # A build-progress note arriving while a reply is audibly playing must NOT overwrite the echo slot.
+    ctrl, tts, _heard, _stops = _controller()
     ctrl._settings.set("voice_input_on", True)  # narrate() checks enabled()
     ctrl._state = "speaking"
     ctrl._speaking_text = "HELIX is opening the dashboard for you now"

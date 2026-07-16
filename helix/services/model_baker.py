@@ -32,9 +32,12 @@ from helix.services.builds import MANIFEST  # single source of truth for the man
 
 # Optional hosted text/image-to-3D backend (Phase 2). Given (prompt, image_path|None) -> GLB bytes.
 NeuralBackend = Callable[[str, Path | None], bytes]
+# Optional hosted text-to-360°-panorama backend (environments/scenes). Given prompt -> image bytes.
+SkyboxBackend = Callable[[str], bytes]
 
 SPEC_FILE = "model.json"
 GLB_REL = "assets/model.glb"
+PANO_REL = "assets/panorama.jpg"   # the equirectangular 360° image for an environment scene
 VIEWER_FILE = "index.html"
 # Stamped into every generated viewer so bake() can tell its OWN page from a hand-authored animated one.
 VIEWER_SENTINEL = "<!-- HELIX-GENERATED-VIEWER -->"
@@ -68,7 +71,8 @@ _TECHNICAL_WORDS = (
 
 class ModelBaker:
     def __init__(
-        self, neural_backend: NeuralBackend | None = None, neural_available=None
+        self, neural_backend: NeuralBackend | None = None, neural_available=None,
+        skybox_backend: SkyboxBackend | None = None, skybox_available=None,
     ) -> None:
         # neural_backend is the hosted high-detail path (Tripo). The container wires it UNCONDITIONALLY
         # (it raises only at call time if no key), so `self._neural is not None` is NOT a real availability
@@ -76,6 +80,10 @@ class ModelBaker:
         # back-compat / tests with no backend.
         self._neural = neural_backend
         self._neural_available = neural_available or (lambda: neural_backend is not None)
+        # skybox_backend is the hosted environment/scene path (Blockade Labs): a whole 360° PLACE, shown
+        # as a skybox. Same wired-unconditionally / availability-reflects-a-live-key pattern as neural.
+        self._skybox = skybox_backend
+        self._skybox_available = skybox_available or (lambda: skybox_backend is not None)
 
     @staticmethod
     def _classify(prompt: str, title: str) -> tuple[int, int]:
@@ -128,6 +136,9 @@ class ModelBaker:
             spec = json.loads(spec_path.read_text(encoding="utf-8"))
             if not isinstance(spec, dict):
                 raise SpecError("model.json must be a JSON object.")
+            if str(spec.get("engine", "auto")).lower() == "environment":
+                self._bake_environment(workspace, spec)  # a 360° scene, not a mesh
+                return
             glb, preview = self._make_glb(spec, workspace)
             (workspace / "assets").mkdir(parents=True, exist_ok=True)
             (workspace / GLB_REL).write_bytes(glb)
@@ -136,6 +147,47 @@ class ModelBaker:
             self._write_error(workspace, str(exc))
         except Exception as exc:  # never let a baking bug fail the whole build
             self._write_error(workspace, f"Couldn't build the model: {exc}")
+
+    # ----- environment (360° scene) -----
+    def _bake_environment(self, workspace: Path, spec: dict) -> None:
+        """engine="environment": generate a 360° panorama for the scene and wrap it in a skybox viewer.
+        There's no mesh — the whole PLACE is the image, mapped onto the inside of a sphere the user looks
+        around in. A missing key or a generation failure becomes a friendly page, like any other build."""
+        prompt = str(spec.get("prompt") or spec.get("title") or "").strip()
+        if not prompt:
+            self._write_error(workspace, "A 360° environment needs a 'prompt' describing the scene.")
+            return
+        if self._skybox is None or not self._skybox_available():
+            self._write_error(
+                workspace,
+                "360° scenes need a Blockade Labs API key — add it in Settings → Connections. "
+                "(For a single object instead, ask for that object.)")
+            return
+        try:
+            img = self._skybox(prompt)
+        except Exception as exc:  # noqa: BLE001 — surface the scene generator's message, never crash
+            self._write_error(workspace, f"Couldn't generate the scene: {exc}")
+            return
+        if not img:
+            self._write_error(workspace, "The scene generator returned nothing.")
+            return
+        try:
+            (workspace / "assets").mkdir(parents=True, exist_ok=True)
+            (workspace / PANO_REL).write_bytes(img)
+            try:  # a converted-from-mesh scene shouldn't keep a stale GLB around
+                (workspace / GLB_REL).unlink()
+            except OSError:
+                pass
+            self._write_skybox_viewer(workspace, spec)
+        except OSError as exc:
+            self._write_error(workspace, f"Couldn't save the scene: {exc}")
+
+    def _write_skybox_viewer(self, workspace: Path, spec: dict) -> None:
+        title = self._title(workspace, spec)
+        accent = _hex_str(spec.get("accent"), DEFAULT_ACCENT)
+        (workspace / VIEWER_FILE).write_text(
+            _SKYBOX_HTML.replace("__TITLE__", _esc(title)).replace("__ACCENT__", accent)
+            .replace("__PANO__", PANO_REL), encoding="utf-8")
 
     # ----- glb construction -----
     def _make_glb(self, spec: dict, workspace: Path) -> "tuple[bytes, bool]":
@@ -810,6 +862,109 @@ _VIEWER_HTML = """<!doctype html>
       controls.update();
       if (composer) composer.render(dt); else renderer.render(scene, camera);
     })();
+  } catch (err) {
+    fail("Couldn't start the 3D view: " + (err && err.message ? err.message : err));
+  }
+  </script>
+</body>
+</html>
+"""
+
+# A fixed skybox viewer for an ENVIRONMENT: the equirectangular panorama is mapped onto the inside of a
+# sphere and the camera sits at the centre, so dragging looks AROUND the scene (a place, not an object).
+_SKYBOX_HTML = """<!doctype html>
+<!-- HELIX-GENERATED-VIEWER -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>__TITLE__</title>
+<style>
+  :root { --accent: __ACCENT__; }
+  html, body { margin: 0; height: 100%; background: #05080b; overflow: hidden;
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif; color: #cfeff0; }
+  #app { position: fixed; inset: 0; cursor: grab; }
+  #app:active { cursor: grabbing; }
+  #title { position: fixed; top: 14px; left: 16px; font-size: 14px; font-weight: 600;
+    letter-spacing: .04em; color: var(--accent); opacity: .9; pointer-events: none;
+    text-shadow: 0 1px 8px rgba(0,0,0,.7); }
+  #hint { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); font-size: 12px;
+    color: #9fc7c8; opacity: .7; pointer-events: none; text-shadow: 0 1px 6px rgba(0,0,0,.7); }
+  #panel { position: fixed; bottom: 14px; right: 14px; display: flex; gap: 6px;
+    background: rgba(8,11,15,.5); border: 1px solid rgba(63,224,224,.25); border-radius: 10px;
+    padding: 6px; backdrop-filter: blur(6px); }
+  #panel button { background: transparent; color: #bfe9ea; border: 1px solid rgba(63,224,224,.25);
+    border-radius: 7px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+  #panel button:hover, #panel button.on { border-color: var(--accent); color: var(--accent); }
+  #msg { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    text-align: center; padding: 24px; font-size: 15px; color: #9fc7c8; }
+  #corners i { position: fixed; width: 26px; height: 26px; border: 1.5px solid rgba(63,224,224,.45);
+    pointer-events: none; }
+  #corners .tl { top: 16px; left: 16px; border-right: none; border-bottom: none; }
+  #corners .tr { top: 16px; right: 16px; border-left: none; border-bottom: none; }
+  #corners .bl { bottom: 16px; left: 16px; border-right: none; border-top: none; }
+  #corners .br { bottom: 16px; right: 16px; border-left: none; border-top: none; }
+</style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="corners"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+  <div id="title">__TITLE__</div>
+  <div id="hint">Drag to look around</div>
+  <div id="panel"><button id="spin" class="on">Auto-pan</button></div>
+  <div id="msg"></div>
+  <script type="importmap">
+  { "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+  </script>
+  <script type="module">
+  import * as THREE from "three";
+  import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+  const fail = (m) => { const e = document.getElementById("msg");
+    e.textContent = m; e.style.display = "flex"; };
+  try {
+    const app = document.getElementById("app");
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    app.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1100);
+    // Camera at the centre; a target a hair away so OrbitControls rotates our VIEW (look around), while
+    // pan + dolly are off so we can't leave the sphere.
+    camera.position.set(0, 0, 0.1);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 0, 0);
+    controls.enablePan = false;
+    controls.enableZoom = false;
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.rotateSpeed = -0.4;             // drag-to-look feels natural (inverted from orbit)
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.35;
+
+    const tex = new THREE.TextureLoader().load("__PANO__", undefined, undefined,
+      () => fail("Couldn't load the scene image."));
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(500, 64, 40),
+      new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide }));
+    scene.add(sphere);
+
+    const spin = document.getElementById("spin");
+    spin.onclick = () => { controls.autoRotate = !controls.autoRotate;
+      spin.classList.toggle("on", controls.autoRotate); };
+    // Stop auto-pan the moment the user grabs it; a click on the button re-enables it.
+    renderer.domElement.addEventListener("pointerdown", () => {
+      controls.autoRotate = false; spin.classList.remove("on"); });
+
+    addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight); });
+    (function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
   } catch (err) {
     fail("Couldn't start the 3D view: " + (err && err.message ? err.message : err));
   }

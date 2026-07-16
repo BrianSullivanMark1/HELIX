@@ -10,6 +10,7 @@ distiller is told to keep only durable facts — one-off requests never enter it
 """
 from __future__ import annotations
 
+import json
 import threading
 
 from helix.domain.models import Role
@@ -41,13 +42,15 @@ class ProfileService:
         self._chat = chat
         self._store = store  # SqliteStore: recent() + profile_text()/set_profile_text() + record_usage()
         self._clock = clock
-        self._since = 0
+        self._since: dict[str, int] = {}   # per-speaker turn counters
         self._busy = threading.Lock()  # one distillation at a time
 
     # ----- read side (each orb turn) -----
-    def context(self) -> str:
-        """The injectable profile block, or '' when HELIX hasn't learned anything yet."""
-        text = self._current().strip()
+    def context(self, user: str = "") -> str:
+        """The injectable profile block for this speaker, or '' when HELIX hasn't learned anything yet.
+        Per-speaker: a recognized person gets their own profile, falling back to the shared default until
+        theirs fills in."""
+        text = self._current(user).strip()
         if not text:
             return ""
         return (
@@ -57,24 +60,50 @@ class ProfileService:
         )
 
     # ----- write side (after each persisted turn) -----
-    def after_turn(self) -> None:
-        """Count a finished orb turn; every so often, refresh the profile on a background thread. The
-        reply is never delayed — distillation runs entirely off the turn path."""
-        self._since += 1
-        target = DISTILL_EVERY if self._current() else FIRST_DISTILL
-        if self._since < target:
+    def after_turn(self, user: str = "") -> None:
+        """Count a finished orb turn; every so often, refresh THIS speaker's profile on a background
+        thread. The reply is never delayed — distillation runs entirely off the turn path."""
+        u = (user or "").strip().lower()
+        self._since[u] = self._since.get(u, 0) + 1
+        target = DISTILL_EVERY if self._current(u) else FIRST_DISTILL
+        if self._since[u] < target:
             return
-        self._since = 0
-        threading.Thread(target=self._distill, daemon=True, name="helix-profile").start()
+        self._since[u] = 0
+        threading.Thread(target=self._distill, args=(u,), daemon=True, name="helix-profile").start()
 
     # ----- internals -----
-    def _current(self) -> str:
+    def _load_all(self) -> dict:
+        """The whole {user: profile_text} store. Migrates a legacy plain-text profile into the '' bucket
+        so an existing single-user profile keeps working and becomes the shared default."""
         try:
-            return self._store.profile_text() or ""
-        except Exception:
-            return ""
+            raw = self._store.profile_text() or ""
+        except Exception:  # noqa: BLE001
+            return {}
+        raw = raw.strip()
+        if not raw:
+            return {}
+        if raw.startswith("{"):
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return {str(k): str(v) for k, v in data.items()}
+            except (ValueError, TypeError):
+                pass
+        return {"": raw}  # legacy plain-text profile → the shared default bucket
 
-    def _distill(self) -> None:
+    def _current(self, user: str = "") -> str:
+        u = (user or "").strip().lower()
+        data = self._load_all()
+        if u:
+            return data.get(u) or data.get("", "")  # a recognized user, falling back to the default
+        return data.get("", "")
+
+    def _save(self, text: str, user: str = "") -> None:
+        data = self._load_all()
+        data[(user or "").strip().lower()] = text
+        self._store.set_profile_text(json.dumps(data))
+
+    def _distill(self, user: str = "") -> None:
         if not self._busy.acquire(blocking=False):
             return  # a distillation is already running; this turn's trigger just folds into it
         try:
@@ -87,7 +116,7 @@ class ProfileService:
             excerpt = "\n".join(f"{m.role.value}: {(m.text or '')[:_MSG_CAP]}" for m in msgs)
             today = self._clock.now().strftime("%B %d, %Y")
             prompt = (
-                f"Today is {today}.\n\nEXISTING PROFILE:\n{self._current() or '(none yet)'}\n\n"
+                f"Today is {today}.\n\nEXISTING PROFILE:\n{self._current(user) or '(none yet)'}\n\n"
                 f"RECENT CONVERSATION:\n{excerpt}\n\nWrite the updated profile now."
             )
             reply = self._chat.chat([Turn(Role.USER, (Text(prompt),))], system=PROFILE_DISTILL_SYSTEM)
@@ -98,7 +127,7 @@ class ProfileService:
                 pass
             text = (reply.text or "").strip()
             if text and len(text) <= _PROFILE_CAP:
-                self._store.set_profile_text(text)
+                self._save(text, user)
         except Exception:  # noqa: BLE001 — a failed refresh just waits for the next trigger
             _LOG.warning("profile distillation failed", exc_info=True)
         finally:

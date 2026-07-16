@@ -1,8 +1,8 @@
 [project]
 name = "helix"
 version = "2.0.0"
-description = "HELIX — a local-first desktop app-builder you talk to."
-readme = "README.md"
+description = "HELIX — a local-first, voice-first desktop AI assistant that also builds apps you talk into being."
+readme = "READ_ME/README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
 dependencies = [

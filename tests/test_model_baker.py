@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import trimesh
 
-from helix.services.model_baker import GLB_REL, SPEC_FILE, VIEWER_FILE, ModelBaker
+from helix.services.model_baker import GLB_REL, PANO_REL, SPEC_FILE, VIEWER_FILE, ModelBaker
 
 
 def _spec(tmp: Path, spec: dict, name: str = "Test Model") -> Path:
@@ -39,6 +39,42 @@ def test_bakes_a_valid_glb_and_viewer(tmp_path: Path):
     html = (tmp_path / VIEWER_FILE).read_text(encoding="utf-8")
     assert "GLTFLoader" in html and GLB_REL in html
     assert "Bolt" in html  # title threaded through
+
+
+def test_environment_bakes_a_skybox_from_the_panorama(tmp_path: Path):
+    calls = []
+    baker = ModelBaker(
+        skybox_backend=lambda prompt: (calls.append(prompt), b"FAKE-PANORAMA-JPEG")[1],
+        skybox_available=lambda: True,
+    )
+    _spec(tmp_path, {"title": "Backyard", "engine": "environment",
+                     "prompt": "a cozy backyard at dusk with a firepit"}, name="Backyard")
+    baker.bake(tmp_path)
+
+    pano = tmp_path / PANO_REL
+    assert pano.exists() and pano.read_bytes() == b"FAKE-PANORAMA-JPEG"
+    assert calls == ["a cozy backyard at dusk with a firepit"]  # the scene prompt reached the backend
+    assert not (tmp_path / GLB_REL).exists()  # an environment is an image, not a mesh
+    html = (tmp_path / VIEWER_FILE).read_text(encoding="utf-8")
+    assert "BackSide" in html and PANO_REL in html and "Backyard" in html  # a look-around skybox
+
+
+def test_environment_without_a_key_shows_a_friendly_page(tmp_path: Path):
+    baker = ModelBaker(skybox_backend=lambda p: b"x", skybox_available=lambda: False)
+    _spec(tmp_path, {"engine": "environment", "prompt": "a forest clearing"})
+    baker.bake(tmp_path)
+    html = (tmp_path / VIEWER_FILE).read_text(encoding="utf-8")
+    assert "Blockade Labs API key" in html and not (tmp_path / PANO_REL).exists()
+
+
+def test_environment_generation_failure_is_friendly(tmp_path: Path):
+    def boom(_p):
+        raise RuntimeError("service down")
+    baker = ModelBaker(skybox_backend=boom, skybox_available=lambda: True)
+    _spec(tmp_path, {"engine": "environment", "prompt": "a beach at sunset"})
+    baker.bake(tmp_path)
+    html = (tmp_path / VIEWER_FILE).read_text(encoding="utf-8")
+    assert "Couldn't generate the scene" in html and "service down" in html
 
 
 def test_viewer_supports_animation_and_creases_only_missing_normals(tmp_path: Path):

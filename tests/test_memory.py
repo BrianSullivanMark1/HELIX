@@ -138,11 +138,12 @@ class _ProfileChat:
 class _ImmediateThread:
     """Deterministic tests: 'background' distillation runs inline."""
 
-    def __init__(self, target=None, daemon=None, name=None) -> None:
+    def __init__(self, target=None, args=(), daemon=None, name=None) -> None:
         self._target = target
+        self._args = args
 
     def start(self) -> None:
-        self._target()
+        self._target(*self._args)
 
 
 def test_profile_distills_after_enough_turns(monkeypatch):

@@ -11,6 +11,7 @@ from typing import Callable
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -27,6 +28,7 @@ from PyQt6.QtWidgets import (
 from helix.adapters.speech import DEFAULT_TTS_VOICE, TTS_VOICES, edge_available
 from helix.domain.connections import KNOWN_SERVICES
 from helix.ports.stores import SettingsStore
+from helix.services.files import WRITE_ACCESS_KEY
 from helix.ui.theme import CYAN, LINE, MUTED, STATUS_DONE
 from helix.ui.voice import AUDIO_INPUT_SETTING, AUDIO_OUTPUT_SETTING, device_id_str
 
@@ -86,11 +88,13 @@ class SettingsView(QWidget):
     saved = pyqtSignal()
 
     def __init__(self, settings: SettingsStore, connections=None, gmail=None, calendar=None,
-                 subscription=None) -> None:
+                 subscription=None, memory=None, remote=None) -> None:
         super().__init__()
         self.setObjectName("Panel")
         self._settings = settings
         self._subscription = subscription          # SubscriptionBrain — reports which brain is live
+        self._memory = memory                      # MemoryService — the "Manage long-term memory" browser
+        self._remote = remote                      # RemoteService — the optional phone companion
         self._connections = connections           # save/load service tokens used by agents + call_api
         self._gmail = gmail                        # read-only Gmail inbox credentials (address + app password)
         self._calendar = calendar                  # read-only calendar (the private iCal URL is the secret)
@@ -176,6 +180,15 @@ class SettingsView(QWidget):
             "knowledge search still works using keywords.",
             self._voyage, lambda: self._settings.get("voyage_api_key", "") or "",
         ))
+        self._blockade = self._password("your Blockade Labs API key")
+        form.addWidget(self._field_row(
+            "Blockade Labs — 360° scenes", "Blockade Labs API key",
+            "Optional. Lets HELIX build a whole 360° ENVIRONMENT you can look around inside — “a backyard "
+            "at dusk”, “a forest clearing”, “a cozy office” — instead of a single object (that's Tripo). "
+            "Get a key at blockadelabs.com. Without it, scene requests fall back to the built-in shape "
+            "builder or an object.",
+            self._blockade, lambda: self._settings.get("blockade_api_key", "") or "",
+        ))
         # Service keys (Slack, GitHub, Alpaca, …) your apps and agents read, or the orb's read-only
         # call_api uses. One row per credential — a service that needs two (e.g. Alpaca's key id + secret)
         # shows both. Everything is entered HERE, once; builds then use it automatically.
@@ -201,6 +214,117 @@ class SettingsView(QWidget):
         if self._calendar is not None:
             self._calendar_url = self._password("https://calendar.google.com/calendar/ical/…/basic.ics")
             form.addWidget(self._calendar_section())
+
+        # ── Files on this PC — reading is always on; WRITING is this switch ──
+        form.addSpacing(4)
+        form.addWidget(self._section(
+            "Files on this PC",
+            "HELIX can always READ folders and files you ask about. Writing files is off unless you "
+            "turn it on here.",
+        ))
+        self._file_write = QCheckBox("Allow HELIX to write files")
+        fw_row = QWidget()
+        fw_lay = QHBoxLayout(fw_row)
+        fw_lay.setContentsMargins(0, 2, 0, 2)
+        fw_lay.setSpacing(8)
+        fw_lay.addWidget(self._file_write)
+        fw_lay.addStretch(1)
+        fw_lay.addWidget(self._info_btn(
+            "Files on this PC",
+            "READING is always available: ask HELIX what's in a folder or to read a file (text, "
+            "code, PDF, Word) and it answers from it.\n\n"
+            "WRITING is this switch. When ON, HELIX can create files on this PC when you ask it to, "
+            "and it always asks before replacing an existing file. When OFF, HELIX never writes.\n\n"
+            "Either way, HELIX can never read your saved keys and secrets, and can never write into "
+            "its own program or data folders — so it can't change itself or your built apps through "
+            "this. Takes effect immediately; no restart needed.",
+        ))
+        form.addWidget(fw_row)
+
+        # ── Conversation & presence — how HELIX talks, listens, and speaks up on its own ──
+        form.addSpacing(4)
+        form.addWidget(self._section(
+            "Conversation & presence",
+            "How HELIX listens, how much it says out loud, and when it speaks up on its own.",
+        ))
+        self._wake_word = QLineEdit()
+        self._wake_word.setPlaceholderText("HELIX")
+        form.addWidget(self._labeled(
+            "Wake word", "Wake word",
+            "The name you say to get HELIX's attention hands-free. Pick a word your household doesn't say "
+            "all day — useful if “HELIX” (or words like “stop”/“goodbye”) keep triggering it around kids "
+            "or the TV. Try something distinctive like “Athena” or “Friday”. Leave blank for the default "
+            "“HELIX”. Inside a short back-and-forth you don't need to repeat it.",
+            self._wake_word,
+        ))
+        self._narration = QComboBox()
+        self._narration.addItem("Stay quiet while working (recommended)", "off")
+        self._narration.addItem("Speak milestones", "milestones")
+        self._narration.addItem("Speak every step", "spoken")
+        form.addWidget(self._labeled(
+            "Talk while working", "Talk while working",
+            "Whether HELIX narrates its progress out loud while it builds. Quiet keeps progress on the "
+            "screen and in the orb's colour (nothing is lost — you still see every step); the other "
+            "options speak it aloud.",
+            self._narration,
+        ))
+        self._proactive = QCheckBox("Let background watchers speak up out loud")
+        form.addWidget(self._check_row(
+            self._proactive, "Background updates",
+            "HELIX quietly watches things in the background (GitHub, Slack, your portfolio, and so on). "
+            "When OFF, anything they find is shown in the conversation but NOT spoken — so HELIX isn't "
+            "talking at the room all day. When ON, notable updates are also read aloud. Reminders you set "
+            "yourself are always spoken either way.",
+        ))
+        self._trust_voice = QCheckBox("Single-user home — trust any voice")
+        form.addWidget(self._check_row(
+            self._trust_voice, "Trust any voice",
+            "By default, once you register your voice, HELIX only acts on voices it recognizes and asks "
+            "an unknown voice to register. Turn this ON in a single-user home to skip that entirely — "
+            "HELIX will act on whoever speaks and never ask “who's this?”. Leave it OFF if you want "
+            "HELIX to ignore voices it doesn't know.",
+        ))
+        if self._memory is not None:
+            mem_btn = QPushButton("🧠 Manage long-term memory…")
+            mem_btn.clicked.connect(self._open_memory)
+            mrow = QHBoxLayout()
+            mrow.setContentsMargins(0, 2, 0, 2)
+            mrow.addWidget(mem_btn)
+            mrow.addStretch(1)
+            mem_host = QWidget()
+            mem_host.setLayout(mrow)
+            form.addWidget(mem_host)
+
+        # ── Remote access (phone) — OFF by default; a token-gated local companion ──
+        if self._remote is not None:
+            form.addSpacing(4)
+            form.addWidget(self._section(
+                "Remote access (phone)",
+                "Off by default. When on, open the shown web address on a phone on the SAME network, paste "
+                "the access token, and ask HELIX or check its status. It can ONLY ask questions and run "
+                "your saved agents — it can never build, delete, change HELIX, or write files remotely.",
+            ))
+            self._remote_enabled = QCheckBox("Let me reach HELIX from a phone")
+            form.addWidget(self._check_row(
+                self._remote_enabled, "Remote access",
+                "Starts a small web server on THIS PC. It's protected by a secret token (shown below when "
+                "on) and is limited to asking questions and running saved agents — the same read-only "
+                "powers a background agent has. It never accepts builds, deletes, self-changes, or file "
+                "writes. Turn it off to stop listening entirely.",
+            ))
+            self._remote_lan = QCheckBox("Allow other devices on my network (not just this PC)")
+            form.addWidget(self._check_row(
+                self._remote_lan, "Network access",
+                "OFF: only this PC can reach it (127.0.0.1). ON: any device on your local network (your "
+                "phone on the same Wi-Fi) can, using the address below. It is still token-protected. This "
+                "does NOT expose HELIX to the internet — for access away from home, use a VPN. Never "
+                "forward this port on your router.",
+            ))
+            self._remote_info = QLabel("")
+            self._remote_info.setWordWrap(True)
+            self._remote_info.setTextFormat(Qt.TextFormat.PlainText)
+            self._remote_info.setStyleSheet(f"color:{MUTED};font-size:12px;")
+            form.addWidget(self._remote_info)
 
         # ── Audio devices — which mic HELIX hears you on, and testing your speakers/earphones ──
         if _AUDIO:
@@ -332,6 +456,45 @@ class SettingsView(QWidget):
         lay.addLayout(head)
         lay.addWidget(field)
         self._statuses.append((status, getter))
+        return box
+
+    def _open_memory(self) -> None:
+        from helix.ui.memory_view import MemoryDialog
+        MemoryDialog(self._memory, self).exec()
+
+    @staticmethod
+    def _lan_ip() -> str:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+        finally:
+            s.close()
+
+    def _refresh_remote_info(self) -> None:
+        if self._remote is None:
+            return
+        if not self._remote.enabled():
+            self._remote_info.setText("Remote access is off — nothing is listening.")
+            return
+        host = self._lan_ip() if self._remote.lan() else "127.0.0.1"
+        url = f"http://{host}:{self._remote.port()}"
+        tok = self._remote.token() or "(saved on next Save)"
+        scope = "on your network" if self._remote.lan() else "on this PC only"
+        self._remote_info.setText(f"Open {url} ({scope}). Access token: {tok}")
+
+    def _check_row(self, checkbox: QCheckBox, info_title: str, info_body: str) -> QWidget:
+        """A checkbox with a trailing ⓘ detail button — the same pattern as the file-write toggle."""
+        box = QWidget()
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(8)
+        lay.addWidget(checkbox)
+        lay.addStretch(1)
+        lay.addWidget(self._info_btn(info_title, info_body))
         return box
 
     def _labeled(self, name: str, info_title: str, info_body: str, widget: QWidget) -> QWidget:
@@ -651,6 +814,7 @@ class SettingsView(QWidget):
         self._key.setText(self._settings.get("claude_api_key", "") or "")
         self._tripo.setText(self._settings.get("tripo_api_key", "") or "")
         self._voyage.setText(self._settings.get("voyage_api_key", "") or "")
+        self._blockade.setText(self._settings.get("blockade_api_key", "") or "")
         detail = (self._settings.get("model_detail") or "balanced").lower()
         didx = self._detail.findData(detail)
         self._detail.setCurrentIndex(didx if didx >= 0 else 0)
@@ -671,6 +835,17 @@ class SettingsView(QWidget):
             self._gmail_pw.setText(self._gmail.app_password())
         if self._calendar is not None:
             self._calendar_url.setText(self._calendar.url())
+        self._file_write.setChecked(bool(self._settings.get(WRITE_ACCESS_KEY)))
+        self._wake_word.setText(self._settings.get("wake_word", "") or "")
+        nmode = (self._settings.get("narration_mode") or "off").lower()
+        nidx = self._narration.findData(nmode)
+        self._narration.setCurrentIndex(nidx if nidx >= 0 else 0)
+        self._proactive.setChecked(bool(self._settings.get("proactive_speech", False)))
+        self._trust_voice.setChecked(bool(self._settings.get("trust_household_voice", False)))
+        if self._remote is not None:
+            self._remote_enabled.setChecked(self._remote.enabled())
+            self._remote_lan.setChecked(self._remote.lan())
+            self._refresh_remote_info()
         self._populate_audio_devices()  # refresh the device lists (earphones may have come/gone)
         self._refresh_statuses()
         self._refresh_brain_status()
@@ -680,6 +855,7 @@ class SettingsView(QWidget):
         self._settings.set("claude_api_key", self._key.text().strip())
         self._settings.set("tripo_api_key", self._tripo.text().strip())
         self._settings.set("voyage_api_key", self._voyage.text().strip())
+        self._settings.set("blockade_api_key", self._blockade.text().strip())
         self._settings.set("model_detail", self._detail.currentData())
         self._settings.set("tts_voice", self._voice.currentData())
         self._settings.set("tts_rate", round(self._speed.value() / 10, 1))
@@ -690,6 +866,18 @@ class SettingsView(QWidget):
             self._gmail.set_credentials(self._gmail_addr.text(), self._gmail_pw.text())
         if self._calendar is not None:
             self._calendar.set_url(self._calendar_url.text())
+        self._settings.set(WRITE_ACCESS_KEY, self._file_write.isChecked())
+        self._settings.set("wake_word", self._wake_word.text().strip())
+        self._settings.set("narration_mode", self._narration.currentData())
+        self._settings.set("proactive_speech", self._proactive.isChecked())
+        self._settings.set("trust_household_voice", self._trust_voice.isChecked())
+        if self._remote is not None:
+            from helix.services.remote import ENABLED_KEY, LAN_KEY
+            self._settings.set(ENABLED_KEY, self._remote_enabled.isChecked())
+            self._settings.set(LAN_KEY, self._remote_lan.isChecked())
+            if self._remote_enabled.isChecked():
+                self._remote.ensure_token()  # mint the access token so it's shown below
+            self._refresh_remote_info()
         if _AUDIO and self._mic_combo is not None and self._out_combo is not None:
             self._settings.set(AUDIO_INPUT_SETTING, self._mic_combo.currentData() or "")
             self._settings.set(AUDIO_OUTPUT_SETTING, self._out_combo.currentData() or "")

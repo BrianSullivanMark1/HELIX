@@ -100,7 +100,8 @@ def test_call_api_attaches_bearer_and_never_returns_token(tmp_path, monkeypatch)
 
     monkeypatch.setattr(mod._OPENER, "open", fake_open)
     out = s.call_api("https://slack.com/api/auth.test")
-    assert out == '{"ok":true,"team":"Acme"}'
+    assert '{"ok":true,"team":"Acme"}' in out           # body returned (now inside an untrusted-data fence)
+    assert "untrusted external CONTENT" in out          # fenced + labelled as data, never instructions
     assert captured["auth"] == "Bearer tok-secret-123"  # token attached server-side
     assert "tok-secret-123" not in out                  # never leaked back to the model
 
@@ -157,7 +158,7 @@ def test_call_api_alpaca_needs_both_keys_and_sends_both_headers(tmp_path, monkey
 
     monkeypatch.setattr(mod._OPENER, "open", fake_open)
     out = s.call_api("https://paper-api.alpaca.markets/v2/account")
-    assert out == '{"status":"ACTIVE","cash":"1000"}'
+    assert '{"status":"ACTIVE","cash":"1000"}' in out  # body returned inside the untrusted-data fence
     assert captured["id"] == "AK-id-123"           # both credentials attached as headers, server-side
     assert captured["secret"] == "sec-secret-999"
     assert captured["auth"] is None                # Alpaca uses its own headers, not a Bearer token

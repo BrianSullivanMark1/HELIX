@@ -25,13 +25,36 @@ class ToolUse:
 
 
 @dataclass(frozen=True)
+class Image:
+    """An image the model SEES (vision). `data` is base64-encoded image bytes; `media_type` is an
+    Anthropic-supported type: image/png, image/jpeg, image/webp, or image/gif. Appears in a USER turn
+    (an attachment) or inside a tool result (an image HELIX located on disk) — always data it looks
+    at, never something it emits."""
+
+    media_type: str
+    data: str
+
+
+@dataclass(frozen=True)
 class ToolResult:
     tool_use_id: str
     content: str
     is_error: bool = False
+    images: tuple[Image, ...] = ()  # images the tool handed back for the model to SEE (e.g. a located
+    #                                 photo) — carried into the tool_result content, never persisted
 
 
-Block = Text | ToolUse | ToolResult
+@dataclass(frozen=True)
+class ToolOutput:
+    """A tool's result that includes IMAGES for the model to see, not just text — for tools like
+    find_images / view_image that hand back pixels. A plain tool just returns a str; `text` is the
+    digest that's persisted/narrated, `images` are shown to the model this turn only."""
+
+    text: str
+    images: tuple[Image, ...] = ()
+
+
+Block = Text | ToolUse | ToolResult | Image
 
 
 @dataclass(frozen=True)

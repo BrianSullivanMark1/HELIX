@@ -32,14 +32,22 @@ from helix.services.builds import BuildService
 from helix.services.calendar import CalendarService
 from helix.services.connections import ConnectionsService
 from helix.services.conversation import ConversationService
+from helix.services.files import FilesService
 from helix.services.forge import ForgeService
 from helix.services.gmail import GmailService
 from helix.services.knowledge import KnowledgeService
+from helix.services.lessons import LessonsService
+from helix.services.location import LocationService
+from helix.services.memory import MemoryService
 from helix.services.model_baker import ModelBaker
 from helix.services.profile import ProfileService
+from helix.services.recommend import RecommendService
+from helix.services.remote import RemoteService
+from helix.services.suggestions import SuggestionService
 from helix.services.reminders import ReminderService
 from helix.services.scheduler import AgentScheduler
 from helix.services.tasks import TaskService
+from helix.services.workflows import WorkflowService
 from helix.services.prompts import CONSOLE_SYSTEM, DEEP_THINK_SYSTEM
 from helix.services.selfdev import SelfDevService
 from helix.services.selfdev_lane import SelfDevLane
@@ -181,7 +189,15 @@ class Container:
         # usage pool as Claude Desktop — through the official Agent SDK + the local claude.exe,
         # instead of pay-per-token API billing. Tools are late-bound below (registry ctor cycle);
         # without a token everything stays on the API key exactly as before.
-        self.subscription = SubscriptionBrain(_oauth, CONSOLE_SYSTEM, workdir=str(self.paths.data))
+        # The subscription brain's claude.exe runs in a NEUTRAL, empty scratch dir OUTSIDE the data tree
+        # (secrets/db/builds) and outside the repo — a cwd on top of secrets is needless blast radius (a
+        # relative read, an up-walked CLAUDE.md); an isolated empty dir has nothing to find.
+        _sub_workdir = Path(tempfile.gettempdir()) / "helix-subscription-cwd"
+        try:
+            _sub_workdir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            _sub_workdir = self.paths.data  # last resort — still better than failing to start
+        self.subscription = SubscriptionBrain(_oauth, CONSOLE_SYSTEM, workdir=str(_sub_workdir))
         # Plain no-tool chat (profile distiller, voice-identity notes, …): subscription first.
         self.chat = PreferredChat(self.subscription, api_chat)
 
@@ -193,10 +209,14 @@ class Container:
                     return self.subscription.run_hermetic(
                         f"{DEEP_THINK_SYSTEM}\n\n---\n\n{question}",
                         model="claude-opus-4-8", effort="high",
-                        on_progress=on_progress, cancel=cancel,
+                        on_progress=on_progress, cancel=cancel, web=True,  # a user-asked reasoner may search
                     ) or "I couldn't reason that through just now — try rephrasing?"
                 except Exception:  # noqa: BLE001 — fall back to the API escalation below
                     pass
+            # The subscription attempt may have run for a while; if the user stopped in the meantime,
+            # don't now fire the priciest call on the API meter.
+            if cancel is not None and getattr(cancel, "is_set", lambda: False)():
+                return ""
             reply = deep_chat.chat([Turn(Role.USER, (Text(question),))], system=DEEP_THINK_SYSTEM)
             # Meter the Opus escalation like the main loop does — it's the most expensive call path, and
             # was previously invisible to the usage ledger.
@@ -235,9 +255,27 @@ class Container:
                 texture_quality="detailed" if high else "standard",
             ).generate(prompt, image)
 
+        # Environment/scene path (Blockade Labs Skybox) — a whole 360° PLACE ("a backyard", "a forest
+        # clearing") the user looks around inside, where Tripo makes single objects. Key read per build,
+        # like Tripo; no key → the baker shows an honest banner and routes objects to Tripo/parametric.
+        def _blockade_key() -> str | None:
+            return (
+                (self.settings.get("blockade_api_key") or os.environ.get("BLOCKADE_API_KEY") or "").strip()
+                or None
+            )
+
+        def _skybox(prompt):
+            from helix.adapters.blockade_skybox import BlockadeSkybox
+            return BlockadeSkybox(
+                _blockade_key, style_provider=lambda: self.settings.get("skybox_style_id")
+            ).generate(prompt)
+
         # neural_available reflects a LIVE Tripo key (the backend is always wired), so auto-routing and the
         # no-key preview banner key off the real thing, not merely "is a backend object present".
-        self.model_baker = ModelBaker(neural_backend=_neural, neural_available=lambda: bool(_tripo_key()))
+        self.model_baker = ModelBaker(
+            neural_backend=_neural, neural_available=lambda: bool(_tripo_key()),
+            skybox_backend=_skybox, skybox_available=lambda: bool(_blockade_key()),
+        )
         self.forge = ForgeService(
             self.builds, self.coder, self.bus, self.repo, self.paths.root, guard_files,
             model_baker=self.model_baker, data_dir=self.paths.data,
@@ -271,6 +309,9 @@ class Container:
             "VOYAGE_API_KEY": lambda: (
                 self.settings.get("voyage_api_key") or os.environ.get("VOYAGE_API_KEY") or ""
             ).strip(),
+            "BLOCKADE_API_KEY": lambda: (
+                self.settings.get("blockade_api_key") or os.environ.get("BLOCKADE_API_KEY") or ""
+            ).strip(),
         }
         self.connections = ConnectionsService(self.builds, self.secrets, managed=_managed_keys)
         # Gmail: read-only inbox access (an address + a Google App Password in the secrets store). Like
@@ -302,18 +343,48 @@ class Container:
             self.builds, self.repo, self.clock, bus=self.bus, embedder=self.embedder
         )
         self.tasks = TaskService(self.builds, connections=self.connections, knowledge=self.knowledge)
+        # Files: the user's own disk. Reads are always on; writes exist only while the Settings
+        # toggle (file_write_access) is on — read live per turn, so flipping it needs no restart.
+        # HELIX's program folder and data stores stay off-limits in every mode.
+        self.files = FilesService(self.settings, root=self.paths.root, data=self.paths.data)
+        # Long-term memory (durable per-speaker FACTS about the user) + Location (named places, so local
+        # questions ground via web search). Both mirror the profile/lessons pattern and inject a context
+        # block each turn; dedicated JSON files, guard-safe like reminders/agents.
+        self.user_memory = MemoryService(
+            self.chat, self.store, JsonSettings(self.paths.data / "helix_memory.json"), self.clock
+        )
+        self.location = LocationService(JsonSettings(self.paths.data / "helix_locations.json"))
+        # Recommend: a local usage ledger (opens/runs per build) that resurfaces the user's most-used and
+        # neglected builds as a "Suggested" strip in the Menu. Privacy-local; a dedicated JSON file.
+        self.recommend = RecommendService(
+            JsonSettings(self.paths.data / "helix_usage.json"), self.clock
+        )
+        # Anticipate: quiet, deterministic nudges (a neglected build, a drafted change) surfaced as one
+        # dismissible chip over the orb by the heartbeat. No LLM, no network — a calm ambient presence.
+        self.suggestions = SuggestionService(
+            recommend=self.recommend, builds=self.builds, selfdev=self.selfdev
+        )
         self.tools = ToolRegistry(
             self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue,
             tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane, connections=self.connections,
             knowledge=self.knowledge, gmail=self.gmail, reminders=self.reminders, calendar=self.calendar,
+            files=self.files, user_memory=self.user_memory, location=self.location,
         )
         # The orb quietly learns who the user is: a background distiller (same fast chat model) keeps a
         # compact profile in the DB, injected into each Console turn like the time anchor. No knobs.
         self.profile = ProfileService(self.chat, self.store, self.clock)
+        # The learning flywheel: standing behavioral preferences distilled from the user's own
+        # corrections/confirmations ("keep it shorter", "yes, that's right"), injected each turn like the
+        # profile. A DEDICATED JSON file (guard-safe like reminders/agents), so a correction made while a
+        # build runs isn't byte-reverted with the settings file.
+        self.lessons = LessonsService(
+            self.chat, self.store, JsonSettings(self.paths.data / "helix_lessons.json"), self.clock
+        )
         self.subscription._tools = self.tools  # late-bind (tools → services ctor cycle, like agents)
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM,
             knowledge=self.knowledge, profile=self.profile, subscription=self.subscription,
+            lessons=self.lessons, user_memory=self.user_memory, location=self.location,
         )
         # Agents persist in a DEDICATED file (not the guarded settings file): scheduled agents write
         # last_run mid-build via the heartbeat, and the orb can create/pause an agent while a build runs
@@ -326,11 +397,29 @@ class Container:
         _seed_watchers(self.agent_store, self.agents)  # the sentinel: default watchers, once per version
         # Which scheduled agents are due — the shell's heartbeat (main_window) asks this every tick.
         self.scheduler = AgentScheduler(self.agents, self.clock)
+        # Workflows chain agents into ordered pipelines. A dedicated JSON store, and — because Workflow
+        # mirrors Agent's shape — the SAME AgentScheduler drives their schedules from the heartbeat.
+        self.workflows = WorkflowService(
+            JsonSettings(self.paths.data / "helix_workflows.json"), self.agents, bus=self.bus,
+            clock=self.clock,
+        )
+        self.tools.bind_workflows(self.workflows)
+        self.workflow_scheduler = AgentScheduler(self.workflows, self.clock)
+        # Remote companion (check in / trigger from a phone). POLICY only here; the listener is started
+        # by the main window and is OFF until the user enables it in Settings. Read/ask + run-agent only
+        # (allow_builds=False, persist=False) — it inherits the BUILD_TOOLS fence, so nothing can build,
+        # delete, self-change, or write to disk remotely.
+        self.remote = RemoteService(
+            self.settings, self.secrets, conversation=self.conversation, agents=self.agents,
+            queue=self.build_queue,
+        )
         self.restart = Restarter(self.paths.root / "main.py", self.paths.root).restart
 
         # Voice (optional; both degrade to text-only / silent if unavailable). TTS uses the chosen
         # neural accent (edge-tts), falling back to the local OS voice when offline/unavailable.
-        self.speech_in = WhisperSpeechIn(active_model())  # use whatever prewarm loaded (preferred/fallback)
+        self.speech_in = WhisperSpeechIn(  # use whatever prewarm loaded (preferred/fallback)
+            active_model(), wake_word=lambda: self.settings.get("wake_word") or ""  # ui.voice.WAKE_WORD_SETTING
+        )
         self.speech_out = EdgeSpeechOut(
             lambda: self.settings.get("tts_voice"),
             lambda: self.settings.get("tts_rate"),

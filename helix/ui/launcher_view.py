@@ -34,6 +34,7 @@ from helix.services.agents import AgentService
 from helix.services.builds import BuildService
 from helix.services.tasks import TaskService
 from helix.ui.build_status import BuildStatus
+from helix.ui.console_view import chip_strip  # shared: a chip row that can't widen the window
 from helix.ui.theme import CYAN, LINE, MUTED, PANEL, STATUS_DONE, STATUS_ERROR, STATUS_WORKING
 from helix.ui.workers import QtWorker
 
@@ -99,7 +100,8 @@ class LauncherView(QWidget):
     buildReverted = pyqtSignal(str)            # slug — a build was rolled back; reload its open viewer
 
     def __init__(
-        self, builds: BuildService, agents: AgentService, tasks: TaskService, knowledge=None
+        self, builds: BuildService, agents: AgentService, tasks: TaskService, knowledge=None,
+        recommend=None,
     ) -> None:
         super().__init__()
         self.setObjectName("Panel")
@@ -107,6 +109,7 @@ class LauncherView(QWidget):
         self._agents = agents
         self._tasks = tasks
         self._knowledge = knowledge  # KnowledgeService — drives the Knowledge tab's cards + doc counts
+        self._recommend = recommend  # RecommendService — the "Suggested" strip of most-used/neglected builds
         self._workers: set[QtWorker] = set()
         # slug -> BuildStatus|None, supplied by the main window's status board; drives the tile borders.
         self._status_provider: Callable[[str], "BuildStatus | None"] = lambda _slug: None
@@ -135,6 +138,19 @@ class LauncherView(QWidget):
         header.addWidget(new_btn)  # Settings lives in the window's top-right nav — not repeated here
         root.addLayout(header)
 
+        # "Suggested" strip — the builds you reach for most (and one you haven't opened in a while),
+        # from the local usage ledger. Hidden until there's usage to suggest from. Clicking one opens it.
+        self._suggest_row = QHBoxLayout()
+        self._suggest_row.setContentsMargins(0, 0, 0, 0)
+        self._suggest_row.setSpacing(8)
+        self._suggest_host = QWidget()
+        self._suggest_host.setLayout(self._suggest_row)
+        self._suggest_host.setStyleSheet("background: transparent;")
+        # Scrolled sideways so a run of suggestions can never widen the window past the screen edge.
+        self._suggest_strip = chip_strip(self._suggest_host)
+        self._suggest_strip.setVisible(False)
+        root.addWidget(self._suggest_strip)
+
         self._stack = QStackedWidget()
         self._apps_grid, apps_page, self._apps_empty = self._grid_page(
             "No apps yet — go to the orb and describe one."
@@ -149,6 +165,7 @@ class LauncherView(QWidget):
         # label, so the user never saw it.
         self._tasks_status = QLabel("")
         self._tasks_status.setObjectName("Status")
+        self._tasks_status.setTextFormat(Qt.TextFormat.PlainText)  # shows flow run output — never rich text
         self._tasks_status.setWordWrap(True)
         tasks_page.layout().addWidget(self._tasks_status)
 
@@ -222,6 +239,7 @@ class LauncherView(QWidget):
 
         self._agent_status = QLabel("")
         self._agent_status.setObjectName("Status")
+        self._agent_status.setTextFormat(Qt.TextFormat.PlainText)  # shows agent run output — never rich text
         self._agent_status.setWordWrap(True)
         lay.addWidget(self._agent_status)
         return page
@@ -286,6 +304,40 @@ class LauncherView(QWidget):
             card.add_actions(run, rename, remove)
             agent_cards.append(card)
         self._fill_grid(self._agents_grid, self._agents_empty, agent_cards)
+        self._refresh_suggestions()
+
+    def _refresh_suggestions(self) -> None:
+        """Rebuild the 'Suggested' strip from the usage ledger. Hidden when there's nothing to suggest."""
+        while self._suggest_row.count():
+            item = self._suggest_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        sugg = self._recommend.suggestions(self._builds.list()) if self._recommend is not None else []
+        if not sugg:
+            self._suggest_strip.setVisible(False)
+            return
+        label = QLabel("Suggested")
+        label.setStyleSheet(f"color:{MUTED};font-size:12px;")
+        self._suggest_row.addWidget(label)
+        for app, reason in sugg:
+            chip = QPushButton()
+            # Bound each chip (elide, cap width) so several suggestions — this strip isn't scrolled —
+            # can't stretch the row, and the window, past the screen edge.
+            chip.setMaximumWidth(260)
+            chip.setText(chip.fontMetrics().elidedText(
+                f"{app.name}  ·  {reason}", Qt.TextElideMode.ElideRight, 232))
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.setToolTip(f"Open {app.name}")
+            chip.setStyleSheet(
+                f"QPushButton{{background:rgba(13,20,27,0.7);color:{CYAN};border:1px solid {LINE};"
+                "border-radius:12px;padding:4px 12px;font-size:12px;}"
+                f"QPushButton:hover{{border-color:{CYAN};}}"
+            )
+            chip.clicked.connect(lambda _c=False, s=app.slug: self.openAppRequested.emit(s))
+            self._suggest_row.addWidget(chip)
+        self._suggest_row.addStretch(1)
+        self._suggest_strip.setVisible(True)
 
     def set_status_provider(self, provider: "Callable[[str], BuildStatus | None]") -> None:
         """Wire the source of per-build status (the main window's board) that colours the tile borders."""
@@ -493,6 +545,8 @@ class LauncherView(QWidget):
 
     def _run_task(self, slug: str, name: str) -> None:
         self.buildSeen.emit(slug)  # running a task acknowledges its done/error status (back to blue)
+        if self._recommend is not None:
+            self._recommend.record_run(slug)  # feed the Suggested strip
         ok = self._tasks.run(slug)
         # Tasks open their own console; surface the outcome on the TASKS page, where the user is looking.
         self._tasks_status.setText(

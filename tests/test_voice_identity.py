@@ -139,7 +139,7 @@ def test_registration_conversation_end_to_end(tmp_path):
     _speak_as(vc, None, "yes")
     assert "name" in tts.spoke[-1].lower()
     _speak_as(vc, _near(bob, 1), "I am Bob")
-    assert "Bob" in tts.spoke[-1]
+    assert "Bob" in " ".join(tts.spoke)
     # 4. answer the calibration questions — each answer is another voice-print
     for i in range(5):
         _speak_as(vc, _near(bob, 2 + i), f"calibration answer number {i}")
@@ -156,7 +156,7 @@ def test_registered_voice_can_recalibrate(tmp_path):
     vc, svc, tts, heard, _lines = _make(tmp_path)
     _speak_as(vc, _near(_ALICE, 60), "hey helix, recalibrate my voice")
     assert heard == []
-    assert "Alice" in tts.spoke[-1]  # the flow greeted her and asked the first question
+    assert "Alice" in " ".join(tts.spoke)  # the flow greeted her and asked the first question
     assert vc._flow.collecting
 
 
@@ -197,7 +197,7 @@ def test_known_voice_introducing_itself_is_acknowledged_not_reenrolled(tmp_path)
     vc, svc, tts, heard, _lines = _make(tmp_path)
     _speak_as(vc, _near(_ALICE, 80), "hey helix, I am Alice")
     assert heard == []
-    assert "I know your voice" in tts.spoke[-1]
+    assert "I know your voice" in " ".join(tts.spoke)
     assert svc.names() == ["Alice"]  # no second profile, no extra enrollment
 
 
@@ -205,7 +205,7 @@ def test_confident_match_claiming_another_name_is_refused(tmp_path):
     vc, svc, tts, heard, _lines = _make(tmp_path)
     _speak_as(vc, _near(_ALICE, 81), "hey helix, I am Robert")
     assert heard == []
-    assert "sound like Alice" in tts.spoke[-1]
+    assert "sound like Alice" in " ".join(tts.spoke)
     assert svc.names() == ["Alice"]
 
 
@@ -273,6 +273,49 @@ def test_production_voiceprint_shape_flows_through_the_gate(tmp_path):
     vc._pending_emb = VoicePrint(dsp=np.asarray(_STRANGER, dtype=np.float32))
     vc._on_wake_text("hey helix, delete everything")
     assert heard == ["what time is it"]
+    assert tts.spoke[-1] == UNRECOGNIZED_REPLY
+
+
+def test_trust_household_voice_acts_on_any_voice(tmp_path):
+    # With the opt-in "single-user home" setting ON, an unrecognized voice is NOT refused — HELIX acts
+    # on it and attributes it to the sole registered owner.
+    vc, _svc, tts, heard, _lines = _make(tmp_path)
+    vc._settings.set("trust_household_voice", True)
+    _speak_as(vc, _STRANGER, "hey helix, what time is it")
+    assert heard == ["what time is it"]
+    assert vc.current_speaker == "Alice"  # the only enrolled owner
+    assert tts.spoke == []                # no refusal
+
+
+def test_trust_off_by_default_keeps_the_strict_gate(tmp_path):
+    # The setting defaults OFF — the red-teamed "unrecognized voices are never acted on" stance is intact.
+    vc, _svc, tts, heard, _lines = _make(tmp_path)
+    _speak_as(vc, _STRANGER, "hey helix, what time is it")
+    assert heard == []
+    assert tts.spoke == [UNRECOGNIZED_REPLY]
+
+
+def test_sticky_recent_speaker_attributes_short_followups_after_session(tmp_path):
+    # A short, evidence-less follow-up right after a real match — even once the session window lapses —
+    # stays attributed to whoever was just here, instead of re-challenging the owner.
+    vc, _svc, _tts, heard, _lines = _make(tmp_path)
+    _speak_as(vc, _near(_ALICE, 70), "hey helix, open the garage")
+    assert vc.current_speaker == "Alice"
+    vc._end_session()  # the 45s session window lapsed
+    # a wake-worded but too-short-to-judge command (no voice evidence) right after the interaction
+    _speak_as(vc, None, "hey helix, and the lights too")
+    assert heard == ["open the garage", "and the lights too"]
+    assert vc.current_speaker == "Alice"
+
+
+def test_sticky_recent_speaker_expires(tmp_path):
+    vc, _svc, tts, heard, _lines = _make(tmp_path)
+    _speak_as(vc, _near(_ALICE, 71), "hey helix, open the garage")
+    vc._end_session()
+    vc._last_speaker_ts -= 10_000  # push the last-seen time well past the sticky window
+    # wake-worded but evidence-less, session closed, sticky expired → refused
+    _speak_as(vc, None, "hey helix, and the lights too")
+    assert heard == ["open the garage"]
     assert tts.spoke[-1] == UNRECOGNIZED_REPLY
 
 

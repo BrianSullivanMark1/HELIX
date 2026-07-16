@@ -35,6 +35,7 @@ from helix.domain.events import (
     SelfChangeFinished,
     SelfChangeProgress,
 )
+from helix.app.remote_companion import RemoteCompanion
 from helix.domain.models import AppKind, BuildKind
 from helix.logging_setup import get_logger
 from helix.ui.build_status import BuildStatusBoard
@@ -74,6 +75,11 @@ class HelixMainWindow(QMainWindow):
         self._c = container
         self.setWindowTitle("HELIX")
         self.resize(980, 740)
+        # NOTE: deliberately NO setMaximumSize here. Capping the size before the window is first shown
+        # makes Qt create the native window without WS_MAXIMIZEBOX — i.e. no maximize button — and it
+        # never actually bounded the window anyway (a child's MINIMUM width overrides a maximum). The
+        # window is kept on-screen at the source instead: every strip/label that could grow without
+        # limit reports a bounded minimum (see console_view._ElidingLabel and the chip strips).
         # The shared status board behind the menu-tile borders, the Console legend, and the orb hue.
         self._board = BuildStatusBoard()
 
@@ -113,13 +119,15 @@ class HelixMainWindow(QMainWindow):
             container.speech_in, container.speech_out, self.orb,
             forge=container.forge, build_queue=container.build_queue,
             selfdev_lane=container.selfdev_lane, voice_id=container.voice_id,
+            suggestions=container.suggestions,
         )
         self.launcher = LauncherView(
-            container.builds, container.agents, container.tasks, container.knowledge
+            container.builds, container.agents, container.tasks, container.knowledge,
+            recommend=container.recommend,
         )
         self.settings = SettingsView(
             container.settings, container.connections, container.gmail, container.calendar,
-            subscription=container.subscription,
+            subscription=container.subscription, memory=container.user_memory, remote=container.remote,
         )
         self._stack.addWidget(self.console)  # 0
         self._stack.addWidget(self.launcher)  # 1
@@ -211,10 +219,16 @@ class HelixMainWindow(QMainWindow):
         # the same announce path builds use.
         self._agent_workers: set[QtWorker] = set()
         self._agent_running = False
+        self._workflow_workers: set[QtWorker] = set()
+        self._workflow_running = False
         self._heartbeat = QTimer(self)
         self._heartbeat.setInterval(15_000)
         self._heartbeat.timeout.connect(self._on_heartbeat)
         self._heartbeat.start()
+
+        # Optional remote companion — OFF by default; starts listening only if the user enabled it.
+        self._remote = RemoteCompanion(container.remote)
+        self._remote.start()
 
     def _build_nav(self) -> QWidget:
         bar = QWidget()
@@ -248,7 +262,8 @@ class HelixMainWindow(QMainWindow):
         return bar
 
     def _show_commands(self) -> None:
-        CommandsDialog(self).exec()
+        wake = (self._c.settings.get("wake_word") or "").strip() or "HELIX"
+        CommandsDialog(self, wake_word=wake).exec()
 
     # ----- orb-only chrome -----
     def _on_console(self) -> bool:
@@ -305,6 +320,7 @@ class HelixMainWindow(QMainWindow):
     def _on_settings_saved(self) -> None:
         self.console.refresh_key_state()
         self.console.reapply_audio_devices()  # a new mic choice takes effect without a restart
+        self._remote.restart()  # apply a changed remote-access toggle / LAN / port without a restart
         self._go(_CONSOLE)
 
     def _on_restart_requested(self) -> None:
@@ -457,6 +473,10 @@ class HelixMainWindow(QMainWindow):
     # ----- the heartbeat: reminders + scheduled agents -----
     def _on_heartbeat(self) -> None:
         try:
+            self.console.maybe_suggest()  # ANTICIPATE — the console rate-limits + dedupes internally
+        except Exception:
+            _LOG.exception("suggestion check failed")
+        try:
             due = self._c.reminders.pop_due()
             if due:
                 # Announce ALL of this tick's due reminders in ONE spoken line. Speaking them back-to-back
@@ -465,6 +485,15 @@ class HelixMainWindow(QMainWindow):
                 self.console.announce_reminder("; ".join(r.text for r in due))
         except Exception:
             _LOG.exception("reminder check failed")
+        if not self._workflow_running:
+            try:
+                wdue = self._c.workflow_scheduler.due_now()
+            except Exception:
+                _LOG.exception("workflow schedule check failed")
+                wdue = []
+            if wdue:
+                self._run_scheduled_workflow(wdue[0])
+                return  # one heavy job per tick
         if self._agent_running:
             return  # one scheduled agent at a time; the next tick picks up the rest
         try:
@@ -474,6 +503,22 @@ class HelixMainWindow(QMainWindow):
             return
         if due:
             self._run_scheduled_agent(due[0])  # one per tick — waking from a long sleep never stampedes
+
+    def _run_scheduled_workflow(self, wf) -> None:
+        self._workflow_running = True
+        self._c.workflow_scheduler.mark_ran(wf.name)  # stamp FIRST so a slow run can't double-fire
+        name = wf.name
+        worker = QtWorker(lambda _emit: self._c.workflows.run(name))
+        self._workflow_workers.add(worker)
+        worker.finished_ok.connect(lambda report, n=name: self._on_scheduled_report(n, report))
+        worker.failed.connect(lambda err, n=name: self._on_scheduled_failure(n, err))
+        worker.finished.connect(lambda w=worker: self._retire_workflow_worker(w))
+        worker.start()
+
+    def _retire_workflow_worker(self, worker: QtWorker) -> None:
+        self._workflow_workers.discard(worker)
+        worker.deleteLater()
+        self._workflow_running = False
 
     def _run_scheduled_agent(self, agent) -> None:
         self._agent_running = True
@@ -518,8 +563,33 @@ class HelixMainWindow(QMainWindow):
 
     def _shutdown_heartbeat(self) -> None:
         self._heartbeat.stop()
-        for worker in list(self._agent_workers):
+        for worker in list(self._agent_workers) + list(self._workflow_workers):
             worker.wait(2000)
+
+    def teardown(self) -> None:
+        """The ONE full-cleanup path, shared by closeEvent AND the app's aboutToQuit (restart / OS
+        logoff bypass closeEvent). Runs once — every step is idempotent, but a guard avoids doing the
+        whole reap twice. Reaps the background build queue FIRST so closing mid-build never orphans
+        claude.exe (it would keep billing + lock the workspace)."""
+        if getattr(self, "_torn_down", False):
+            return
+        self._torn_down = True
+        for step in (
+            self._remote.stop,  # stop the remote listener first — no new remote turns during teardown
+            self._shutdown_heartbeat,  # stop the cadence + join any in-flight scheduled agent
+            self._c.build_queue.shutdown,
+            self._c.selfdev_lane.shutdown,
+            self._c.subscription.shutdown,  # close the SDK session + its claude.exe cleanly
+            self._stop_app_servers,  # kill any backend-app servers so they don't outlive HELIX / hold a port
+            (self._viewer.clear if self._viewer is not None else lambda: None),
+            self.console.shutdown,
+            self.launcher.shutdown,
+            self._c.store.close,
+        ):
+            try:
+                step()
+            except Exception:
+                _LOG.exception("shutdown step failed during teardown")
 
     def closeEvent(self, event) -> None:
         # If real work is in flight, give the user a decision point rather than silently abandoning it.
@@ -537,29 +607,14 @@ class HelixMainWindow(QMainWindow):
             if confirm != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
-        # Reap the background build queue FIRST: kill the coder subprocess before anything else tears
-        # down, so closing mid-build never orphans claude.exe (it would keep billing + lock the workspace).
-        for teardown in (
-            self._shutdown_heartbeat,  # stop the cadence + join any in-flight scheduled agent
-            self._c.build_queue.shutdown,
-            self._c.selfdev_lane.shutdown,
-            self._c.subscription.shutdown,  # close the SDK session + its claude.exe cleanly
-            self._stop_app_servers,  # kill any backend-app servers so they don't outlive HELIX / hold a port
-            (self._viewer.clear if self._viewer is not None else lambda: None),
-            self.console.shutdown,
-            self.launcher.shutdown,
-            self._c.store.close,
-        ):
-            try:
-                teardown()
-            except Exception:
-                _LOG.exception("shutdown step failed during close")
+        self.teardown()
         super().closeEvent(event)
 
     def _open_app(self, slug: str) -> None:
         app = next((a for a in self._c.builds.list() if a.slug == slug), None)
         if app is None:
             return
+        self._c.recommend.record_open(slug)  # learn which builds the user reaches for (Suggested strip)
         self._on_build_seen(slug)  # opening acknowledges a done/error result → tile/legend back to blue
         if app.build_kind == BuildKind.KNOWLEDGE:
             # A knowledge base opens in its native manager (add notes/files, search, remove), not a webview.

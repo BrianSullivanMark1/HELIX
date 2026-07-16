@@ -378,7 +378,11 @@ class PresenceOrb(QWidget):
         self._smoke = _build_smoke()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(33)  # ~30 fps
+        # ~30 fps while anything is actually moving (listening/speaking/thinking, a build-status hue, or
+        # live mic energy); ~15 fps for the slow idle breathing. Halves the repaint load on a
+        # permanently-open app without freezing the ambient presence. _tick adjusts the interval live.
+        self._active_ms, self._idle_ms = 33, 66
+        self._timer.start(self._active_ms)
 
     def set_state(self, state: OrbState) -> None:
         self._state = state
@@ -435,6 +439,17 @@ class PresenceOrb(QWidget):
         self._spin = (self._spin + 3.0) % 360.0
         self._t += 1.0
         self.update()
+        # Downshift to the idle cadence only when nothing is actively animating: resting state, no build
+        # hue, and the mic level + spectral ring have decayed to ~zero. Any set_state/set_status/set_level
+        # /set_bands lifts one of these and the very next tick restores the fast cadence.
+        busy = (
+            self._state != OrbState.IDLE or self._status != OrbStatus.NONE
+            or self._level > 0.01 or self._level_target > 0.01
+            or any(b > 0.01 for b in self._bands) or any(b > 0.01 for b in self._bands_target)
+        )
+        want = self._active_ms if busy else self._idle_ms
+        if self._timer.interval() != want:
+            self._timer.setInterval(want)
 
     def paintEvent(self, _event) -> None:
         w, h = self.width(), self.height()

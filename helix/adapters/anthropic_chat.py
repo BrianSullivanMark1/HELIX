@@ -13,7 +13,7 @@ import anthropic
 from helix.domain.errors import MissingApiKey
 from helix.domain.models import Role
 from helix.logging_setup import get_logger
-from helix.ports.llm import Reply, Text, ToolResult, ToolSpec, ToolUse, Turn, Usage
+from helix.ports.llm import Image, Reply, Text, ToolResult, ToolSpec, ToolUse, Turn, Usage
 
 _LOG = get_logger("anthropic")
 
@@ -137,14 +137,30 @@ class AnthropicChat:
         for b in turn.blocks:
             if isinstance(b, Text):
                 content.append({"type": "text", "text": b.text})
+            elif isinstance(b, Image):
+                content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": b.media_type, "data": b.data},
+                })
             elif isinstance(b, ToolUse):
                 content.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.args})
             elif isinstance(b, ToolResult):
-                block: dict[str, Any] = {
-                    "type": "tool_result",
-                    "tool_use_id": b.tool_use_id,
-                    "content": b.content,
-                }
+                # A tool that handed back images (a located photo) → tool_result content is a LIST of
+                # blocks (text + images) the model can see; otherwise it's the plain string as before.
+                if b.images:
+                    result_content: list[dict[str, Any]] = []
+                    if b.content:
+                        result_content.append({"type": "text", "text": b.content})
+                    for im in b.images:
+                        result_content.append({
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": im.media_type, "data": im.data},
+                        })
+                    block: dict[str, Any] = {
+                        "type": "tool_result", "tool_use_id": b.tool_use_id, "content": result_content,
+                    }
+                else:
+                    block = {"type": "tool_result", "tool_use_id": b.tool_use_id, "content": b.content}
                 if b.is_error:
                     block["is_error"] = True
                 content.append(block)

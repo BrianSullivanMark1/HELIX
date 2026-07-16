@@ -20,6 +20,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import Callable
@@ -43,6 +44,9 @@ except Exception:  # pragma: no cover - depends on the host's Qt plugins
 _LOG = get_logger("voice")
 
 VOICE_SETTING = "voice_input_on"  # hands-free mic on/off; persisted, default off
+WAKE_WORD_SETTING = "wake_word"   # the spoken name that engages HELIX; "" / "HELIX" = the default name.
+                                  # A household with a baby who says "HELIX/stop/goodbye" all day can pick
+                                  # a baby-rare word (e.g. "Athena", "Friday") so the mic stops false-waking.
 AUDIO_INPUT_SETTING = "audio_input_id"    # chosen mic (QAudioDevice id); "" = system default
 AUDIO_OUTPUT_SETTING = "audio_output_id"  # chosen speaker, for the Settings 'Test' button only — HELIX's
                                           # own voice always follows the Windows DEFAULT output device
@@ -58,8 +62,13 @@ WAKE_MIN_SPEECH_S = 0.3      # ignore shorter blips (clicks, coughs)
 WAKE_MAX_UTTER_S = 12.0      # hard cap per utterance
 WAKE_PREROLL_S = 0.5         # keep this much pre-speech audio so the "H" onset of HELIX isn't clipped
 
-SESSION_IDLE_MS = 5 * 60 * 1000  # end the conversation session after this much inactivity (5 min)
+SESSION_IDLE_MS = 45 * 1000  # end the conversation session after this much inactivity. SHORT on purpose:
+                             # inside a session the wake word isn't required, so a long window turns
+                             # overheard family/TV speech into billed turns. 45s covers a natural
+                             # back-and-forth without leaving the mic wide open for minutes.
 PTT_MAX_MS = 20 * 1000           # hard cap on one push-to-talk capture (safety if 'released' is missed)
+_RECENT_SPEAKER_S = 600          # how long a confidently-recognized speaker stays "still here" for short,
+                                 # evidence-less follow-ups after a session lapses (10 min)
 
 # Accept the obvious mis-hearings of "HELIX" so a clear command still lands.
 _WAKE_RE = re.compile(
@@ -67,6 +76,21 @@ _WAKE_RE = re.compile(
     r"(?:he+l+ix|helics?|helicks|heli[ckx]s?|healix|healex|hel[eu]x|heelux|hilux)\b[\s,.:;!?-]*",
     re.IGNORECASE,
 )
+DEFAULT_WAKE_WORD = "HELIX"
+
+
+def build_wake_re(word: str | None):
+    """The wake-word matcher for the configured name. For the default HELIX we keep the curated
+    fuzzy alternation (its many STT mis-hearings). For a custom word we build a simple boundary match
+    with the optional "hey/ok/okay" carrier — so a household can pick a baby-rare word that a busy room
+    isn't constantly saying."""
+    w = (word or "").strip()
+    if not w or w.lower() == "helix":
+        return _WAKE_RE
+    return re.compile(
+        r"\b(?:hey\s+|ok\s+|okay\s+)?" + re.escape(w) + r"\b[\s,.:;!?-]*",
+        re.IGNORECASE,
+    )
 # Phrases that close an active conversation session immediately (no wake word needed).
 _DISMISSAL_RE = re.compile(
     r"\b(?:good\s*bye|bye(?:\s+now)?|be\s+right\s+back|brb|i'?ll\s+be\s+back|"
@@ -118,9 +142,11 @@ def _pcm_bands(pcm: bytes, n: int = 16) -> list[float]:
         return [0.0] * n
 
 
-def split_wake(text: str) -> tuple[bool, str]:
-    """(matched, command): if 'HELIX' is in `text`, return True + the words after it, else (False, '')."""
-    match = _WAKE_RE.search(text or "")
+def split_wake(text: str, wake_re=None) -> tuple[bool, str]:
+    """(matched, command): if the wake word is in `text`, return True + the words after it, else
+    (False, ''). `wake_re` overrides the default HELIX matcher (the controller passes the configured
+    word's regex)."""
+    match = (wake_re or _WAKE_RE).search(text or "")
     if not match:
         return False, ""
     return True, (text[match.end():] or "").strip()
@@ -138,7 +164,7 @@ def _content_words(text: str) -> list[str]:
     return [w for w in words if w not in _ECHO_STOPWORDS]
 
 
-def is_echo(heard: str, spoken: str) -> bool:
+def is_echo(heard: str, spoken: str, wake_re=None) -> bool:
     """Is this transcript, overheard WHILE HELIX speaks, just its own voice coming back through the mic?
 
     The name is the primary discriminator: a reply that never says 'HELIX' cannot put the name in the
@@ -149,12 +175,13 @@ def is_echo(heard: str, spoken: str) -> bool:
     The wake word is stripped from BOTH sides before scoring — it appears in every barge utterance (the
     user said it) AND, on this branch, in the reply, so counting it as overlap would be a guaranteed
     free hit that wrongly flags a genuine short command like 'HELIX, make it red' as an echo."""
+    wake_re = wake_re or _WAKE_RE
     if not (spoken or "").strip():
         return False
-    if not _WAKE_RE.search(spoken):
+    if not wake_re.search(spoken):
         return False  # the reply never says the name; hearing it means the user said it
-    heard_nowake = _WAKE_RE.sub(" ", heard or "")
-    spoken_nowake = _WAKE_RE.sub(" ", spoken)
+    heard_nowake = wake_re.sub(" ", heard or "")
+    spoken_nowake = wake_re.sub(" ", spoken)
     content = _content_words(heard_nowake)
     if not content:
         return True  # nothing beyond the name and filler, and the reply itself says the name
@@ -172,9 +199,23 @@ def is_dismissal(text: str) -> bool:
 
 
 _MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")  # [label](url) -> label
-_MD_SYMS = re.compile(r"[*_`#~>|]+")              # markdown emphasis / headings / code / quotes / tables
+_MD_SYMS = re.compile(r"[*`#~>|]+")               # markdown emphasis / headings / code / quotes / tables
 _BULLET = re.compile(r"(?m)^\s*[-•·]\s+")         # list bullets at line start
 _WS = re.compile(r"\s+")
+# Underscores are NOT deleted — deleting glued a snake_case token into one unsayable word ("call_api" →
+# "callapi" → the voice said "calawpee"). Turn each into a space so the parts are spoken as words.
+_UNDERSCORE = re.compile(r"_+")
+# Tiny say-as map: short tech tokens the neural voice would otherwise slur. Whole-word, case-insensitive;
+# expanded to spaced letters so they're read as initialisms. Kept deliberately small and safe.
+_SAY_AS = {
+    "api": "A P I", "apis": "A P Is", "url": "U R L", "urls": "U R Ls",
+    "sam.gov": "Sam dot gov", "sam gov": "Sam dot gov",
+    "http": "H T T P", "https": "H T T P S", "json": "Jason", "pdf": "P D F",
+}
+_SAY_AS_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in sorted(_SAY_AS, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
 # A ```viz block carries a table/chart spec the orb DISPLAYS but must never read aloud.
 _VIZ_RE = re.compile(r"```viz\s*\n?(.*?)```", re.DOTALL)
 
@@ -197,13 +238,58 @@ def split_visuals(text: str) -> tuple[str, list[dict]]:
     return spoken, specs
 
 
+# Split a reply into sentence-ish chunks so speech can START on the first sentence while the rest are
+# still being synthesized — the first word lands much sooner on a multi-sentence reply. Splits after
+# ., !, or ? (not after a common abbreviation like "Dr." / "e.g."), and merges tiny fragments so a lone
+# "Yes." isn't its own choppy chunk.
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(])")
+# Abbreviations (letters only, dots stripped) that end in a period but don't end a sentence.
+_ABBREV = frozenset("mr mrs ms dr st vs etc no fig eg ie am pm us prof jr sr".split())
+_MIN_CHUNK = 12  # a chunk shorter than this is a fragment — glue it to a neighbour, not its own utterance
+
+
+def _last_word_letters(chunk: str) -> str:
+    return re.sub(r"[^a-z]", "", chunk.rsplit(" ", 1)[-1].lower())
+
+
+def split_sentences(text: str) -> list[str]:
+    """`text` (already speakable) → sentence chunks for streamed playback. One chunk for a short reply
+    (no behavior change); several for a long one, so the first plays while the rest synthesize. Doesn't
+    split after an abbreviation ("Dr. Smith"), and glues tiny fragments to a neighbour so a lone "Yes."
+    isn't its own choppy utterance."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    parts = [p.strip() for p in _SENT_SPLIT.split(text) if p.strip()]
+    # Pass 1: undo splits right after an abbreviation.
+    joined: list[str] = []
+    for p in parts:
+        if joined and _last_word_letters(joined[-1]) in _ABBREV:
+            joined[-1] = f"{joined[-1]} {p}"
+        else:
+            joined.append(p)
+    # Pass 2: absorb a too-short fragment into a neighbour (the previous chunk if it was itself tiny,
+    # else merge this tiny one back).
+    chunks: list[str] = []
+    for p in joined:
+        if chunks and (len(chunks[-1]) < _MIN_CHUNK or len(p) < _MIN_CHUNK):
+            chunks[-1] = f"{chunks[-1]} {p}"
+        else:
+            chunks.append(p)
+    return chunks or [text]
+
+
 def speakable(text: str) -> str:
     """Strip viz blocks, markdown, and symbols so the voice never reads a table/chart or punctuation as
-    words (e.g. '*' → 'asterisk'). A safety net behind the system prompt's plain-spoken instruction."""
+    words (e.g. '*' → 'asterisk'). A safety net behind the system prompt's plain-spoken instruction.
+    Also un-glues snake_case (underscore → space) and expands a few tech initialisms, so a stray tool
+    name like 'call_api' is spoken as "call A P I", never the mangled "calawpee"."""
     t = _VIZ_RE.sub("", text or "")  # never read a table/chart block aloud
     t = _MD_LINK.sub(r"\1", t)
     t = _BULLET.sub("", t)
     t = _MD_SYMS.sub("", t)
+    t = _UNDERSCORE.sub(" ", t)      # snake_case → separate words (never a deleted underscore)
+    t = _SAY_AS_RE.sub(lambda m: _SAY_AS[m.group(1).lower()], t)
     return _WS.sub(" ", t).strip()
 
 
@@ -273,13 +359,13 @@ def is_wake(text: str) -> bool:
     return bool(_WAKE_FORMS.match(_clean_command(text)))
 
 
-def _wants_wake(text: str) -> bool:
+def _wants_wake(text: str, wake_re=None) -> bool:
     """Permissive wake test used ONLY while asleep, where the only outcomes are wake or stop — so a greedy
     match is free. True if HELIX is named (the wake word wakes it — 'sleep until you hear your name'), the
     utterance is a wake phrase, or a SHORT utterance carries a wake hint. Gating the fuzzy hint to short
     utterances keeps ambient chatter that merely contains 'listen'/'wake' ('did you listen to the game')
     from waking it, while 'wake' / 'wake up now' / 'mic on' still do."""
-    if split_wake(text)[0]:
+    if split_wake(text, wake_re)[0]:
         return True
     if is_wake(text):
         return True
@@ -604,6 +690,13 @@ class VoiceController(QObject):
         self._pending_emb = None           # the current utterance's voice-print (set on the worker)
         self.current_speaker: str | None = None   # who spoke the command recognized() is emitting
         self._session_speaker: str | None = None  # who opened the live session (sticky for short follow-ups)
+        # Sticky "who was just here": the last confidently-recognized speaker + when (monotonic seconds).
+        # Lets a short follow-up right after a real interaction stay attributed even outside a session,
+        # so a registered owner isn't re-challenged the moment the 45s window lapses.
+        self._last_speaker: str | None = None
+        self._last_speaker_ts = 0.0
+        # The wake-word matcher for the configured name (default HELIX keeps its curated fuzzy matcher).
+        self._wake_re = build_wake_re(settings.get(WAKE_WORD_SETTING) if settings is not None else None)
         self._workers: set[QtWorker] = set()
         self._listener: WakeWordListener | None = None
         self._recorder: MicRecorder | None = None
@@ -613,6 +706,9 @@ class VoiceController(QObject):
         self._barge_busy = False          # one in-flight barge transcription at a time while speaking
         self._narrating = False           # a progress note is being spoken (skip new ones until it ends)
         self._muted = False               # user paused the mic: ignore all speech except unmute/stop
+        self._working = False             # HELIX is building/thinking: the mic goes DEAF so ambient talk
+                                          # (a baby, the TV, a "stop" across the room) can't interrupt the
+                                          # work. A deliberate stop is UI-only (tap the orb, Esc, Stop).
         self._speaking_text = ""          # what TTS is saying right now — the echo check compares to it
         self._speak_gen = 0               # a preempted utterance must not knock a newer turn to idle
         self._mic_ok: bool | None = None  # cache the device probe; don't reopen it on every settle
@@ -632,8 +728,10 @@ class VoiceController(QObject):
     def reload_audio_input(self) -> None:
         """Re-open the mic on the currently-selected input device (Settings just changed it) so a new mic
         takes effect without a restart. The device is read fresh on every (re)arm, so a later re-arm also
-        picks it up; this just makes the switch immediate when hands-free is already listening."""
+        picks it up; this just makes the switch immediate when hands-free is already listening. Also
+        re-reads the wake word, so a changed name takes effect without a restart too."""
         self._mic_ok = None  # re-probe: the chosen device may differ in availability
+        self._wake_re = build_wake_re(self._settings.get(WAKE_WORD_SETTING))
         if self._listener is None:
             return
         try:
@@ -717,6 +815,25 @@ class VoiceController(QObject):
             self._flow.cancel()
 
     # ----- state machine -----
+    def _apply_listen_gate(self) -> None:
+        """The ONE rule for whether the mic is live: only while HELIX is genuinely idle — not thinking,
+        not speaking, and not working on a background build. So HELIX never hears its own reply and
+        ambient speech can't barge into a running turn or cancel a build. (While muted the state is
+        idle, so the mic stays live to hear 'wake'/'stop'; the muted branch of _on_utterance filters
+        everything else.)"""
+        if self._listener is not None:
+            self._listener.set_active(self.enabled() and not self._working and self._state == "idle")
+
+    def set_working(self, on: bool) -> None:
+        """The Console flags HELIX busy on a background build / self-change draft. While working the mic
+        is deaf (see _apply_listen_gate) so the room can't cancel the work by voice — the deliberate
+        stops (tap the orb, Esc, the Stop button) still apply. Toggling it re-applies the gate at once."""
+        on = bool(on)
+        if on == self._working:
+            return
+        self._working = on
+        self._apply_listen_gate()
+
     def _set_state(self, state: str) -> None:
         self._state = state
         if state == "idle":
@@ -724,10 +841,7 @@ class VoiceController(QObject):
             if self.enabled() and self._listener is None and self.can_listen():
                 self._start_wake()
                 return  # _start_wake re-enters _set_state("idle")
-        if self._listener is not None:
-            # Listen while idle (full commands) AND while busy (speaking OR thinking/building) — during
-            # 'busy' only a short "stop" acts (barge-in), so the user can halt a long build by voice.
-            self._listener.set_active(state in ("idle", "speaking", "thinking") and self.enabled())
+        self._apply_listen_gate()
         self.stateChanged.emit(_ORB.get(state, OrbState.IDLE))
 
     # ----- wake-word flow -----
@@ -782,7 +896,7 @@ class VoiceController(QObject):
         # Everything else is dropped: a slept mic never starts a turn or a build from your speech.
         self._barge_busy = False
         t = (text or "").strip()
-        if t and _wants_wake(t):
+        if t and _wants_wake(t, self._wake_re):
             self.set_muted(False)  # speaks the wake confirmation and re-arms the listener (owns state)
             return
         if t and is_stop(t):
@@ -801,19 +915,11 @@ class VoiceController(QObject):
             self._barge_busy = True
             self._transcribe(path, self._on_muted_text)
             return
-        # While speaking/thinking — OR while a background build is narrating (state is 'idle' then) — only
-        # a short "stop" counts. Otherwise HELIX's own narration, picked up by the open mic, would be
-        # transcribed as a brand-new (billed) command.
-        if self._state in ("speaking", "thinking") or self._narrating:  # barge-in: only "stop" interrupts
-            if self._barge_busy:
-                return
-            path = self._pcm_to_wav(pcm)
-            if path is None:
-                return
-            self._barge_busy = True
-            self._transcribe(path, self._on_barge_text, pcm)
-            return
-        if self._state != "idle":  # transcribing / thinking — ignore
+        # THE FOCUS SHIELD: the mic is gated off (see _apply_listen_gate) while HELIX is thinking,
+        # speaking, or working a background build, so this only fires when HELIX is genuinely idle. If
+        # a late chunk still arrives mid-work, drop it — HELIX never transcribes its own reply and the
+        # room can't interrupt the work by voice; deliberate stops are UI-only.
+        if self._working or self._state != "idle":
             return
         path = self._pcm_to_wav(pcm)
         if path is None:
@@ -868,7 +974,7 @@ class VoiceController(QObject):
             flow.cancel()
             self.interrupt()
             return True
-        matched, after = split_wake(text)
+        matched, after = split_wake(text, self._wake_re)
         # PEEK at the voice-print — only consume it if the flow accepts the utterance. On a lapse the
         # caller re-gates this same utterance, and destroying its print here would blind the gate
         # (identify(None) = no-evidence, which a live session would then mis-attribute).
@@ -933,17 +1039,50 @@ class VoiceController(QObject):
         if name:
             self.current_speaker = name
             self._session_speaker = name
+            self._remember_speaker(name)  # sticky "who was just here" for short follow-ups
             if res.confident:  # quietly sharpen the profile with this utterance
                 threading.Thread(
                     target=svc.add_passive, args=(name, emb), daemon=True, name="helix-voiceid"
                 ).start()
             return True
-        if res.no_evidence and self._session and self._session_speaker:
-            # Too short to judge, but it's a follow-up inside a session a recognized speaker opened.
-            self.current_speaker = self._session_speaker
+        if res.no_evidence:
+            # Too short to judge. Attribute it to whoever is clearly still here rather than re-challenging:
+            # the session opener, or the person recognized moments ago — so an owner isn't re-asked the
+            # instant the session lapses. (Both require a REAL prior match, so a cold stranger still can't
+            # ride this.)
+            if self._session and self._session_speaker:
+                self.current_speaker = self._session_speaker
+                return True
+            if self._recent_speaker():
+                self.current_speaker = self._recent_speaker()
+                return True
+        # Opt-in "single-user home" trust (Settings): when on, never refuse — act for the owner, named
+        # when we can. Off by default, so the strict "unrecognized voices are never acted on" stance is
+        # unchanged unless the user deliberately chooses whole-household trust.
+        if bool(self._settings.get("trust_household_voice", False)):
+            who = self._session_speaker or self._recent_speaker()
+            if who is None:
+                names = svc.names()
+                who = names[0] if len(names) == 1 else None
+            self.current_speaker = who
             return True
         self._say_identity(command, flow.offer())  # the ONE reply an unrecognized voice gets
         return False
+
+    def _remember_speaker(self, name: str) -> None:
+        self._last_speaker = name
+        self._last_speaker_ts = time.monotonic()
+
+    def _recent_speaker(self) -> str | None:
+        """Who was confidently recognized within the sticky window, else None."""
+        if self._last_speaker and (time.monotonic() - self._last_speaker_ts) <= _RECENT_SPEAKER_S:
+            return self._last_speaker
+        return None
+
+    def _ack(self) -> str:
+        """A bare-wake acknowledgement, by name when HELIX knows who's speaking ("Yes, Brian?")."""
+        who = self._session_speaker or self.current_speaker or self._recent_speaker()
+        return f"Yes, {who}?" if who else "Yes?"
 
     def _on_barge_text(self, text: str) -> None:
         # While HELIX is busy (speaking a reply OR building), two things cut through: a SHORT stop
@@ -960,8 +1099,8 @@ class VoiceController(QObject):
             # when the worker actually unwinds (stopping TTS ends a speaking turn on its own).
             self.stopRequested.emit()
             return
-        matched, after = split_wake(t)
-        if not matched or is_echo(t, self._speaking_text):
+        matched, after = split_wake(t, self._wake_re)
+        if not matched or is_echo(t, self._speaking_text, self._wake_re):
             return  # not addressed to HELIX — or HELIX hearing itself say its own name
         command = after.strip()
         if self._state == "thinking" and not self._narrating:
@@ -998,10 +1137,11 @@ class VoiceController(QObject):
             return
         if self._flow_intercept(text):  # an open registration/recalibration chat owns the mic
             return
-        matched, after = split_wake(text)
+        matched, after = split_wake(text, self._wake_re)
         if self._session and is_dismissal(text):
+            who = self._session_speaker or self.current_speaker  # capture before _end_session clears it
             self._end_session()
-            self._say("Goodbye, sir.")  # acknowledge, then drop back to wake-word-only
+            self._say(f"Until next time, {who}." if who else "Until next time.")
             return
         if matched:
             command = after.strip()
@@ -1022,7 +1162,7 @@ class VoiceController(QObject):
             return
         if not command:
             self._start_session()
-            self._say("Yes?")  # bare "HELIX" — acknowledge and wait for the command
+            self._say(self._ack())  # bare wake word — acknowledge and wait for the command
             return
         if not self._gate(command):
             # The gate consumed it — and CRUCIALLY no session opens for a refused voice. A session
@@ -1119,7 +1259,26 @@ class VoiceController(QObject):
         self._set_state("speaking")
         self._speak_gen += 1
         gen = self._speak_gen
-        self._run(lambda _emit: self._tts.speak(text), lambda *_: self._speak_done(gen))
+        # STREAMED playback: speak the reply sentence-by-sentence so the first words start while the
+        # later sentences are still being synthesized (a much faster feel on a long reply). Each chunk
+        # blocks until it finishes; a newer speak()/stop() bumps _speak_gen (and stops TTS), so the
+        # loop drops the rest at the next boundary — same preemption guarantee as one-shot speech.
+        chunks = split_sentences(text)
+        self._run(lambda _emit: self._speak_chunks(chunks, gen), lambda *_: self._speak_done(gen))
+
+    def _speak_chunks(self, chunks: list[str], gen: int) -> None:
+        if gen != self._speak_gen:
+            return
+        # Preferred: the TTS renders the chunks concurrently and plays them gaplessly (no per-sentence
+        # pause). Falls back to a simple sequential loop for a voice backend that doesn't support it.
+        speak_chunks = getattr(self._tts, "speak_chunks", None)
+        if callable(speak_chunks):
+            speak_chunks(chunks)
+            return
+        for chunk in chunks:
+            if gen != self._speak_gen:  # a newer speak()/stop() took over — drop the remaining sentences
+                return
+            self._tts.speak(chunk)
 
     def _speak_done(self, gen: int) -> None:
         """Settle to idle when an utterance finishes — unless it was preempted (a newer speak took

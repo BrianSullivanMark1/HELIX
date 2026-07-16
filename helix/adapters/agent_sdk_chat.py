@@ -11,8 +11,10 @@ Design:
   - The ORB keeps one persistent SDK session (fast follow-up turns, CLI-side caching + compaction);
     HELIX's tools ride into it as in-process MCP tools whose callbacks dispatch straight into
     ToolRegistry. Built-in Claude Code tools are OFF except WebSearch/WebFetch (and the file/shell
-    tools are additionally disallowed) — the orb must never gain file or shell access through this
-    path. Isolation: `setting_sources=[]` (no user/project settings, MCP servers, or hooks), a
+    tools are additionally disallowed) — any disk access the orb has goes through HELIX's OWN
+    audited file tools on the MCP bridge (private-zone checks, the Settings write toggle, fenced
+    output), never through the SDK's raw Read/Write/Bash, which would bypass every one of those
+    guards. Isolation: `setting_sources=[]` (no user/project settings, MCP servers, or hooks), a
     NEUTRAL working dir with no CLAUDE.md (so no project instructions auto-load), and
     `--no-session-persistence` (the untrusted transcript is not written to ~/.claude/projects).
     NOTE: `--bare` would also block the CLI's own user-level auto-memory, but it DISABLES
@@ -41,8 +43,9 @@ from dataclasses import dataclass
 from typing import Callable
 
 from helix.adapters.claude_code_cli import resolve_claude_cli
+from helix.domain.tool_labels import friendly_tool_label
 from helix.logging_setup import get_logger
-from helix.ports.llm import Reply, Text, Turn, Usage
+from helix.ports.llm import Reply, Text, ToolOutput, Turn, Usage
 
 _LOG = get_logger("subscription")
 
@@ -94,12 +97,36 @@ def sdk_importable() -> bool:
         return False
 
 
+def _image_message(prompt: str, images):
+    """An async iterable yielding ONE user message whose content is the attached images followed by the
+    text — the stream-json envelope the Agent SDK writes to the CLI (confirmed against the SDK source:
+    string prompts wrap as {"type":"user","message":{"role":"user","content": ...}}). Images first, then
+    the question, so the model reads the picture and answers about it. Base64 image blocks are the only
+    image mechanism on the subscription/CLI path (no Files API)."""
+    content = [
+        {"type": "image",
+         "source": {"type": "base64", "media_type": im.media_type, "data": im.data}}
+        for im in images
+    ]
+    content.append({"type": "text", "text": prompt})
+
+    async def _gen():
+        yield {
+            "type": "user",
+            "message": {"role": "user", "content": content},
+            "parent_tool_use_id": None,
+        }
+
+    return _gen()
+
+
 @dataclass
 class _Sinks:
     """One run's callbacks — carried in the bridge closure, never shared between runs."""
     on_progress: Callable[[str], None] | None = None
     cancel: object | None = None
     on_tool: Callable[[str, str], None] | None = None
+    user: str = ""  # the recognized speaker key, so a bridged write tool records to the right person
 
 
 class SubscriptionBrain:
@@ -169,17 +196,30 @@ class SubscriptionBrain:
 
             def _make(spec_name: str):
                 async def _call(args: dict):
-                    def _dispatch() -> str:
+                    def _dispatch():
                         out = self._tools.dispatch(
                             spec_name, args or {},
-                            on_progress=sinks.on_progress, cancel=sinks.cancel,
+                            on_progress=sinks.on_progress, cancel=sinks.cancel, user=sinks.user,
                         )
+                        # A tool may hand back IMAGES for the model to see (find_images / view_image) —
+                        # those become MCP image content blocks the CLI forwards to the model as vision;
+                        # the digest/narration uses the text part only.
+                        if isinstance(out, ToolOutput):
+                            content = [{"type": "text", "text": out.text}] if out.text else []
+                            content += [
+                                {"type": "image", "data": im.data, "mimeType": im.media_type}
+                                for im in out.images
+                            ]
+                            digest = out.text
+                        else:
+                            digest = str(out)
+                            content = [{"type": "text", "text": digest}]
                         if sinks.on_tool is not None:
-                            sinks.on_tool(spec_name, str(out))
-                        return str(out)
+                            sinks.on_tool(spec_name, digest)
+                        return content
 
                     result = await asyncio.to_thread(_dispatch)
-                    return {"content": [{"type": "text", "text": result}]}
+                    return {"content": result}
 
                 return _call
 
@@ -189,7 +229,7 @@ class SubscriptionBrain:
         return sdk_tools
 
     def _options(self, tool_names: tuple[str, ...], model: str, effort: str, sinks: _Sinks,
-                 system: str | None = None):
+                 system: str | None = None, web: bool = True):
         from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server
 
         mcp = {}
@@ -199,6 +239,12 @@ class SubscriptionBrain:
                 name="helix", version="1.0.0", tools=self._bridged_tools(tool_names, sinks)
             )
             allowed = [f"mcp__helix__{n}" for n in tool_names]
+        # WebSearch/WebFetch are the ONLY built-in tools we ever allow, and only for USER-driven runs
+        # (the orb, think_harder). AUTONOMOUS runs (agents/watchers, distillers) get web=False: they
+        # act on untrusted content (Slack/GitHub/email/notes), and an arbitrary-URL fetch would be an
+        # egress channel that bypasses call_api's host-allowlist + redirect-refusal + secret scrubbing.
+        # Those runs reach services only through the audited HELIX tools on the MCP bridge.
+        web_tools = ["WebSearch", "WebFetch"] if web else []
         # The token is the ONLY credential the child may see. An inherited ANTHROPIC_API_KEY would
         # otherwise reach claude.exe (the SDK merges os.environ) and the CLI PREFERS the key — silently
         # billing the API instead of the subscription — so clear it, exactly like the coder adapter.
@@ -207,12 +253,14 @@ class SubscriptionBrain:
             system_prompt=system or self._system,
             model=model,
             effort=effort,
-            # Web only — never the file/shell tools. `tools` sets the AVAILABLE built-in set (CLI
-            # --tools), so everything else is absent; disallowed_tools is belt-and-braces.
-            tools=["WebSearch", "WebFetch"],
-            disallowed_tools=["Bash", "Edit", "Write", "Read", "Glob", "Grep"],
+            # Web only (and only when `web`) — never the file/shell tools. `tools` sets the AVAILABLE
+            # built-in set (CLI --tools), so everything else is absent; disallowed_tools is belt-and-braces
+            # and additionally denies the web tools outright when they aren't granted.
+            tools=web_tools,
+            disallowed_tools=["Bash", "Edit", "Write", "Read", "Glob", "Grep"]
+            + ([] if web else ["WebSearch", "WebFetch"]),
             mcp_servers=mcp,
-            allowed_tools=allowed + ["WebSearch", "WebFetch"],
+            allowed_tools=allowed + web_tools,
             setting_sources=[],   # no user/project settings, MCP servers, or hooks
             # --no-session-persistence: the untrusted transcript is never written to ~/.claude/
             # projects. (NOT --bare — it breaks subscription-token auth; see the module docstring.)
@@ -260,23 +308,27 @@ class SubscriptionBrain:
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock) and (block.text or "").strip():
+                        # Collect the model's interim prose as the running answer, but do NOT push it as
+                        # a progress line: narrating half-formed thoughts made HELIX read its own thinking
+                        # aloud. Only tool milestones surface as progress, and only in a friendly phrase.
                         texts.append(block.text.strip())
-                        if on_progress is not None:
-                            on_progress(block.text.strip().split("\n", 1)[0][:90])
                     elif isinstance(block, ToolUseBlock) and on_progress is not None:
-                        name = (block.name or "").rsplit("__", 1)[-1]
-                        on_progress(f"Using {name}")
+                        # Never emit the raw tool identifier — spoken, "call_api" becomes "calawpee".
+                        on_progress(friendly_tool_label(block.name))
             elif isinstance(message, ResultMessage):
                 result_text = (message.result or "").strip() or None
         return result_text or (texts[-1] if texts else "")
 
     async def _orb_turn(self, prompt: str, tool_names: tuple[str, ...], sinks: _Sinks,
-                        history: str) -> str:
+                        history: str, images=None) -> str:
         client, fresh = await self._ensure_client(tool_names)
         if fresh and history:
             # Just (re)connected — the model has no memory of earlier turns. Prime it with a compact
             # recent transcript so "what did I just ask?" works right after a restart.
             prompt = f"[Earlier in this conversation:\n{history}\n]\n\n{prompt}"
+        # With attached images the turn is a structured user message (images + text); otherwise a plain
+        # string, exactly as before. Same persistent session, same response drain.
+        query_input = _image_message(prompt, images) if images else prompt
         watcher = None
         if sinks.cancel is not None:
             async def _watch():
@@ -292,7 +344,7 @@ class SubscriptionBrain:
 
             watcher = asyncio.ensure_future(_watch())
         try:
-            await client.query(prompt)
+            await client.query(query_input)
             return await self._collect_response(client, sinks.on_progress)
         finally:
             if watcher is not None:
@@ -300,7 +352,7 @@ class SubscriptionBrain:
 
     def run_orb_turn(
         self, prompt: str, tool_names: tuple[str, ...] = (), *,
-        history: str = "", on_progress=None, cancel=None, on_tool=None,
+        history: str = "", on_progress=None, cancel=None, on_tool=None, user: str = "", images=None,
     ) -> str:
         """One interactive orb turn on the persistent subscription session. Raises on failure —
         the caller decides whether to fall back to the API path or surface the error. A failed turn
@@ -313,9 +365,10 @@ class SubscriptionBrain:
             self._orb_sinks.on_progress = on_progress
             self._orb_sinks.cancel = cancel
             self._orb_sinks.on_tool = on_tool
+            self._orb_sinks.user = user
             try:
                 try:
-                    return self._run(self._orb_turn(prompt, names, self._orb_sinks, history))
+                    return self._run(self._orb_turn(prompt, names, self._orb_sinks, history, images))
                 except Exception as first:  # one clean retry on a fresh session (dead CLI, stale pipe)
                     _LOG.warning("subscription turn failed (%s); retrying on a fresh session", first)
                     try:
@@ -323,7 +376,7 @@ class SubscriptionBrain:
                     except Exception:  # noqa: BLE001
                         pass
                     try:
-                        return self._run(self._orb_turn(prompt, names, self._orb_sinks, history))
+                        return self._run(self._orb_turn(prompt, names, self._orb_sinks, history, images))
                     except Exception:
                         try:  # a twice-failed turn must not leave a live-but-broken session behind
                             self._run(self._drop_client(), timeout=30.0)
@@ -337,10 +390,10 @@ class SubscriptionBrain:
 
     # ----- hermetic one-shots (agents/watchers, distillers, think_harder) -----
     async def _hermetic(self, prompt: str, tool_names: tuple[str, ...], model: str, effort: str,
-                        sinks: _Sinks, system: str | None) -> str:
+                        sinks: _Sinks, system: str | None, web: bool) -> str:
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, query
 
-        opts = self._options(tool_names, model, effort, sinks, system=system)
+        opts = self._options(tool_names, model, effort, sinks, system=system, web=web)
         texts: list[str] = []
         result_text: str | None = None
         async for message in query(prompt=prompt, options=opts):
@@ -359,16 +412,17 @@ class SubscriptionBrain:
     def run_hermetic(
         self, prompt: str, tool_names: tuple[str, ...] = (), *,
         model: str = ORB_MODEL, effort: str = "low", system: str | None = None,
-        on_progress=None, cancel=None, on_tool=None,
+        on_progress=None, cancel=None, on_tool=None, web: bool = False,
     ) -> str:
         """A stateless run (agents/watchers, deep thinking, distillation). Fresh session each time,
         nothing persisted anywhere by this layer; `system` overrides the orb persona when the caller
         is a distiller with its own. Its sinks live in its own closure — no lock, so it runs
         concurrently with the orb and can even be re-entered from an orb turn's bridged tool. Raises
-        on failure."""
+        on failure. `web` defaults OFF: autonomous/distiller runs get no arbitrary web fetch — only a
+        user-driven reasoner (think_harder) opts back in."""
         _hide_child_windows()  # before any SDK spawn — no blank console window on every turn
         sinks = _Sinks(on_progress=on_progress, cancel=cancel, on_tool=on_tool)
-        return self._run(self._hermetic(prompt, tuple(tool_names), model, effort, sinks, system))
+        return self._run(self._hermetic(prompt, tuple(tool_names), model, effort, sinks, system, web))
 
     def shutdown(self) -> None:
         if self._closed:

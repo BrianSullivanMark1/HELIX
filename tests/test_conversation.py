@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from helix.ports.llm import Reply, Text, ToolSpec
-from helix.services.conversation import ConversationService
+from helix.ports.llm import Reply, Text, ToolSpec, ToolUse
+from helix.services.conversation import MAX_STEPS, ConversationService
 
 
 class _CaptureChat:
@@ -195,6 +195,105 @@ def test_current_time_anchor_is_injected_each_turn_but_not_persisted():
     # ...but the anchor is ephemeral — only the user's words are written to history
     stored = "".join(m.text for m in store.msgs)
     assert "what day is it" in stored and "Current date & time" not in stored
+
+
+class _ScriptChat:
+    """Returns a scripted sequence of replies (so we can drive the tool loop), else a plain 'done'."""
+
+    def __init__(self, replies) -> None:
+        self._replies = list(replies)
+        self.calls = 0
+        self.last_turns: list = []
+
+    def chat(self, turns, *, system=None, tools=None) -> Reply:
+        self.calls += 1
+        self.last_turns = list(turns)
+        return self._replies.pop(0) if self._replies else Reply(blocks=(Text("done"),))
+
+
+class _RaisingTools:
+    def specs(self):
+        return [ToolSpec("list_apps", "list", {"type": "object", "properties": {}})]
+
+    def dispatch(self, *a, **k):
+        raise RuntimeError("boom")
+
+
+class _OkTools:
+    def specs(self):
+        return [ToolSpec("list_apps", "list", {"type": "object", "properties": {}})]
+
+    def dispatch(self, *a, **k):
+        return "two apps"
+
+
+def test_api_loop_recovers_from_a_tool_error():
+    # A tool that raises must NOT crash the turn — the error is fed back to the model, which then answers.
+    chat = _ScriptChat([
+        Reply(blocks=(ToolUse("t1", "list_apps", {}),)),  # first: call the (raising) tool
+        Reply(blocks=(Text("Here you go."),)),            # then: recover with a plain answer
+    ])
+    svc = ConversationService(chat, _RaisingTools(), _FakeStore(), _FakeMemory(), _FixedClock(), "sys")
+    out = svc.run_turn("what apps do I have")
+    assert out == "Here you go."   # recovered
+    assert chat.calls == 2         # the loop continued past the tool error
+
+
+def test_api_loop_stops_at_max_steps():
+    # A model that keeps calling tools forever is capped at MAX_STEPS, then bows out gracefully.
+    chat = _ScriptChat([Reply(blocks=(ToolUse(f"t{i}", "list_apps", {}),)) for i in range(MAX_STEPS + 3)])
+    svc = ConversationService(chat, _OkTools(), _FakeStore(), _FakeMemory(), _FixedClock(), "sys")
+    out = svc.run_turn("loop please")
+    assert chat.calls == MAX_STEPS
+    assert "stuck" in out.lower()
+
+
+def test_successful_tool_result_is_remembered_as_a_tool_row():
+    from helix.domain.models import Role
+
+    chat = _ScriptChat([
+        Reply(blocks=(ToolUse("t1", "list_apps", {}),)),
+        Reply(blocks=(Text("Two apps."),)),
+    ])
+    store = _FakeStore()
+    svc = ConversationService(chat, _OkTools(), store, _FakeMemory(), _FixedClock(), "sys")
+    svc.run_turn("what apps")
+    # what the tool learned is persisted as a TOOL row so a later turn can answer from it
+    assert any(m.role == Role.TOOL for m in store.msgs)
+
+
+class _FakeMemSvc:
+    """Stand-in MemoryService: returns a per-user context block, records after_turn calls."""
+
+    def __init__(self, facts_by_user):
+        self._by = facts_by_user
+        self.after_calls = []
+
+    def context(self, user=""):
+        f = self._by.get(user)
+        return f"[memory: {f}]" if f else ""
+
+    def after_turn(self, user=""):
+        self.after_calls.append(user)
+
+
+def test_per_speaker_memory_is_injected_for_the_right_person():
+    # Brian's long-term memory is injected on his turn; Sarah (no memory) gets none — household keying.
+    mem = _FakeMemSvc({"brian": "is a contractor"})
+    chat = _CaptureChat()
+    svc = ConversationService(
+        chat, _FakeTools([]), _FakeStore(), _FakeMemory(), _FixedClock(), "sys", user_memory=mem
+    )
+    svc.run_turn("hey", speaker="Brian")
+    assert "is a contractor" in _all_text(chat.last_turns)
+    assert mem.after_calls == ["brian"]  # captured under the speaker key
+
+    chat2 = _CaptureChat()
+    svc2 = ConversationService(
+        chat2, _FakeTools([]), _FakeStore(), _FakeMemory(), _FixedClock(), "sys", user_memory=mem
+    )
+    svc2.run_turn("hey", speaker="Sarah")
+    assert "is a contractor" not in _all_text(chat2.last_turns)  # not Sarah's memory
 
 
 def test_history_coalesces_consecutive_same_role_turns():

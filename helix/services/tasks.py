@@ -46,6 +46,10 @@ class TaskService:
         self._connections = connections  # injects the build's declared API keys as env vars at launch
         self._knowledge = knowledge       # ingests a task's outbox into a knowledge base when it finishes
         self._procs: dict[str, subprocess.Popen] = {}  # slug -> live process (for status / cleanup)
+        # run() (a worker thread) and stop()/_prune() (the UI thread) both mutate _procs; guard every
+        # access so a concurrent insert can't make _prune's iterate-then-pop raise "changed size during
+        # iteration" (surfaced as a spurious launch failure).
+        self._lock = threading.Lock()
 
     def runnable(self) -> list[App]:
         return [a for a in self._builds.list() if a.build_kind == BuildKind.TASK]
@@ -59,7 +63,8 @@ class TaskService:
         )
 
     def is_running(self, slug: str) -> bool:
-        proc = self._procs.get(slug)
+        with self._lock:
+            proc = self._procs.get(slug)
         return proc is not None and proc.poll() is None
 
     def run(self, slug: str, *, port: int | None = None, headless: bool = False) -> bool:
@@ -103,7 +108,8 @@ class TaskService:
                 [_python(), app.entry_point], cwd=str(ws), env=env,
                 stdout=stdout, stderr=stderr, creationflags=flags,
             )
-            self._procs[slug] = proc
+            with self._lock:
+                self._procs[slug] = proc
             # Watch a finishing console task for results to harvest into the user's knowledge. A server app
             # (headless, runs indefinitely) is never harvested.
             if not headless and self._knowledge is not None:
@@ -132,7 +138,8 @@ class TaskService:
 
     def stop(self, slug: str) -> None:
         """Terminate one running build (e.g. a backend app's server when its viewer closes)."""
-        proc = self._procs.pop(slug, None)
+        with self._lock:
+            proc = self._procs.pop(slug, None)
         if proc is not None:
             try:
                 if proc.poll() is None:
@@ -143,14 +150,17 @@ class TaskService:
     def terminate_all(self) -> None:
         """Best-effort stop of any task processes HELIX launched (available; not called on a normal close,
         since a task runs in its own console and is the user's to keep running)."""
-        for proc in list(self._procs.values()):
+        with self._lock:
+            procs = list(self._procs.values())
+            self._procs.clear()
+        for proc in procs:
             try:
                 if proc.poll() is None:
                     proc.terminate()
             except Exception:
                 pass
-        self._procs.clear()
 
     def _prune(self) -> None:
-        for slug in [s for s, p in self._procs.items() if p.poll() is not None]:
-            self._procs.pop(slug, None)
+        with self._lock:
+            for slug in [s for s, p in self._procs.items() if p.poll() is not None]:
+                self._procs.pop(slug, None)

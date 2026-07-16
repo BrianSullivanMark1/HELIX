@@ -184,7 +184,7 @@ class _Tools:
     def specs(self):
         return []
 
-    def dispatch(self, name, args, *, on_progress=None, cancel=None):
+    def dispatch(self, name, args, *, on_progress=None, cancel=None, user=""):
         if self._exc:
             raise self._exc
         return "done"

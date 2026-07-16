@@ -90,6 +90,45 @@ def test_speakable_strips_markdown_and_symbols():
     assert speakable("Hello, sir. Ready when you are?") == "Hello, sir. Ready when you are?"
 
 
+def test_speakable_unglues_snake_case_and_expands_acronyms():
+    # The "calawpee" fix: an underscore becomes a SPACE (never deleted), so a stray tool name is spoken
+    # as words, and a few tech initialisms are said letter-by-letter instead of slurred.
+    assert speakable("I'll call_api for that") == "I'll call A P I for that"
+    assert speakable("using build_3d_model now") == "using build 3d model now"
+    assert speakable("open the url please") == "open the U R L please"
+
+
+def test_split_sentences_for_streamed_speech():
+    from helix.ui.voice import split_sentences
+
+    # a short reply stays one chunk (no behavior change)
+    assert split_sentences("On it.") == ["On it."]
+    # a multi-sentence reply splits so the first can play while the rest synthesize
+    assert split_sentences("The report is ready. Revenue climbed. Want the details?") == [
+        "The report is ready.", "Revenue climbed.", "Want the details?",
+    ]
+    # a tiny fragment merges forward instead of becoming a choppy lone chunk
+    assert split_sentences("Yes. The build finished and it's in the menu now.") == [
+        "Yes. The build finished and it's in the menu now.",
+    ]
+    # an abbreviation doesn't split mid-sentence
+    assert split_sentences("Dr. Smith called about the permit. I'll follow up.") == [
+        "Dr. Smith called about the permit.", "I'll follow up.",
+    ]
+    assert split_sentences("") == []
+
+
+def test_wake_word_config_matches_a_custom_word_only():
+    from helix.ui.voice import build_wake_re
+
+    re_helix = build_wake_re(None)  # default falls back to the curated HELIX matcher
+    assert split_wake("hey helix open the door", re_helix) == (True, "open the door")
+    re_athena = build_wake_re("Athena")
+    assert split_wake("Athena what's the time", re_athena)[0]
+    assert split_wake("hey Athena, open the garage", re_athena) == (True, "open the garage")
+    assert not split_wake("hey helix open the door", re_athena)[0]  # only the chosen word wakes now
+
+
 def test_split_visuals_extracts_table_and_leaves_spoken_prose():
     reply = 'Here are the quarters.\n```viz\n{"type":"table","columns":["Q"],"rows":[["Q1"]]}\n```'
     spoken, specs = split_visuals(reply)

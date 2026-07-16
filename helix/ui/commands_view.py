@@ -23,7 +23,7 @@ from helix.ui.theme import CYAN, LINE, MUTED, TEXT
 # (section title, [(keyword/phrase, one-sentence action)]). Keep each action to ONE plain sentence.
 COMMAND_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     ("Wake & talk", (
-        ("“HELIX …”", "Say the wake word, then your request."),
+        ("“{WAKE} …”", "Say the wake word, then your request (change the word in Settings)."),
         ("Tap the orb", "Start talking hands-free — or stop HELIX when it's busy."),
         ("🎤 Hold to Talk", "Push-to-talk: hold the button, speak, release."),
     )),
@@ -40,13 +40,15 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("“run my morning brief”", "Runs a saved agent (or “run the cleanup flow”)."),
         ("“delete the tip calculator”", "Removes it — after you confirm with one click."),
     )),
-    ("Stop a build", (
-        ("“stop” · “stop build” · “cancel the build” · “abort”", "Halts the build that's running now."),
-        ("Esc, or tap the orb", "The same as saying “stop”."),
+    ("Stop a build or a reply", (
+        ("■ Stop button", "Halts whatever HELIX is doing right now."),
+        ("Esc, or tap the orb", "The same — stop the current build or reply."),
+        ("“stop” · “stop build” · “cancel the build” · “abort”", "By voice when HELIX is idle; while it's "
+         "building or speaking the mic is off — so a baby or the TV can't cancel your work — use Stop."),
     )),
     ("Sleep the mic — your build keeps running", (
         ("“sleep” · “go to sleep” · “stop listening”", "Rests the mic so HELIX stops hearing you."),
-        ("“wake” · “HELIX” · “start listening”", "Wakes the mic and starts listening to you again."),
+        ("“wake” · “{WAKE}” · “start listening”", "Wakes the mic and starts listening to you again."),
         ("😴 Sleep / ▶ Wake button", "The same rest/wake, by hand, beside the text box."),
     )),
     ("Voice & session", (
@@ -71,8 +73,9 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
 class CommandsDialog(QDialog):
     """A scrollable, HUD-styled reference of HELIX's keywords and controls."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, wake_word: str = "HELIX") -> None:
         super().__init__(parent)
+        self._wake = (wake_word or "").strip() or "HELIX"
         self.setWindowTitle("HELIX — Commands")
         self.setMinimumSize(560, 620)
         self.setStyleSheet(
@@ -85,7 +88,9 @@ class CommandsDialog(QDialog):
 
         title = QLabel("Things you can say")
         title.setStyleSheet(f"color:{CYAN};font-size:18px;font-weight:600;letter-spacing:.5px;")
-        subtitle = QLabel("Speak the wake word “HELIX” first when hands-free, or just type any of these.")
+        subtitle = QLabel(
+            f"Speak the wake word “{self._wake}” first when hands-free, or just type any of these."
+        )
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet(f"color:{MUTED};")
         root.addWidget(title)
@@ -125,7 +130,7 @@ class CommandsDialog(QDialog):
         head.setStyleSheet(f"color:{CYAN};font-weight:600;font-size:13px;letter-spacing:.4px;")
         lay.addWidget(head)
         for keys, action in rows:
-            row = QLabel(f"{keys}  —  {action}")
+            row = QLabel(f"{keys.replace('{WAKE}', self._wake)}  —  {action}")
             row.setWordWrap(True)
             row.setTextFormat(Qt.TextFormat.PlainText)
             row.setStyleSheet(f"color:{TEXT};")

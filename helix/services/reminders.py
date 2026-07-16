@@ -7,6 +7,7 @@ closed fires at the next launch, marked late). The shell's heartbeat calls pop_d
 from __future__ import annotations
 
 import secrets as _secrets
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -37,6 +38,10 @@ class ReminderService:
     def __init__(self, settings: SettingsStore, clock: Clock) -> None:
         self._settings = settings
         self._clock = clock
+        # add/cancel run on an orb worker thread; pop_due runs on the heartbeat (UI) thread. Each is a
+        # read-modify-write over one settings key, and the store locks only individual get/set — so
+        # serialize the whole RMW here or their saves interleave and drop or double-fire a reminder.
+        self._lock = threading.RLock()
 
     # ----- reads -----
     def active(self) -> list[Reminder]:
@@ -74,11 +79,12 @@ class ReminderService:
                 due += timedelta(days=1)
         else:
             return "When should I remind you — in how many minutes, or at what time?"
-        items = self.active()
-        if len(items) >= _MAX_ACTIVE:
-            return "That's a lot of reminders — clear some before adding more."
-        rem = Reminder(_secrets.token_hex(3), text, due)
-        self._save(items + [rem])
+        with self._lock:
+            items = self.active()
+            if len(items) >= _MAX_ACTIVE:
+                return "That's a lot of reminders — clear some before adding more."
+            rem = Reminder(_secrets.token_hex(3), text, due)
+            self._save(items + [rem])
         when = _spoken_time(due) if due.date() == now.date() else f"{_spoken_time(due)} tomorrow"
         return f"Reminder set for {when} — I'll speak up."
 
@@ -87,23 +93,26 @@ class ReminderService:
         needle = (which or "").strip().lower()
         if not needle:
             return "Which reminder should I cancel?"
-        items = self.active()
-        hits = [r for r in items if r.id == needle or needle in r.text.lower()]
-        if not hits:
-            return f"I don't have a reminder matching '{which}'."
-        if len(hits) > 1:
-            return "A few match — which one? " + "; ".join(f"{r.text} at {_spoken_time(r.due)}" for r in hits)
-        self._save([r for r in items if r.id != hits[0].id])
+        with self._lock:
+            items = self.active()
+            hits = [r for r in items if r.id == needle or needle in r.text.lower()]
+            if not hits:
+                return f"I don't have a reminder matching '{which}'."
+            if len(hits) > 1:
+                return ("A few match — which one? "
+                        + "; ".join(f"{r.text} at {_spoken_time(r.due)}" for r in hits))
+            self._save([r for r in items if r.id != hits[0].id])
         return f"Cancelled the '{hits[0].text}' reminder."
 
     # ----- the heartbeat -----
     def pop_due(self) -> list[Reminder]:
         """Return every reminder that has come due and remove it from the store — each fires once."""
         now = self._clock.now()
-        items = self.active()
-        due = [r for r in items if r.due <= now]
-        if due:
-            self._save([r for r in items if r.due > now])
+        with self._lock:
+            items = self.active()
+            due = [r for r in items if r.due <= now]
+            if due:
+                self._save([r for r in items if r.due > now])
         return due
 
     def _save(self, items: list[Reminder]) -> None:
