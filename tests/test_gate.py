@@ -213,23 +213,44 @@ def test_live_volatile_writes_during_a_draft_do_not_refuse(tmp_path):
     assert pc.branch in GIT.list_branches(repo, "selfdev/")
 
 
-def test_coder_escape_into_a_nonvolatile_data_file_still_refused(tmp_path):
-    # The guard is NARROWED, not disabled: a coder that writes a NON-volatile data path (a user's built
-    # app, secrets) is still caught. Only the app's own churning stores are skipped.
+def test_coder_escape_into_secrets_still_refused(tmp_path):
+    # The guard is NARROWED, not disabled: a coder that writes a NON-skipped data path is still caught.
     repo = _helix_repo()
     data = tmp_path / "livedata2"
     data.mkdir()
 
     def coder(wt):
         _w(wt / "helix/services/conversation.py", "# edit")
-        _w(data / "builds" / "myapp" / "index.html", "<h1>escaped into a user's app</h1>")
+        _w(data / "some_other_secret_store.json", '{"stolen": true}')
 
     svc = SelfDevService(
         _Coder(coder), GIT, _Settings(), CLOCK, repo,
         worktrees_dir=repo.parent / "wt-esc", smoke_check=lambda p: (True, ""), data_dir=data,
     )
     with pytest.raises(ConstitutionViolation):
-        svc.propose("escape into a built app")
+        svc.propose("escape into a non-volatile data file")
+
+
+def test_concurrent_build_writing_data_builds_during_a_draft_does_not_refuse(tmp_path):
+    # A background BUILD can run WHILE a self-change drafts and write its own workspace under
+    # data/builds. Those writes are the build, not the self-dev coder — the draft must still succeed
+    # (the Forge guard skips the builds tree for the same reason).
+    repo = _helix_repo()
+    data = tmp_path / "livedata3"
+    (data / "builds").mkdir(parents=True)
+
+    def coder(wt):
+        _w(wt / "helix/services/conversation.py", "# improved by the draft")
+        # a concurrent build writing its workspace during the draft:
+        _w(data / "builds" / "tip-calc" / "index.html", "<h1>a concurrent build</h1>")
+        _w(data / "builds" / "tip-calc" / ".helixbuild.json", "{}")
+
+    svc = SelfDevService(
+        _Coder(coder), GIT, _Settings(), CLOCK, repo,
+        worktrees_dir=repo.parent / "wt-cc", smoke_check=lambda p: (True, ""), data_dir=data,
+    )
+    pc = svc.propose("improve conversation")  # must NOT be refused by the concurrent build's writes
+    assert pc.branch in GIT.list_branches(repo, "selfdev/")
 
 
 # ----- forge build containment -----

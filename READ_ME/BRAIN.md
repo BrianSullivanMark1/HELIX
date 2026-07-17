@@ -70,8 +70,11 @@ on a background thread:
 1. Refuse unless the working tree is clean, the constitution fingerprint matches, and no git hooks are
    planted.
 2. Create an **isolated git worktree** in a temp dir (never the live tree) on a `selfdev/` branch.
-3. The **growth coder** (the Claude Code CLI on the subscription token, pinned to Fable 5) edits code
-   in that worktree, streaming plain-language progress.
+3. The **growth coder** (the Claude Code CLI on the subscription token) edits code in that worktree,
+   streaming plain-language progress. It drafts on the growth model by default (Fable 5,
+   auto-upscaling), but Evolve **sizes it per task**: its Fable-5 proposal ends with an `EFFORT` tier —
+   `deep` holds at Fable 5+, `standard` drops to the **Opus 4.8 work floor** for a small mechanical
+   change. It never drafts below Opus 4.8.
 4. Guards, all fail-closed: a **source-escape** scan (the coder must not write the live source outside
    its worktree) and a **data-guard** (it must not write into `data/`). The data-guard SKIPS the app's
    own volatile stores (`config.volatile_data_paths` — helix.db, agents/memory/reflexes, the log,

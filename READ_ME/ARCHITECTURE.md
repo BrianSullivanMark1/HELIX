@@ -253,8 +253,9 @@ HELIX can improve its *own* code through the same `CoderAgent`, but every self-c
   minus the protected files): a fail-closed allowlist; anything else is refused.
 - **`LOCKED_SETTINGS`** — e.g. `human_approval_required`, which cannot be toggled off by the model.
 
-The gate: record pending → scan the diff against protected paths/shell → smoke-check (import the app in
-an isolated worktree) → revertible `--no-ff` merge → restart. A fingerprint over the Constitution pauses
+The gate: record pending → scan the diff against protected paths/shell → smoke-check (non-executing
+byte-compile in an isolated worktree — importing is deliberately avoided so branch code never runs at
+approve time) → revertible `--no-ff` merge → restart. A fingerprint over the Constitution pauses
 autonomous self-editing if the laws are tampered with. Drafting runs in a background lane so the orb
 isn't frozen. Built apps are sandboxed to their own workspace and told never to reach outside it.
 

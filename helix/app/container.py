@@ -241,10 +241,12 @@ class Container:
         coder_chat = AnthropicChat(_key, max_tokens=8000)  # roomier for code generation (Opus default)
         # Prefer the Claude Code CLI (most capable); fall back to the API coder (key-only, no CLI).
         self.coder = FallbackCoder(ClaudeCodeCli(_key, _oauth), ApiCoder(coder_chat, _key))
-        # THE GROWTH CODER: when HELIX edits its OWN code (self-improvement), it drafts on the STRONGEST
-        # model — Fable 5 today, auto-upscaling — not the everyday coder's default. Same CLI/subscription
-        # path (the OAuth token is preferred over the API key inside ClaudeCodeCli), just pinned to the
-        # growth model. Builds keep using self.coder; only self-dev reaches for the top brain.
+        # THE GROWTH CODER: when HELIX edits its OWN code (self-improvement), it drafts on the growth
+        # model by DEFAULT (Fable 5 today, auto-upscaling) — but Evolve's proposal can size it PER TASK
+        # via the EFFORT tier, dropping to the Opus 4.8 work floor for a small mechanical change or
+        # holding at Fable 5 for a deep one (see GrowthModelResolver.work_model). Same CLI/subscription
+        # path (the OAuth token is preferred over the API key inside ClaudeCodeCli). Builds keep using
+        # self.coder; only self-dev reaches for the top brain.
         _growth_model = self.growth_model.resolve()
         growth_coder_chat = AnthropicChat(_key, model=_growth_model, max_tokens=8000)
         self.growth_coder = FallbackCoder(

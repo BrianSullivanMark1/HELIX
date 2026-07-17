@@ -152,7 +152,12 @@ class SelfDevService:
         # self-change draft runs the coder for MINUTES while the live app keeps writing them. Without
         # this skip, HELIX's own mid-draft writes are misread as a coder escape and a good draft is
         # refused ("the coder wrote into protected data/ (helix.db, …)"). Shared with the Forge guard.
-        data_skip = volatile_data_paths(self._data_dir) if self._data_dir else ()
+        # ALSO skip data/builds: a background BUILD (or a knowledge ingest) can run CONCURRENTLY with a
+        # draft and write its own workspace under data/builds — that is the build, not the self-dev
+        # coder, exactly as the Forge guard skips the builds tree for concurrent builds.
+        data_skip = (
+            (*volatile_data_paths(self._data_dir), self._data_dir / "builds") if self._data_dir else ()
+        )
         data_sig = scan_tree(self._data_dir, skip=data_skip) if self._data_dir else {}
         # Escape backstop: the shared coder (the Claude Code CLI) can target ABSOLUTE paths, so it could
         # write into the live deployed source OUTSIDE its draft worktree. The worktree's staged diff can't

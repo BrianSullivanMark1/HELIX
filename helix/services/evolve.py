@@ -1,8 +1,9 @@
 """EvolveService — HELIX's overnight self-improvement pass (V3_DESIGN §5).
 
 Once a night, in the quiet hours, HELIX mines what the day produced — the standing lessons its user
-taught it and the tail of its own log — and asks the fast brain for the ONE small, safe improvement
-worth making to its own code. A real proposal is handed to the SAME background drafting lane that
+taught it and the tail of its own log — and asks its STRONGEST reasoning model (the growth model —
+Fable 5, auto-upscaling) for the ONE small, safe improvement worth making to its own code, and for how
+much muscle drafting it needs (the EFFORT tier, which sizes the coder model). A real proposal is handed to the SAME background drafting lane that
 `improve_helix` uses, so the standard pipeline (branch, Constitution scan, smoke-checked approval,
 SelfChangeProgress/Finished announcements) all just happens; a QUIET night costs one cheap model
 call and nothing else. Evolve is a *client* of the selfdev gate, never a bypass: it drafts, it never
