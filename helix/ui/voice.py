@@ -27,6 +27,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from helix.domain.brain import is_addressed, is_wake_utterance
 from helix.logging_setup import get_logger
 from helix.ports.speech import SpeechIn, SpeechOut
 from helix.ports.stores import SettingsStore
@@ -358,7 +359,8 @@ def is_stop(text: str) -> bool:
 
 
 def is_sleep(text: str) -> bool:
-    """True when the whole utterance asks HELIX to sleep (rest the mic), not stop a build."""
+    """True when the whole utterance asks HELIX to sleep (rest the mic), not stop a build. This is the
+    built-in brainstem grammar; VoiceController._is_sleep_reflex also consults learned reflexes."""
     return bool(_SLEEP_FORMS.match(_clean_command(text)))
 
 
@@ -368,20 +370,13 @@ def is_wake(text: str) -> bool:
 
 
 def _wants_wake(text: str, wake_re=None) -> bool:
-    """STRICT wake test used while asleep — sleep means sleep. True only for an EXPLICIT wake:
-    a whole-utterance wake phrase ("wake up", "mic on"), or the wake word LEADING the utterance
-    (first two words — "HELIX", "hey HELIX, you there?") or an utterance so short it IS the address
-    (≤3 words containing the name). The name buried in a longer sentence — "the wake word is HELIX",
-    someone explaining the commands to a friend — is speech ABOUT HELIX, not TO it: stay asleep."""
-    if is_wake(text):
-        return True
-    if not split_wake(text, wake_re)[0]:
-        return False
-    words = re.findall(r"[a-z0-9']+", (text or "").lower())
-    if len(words) <= 3:
-        return True
-    rx = wake_re or _WAKE_RE
-    return any(rx.search(w) for w in words[:2])
+    """Wake test used while asleep — the THALAMIC GATE (domain/brain.py). Sleep means sleep: HELIX
+    wakes only for an explicit wake PHRASE ("wake up", "mic on") or an utterance genuinely ADDRESSED
+    to it — the name leading the utterance, even inside a natural greeting ("good morning HELIX, how
+    you doing"), or a short utterance that IS the address. The name merely MENTIONED mid-sentence
+    ("the wake word is HELIX", explaining the commands to a friend) is speech about HELIX, not to it,
+    and leaves it asleep."""
+    return is_wake_utterance(text, wake_re or _WAKE_RE, is_wake)
 
 
 def _normalize16(pcm: bytes, target_peak: float = 0.9, max_gain: float = 8.0) -> bytes:
@@ -689,11 +684,16 @@ class VoiceController(QObject):
         settings: SettingsStore,
         parent: QObject | None = None,
         voice_id: "voiceid.VoiceIdService | None" = None,
+        reflexes=None,
     ) -> None:
         super().__init__(parent)
         self._stt = speech_in
         self._tts = speech_out
         self._settings = settings
+        # Learned reflexes (the growth layer's consolidation store): a sleep phrase the cortex judged
+        # genuine fires here instantly next time — no model call. Optional; without it, only the
+        # built-in sleep grammar applies.
+        self._reflexes = reflexes
         # Voice identity: who is speaking. Optional — without the service the gate is open and
         # behavior is exactly the single-user HELIX of before.
         self._voice_id = voice_id
@@ -869,6 +869,23 @@ class VoiceController(QObject):
     # ----- sleep / wake (rest the mic without stopping a build) -----
     def is_muted(self) -> bool:
         return self._muted
+
+    def _is_sleep_reflex(self, command: str) -> bool:
+        """Brainstem sleep check: the built-in grammar OR a learned reflex the cortex consolidated.
+        Only ever called on the command portion (post-wake / in-session), so it is addressed-only."""
+        if is_sleep(command):
+            return True
+        return self._reflexes is not None and self._reflexes.matches(command, "sleep")
+
+    def learn_sleep(self, command: str) -> None:
+        """Consolidate a phrase the cortex judged a genuine sleep request into a fast reflex — the
+        growth layer teaching the brainstem. Skips anything the built-in grammar already covers."""
+        if self._reflexes is None or not (command or "").strip() or is_sleep(command):
+            return
+        try:
+            self._reflexes.learn(command, "sleep")
+        except Exception:  # noqa: BLE001 — consolidation is best-effort, never breaks a turn
+            pass
 
     def set_muted(self, on: bool, announce: bool = True) -> None:
         """Put the mic to SLEEP / WAKE it. Sleeping does NOT end the session or stop a build — it only
@@ -1129,8 +1146,8 @@ class VoiceController(QObject):
             self.stopRequested.emit()
             self._set_state("idle")
             return
-        if is_sleep(command):  # 'sleep' rests the mic; set_muted speaks the confirmation and re-arms
-            self.set_muted(True)
+        if self._is_sleep_reflex(command):  # built-in OR learned sleep reflex — rest the mic
+            self.set_muted(True)  # set_muted speaks the confirmation and re-arms
             return
         if not command:
             self._start_session()
@@ -1162,7 +1179,7 @@ class VoiceController(QObject):
         else:
             self._set_state("idle")  # not addressed to HELIX — keep listening
             return
-        if is_sleep(command):  # "sleep / stop listening" — rest the mic; never a turn, never a build-stop
+        if self._is_sleep_reflex(command):  # built-in OR learned sleep reflex — rest the mic
             self.set_muted(True)  # set_muted speaks the confirmation and re-arms the listener
             return
         if is_wake(command):  # already awake — consume it so 'wake' never becomes a model turn

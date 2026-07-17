@@ -128,6 +128,7 @@ class ConversationService:
         cancel: CancelToken | None = None, allow_builds: bool = True, persist: bool = True,
         knowledge_sources: list[tuple[str, str]] | None = None,
         speaker_context: str | None = None, speaker: str | None = None,
+        situation: str | None = None,
     ) -> str:
         # The per-speaker key for the household-aware context (profile/lessons/memory/location). Empty =
         # the shared/single-user bucket; a recognized name gets their own. Only meaningful on persist
@@ -150,6 +151,12 @@ class ConversationService:
         # identity), attachments, and ambient knowledge. Appended to the LAST user turn for the API
         # path (never persisted, cache-friendly because the system prompt stays byte-stable).
         extras: list[str] = [self._now_context()]
+        # LIMBIC self-situation (interoception — READ_ME/BRAIN.md): HELIX's own live state this turn
+        # (awake/resting, session, who's speaking, a build running, time of day). The cortex reasons
+        # FROM it, so "where am I in this conversation?" is answerable. Built by the caller (the
+        # Console holds these signals); an agent run has none.
+        if persist and situation:
+            extras.append(situation)
         if persist and self._profile is not None:
             profile_text = self._profile.context(user)
             if profile_text:

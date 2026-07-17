@@ -737,11 +737,14 @@ class ConsoleView(QWidget):
         selfdev_lane=None,
         voice_id=None,
         suggestions=None,
+        reflexes=None,
     ) -> None:
         super().__init__()
         self.setObjectName("Console")
         self._conversation = conversation
         self._settings = settings
+        self._reflexes = reflexes  # growth layer: learned sleep reflexes (voice consolidation)
+        self._last_user_utterance = ""  # the last voice utterance, for reflex consolidation
         self._forge = forge  # for removing/rolling back work a 'stop' interrupted
         self._queue = build_queue  # background build jobs — cancel/status the running build
         self._selfdev_lane = selfdev_lane  # background self-change drafts — cancel/status
@@ -778,7 +781,9 @@ class ConsoleView(QWidget):
         self._voice: VoiceController | None = None
         self._voice_id = voice_id  # registered voice profiles (identity notes ride into each turn)
         if speech_in is not None and speech_out is not None:
-            self._voice = VoiceController(speech_in, speech_out, settings, self, voice_id=voice_id)
+            self._voice = VoiceController(
+                speech_in, speech_out, settings, self, voice_id=voice_id, reflexes=reflexes
+            )
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 14, 28, 18)
@@ -1317,6 +1322,38 @@ class ConsoleView(QWidget):
         self._attach_host.setVisible(bool(self._attachments))
 
     # ----- conversation -----
+    def _situation(self, *, from_voice: bool) -> str:
+        """The LIMBIC self-situation block (interoception — READ_ME/BRAIN.md): HELIX's own live state
+        this turn, so the cortex can reason about where it is. Compact, plain, ephemeral — never
+        persisted, rebuilt each turn from the real signals."""
+        import time as _time
+
+        bits: list[str] = []
+        bits.append("reached by voice" if from_voice else "reached by typed message")
+        if self._voice is not None:
+            in_session = False
+            try:
+                in_session = bool(getattr(self._voice, "_session", False))
+            except Exception:  # noqa: BLE001
+                in_session = False
+            bits.append("mic awake" + (", conversation session open" if in_session else ""))
+        # A build in flight is part of HELIX's felt state (it's "working").
+        try:
+            if self._queue is not None and self._queue.active_names():
+                bits.append("a build is running in the background")
+        except Exception:  # noqa: BLE001
+            pass
+        hour = _time.localtime().tm_hour
+        part = ("early morning" if hour < 6 else "morning" if hour < 12
+                else "afternoon" if hour < 17 else "evening" if hour < 22 else "late night")
+        bits.append(f"it's {part}")
+        return (
+            "[Your own state right now (self-awareness, not the user's words): "
+            + "; ".join(bits)
+            + ". Reason from this when it matters — you are a situated presence, aware of where you "
+            "are in the conversation.]"
+        )
+
     def _send(self) -> None:
         text = self._input.text().strip()
         attached = list(self._attachments)
@@ -1332,6 +1369,10 @@ class ConsoleView(QWidget):
         attach_paths = attach_paths or []
         if not text and not attach_paths:
             return
+        # Remember this turn's raw utterance so a go_to_sleep judgment can consolidate it into a
+        # learned reflex (the growth layer). Voice turns are what teach the brainstem; a typed one
+        # is harmless to record too.
+        self._last_user_utterance = text if from_voice else ""
         if not from_voice and self._voice_id is not None and voiceid.wants_recalibration(text):
             # Calibration is a spoken conversation — HELIX has to HEAR the voice it's learning.
             self._add_bubble("you", text)
@@ -1459,6 +1500,7 @@ class ConsoleView(QWidget):
         paths = list(attach_paths or [])
         self._turn_sources = []  # fresh per turn; populated if the orb drew on saved knowledge
         sources_sink = self._turn_sources
+        situation = self._situation(from_voice=from_voice)  # LIMBIC self-state (proprioception)
         # Who spoke, plus their identity notes — ephemeral context so the orb addresses the recognized
         # speaker and remembers what it learned about them at registration.
         speaker_ctx = None
@@ -1496,6 +1538,7 @@ class ConsoleView(QWidget):
             return self._conversation.run_turn(
                 text, attachments_text=atext, images=image_blocks, on_progress=emit, cancel=token,
                 knowledge_sources=sources_sink, speaker_context=speaker_ctx, speaker=speaker,
+                situation=situation,
             )
 
         worker = QtWorker(_run)
@@ -1874,8 +1917,13 @@ class ConsoleView(QWidget):
     def sleep_voice(self) -> None:
         """Rest the mic at the MODEL's judged request (the go_to_sleep tool) — without the canned
         'Going to sleep.' confirmation, because the model's own reply is the goodnight. Only the
-        user's spoken wake word brings the ears back; nothing here can."""
+        user's spoken wake word brings the ears back; nothing here can. GROWTH: the utterance that
+        triggered this cortical judgment consolidates into a fast reflex, so next time the same phrase
+        rests the mic instantly without a model turn (the cortex teaching the brainstem)."""
         if self._voice is not None:
+            last = getattr(self, "_last_user_utterance", "") or ""
+            if last:
+                self._voice.learn_sleep(last)
             self._voice.set_muted(True, announce=False)
 
     def announce_online(self) -> None:

@@ -124,7 +124,7 @@ class HelixMainWindow(QMainWindow):
             container.speech_in, container.speech_out, self.orb,
             forge=container.forge, build_queue=container.build_queue,
             selfdev_lane=container.selfdev_lane, voice_id=container.voice_id,
-            suggestions=container.suggestions,
+            suggestions=container.suggestions, reflexes=container.reflexes,
         )
         self.launcher = LauncherView(
             container.builds, container.agents, container.tasks, container.knowledge,

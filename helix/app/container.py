@@ -16,6 +16,7 @@ from helix.adapters.claude_code_cli import ClaudeCodeCli
 from helix.adapters.coder_select import FallbackCoder
 from helix.adapters.git_repo import GitRepo
 from helix.adapters.json_settings import JsonSettings
+from helix.adapters.model_select import GrowthModelResolver
 from helix.adapters.restart import Restarter
 from helix.adapters.signal_bus import SignalBus
 from helix.adapters.speech import EdgeSpeechOut, OsSpeechOut, WhisperSpeechIn, active_model
@@ -38,6 +39,7 @@ from helix.services.gmail import GmailService
 from helix.services.knowledge import KnowledgeService
 from helix.services.desktop import DesktopService
 from helix.services.evolve import EvolveService
+from helix.services.reflexes import ReflexService
 from helix.services.lessons import LessonsService
 from helix.services.location import LocationService
 from helix.services.memory import MemoryService
@@ -177,14 +179,18 @@ class Container:
         def _oauth() -> str | None:
             return self.settings.get("claude_code_oauth_token")
 
-        # Model tiering: the conversation runs on Sonnet (fast — thinking off, low effort) for snappy
-        # routing/confirming/chat; a hard question escalates to Opus with deep thinking via think_harder;
-        # builds use the most capable coder. All can research the web.
+        # Model tiering (READ_ME/BRAIN.md): everyday conversation runs on a fast model (Sonnet —
+        # thinking off, low effort) for snappy routing/confirming/chat. GROWTH reasoning — the deep
+        # reasoner (think_harder) and the nightly Evolve loop, where HELIX rewrites itself — runs on
+        # the STRONGEST model available. The resolver queries the live model list and auto-upscales to
+        # a future Fable 6 / higher Opus; the pinned floor is Fable 5. Builds use the most capable coder.
+        self.growth_model = GrowthModelResolver(_key, clock=self.clock)
         api_chat = AnthropicChat(
             _key, model="claude-sonnet-4-6", web_search=True, thinking="disabled", effort="low",
         )
         deep_chat = AnthropicChat(
-            _key, model="claude-opus-4-8", web_search=True, thinking="adaptive", effort="high",
+            _key, model=self.growth_model.resolve(), web_search=True, thinking="adaptive",
+            effort="high",
         )
         # THE SUBSCRIPTION BRAIN: when a Claude Code token is connected (Settings → `claude
         # setup-token`), conversation/agents/distillers run on the user's Claude PLAN — the same
@@ -202,6 +208,12 @@ class Container:
         self.subscription = SubscriptionBrain(_oauth, CONSOLE_SYSTEM, workdir=str(_sub_workdir))
         # Plain no-tool chat (profile distiller, voice-identity notes, …): subscription first.
         self.chat = PreferredChat(self.subscription, api_chat)
+        # The GROWTH chat: plain (no-tool) reasoning pinned to the strongest available model + high
+        # effort, subscription-first like self.chat. Evolve's nightly self-improvement pass runs on
+        # this so HELIX always grows on its best brain (Fable 5 → a future Fable 6, resolved live).
+        growth_chat = PreferredChat(
+            self.subscription, deep_chat, model=self.growth_model.resolve(), effort="high",
+        )
 
         def _deep_think(question: str, on_progress=None, cancel=None) -> str:
             if cancel is not None and getattr(cancel, "is_set", lambda: False)():
@@ -210,7 +222,7 @@ class Container:
                 try:
                     return self.subscription.run_hermetic(
                         f"{DEEP_THINK_SYSTEM}\n\n---\n\n{question}",
-                        model="claude-opus-4-8", effort="high",
+                        model=self.growth_model.resolve(), effort="high",
                         on_progress=on_progress, cancel=cancel, web=True,  # a user-asked reasoner may search
                     ) or "I couldn't reason that through just now — try rephrasing?"
                 except Exception:  # noqa: BLE001 — fall back to the API escalation below
@@ -388,11 +400,15 @@ class Container:
         self.lessons = LessonsService(
             self.chat, self.store, JsonSettings(self.paths.data / "helix_lessons.json"), self.clock
         )
+        # Reflexes: the growth layer's consolidation store (READ_ME/BRAIN.md). A sleep phrase the
+        # cortex judged genuine becomes a fast brainstem reflex next time — dedicated guard-safe JSON
+        # (like reminders/agents), so a reflex learned mid-build isn't byte-reverted with settings.
+        self.reflexes = ReflexService(JsonSettings(self.paths.data / "helix_reflexes.json"))
         # Evolve: the overnight self-improvement pass (V3). Mines the day's lessons + the log tail and
         # DRAFTS one small change through the same selfdev lane improve_helix uses — approval-gated,
         # never self-applying. The shell heartbeat calls tick(); the Settings toggle governs it.
         self.evolve = EvolveService(
-            self.chat, self.lessons, self.selfdev_lane, self.selfdev, self.settings, self.clock
+            growth_chat, self.lessons, self.selfdev_lane, self.selfdev, self.settings, self.clock
         )
         self.subscription._tools = self.tools  # late-bind (tools → services ctor cycle, like agents)
         self.conversation = ConversationService(
