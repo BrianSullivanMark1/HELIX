@@ -24,11 +24,14 @@ class FallbackCoder:
         return self._primary.available() or self._fallback.available()
 
     def run_task(
-        self, repo_dir: Path, prompt: str, *, on_progress: ProgressFn | None = None, cancel=None
+        self, repo_dir: Path, prompt: str, *, on_progress: ProgressFn | None = None, cancel=None,
+        model: str | None = None,
     ) -> CoderResult:
         if self._primary.available():
             _LOG.info("building with %s", self._primary.name)
-            result = self._primary.run_task(repo_dir, prompt, on_progress=on_progress, cancel=cancel)
+            result = self._primary.run_task(
+                repo_dir, prompt, on_progress=on_progress, cancel=cancel, model=model
+            )
             if result.ok:
                 return result
             if cancel is not None and cancel.is_set():
@@ -37,11 +40,15 @@ class FallbackCoder:
             if self._fallback.available():
                 if on_progress:
                     on_progress("Switching to the built-in builder…")
-                return self._fallback.run_task(repo_dir, prompt, on_progress=on_progress, cancel=cancel)
+                return self._fallback.run_task(
+                    repo_dir, prompt, on_progress=on_progress, cancel=cancel, model=model
+                )
             return result
         if self._fallback.available():
             _LOG.info("building with %s", self._fallback.name)
-            return self._fallback.run_task(repo_dir, prompt, on_progress=on_progress, cancel=cancel)
+            return self._fallback.run_task(
+                repo_dir, prompt, on_progress=on_progress, cancel=cancel, model=model
+            )
         return CoderResult(
             ok=False, summary="", error="No coder available — add your Claude API key in Settings."
         )

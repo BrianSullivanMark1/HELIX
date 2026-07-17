@@ -47,15 +47,24 @@ class _Lane:
         self._busy = busy
         self._raises = raises
         self.requests = []
+        self.models = []
 
     def busy(self):
         return self._busy
 
-    def start(self, request):
+    def start(self, request, model=None):
         if self._raises:
             raise RuntimeError("boom")
         self.requests.append(request)
+        self.models.append(model)
         return True
+
+
+class _GrowthModel:
+    """Mirrors GrowthModelResolver.work_model: deep=Fable 5, standard=Opus 4.8 floor."""
+
+    def work_model(self, deep):
+        return "claude-fable-5" if deep else "claude-opus-4-8"
 
 
 class _SelfDev:
@@ -92,10 +101,11 @@ def _lessons(rules_by_user):
     return LessonsService(_Chat(), None, mem, _Clock())
 
 
-def _svc(chat=None, settings=None, clock=None, lane=None, selfdev=None, lessons=None, tail="a log"):
+def _svc(chat=None, settings=None, clock=None, lane=None, selfdev=None, lessons=None, tail="a log",
+         growth_model=None):
     return EvolveService(
         chat or _Chat("QUIET"), lessons, lane or _Lane(), selfdev or _SelfDev(),
-        settings or _Settings(), clock or _Clock(), log_tail=lambda: tail,
+        settings or _Settings(), clock or _Clock(), log_tail=lambda: tail, growth_model=growth_model,
     )
 
 
@@ -178,6 +188,43 @@ def test_proposal_starts_a_draft_with_the_material(monkeypatch):
     prompt = chat.prompts[-1]                                 # the model saw each speaker's lessons
     assert "Keep replies short" in prompt and "Call the project Falcon" in prompt
     assert "fired twice" in prompt                             # ...and the log tail
+
+
+def test_proposal_effort_standard_drafts_on_the_opus_floor(monkeypatch):
+    # The Fable-5 proposal sized the task as small → the coder drafts on the Opus 4.8 work floor,
+    # and the EFFORT line is stripped from the request handed to the coder.
+    monkeypatch.setattr(evolve_mod.threading, "Thread", _ImmediateThread)
+    lane = _Lane()
+    _svc(chat=_Chat("Fix a one-line guard in services/reminders.py.\nEFFORT: standard"),
+         lane=lane, growth_model=_GrowthModel()).tick()
+    assert lane.models == ["claude-opus-4-8"]
+    assert lane.requests == ["Fix a one-line guard in services/reminders.py."]  # EFFORT line stripped
+    assert "EFFORT" not in lane.requests[0]
+
+
+def test_proposal_effort_deep_drafts_on_fable(monkeypatch):
+    monkeypatch.setattr(evolve_mod.threading, "Thread", _ImmediateThread)
+    lane = _Lane()
+    _svc(chat=_Chat("Rework the retry/backoff across adapters.\nEFFORT: deep"),
+         lane=lane, growth_model=_GrowthModel()).tick()
+    assert lane.models == ["claude-fable-5"]
+
+
+def test_proposal_without_an_effort_line_defaults_to_deep(monkeypatch):
+    # A missing/garbled EFFORT line falls back to the strongest model — the safe default for self-editing.
+    monkeypatch.setattr(evolve_mod.threading, "Thread", _ImmediateThread)
+    lane = _Lane()
+    _svc(chat=_Chat("Some worthwhile change with no effort tag."),
+         lane=lane, growth_model=_GrowthModel()).tick()
+    assert lane.models == ["claude-fable-5"]
+
+
+def test_no_growth_model_leaves_the_coder_default(monkeypatch):
+    # Without a resolver the lane gets model=None → the coder keeps its own configured (growth) model.
+    monkeypatch.setattr(evolve_mod.threading, "Thread", _ImmediateThread)
+    lane = _Lane()
+    _svc(chat=_Chat("A change.\nEFFORT: standard"), lane=lane, growth_model=None).tick()
+    assert lane.models == [None]
 
 
 def test_second_tick_same_day_runs_nothing(monkeypatch):

@@ -123,7 +123,8 @@ class SelfDevService:
 
     # ----- propose / approve / reject -----
     def propose(
-        self, request: str, *, on_progress: ProgressFn | None = None, cancel=None
+        self, request: str, *, on_progress: ProgressFn | None = None, cancel=None,
+        model: str | None = None,
     ) -> PendingChange:
         self._require_intact()
         self._refuse_if_hooks_present()
@@ -160,7 +161,7 @@ class SelfDevService:
         src_sig = scan_tree(self._root, skip=src_skip)
         try:
             result = self._coder.run_task(
-                wt, improve_helix_prompt(request), on_progress=on_progress, cancel=cancel
+                wt, improve_helix_prompt(request), on_progress=on_progress, cancel=cancel, model=model
             )
             if cancel is not None and cancel.is_set():
                 raise BuildError("the self-change was stopped.")

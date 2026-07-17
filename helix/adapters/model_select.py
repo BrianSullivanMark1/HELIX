@@ -33,9 +33,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
 
-# The pinned floor — the strongest generally-available model as of this build. Used verbatim when the
-# live list can't be reached, and as the minimum the resolver will return.
+# The pinned floor for REASONING — the strongest generally-available model as of this build. Used
+# verbatim when the live list can't be reached, and as the minimum the resolver will return.
 PREFERRED_GROWTH_MODEL = "claude-fable-5"
+
+# The floor for WORK (drafting a self-change). The Fable-5 proposal sizes the coder model to the task
+# but may never pick below this — even a trivial mechanical change is drafted on at least Opus 4.8.
+WORK_FLOOR_MODEL = "claude-opus-4-8"
 
 _MODELS_URL = "https://api.anthropic.com/v1/models?limit=100"
 _ANTHROPIC_VERSION = "2023-06-01"
@@ -108,6 +112,14 @@ class GrowthModelResolver:
                 pass
         import time
         return time.monotonic()
+
+    def work_model(self, deep: bool) -> str:
+        """The model the self-dev CODER should draft with — the Fable-5 proposal picks the tier:
+        deep=True  → the strongest available (resolve(): Fable 5, auto-upscaling), for a subtle,
+                     cross-cutting, or architectural change;
+        deep=False → the WORK FLOOR (Opus 4.8), for a small, localized, mechanical change.
+        Never below the floor: resolve() is always >= Fable 5, which outranks Opus 4.8."""
+        return self.resolve() if deep else WORK_FLOOR_MODEL
 
     def resolve(self) -> str:
         """The growth model id — returns IMMEDIATELY (never blocks a caller, never blocks startup):

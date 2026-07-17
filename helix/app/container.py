@@ -417,7 +417,8 @@ class Container:
         # DRAFTS one small change through the same selfdev lane improve_helix uses — approval-gated,
         # never self-applying. The shell heartbeat calls tick(); the Settings toggle governs it.
         self.evolve = EvolveService(
-            growth_chat, self.lessons, self.selfdev_lane, self.selfdev, self.settings, self.clock
+            growth_chat, self.lessons, self.selfdev_lane, self.selfdev, self.settings, self.clock,
+            growth_model=self.growth_model,  # maps the proposal's EFFORT tier → coder model
         )
         self.subscription._tools = self.tools  # late-bind (tools → services ctor cycle, like agents)
         self.conversation = ConversationService(

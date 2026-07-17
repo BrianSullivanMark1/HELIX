@@ -132,8 +132,12 @@ class ApiCoder:
         return False
 
     def run_task(
-        self, repo_dir: Path, prompt: str, *, on_progress: ProgressFn | None = None, cancel=None
+        self, repo_dir: Path, prompt: str, *, on_progress: ProgressFn | None = None, cancel=None,
+        model: str | None = None,
     ) -> CoderResult:
+        # `model` (the per-run override the CLI coder honors) is accepted for a uniform coder contract;
+        # this fallback uses its CONFIGURED ChatModel, which for the growth coder is already the strong
+        # growth model (>= the Opus 4.8 work floor), so a self-dev draft never drops below the floor here.
         ws = Path(repo_dir)
         system = _SYSTEM_EDIT if self._has_existing_code(ws) else _SYSTEM_NEW
         written: list[str] = []

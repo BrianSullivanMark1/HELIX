@@ -36,7 +36,10 @@ class CoderAgent(Protocol):
         *,
         on_progress: ProgressFn | None = None,
         cancel: "Cancellable | None" = None,
+        model: str | None = None,
     ) -> CoderResult:
         """Edit files under repo_dir to satisfy `prompt`, streaming progress lines. If `cancel` is set
-        mid-run, stop as soon as possible and return a non-ok result."""
+        mid-run, stop as soon as possible and return a non-ok result. `model` optionally overrides the
+        agent's configured model for THIS run (self-improvement sizes the model to the task — the
+        Fable-5 proposal picks it); None keeps the configured default."""
         ...

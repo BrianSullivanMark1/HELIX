@@ -34,7 +34,8 @@ class _Selfdev:
     def __init__(self, fn) -> None:
         self._fn = fn
 
-    def propose(self, request, *, on_progress=None, cancel=None):
+    def propose(self, request, *, on_progress=None, cancel=None, model=None):
+        self.model = model  # the lane threads the chosen coder model through to propose
         return self._fn(request, on_progress, cancel)
 
 

@@ -133,6 +133,16 @@ def test_resolver_never_blocks_and_floors_without_a_key():
     assert r.resolve() == PREFERRED_GROWTH_MODEL  # idempotent, still instant
 
 
+def test_work_model_tiers_floor_at_opus_and_top_at_fable():
+    from helix.adapters.model_select import WORK_FLOOR_MODEL, GrowthModelResolver
+
+    r = GrowthModelResolver(lambda: "")  # no key → resolve() is the Fable floor
+    assert r.work_model(deep=False) == WORK_FLOOR_MODEL == "claude-opus-4-8"
+    assert r.work_model(deep=True) == PREFERRED_GROWTH_MODEL == "claude-fable-5"
+    # The standard (floor) tier is never stronger than the deep tier.
+    assert best_growth_model([r.work_model(False), r.work_model(True)]) == r.work_model(True)
+
+
 def test_resolver_uses_a_no_redirect_opener():
     # The authenticated model-list request must refuse redirects (no x-api-key leak), matching call_api.
     from helix.adapters import model_select

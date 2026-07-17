@@ -31,8 +31,10 @@ class SelfDevLane:
         with self._lock:
             return self._busy
 
-    def start(self, request: str) -> bool:
-        """Begin drafting in the background. Returns False if a draft is already running (one at a time)."""
+    def start(self, request: str, model: str | None = None) -> bool:
+        """Begin drafting in the background. Returns False if a draft is already running (one at a
+        time). `model` optionally pins the coder model for this draft — Evolve's Fable-5 proposal sizes
+        it to the task (deep=Fable 5, standard=Opus 4.8 floor); None keeps the growth coder's default."""
         with self._lock:
             if self._busy:
                 return False
@@ -40,7 +42,7 @@ class SelfDevLane:
             self._cancel = CancelToken()
             cancel = self._cancel
         self._thread = threading.Thread(
-            target=self._run, args=(request, cancel), daemon=True, name="helix-selfdev"
+            target=self._run, args=(request, cancel, model), daemon=True, name="helix-selfdev"
         )
         self._thread.start()
         return True
@@ -51,12 +53,14 @@ class SelfDevLane:
         if c is not None:
             c.cancel()
 
-    def _run(self, request: str, cancel: CancelToken) -> None:
+    def _run(self, request: str, cancel: CancelToken, model: str | None = None) -> None:
         def on_progress(line: str) -> None:
             self._bus.publish(SelfChangeProgress(line))
 
         try:
-            change = self._selfdev.propose(request, on_progress=on_progress, cancel=cancel)
+            change = self._selfdev.propose(
+                request, on_progress=on_progress, cancel=cancel, model=model
+            )
             self._bus.publish(SelfChangeFinished(ok=True, summary=change.summary, branch=change.branch))
         except Exception as exc:  # noqa: BLE001 - surface any drafting failure as an announcement
             stopped = cancel.is_set()

@@ -145,7 +145,8 @@ class ClaudeCodeCli:
         return self._cli() is not None and bool(token or key)
 
     def run_task(
-        self, repo_dir: Path, prompt: str, *, on_progress: ProgressFn | None = None, cancel=None
+        self, repo_dir: Path, prompt: str, *, on_progress: ProgressFn | None = None, cancel=None,
+        model: str | None = None,
     ) -> CoderResult:
         cli = self._cli()
         if not cli:
@@ -165,7 +166,7 @@ class ClaudeCodeCli:
         cmd = [
             cli, "-p", prompt,
             "--output-format", "stream-json", "--verbose",
-            "--model", self._model, "--permission-mode", "acceptEdits",
+            "--model", (model or self._model), "--permission-mode", "acceptEdits",
             # No shell: the coder edits files via Write/Edit only. Denying Bash removes the easiest
             # path to git-hook injection, `git branch -f`, and writing outside the workspace.
             "--disallowedTools", "Bash",
