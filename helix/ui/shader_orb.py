@@ -12,18 +12,31 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QSizePolicy, QStackedLayout, QWidget
 
+from helix.logging_setup import get_logger
 from helix.ui.orb import OrbState, OrbStatus, PresenceOrb
 
+_LOG = get_logger("shader_orb")
+
 _READY = "helix-orb-ready"
+_LOST = "helix-orb-lost"  # the page's WebGL context died — hide the view, the painter orb returns
 
 try:  # WebEngine is optional; without it ShaderOrb is just the QPainter orb
+    from PyQt6.QtWebEngineCore import QWebEnginePage
     from PyQt6.QtWebEngineWidgets import QWebEngineView
 
     _HAVE_WEBENGINE = True
+
+    class _LoggingPage(QWebEnginePage):
+        """The orb page's JS console lands in helix.log — the ONLY window into why the GPU layer
+        did or didn't come up inside the frozen app (shader errors, GL failures, context loss)."""
+
+        def javaScriptConsoleMessage(self, level, message, line, source):  # noqa: N802 - Qt override
+            _LOG.info("orb page js[%s:%s]: %s", getattr(level, "value", level), line, str(message)[:400])
+
 except Exception:  # pragma: no cover - depends on the optional WebEngine dependency
     _HAVE_WEBENGINE = False
 
@@ -58,6 +71,7 @@ class ShaderOrb(QWidget):
             return
         view = QWebEngineView(self)
         view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        view.setPage(_LoggingPage(view))  # page JS console → helix.log (frozen-app observability)
         # The page OWNS its background (the dark circuit city) — no window-transparency dependence.
         # Transparent WebEngine backgrounds fail on some GPUs by painting an opaque WHITE rectangle
         # behind the overlays; an opaque near-black page can't. Matches the page's own clear colour.
@@ -69,13 +83,30 @@ class ShaderOrb(QWidget):
         view.hide()
         lay.addWidget(view)
         self._view = view
+        # If the page never reaches its first rendered frame, say so in the log — otherwise a
+        # frozen-app GPU failure is indistinguishable from the opt-in flag being off.
+        QTimer.singleShot(10_000, self._report_if_never_ready)
+
+    def _report_if_never_ready(self) -> None:
+        if self._view is not None and not self._ready:
+            _LOG.warning("shader orb never reached first render — the painter Presence remains")
 
     def _on_title(self, title: str) -> None:
-        # The page sets this only after a successful first WebGL frame.
-        if title == _READY and self._view is not None and not self._ready:
+        # READY fires only after a successful first WebGL frame; LOST fires if the GL context dies
+        # later (a dead opaque view would otherwise COVER the painter orb — hide it instead, and
+        # come back only if the context is restored and renders again).
+        if self._view is None:
+            return
+        if title == _READY:
+            if not self._ready:
+                _LOG.info("shader orb live (first frame rendered)")
             self._ready = True
             self._view.show()
             self._view.raise_()
+        elif title == _LOST and self._ready:
+            _LOG.warning("shader orb GL context lost — painter Presence takes over")
+            self._ready = False
+            self._view.hide()
 
     # ----- same interface the Console drives -----
     def set_state(self, state: OrbState) -> None:
@@ -343,6 +374,11 @@ try {
 
   // drive
   const clock = new THREE.Clock(); let started = false; let phase = 0;
+  // A dead GL context would leave an opaque black view COVERING the painter orb — tell the shell,
+  // and re-announce readiness if the context comes back and renders again.
+  renderer.domElement.addEventListener("webglcontextlost", (e) => {
+    e.preventDefault(); started = false; document.title = "helix-orb-lost";
+  });
   (function loop(){
     requestAnimationFrame(loop);
     const dt = Math.min(clock.getDelta(), 0.05);
