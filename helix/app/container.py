@@ -25,7 +25,7 @@ from helix.adapters.system_clock import SystemClock
 from helix.adapters.voyage_embed import VoyageEmbedder
 from helix.config import AppPaths
 from helix.domain.models import Role
-from helix.logging_setup import setup_logging
+from helix.logging_setup import get_logger, setup_logging
 from helix.ports.llm import Text, Turn
 from helix.services.agents import AgentService
 from helix.services.build_queue import BuildQueue
@@ -206,6 +206,15 @@ class Container:
         except OSError:
             _sub_workdir = self.paths.data  # last resort — still better than failing to start
         self.subscription = SubscriptionBrain(_oauth, CONSOLE_SYSTEM, workdir=str(_sub_workdir))
+        # Say plainly, once per launch, which rail the brain bills to — the subscription (flat, the
+        # enterprise plan) or the metered API key. Silent metering is how a surprise bill happens.
+        _log = get_logger("container")
+        if (_oauth() or "").strip():
+            _log.info("brain: SUBSCRIPTION token connected — all HELIX reasoning bills to the plan")
+        elif (_key() or "").strip():
+            _log.warning("brain: NO subscription token — running on the METERED API key")
+        else:
+            _log.warning("brain: no Claude auth at all — conversation is offline until connected")
         # Plain no-tool chat (profile distiller, voice-identity notes, …): subscription first.
         self.chat = PreferredChat(self.subscription, api_chat)
         # The GROWTH chat: plain (no-tool) reasoning pinned to the strongest available model + high
