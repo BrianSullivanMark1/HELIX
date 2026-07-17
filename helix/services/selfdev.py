@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+from helix.config import volatile_data_paths
 from helix.domain import constitution
 from helix.domain.errors import BuildError, ConstitutionViolation
 from helix.domain.models import PendingChange
@@ -96,8 +97,15 @@ class SelfDevService:
         self._smoke = smoke_check
         self._guard_files = list(guard_files or [])  # reverted if the coder writes into them
         self._data_dir = data_dir  # the off-limits data/ tree (db, logs, built apps)
-        # Record the Constitution fingerprint on first run; later mismatches pause self-editing.
-        if not self._settings.get(FINGERPRINT_SETTING):
+        # The fingerprint tripwire detects OUT-OF-BAND edits to the safety code (constitution + this
+        # gate). Record it on first run. In a FROZEN build the safety code is read-only .pyc bundled in
+        # the exe — a user cannot edit it out of band, so a fingerprint that no longer matches can ONLY
+        # mean a legitimately NEW BUILD shipped new safety code (as this very change did). Re-stamp it
+        # automatically there, so a genuine upgrade never strands the user in the paused state. In DEV
+        # mode the source IS editable on disk — that is the real tamper surface — so keep the strict
+        # compare-and-pause (below), re-stamping only when the fingerprint is missing entirely.
+        stored = self._settings.get(FINGERPRINT_SETTING)
+        if not stored or getattr(sys, "frozen", False):
             self._settings.set(FINGERPRINT_SETTING, constitution.fingerprint())
 
     # ----- guards -----
@@ -138,7 +146,13 @@ class SelfDevService:
             self._cleanup_draft(wt, branch)
             raise
         guard = snapshot_files(self._guard_files)
-        data_sig = scan_tree(self._data_dir) if self._data_dir else {}
+        # The data guard scans data/ for a coder that wrote outside its worktree — but it must SKIP the
+        # app's own volatile stores (helix.db, agents/memory/reflexes stamps, the log), because a
+        # self-change draft runs the coder for MINUTES while the live app keeps writing them. Without
+        # this skip, HELIX's own mid-draft writes are misread as a coder escape and a good draft is
+        # refused ("the coder wrote into protected data/ (helix.db, …)"). Shared with the Forge guard.
+        data_skip = volatile_data_paths(self._data_dir) if self._data_dir else ()
+        data_sig = scan_tree(self._data_dir, skip=data_skip) if self._data_dir else {}
         # Escape backstop: the shared coder (the Claude Code CLI) can target ABSOLUTE paths, so it could
         # write into the live deployed source OUTSIDE its draft worktree. The worktree's staged diff can't
         # see that, so snapshot the live source and fail closed if anything moved (mirrors ForgeService).
@@ -160,7 +174,7 @@ class SelfDevService:
             # Writes into gitignored data/ are invisible to git, so detect them on the filesystem (the
             # worktree lives OUTSIDE data/, so legit draft edits don't trip this — only a real escape).
             reverted = restore_if_changed(guard)  # settings written by the coder are reverted
-            data_hit = tree_changed(self._data_dir, data_sig) if self._data_dir else []
+            data_hit = tree_changed(self._data_dir, data_sig, skip=data_skip) if self._data_dir else []
             if reverted or data_hit:
                 names = reverted + [Path(p).name for p in data_hit]
                 raise ConstitutionViolation(

@@ -1316,12 +1316,18 @@ class VoiceController(QObject):
         if gen == self._speak_gen and self._state == "speaking":
             self._set_state("idle")
 
-    def narrate(self, text: str) -> None:
+    def narrate(self, text: str, force: bool = False) -> None:
         """Speak a short progress note as HELIX works, WITHOUT changing the turn state (the mic stays
         gated, the orb keeps 'thinking'). Skips while a previous note is still speaking, so notes pace
-        themselves to speech and never stack up — turning a stream of steps into spoken milestones."""
-        if self._narrating or self._muted or not self.enabled():
-            return  # muted means quiet: don't speak progress notes (HELIX would also hear itself)
+        themselves to speech and never stack up — turning a stream of steps into spoken milestones.
+
+        force=True speaks even when the mic is ASLEEP (muted): used for GROWTH narration, where the
+        user wants to hear HELIX describe what it's becoming even after hitting sleep. Safe because
+        the mic is deaf while HELIX works (the focus shield), so it can't hear its own voice."""
+        if self._narrating or not self.enabled():
+            return
+        if self._muted and not force:
+            return  # muted means quiet: ordinary progress notes stay silent (HELIX would hear itself)
         if self._state == "speaking":
             # A real reply is audibly playing right now. Overlaying a progress note here would (a) queue
             # its audio behind the reply on the one warm player and (b) overwrite _speaking_text, so the

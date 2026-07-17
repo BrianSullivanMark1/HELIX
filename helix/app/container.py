@@ -241,6 +241,15 @@ class Container:
         coder_chat = AnthropicChat(_key, max_tokens=8000)  # roomier for code generation (Opus default)
         # Prefer the Claude Code CLI (most capable); fall back to the API coder (key-only, no CLI).
         self.coder = FallbackCoder(ClaudeCodeCli(_key, _oauth), ApiCoder(coder_chat, _key))
+        # THE GROWTH CODER: when HELIX edits its OWN code (self-improvement), it drafts on the STRONGEST
+        # model — Fable 5 today, auto-upscaling — not the everyday coder's default. Same CLI/subscription
+        # path (the OAuth token is preferred over the API key inside ClaudeCodeCli), just pinned to the
+        # growth model. Builds keep using self.coder; only self-dev reaches for the top brain.
+        _growth_model = self.growth_model.resolve()
+        growth_coder_chat = AnthropicChat(_key, model=_growth_model, max_tokens=8000)
+        self.growth_coder = FallbackCoder(
+            ClaudeCodeCli(_key, _oauth, model=_growth_model), ApiCoder(growth_coder_chat, _key)
+        )
 
         # Services
         self.builds = BuildService(self.paths.builds, self.repo, self.clock)
@@ -310,7 +319,7 @@ class Container:
         # Self-dev worktrees live OUTSIDE the app tree (a temp dir) so a concurrent background build's
         # escape-scan never mistakes an in-progress self-change draft for an escaped write.
         self.selfdev = SelfDevService(
-            self.coder, self.repo, self.settings, self.clock, self.paths.root,
+            self.growth_coder, self.repo, self.settings, self.clock, self.paths.root,
             worktrees_dir=Path(tempfile.gettempdir()) / "helix-worktrees", guard_files=guard_files,
             data_dir=self.paths.data,
         )

@@ -34,6 +34,36 @@ def _frozen_data_dir() -> Path:
 
 _MIGRATED_MARKER = ".helix-data-migrated"  # written ONLY after a fully-successful migration
 
+# The app's OWN volatile stores — files the LIVE running app rewrites on its own during normal
+# operation: sqlite checkpoints (helix.db), the log, the heartbeat stamping scheduled agents, the
+# background distillers (memory/lessons), usage/recency ledgers, a key connected mid-run (secrets).
+# BOTH escape guards — the Forge build guard AND the self-dev data guard — must SKIP these when they
+# scan data/ for a coder that wrote outside its workspace. A coder run (a build, or a self-change
+# draft) lasts minutes; a write to one of these files DURING that window is HELIX itself, not the
+# coder, and must never be mistaken for an escape and fail an otherwise-good build/draft. ONE list,
+# so the two guards can never drift apart (a drift is exactly how helix_reflexes.json was once missed).
+VOLATILE_STORE_NAMES: tuple[str, ...] = (
+    "helix.db",
+    "helix.log",
+    "helix_agents.json",
+    "helix_memory.json",
+    "helix_lessons.json",
+    "helix_locations.json",
+    "helix_usage.json",
+    "helix_workflows.json",
+    "helix_voices.json",
+    "helix_reminders.json",
+    "helix_reflexes.json",
+    "helix_secrets.json",
+)
+
+
+def volatile_data_paths(data_dir: "Path") -> tuple["Path", ...]:
+    """The absolute paths of the app's volatile stores under `data_dir` — the skip set both coder
+    guards use so the live app's own writes are never mistaken for a coder escape."""
+    d = Path(data_dir)
+    return tuple(d / name for name in VOLATILE_STORE_NAMES)
+
 
 def _has_real_data(d: Path) -> bool:
     """True if `d` already holds actual user data (settings, DB, secrets, or built apps) — as opposed to

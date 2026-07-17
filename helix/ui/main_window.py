@@ -468,7 +468,7 @@ class HelixMainWindow(QMainWindow):
         )
 
     def _on_self_change_progress(self, ev: object) -> None:
-        self.console.on_build_progress("self-change", ev.line)
+        self.console.on_self_change_progress(ev.line)
 
     def _on_self_change_finished(self, ev: object) -> None:
         self.console.on_self_change_finished(ev.ok, ev.summary, ev.branch, ev.error, ev.stopped)

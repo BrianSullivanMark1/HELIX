@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from helix.config import volatile_data_paths
 from helix.domain.errors import BuildCancelled, BuildError
 from helix.domain.events import BuildCreated, BuildDeleted, BuildIterated, BuildStarted
 from helix.domain.models import App, BuildKind, slugify
@@ -130,24 +131,16 @@ class ForgeService:
         #     settings, the mtime bump from the byte-revert below would itself read as an escape. Settings
         #     are still protected: tampering is reverted byte-for-byte by snapshot_files/restore below.
         guard = snapshot_files(self._guard_files)  # byte-revert settings if tampered
+        # Skip: git's own churn, the whole builds tree (concurrent builds write their own workspaces),
+        # and every VOLATILE store the live app rewrites WHILE a build runs (helix.db checkpoints, the
+        # heartbeat stamping agents, background distillers, a key connected mid-build, a reflex
+        # consolidated). Without these, HELIX's own mid-build writes read as the BUILD escaping and a
+        # good build fails. The volatile list is shared with the self-dev guard (config), so they
+        # can never drift apart.
         skip = (
             self._app_root / ".git",
             self._builds.dir,
-            self._data_dir / "helix.db",
-            self._data_dir / "helix_secrets.json",  # volatile: the user can connect a key mid-build
-            self._data_dir / "helix_reminders.json",  # volatile: "set a timer" works mid-build too
-            self._data_dir / "helix_agents.json",  # volatile: create/pause/mark_ran happen mid-build too
-            # Every other store a background distiller or the UI thread rewrites WHILE a build runs —
-            # long-term memory (incl. the V3 visual distiller), lessons, locations, usage, workflows,
-            # voice profiles. Without these, a mid-build "remember" or a passive voice-profile upgrade
-            # reads as the BUILD escaping: the user's data file gets reverted and a good build fails.
-            self._data_dir / "helix_memory.json",
-            self._data_dir / "helix_lessons.json",
-            self._data_dir / "helix_locations.json",
-            self._data_dir / "helix_usage.json",
-            self._data_dir / "helix_workflows.json",
-            self._data_dir / "helix_voices.json",
-            self._data_dir / "helix_reflexes.json",  # a sleep reflex consolidated mid-build (growth layer)
+            *volatile_data_paths(self._data_dir),
             *self._guard_files,
         )
         tree_sig = scan_tree(self._app_root, skip=skip)

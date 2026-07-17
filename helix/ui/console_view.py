@@ -1105,11 +1105,13 @@ class ConsoleView(QWidget):
 
     def _cancel_active(self) -> None:
         """Stop now: cancel a generating reply (the conversational turn) AND halt the running background
-        build. The build's cleanup offer fires later via on_build_finished(stopped)."""
+        build. The build's cleanup offer fires later via on_build_finished(stopped).
+
+        A SELF-IMPROVEMENT draft is deliberately NOT cancelled here — growth is protected work that
+        must run to completion, so neither speech nor a 'stop' interrupts it (the mic is deaf while it
+        drafts anyway). It ends on its own; the user drops the result afterward with 'discard it', and
+        closing the app unwinds an in-flight draft (selfdev_lane.shutdown)."""
         building = self._queue is not None and self._queue.active_name() is not None
-        if self._selfdev_lane is not None and self._selfdev_lane.busy():
-            self._selfdev_lane.cancel()  # a stop must halt a background self-change draft FIRST, before
-            #                              any cleanup-answer early-return below could skip it
         if self._cleanups and not building and not self._busy:
             # A "remove the half-built X?" offer is hanging and nothing is running — Esc / "stop" /
             # "never mind" naturally means "no, leave it", not a no-op. Answer the NEWEST (the one just
@@ -1747,11 +1749,26 @@ class ConsoleView(QWidget):
                          else f"The {name} build didn't go through.")
         return " ".join(parts)
 
+    def on_self_change_progress(self, line: str) -> None:
+        """Live commentary while HELIX GROWS (drafts a change to its own code). Distinct from a build:
+        the orb goes to the working hue with an 'Improving myself' pill so it's unmistakable that
+        something important is happening, the mic is shielded (the draft can't be cancelled by voice),
+        and — unlike ordinary progress — the high-level steps are spoken ALOUD even when the mic is
+        asleep, because the user wants to hear HELIX narrate what it's becoming."""
+        text = (line or "").strip()
+        self.set_orb_status(OrbStatus.WORKING)          # the whole presence signals work
+        self.status.setText(f"Improving myself — {text}" if text else "Improving myself…")
+        self._sync_working()                             # deafen the mic: growth isn't interruptible
+        if self._voice is not None and text:
+            # force=True → speak even when asleep; growth narration bypasses the quiet-while-muted rule.
+            self._voice.narrate(text, force=True)
+
     def on_self_change_finished(
         self, ok: bool, summary: str, branch: str, error: str | None, stopped: bool
     ) -> None:
         """A background self-change draft ended — announce whether it's ready to apply."""
         QTimer.singleShot(0, self._sync_working)  # lift the mic shield once the draft lane is idle
+        self._settle_orb_status()                 # drop the working hue back to blue (or yellow if building)
         if stopped:
             self._announce("Stopped drafting that change.")
         elif ok:

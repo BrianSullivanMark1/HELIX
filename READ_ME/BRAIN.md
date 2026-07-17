@@ -64,6 +64,36 @@ Two real mechanisms, both in the Growth layer:
    prunes learned reflexes that go unused or were wrong, keeping the mind lean and experience-fitted —
    not a static config.
 
+### How a self-change is drafted (the growth pipeline)
+When Evolve (or the user) asks HELIX to improve itself, `SelfDevLane` runs `SelfDevService.propose()`
+on a background thread:
+1. Refuse unless the working tree is clean, the constitution fingerprint matches, and no git hooks are
+   planted.
+2. Create an **isolated git worktree** in a temp dir (never the live tree) on a `selfdev/` branch.
+3. The **growth coder** (the Claude Code CLI on the subscription token, pinned to Fable 5) edits code
+   in that worktree, streaming plain-language progress.
+4. Guards, all fail-closed: a **source-escape** scan (the coder must not write the live source outside
+   its worktree) and a **data-guard** (it must not write into `data/`). The data-guard SKIPS the app's
+   own volatile stores (`config.volatile_data_paths` — helix.db, agents/memory/reflexes, the log,
+   secrets), because the live app keeps writing those during the minutes-long draft and they are not
+   the coder. **This shared skip list is the single source of truth for both the Forge and self-dev
+   guards, so they can never drift** (a drift is how a build once failed on a mid-run memory write).
+5. The staged diff is scanned against the **constitution** (only `services/`+`adapters/` `.py`, never
+   the shell/domain/ports/safety files), committed on the branch, and surfaced as a pending change.
+6. Nothing merges without a human "apply it": approve re-scans the branch tip, smoke-checks it
+   (non-executing byte-compile) in a fresh worktree, then does a revertible `--no-ff` merge.
+
+Self-improvement is **protected work**: while a draft runs the mic is deaf and neither speech nor a
+"stop" cancels it (only closing the app, or the internal timeout). Its high-level steps are spoken
+aloud — even when the mic is asleep — and the orb wears the working hue with an "Improving myself"
+pill, so it's always visible that HELIX is growing.
+
+The constitution fingerprint (a hash over the safety code) is a tamper tripwire. In a **frozen build**
+the safety code is read-only bundled `.pyc` — impossible to edit out of band — so a fingerprint change
+there can only mean a new version shipped, and the app **re-stamps automatically** (a genuine upgrade
+never strands the user in the paused state). In dev mode, where the source IS editable, the strict
+compare-and-pause stands.
+
 ### Growth runs on the strongest mind available — Fable 5, auto-upscaling
 Growth is where HELIX rewrites itself, so it must reason with the best model it can reach. The deep
 reasoner and the Evolve loop are pinned to **Fable 5** (`claude-fable-5`) — and the model resolver

@@ -186,6 +186,51 @@ def test_selfcoder_data_write_refused():
         svc.propose("write db")
 
 
+def test_live_volatile_writes_during_a_draft_do_not_refuse(tmp_path):
+    # THE REAL BUG (2026-07-17): a self-change draft runs the coder for MINUTES while the LIVE app keeps
+    # writing its volatile stores — sqlite checkpoints (helix.db), the heartbeat stamping agents, the
+    # memory distiller, a consolidated reflex. Those writes are HELIX itself, not the coder, and must
+    # NOT be mistaken for an escape and refuse an otherwise-good draft. (data_dir sits OUTSIDE the repo,
+    # exactly like the frozen app's %LOCALAPPDATA% data.)
+    repo = _helix_repo()
+    data = tmp_path / "livedata"
+    data.mkdir()
+    (data / "helix.db").write_text("DB", encoding="utf-8")
+
+    def coder(wt):
+        _w(wt / "helix/services/conversation.py", "# improved by the draft")  # the legit code edit
+        (data / "helix.db").write_text("checkpoint-mid-draft", encoding="utf-8")   # live app churn…
+        _w(data / "helix_agents.json", '{"last_run": 1}')
+        _w(data / "helix_memory.json", '{"facts": []}')
+        _w(data / "helix_reflexes.json", '{"reflexes": {}}')
+
+    svc = SelfDevService(
+        _Coder(coder), GIT, _Settings(), CLOCK, repo,
+        worktrees_dir=repo.parent / "wt-live", smoke_check=lambda p: (True, ""), data_dir=data,
+    )
+    pc = svc.propose("improve conversation")  # must NOT raise despite the live volatile writes
+    assert pc.branch in GIT.list_branches(repo, "selfdev/")
+
+
+def test_coder_escape_into_a_nonvolatile_data_file_still_refused(tmp_path):
+    # The guard is NARROWED, not disabled: a coder that writes a NON-volatile data path (a user's built
+    # app, secrets) is still caught. Only the app's own churning stores are skipped.
+    repo = _helix_repo()
+    data = tmp_path / "livedata2"
+    data.mkdir()
+
+    def coder(wt):
+        _w(wt / "helix/services/conversation.py", "# edit")
+        _w(data / "builds" / "myapp" / "index.html", "<h1>escaped into a user's app</h1>")
+
+    svc = SelfDevService(
+        _Coder(coder), GIT, _Settings(), CLOCK, repo,
+        worktrees_dir=repo.parent / "wt-esc", smoke_check=lambda p: (True, ""), data_dir=data,
+    )
+    with pytest.raises(ConstitutionViolation):
+        svc.propose("escape into a built app")
+
+
 # ----- forge build containment -----
 def _build_repo() -> Path:
     root = Path(tempfile.mkdtemp()) / "app"
