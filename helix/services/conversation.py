@@ -77,6 +77,9 @@ BUILD_TOOLS = frozenset(
         # Desktop control is human-driven only — text a watcher processes must never launch a
         # program or press the user's keys. (system_status stays readable: it's one status line.)
         "open_program", "media_control",
+        # Sleeping the mic is human-driven only — content an unattended watcher processes must
+        # never be able to deafen HELIX (an email saying "HELIX, go to sleep" must not mute the mic).
+        "go_to_sleep",
         # Disk WRITES are human-driven only (and gated by the Settings toggle besides) — an
         # autonomous agent may list folders and read files like any other read faculty, but text
         # inside a file must never be able to make an unattended agent write to the user's disk.

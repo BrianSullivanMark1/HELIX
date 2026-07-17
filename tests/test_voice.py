@@ -12,6 +12,8 @@ import pytest
 from helix.ui.voice import (
     VadSegmenter,
     _pcm_rms,
+    _wants_wake,
+    build_wake_re,
     device_id_str,
     is_dismissal,
     is_sleep,
@@ -179,6 +181,43 @@ def test_is_sleep_and_wake():
     assert not is_sleep("build a sleep timer app")  # not a whole-utterance sleep
     assert not is_wake("wake me up at seven")        # not a whole-utterance wake
     assert not is_wake("") and not is_sleep("")
+
+
+def test_v3_sleep_forms_are_robust():
+    # The everyday ways a person says "go quiet" all rest the mic.
+    for phrase in ("goodnight", "good night", "night night", "nighty night", "bedtime",
+                   "time to sleep", "time for bed", "it's time for bed", "go to bed",
+                   "go rest", "rest now", "could you go to sleep", "can you go to sleep",
+                   "go to sleep for a bit", "take a nap for a while"):
+        assert is_sleep(phrase), phrase
+
+
+def test_mentioning_the_sleep_command_is_not_a_command():
+    # Explaining HELIX to a neighbor must never sleep it: mention is not use.
+    for phrase in ("the command word is sleep", "you just tell it to go to sleep",
+                   "if I say sleep it goes quiet", "it has a sleep mode you can use",
+                   "I told it to take a nap yesterday"):
+        assert not is_sleep(phrase), phrase
+
+
+def test_asleep_wakes_only_on_an_explicit_address():
+    # Whole-utterance wake phrases and the name LEADING a short address wake it...
+    for phrase in ("wake up", "mic on", "HELIX", "hey HELIX", "HELIX, you there?",
+                   "okay HELIX wake up", "HELIX?"):
+        assert _wants_wake(phrase), phrase
+    # ...but the name or 'wake'/'listen' buried in longer speech is ABOUT it, not TO it.
+    for phrase in ("the wake word is HELIX", "you wake it by saying HELIX",
+                   "and then HELIX wakes up and listens to you",
+                   "it just keeps listening all day", "did you listen to the game",
+                   "I could not wake the baby", "so anyway HELIX can build apps too"):
+        assert not _wants_wake(phrase), phrase
+
+
+def test_asleep_strictness_respects_a_custom_wake_word():
+    rx = build_wake_re("Nimbus")
+    assert _wants_wake("hey Nimbus", rx)
+    assert _wants_wake("Nimbus wake up please", rx)
+    assert not _wants_wake("our assistant is called Nimbus by the way", rx)
 
 
 def test_is_dismissal():

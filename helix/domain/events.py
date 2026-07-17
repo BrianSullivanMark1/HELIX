@@ -97,6 +97,15 @@ class ConnectRequested(Event):
 
 
 @dataclass(frozen=True)
+class SleepRequested(Event):
+    """The model judged that the user genuinely asked HELIX to rest its ears — a sleep request
+    embedded in natural speech ("go take a nap while we talk") rather than a crisp voice command
+    (those are handled deterministically in the voice layer). The UI puts the mic to sleep WITHOUT
+    the canned confirmation; the model's own reply is the goodnight. Merely MENTIONING the sleep
+    command (explaining HELIX to someone) must never publish this."""
+
+
+@dataclass(frozen=True)
 class BuildStarted(Event):
     """A background build just began — the tile turns yellow, it joins the Console legend, and the orb
     goes to its working hue. Fired by the Forge the moment the workspace is marked building, so the UI

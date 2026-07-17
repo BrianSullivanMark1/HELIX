@@ -1871,6 +1871,13 @@ class ConsoleView(QWidget):
         # A reminder is something the USER asked for ("remind me at five") — always spoken.
         self._announce(f"Reminder: {text}")
 
+    def sleep_voice(self) -> None:
+        """Rest the mic at the MODEL's judged request (the go_to_sleep tool) — without the canned
+        'Going to sleep.' confirmation, because the model's own reply is the goodnight. Only the
+        user's spoken wake word brings the ears back; nothing here can."""
+        if self._voice is not None:
+            self._voice.set_muted(True, announce=False)
+
     def announce_online(self) -> None:
         """The V3 boot cue — one short spoken line when the presence comes up, so a user on
         headphones knows HELIX is online without looking. Fired once per launch by the main

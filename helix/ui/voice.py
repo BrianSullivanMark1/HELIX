@@ -307,15 +307,22 @@ _STOP_FORMS = re.compile(
     re.IGNORECASE,
 )
 # SLEEP / WAKE — pause/resume the user's mic WITHOUT stopping a build (the opposite of a stop command).
-# "sleep" rests the mic; "wake" — or just saying the wake word "HELIX" — brings it back. Whole-utterance
-# matches only, so "build a sleep-timer app" or "wake me at seven" don't fire. Legacy mute/unmute
-# phrasings stay accepted (old habits keep working), but the spoken + on-screen language is sleep/wake.
+# "sleep" rests the mic; an EXPLICIT wake brings it back. Whole-utterance matches only, so "build a
+# sleep-timer app", "wake me at seven", or EXPLAINING the commands to someone ("the command word is
+# sleep") never fire — mentioning a command is not giving it. Legacy mute/unmute phrasings stay
+# accepted (old habits keep working), but the spoken + on-screen language is sleep/wake. A genuine
+# sleep request embedded in longer natural speech is handled by the model instead (the go_to_sleep
+# tool), which judges how the words were meant.
 _SLEEP_FORMS = re.compile(
-    r"^(?:"
+    r"^(?:(?:can|could|would)\s+you\s+)?"          # polite lead-in ("could you go to sleep")
+    r"(?:"
     r"(?:go(?:ing)?\s+(?:to\s+|2\s+)?)?sleep(?:\s+(?:now|mode|please))?|goto\s+sleep|take\s+a\s+nap|"
+    r"good\s*night|nighty?\s+night|bed\s*time|(?:it'?s\s+)?time\s+(?:to\s+sleep|for\s+bed)|"
+    r"go\s+to\s+bed|(?:go\s+)?rest|"  # 'rest now' cleans to bare 'rest' (fillers strip 'now')
     r"mute(?:\s+(?:yourself|me|the\s+mic|my\s+mic|mic))?|stop\s+listening|pause\s+listening|"
     r"stop\s+the\s+mic|mic\s+off"
-    r")$",
+    r")"
+    r"(?:\s+for\s+a\s+(?:bit|while|minute|moment))?$",  # "go to sleep for a bit"
     re.IGNORECASE,
 )
 _WAKE_FORMS = re.compile(
@@ -326,9 +333,10 @@ _WAKE_FORMS = re.compile(
     r")$",
     re.IGNORECASE,
 )
-# Permissive wake hint — used ONLY while asleep, where the only possible outcomes are wake or stop, so a
-# greedy match is free: any whiff of wake/listen brings HELIX back rather than stranding you muted.
-_WAKE_HINT = re.compile(r"\b(?:wake|awake|wakey|woke|listen(?:ing)?|un\s*mute[d]?|mic\s*on)\b", re.IGNORECASE)
+# V3: sleep means SLEEP. There is deliberately no fuzzy wake hint any more — while asleep, only an
+# EXPLICIT wake brings HELIX back: a whole-utterance wake phrase ("wake up", "mic on"), or its name
+# LEADING a short address ("HELIX", "hey HELIX, wake up"). Its name merely mentioned mid-sentence
+# ("...the wake word is HELIX") is someone talking ABOUT it, and it stays asleep.
 
 # What HELIX SAYS OUT LOUD when it sleeps / wakes, so you know the command landed even away from the
 # screen. The sleep line deliberately carries no wake trigger words ("HELIX"/"wake"/"listen") — the open
@@ -360,17 +368,20 @@ def is_wake(text: str) -> bool:
 
 
 def _wants_wake(text: str, wake_re=None) -> bool:
-    """Permissive wake test used ONLY while asleep, where the only outcomes are wake or stop — so a greedy
-    match is free. True if HELIX is named (the wake word wakes it — 'sleep until you hear your name'), the
-    utterance is a wake phrase, or a SHORT utterance carries a wake hint. Gating the fuzzy hint to short
-    utterances keeps ambient chatter that merely contains 'listen'/'wake' ('did you listen to the game')
-    from waking it, while 'wake' / 'wake up now' / 'mic on' still do."""
-    if split_wake(text, wake_re)[0]:
-        return True
+    """STRICT wake test used while asleep — sleep means sleep. True only for an EXPLICIT wake:
+    a whole-utterance wake phrase ("wake up", "mic on"), or the wake word LEADING the utterance
+    (first two words — "HELIX", "hey HELIX, you there?") or an utterance so short it IS the address
+    (≤3 words containing the name). The name buried in a longer sentence — "the wake word is HELIX",
+    someone explaining the commands to a friend — is speech ABOUT HELIX, not TO it: stay asleep."""
     if is_wake(text):
         return True
-    cleaned = _clean_command(text)
-    return len(cleaned.split()) <= 3 and bool(_WAKE_HINT.search(cleaned))
+    if not split_wake(text, wake_re)[0]:
+        return False
+    words = re.findall(r"[a-z0-9']+", (text or "").lower())
+    if len(words) <= 3:
+        return True
+    rx = wake_re or _WAKE_RE
+    return any(rx.search(w) for w in words[:2])
 
 
 def _normalize16(pcm: bytes, target_peak: float = 0.9, max_gain: float = 8.0) -> bytes:
@@ -891,8 +902,9 @@ class VoiceController(QObject):
         self.set_muted(not self._muted)
 
     def _on_muted_text(self, text: str) -> None:
-        # Asleep: the ONLY outcomes are WAKE or STOP, so wake-matching is greedy (a false positive is
-        # free) — any whiff of 'wake'/'listen'/the wake word brings HELIX back instead of stranding you.
+        # Asleep: the ONLY outcomes are an EXPLICIT wake or STOP. V3 wake-matching is strict — a
+        # whole-utterance wake phrase or the name LEADING a short address; the name or 'wake' merely
+        # occurring inside longer speech (explaining HELIX to someone) leaves it asleep.
         # Everything else is dropped: a slept mic never starts a turn or a build from your speech.
         self._barge_busy = False
         t = (text or "").strip()

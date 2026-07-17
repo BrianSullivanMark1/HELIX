@@ -27,6 +27,7 @@ from helix.domain.events import (
     BuildDeleted,
     BuildDeleteRequested,
     ConnectRequested,
+    SleepRequested,
     BuildFinished,
     BuildIterated,
     BuildOpenRequested,
@@ -69,6 +70,7 @@ class HelixMainWindow(QMainWindow):
     _deleteRequestSignal = pyqtSignal(object)
     _openRequestSignal = pyqtSignal(object)
     _connectRequestSignal = pyqtSignal(object)
+    _sleepRequestSignal = pyqtSignal(object)
     _selfChangeProgressSignal = pyqtSignal(object)
     _selfChangeFinishedSignal = pyqtSignal(object)
 
@@ -207,6 +209,10 @@ class HelixMainWindow(QMainWindow):
         # pastes the value into the PANEL (never chat); the model never sees it.
         container.bus.subscribe(ConnectRequested, self._connectRequestSignal.emit)
         self._connectRequestSignal.connect(self._on_connect_requested)
+        # The model judged a genuine embedded sleep request (go_to_sleep) → rest the mic quietly;
+        # the model's own reply is the goodnight. Only the user's spoken wake word wakes it.
+        container.bus.subscribe(SleepRequested, self._sleepRequestSignal.emit)
+        self._sleepRequestSignal.connect(lambda _ev: self.console.sleep_voice())
         # Background-build lifecycle → the status board (tiles/legend/orb) + the Console (status line /
         # spoken announcement). Started fires the instant a build begins so the UI shows it at once.
         container.bus.subscribe(BuildStarted, self._buildStartedSignal.emit)

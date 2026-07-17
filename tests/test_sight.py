@@ -101,3 +101,16 @@ def test_connect_service_refuses_an_unknown_service():
     msg = _registry(bus).dispatch("connect_service", {"service": "definitely-not-a-service"})
     assert "can't connect" in msg.lower()
     assert bus.published == []
+
+
+def test_go_to_sleep_publishes_the_rest_request_and_stays_off_agents():
+    from helix.domain.events import SleepRequested
+
+    bus = _Bus()
+    reg = _registry(bus)
+    assert "go_to_sleep" in {s.name for s in reg.specs()}
+    msg = reg.dispatch("go_to_sleep", {})
+    assert [type(e) for e in bus.published] == [SleepRequested]
+    assert "goodnight" in msg.lower()  # the model's reply is the goodnight, not a canned confirm
+    # An unattended watcher must never be able to deafen HELIX from content it processes.
+    assert "go_to_sleep" in BUILD_TOOLS

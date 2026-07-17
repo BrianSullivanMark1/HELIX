@@ -9,6 +9,7 @@ from helix.domain.events import (
     BuildOpenRequested,
     BuildRenamed,
     ConnectRequested,
+    SleepRequested,
 )
 from helix.domain.models import BuildKind, slugify
 from helix.domain.vocabulary import kind_label
@@ -778,6 +779,28 @@ class ToolRegistry:
                         },
                     )
                 )
+        if self._bus is not None:
+            tools.append(
+                ToolSpec(
+                    name="go_to_sleep",
+                    description=(
+                        "Rest HELIX's ears (put the microphone to sleep) because the user GENUINELY "
+                        "asked for it in natural speech — 'go take a nap while we talk', 'give us "
+                        "some privacy', 'rest for a while, HELIX'. Judge how the words were meant: "
+                        "someone merely MENTIONING the sleep command while explaining HELIX to "
+                        "another person ('the command word is sleep') is talking ABOUT you, not to "
+                        "you — never call it for that; just keep the conversation. After calling, "
+                        "reply with ONE brief natural goodnight (it will be spoken) and mention that "
+                        "saying the wake word brings you back. Only the user's spoken wake word can "
+                        "wake the ears — you cannot."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                )
+            )
         # Screen sight is its own faculty (it needs only the image pipeline, not FilesService), so it
         # is always advertised — matching its unconditional dispatch below.
         tools.append(
@@ -1150,6 +1173,12 @@ class ToolRegistry:
             return ToolOutput(
                 text="Looking at the screen now.",
                 images=(block,),
+            )
+        if name == "go_to_sleep" and self._bus is not None:
+            self._bus.publish(SleepRequested())
+            return (
+                "The ears are resting. Reply with one brief natural goodnight and note that the "
+                "wake word brings you back."
             )
         if name == "open_program" and self._desktop is not None:
             return self._desktop.open_program(args.get("name", ""))
