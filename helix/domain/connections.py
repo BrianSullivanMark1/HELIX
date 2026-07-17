@@ -23,8 +23,8 @@ class Connection:
 class Service:
     """A known external service the orb/agents can read via call_api, using stored credential(s). Each
     field is a credential the user pastes, kept under the same env-var name a built app would read — so
-    connecting a service once (in Settings → Connections) makes it available to call_api AND to any build
-    that declares that key. `auth` says how the stored value(s) attach to a request: a list of
+    connecting a service once (the just-in-time key panel, opened in conversation) makes it available
+    to call_api AND to any build that declares that key. `auth` says how the stored value(s) attach to a request: a list of
     (header-name, template) pairs where {ENV_NAME} is filled with that field's value — a Bearer token for
     most services, or several custom headers for ones like Alpaca that need a key id + secret."""
 

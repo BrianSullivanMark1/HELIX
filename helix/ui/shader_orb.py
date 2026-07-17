@@ -20,7 +20,6 @@ from helix.ui.orb import OrbState, OrbStatus, PresenceOrb
 _READY = "helix-orb-ready"
 
 try:  # WebEngine is optional; without it ShaderOrb is just the QPainter orb
-    from PyQt6.QtWebEngineCore import QWebEngineSettings
     from PyQt6.QtWebEngineWidgets import QWebEngineView
 
     _HAVE_WEBENGINE = True
@@ -60,9 +59,8 @@ class ShaderOrb(QWidget):
         view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         view.page().setBackgroundColor(Qt.GlobalColor.transparent)
         view.setStyleSheet("background: transparent;")
-        view.settings().setAttribute(
-            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
-        )
+        # The page is fully self-contained (three.js is spliced inline) — it needs NO remote access,
+        # so none is granted.
         view.titleChanged.connect(self._on_title)
         view.setHtml(html)
         view.hide()

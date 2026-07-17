@@ -85,12 +85,13 @@ class HelixMainWindow(QMainWindow):
         # The shared status board behind the menu-tile borders, the Console legend, and the orb hue.
         self._board = BuildStatusBoard()
 
-        # The orb is the living background of the whole window. Default is the dark QPainter PresenceOrb
-        # (audio-reactive, on-brand). The GPU-shader ShaderOrb is OPT-IN (shader_orb=true) because a
-        # transparent QWebEngine background isn't reliable across GPUs/the frozen build — when it fails it
-        # paints an opaque (white) rectangle as the window background, which the transparent overlays then
-        # show through, washing the whole app out. Keep it behind the flag until its transparency is
-        # verified live on this machine.
+        # The orb is the living background of the whole window. Both layers wear the V3 Presence look:
+        # the QPainter orb (default — reliable everywhere) and the GPU ShaderOrb (shader_orb=true; the
+        # richer living-circuit render, self-contained since V3 bundles three.js). The GPU layer stays
+        # OPT-IN because a transparent QWebEngine background isn't reliable across every GPU — when
+        # THAT fails it paints an opaque (white) rectangle behind the overlays, washing the app out,
+        # and the reveal-on-ready sentinel can't detect it (the page itself renders fine). Flip the
+        # setting off if a machine ever washes out.
         use_shader = bool(container.settings.get("shader_orb", False))
         self.orb = ShaderOrb() if use_shader else PresenceOrb()
 

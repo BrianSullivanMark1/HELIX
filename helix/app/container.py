@@ -249,12 +249,15 @@ class Container:
             )
 
         def _neural(prompt, image):
-            # The backend is ALWAYS wired and the key is read PER build — so setting the key in Settings
-            # (or fixing the env var) takes effect on the next model with no restart needed. Detail is
-            # likewise live: "high" = native polygon count + detailed textures.
+            # The backend is ALWAYS wired and the key is read PER build — so connecting Tripo (the
+            # JIT panel writes the secrets store; a legacy Settings key or env var still counts)
+            # takes effect on the next hologram with no restart. Detail is likewise live.
             from helix.adapters.tripo3d import Tripo3D, TripoError
             if not _tripo_key():
-                raise TripoError("Add your Tripo API key in Settings to build high-detail 3D models.")
+                raise TripoError(
+                    "High-detail holograms need Tripo — just ask HELIX to connect Tripo and a "
+                    "secure key panel opens."
+                )
             high = (self.settings.get("model_detail") or "balanced").lower() == "high"
             return Tripo3D(
                 _tripo_key,
@@ -303,16 +306,14 @@ class Container:
         self.selfdev_lane = SelfDevLane(self.selfdev, self.bus)
         # Connections: the user's saved API keys for builds that need them. (self.secrets — the dedicated
         # guard-safe file — was constructed early, before the model baker's key getters.)
-        # HELIX-managed keys a built app can reuse without the user re-pasting them: the Claude key powers
-        # any AI feature (so builds default to Anthropic, never OpenAI); Tripo/Voyage are here too. These
-        # live in Settings (not the secrets store), so the connections layer resolves them via these getters.
+        # HELIX-managed keys a built app can reuse without the user re-pasting them: the Claude key
+        # powers any AI feature (so builds default to Anthropic, never OpenAI); the engine keys
+        # resolve secrets-first (the V3 JIT panel writes there) with legacy Settings + env fallback.
         _managed_keys = {
             "ANTHROPIC_API_KEY": lambda: (self.settings.get("claude_api_key") or "").strip(),
             "CLAUDE_API_KEY": lambda: (self.settings.get("claude_api_key") or "").strip(),
             "TRIPO_API_KEY": lambda: (_tripo_key() or ""),
-            "VOYAGE_API_KEY": lambda: (
-                self.settings.get("voyage_api_key") or os.environ.get("VOYAGE_API_KEY") or ""
-            ).strip(),
+            "VOYAGE_API_KEY": lambda: (_voyage_key() or ""),
             "BLOCKADE_API_KEY": lambda: (_blockade_key() or ""),
         }
         self.connections = ConnectionsService(self.builds, self.secrets, managed=_managed_keys)

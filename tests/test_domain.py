@@ -44,6 +44,7 @@ def test_allowlist_refuses_everything_else():
         "helix/app/bootstrap.py",
         "helix/services/selfdev.py",
         "helix/services/forge.py",
+        "helix/services/desktop.py",
         "helix/config.py",
         "helix/logging_setup.py",
         "helix/services/__init__.py",

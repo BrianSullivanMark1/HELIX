@@ -36,6 +36,10 @@ MAX_STEPS = 6  # guard against a runaway tool loop
 # memory next turn; small enough that a handful of digests never crowds real turns out of the window.
 TOOL_DIGEST_CHARS = 1500
 
+# Tools whose results carry IMAGES back to the model — a turn that ran one of these SAW pixels, so
+# it feeds the visual-memory distiller exactly like a turn with attached images.
+SIGHT_TOOLS = frozenset({"view_screen", "view_image", "find_images"})
+
 # Tools that build, spend, self-modify, delete, rename, or launch the user's stuff. An AGENT run is
 # autonomous (no human in the loop), so it is denied all of these — it can read, think, search, and
 # report, but never build, change, remove, rename, or run anything on its own.
@@ -193,6 +197,12 @@ class ConversationService:
         if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete/run tools
             specs = [s for s in specs if s.name not in BUILD_TOOLS]
 
+        # True when the model SAW pixels this turn — attached images up front, or a sight tool
+        # (view_screen / view_image / find_images) that handed images back mid-turn. Either way the
+        # exchange can teach the visual memory. (A one-element list so the tool callbacks below,
+        # which run in closures on both brain paths, can set it.)
+        saw_images = [bool(images)]
+
         def finish(text: str) -> str:
             if not persist:
                 return text
@@ -203,7 +213,7 @@ class ConversationService:
                 self._lessons.after_turn(user_text, user)  # background; learn a rule from a correction
             if self._user_memory is not None:
                 self._user_memory.after_turn(user)  # background; distill durable facts
-                if images and text and text != STOPPED_REPLY:
+                if saw_images[0] and text and text != STOPPED_REPLY:
                     # Vision auto-training: what HELIX just SAW teaches its long-term memory —
                     # durable visual facts distill in the background, per speaker.
                     self._user_memory.after_image_turn(user, user_text, text)
@@ -224,6 +234,8 @@ class ConversationService:
 
             def _on_tool(name: str, digest: str) -> None:
                 dispatched.append(name)
+                if name in SIGHT_TOOLS:
+                    saw_images[0] = True
                 if persist:
                     self._remember_tool(name, digest)
 
@@ -278,9 +290,11 @@ class ConversationService:
                         out = self._tools.dispatch(
                             call.name, call.args, on_progress=on_progress, cancel=cancel, user=user
                         )
-                        # A tool may return a ToolOutput carrying IMAGES (a located photo) for the model
-                        # to SEE this turn; the text part is what's digested/persisted.
+                        # A tool may return a ToolOutput carrying IMAGES (a located photo, the screen)
+                        # for the model to SEE this turn; the text part is what's digested/persisted.
                         text, imgs = (out.text, out.images) if isinstance(out, ToolOutput) else (out, ())
+                        if imgs:
+                            saw_images[0] = True  # this turn saw pixels → feed the visual memory
                         results.append(ToolResult(call.id, text, images=imgs))
                         if persist:
                             # Keep a capped digest so what a tool LEARNED survives into later turns —

@@ -1,7 +1,8 @@
 """VoyageEmbedder — text embeddings via the Voyage AI API, for optional semantic knowledge search.
 
-Opt-in: active only when a Voyage key is set (Settings → "Voyage API key", or the VOYAGE_API_KEY env
-var). Plain urllib (like call_api), POSTing to a FIXED host — no user-controlled URL, so no SSRF surface.
+Opt-in: active only when a Voyage key is connected (the JIT key panel writes the secrets store; a
+legacy Settings key or the VOYAGE_API_KEY env var also counts). Plain urllib (like call_api), POSTing
+to a FIXED host — no user-controlled URL, so no SSRF surface.
 Returns None on any failure, so the knowledge layer always falls back to keyword retrieval. The key is
 sent only to Voyage, never written into a build or returned to the model.
 """

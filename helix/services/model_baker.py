@@ -160,8 +160,8 @@ class ModelBaker:
         if self._skybox is None or not self._skybox_available():
             self._write_error(
                 workspace,
-                "360° scenes need a Blockade Labs API key — add it in Settings → Connections. "
-                "(For a single object instead, ask for that object.)")
+                "360° scenes need Blockade Labs — ask HELIX to connect Blockade and a secure key "
+                "panel opens. (For a single object instead, ask for that object.)")
             return
         try:
             img = self._skybox(prompt)
@@ -208,7 +208,10 @@ class ModelBaker:
 
         if engine == "neural":
             if not has_neural:
-                raise SpecError("High-detail (neural) holograms aren't enabled — add a Tripo API key in Settings.")
+                raise SpecError(
+                    "High-detail (neural) holograms aren't enabled — ask HELIX to connect Tripo "
+                    "and a secure key panel opens."
+                )
             return self._neural_glb(spec, workspace, prompt), False
 
         if engine == "auto":
@@ -226,7 +229,7 @@ class ModelBaker:
                 # neural attempt failed but parts exist — fall through to the local mesh.
             if not parts:
                 if organic and not has_neural:
-                    raise SpecError("This looks like an organic subject — add a Tripo API key in Settings "
+                    raise SpecError("This looks like an organic subject — ask HELIX to connect Tripo "
                                     "for a film-grade hologram.")
                 raise SpecError("model.json needs a 'parts' list (or an enabled neural 'prompt').")
             return self._parametric_glb(parts), (organic and not has_neural)
@@ -421,7 +424,7 @@ class ModelBaker:
         title = self._title(workspace, spec)
         bg = _hex_str(spec.get("background"), DEFAULT_BG)
         accent = _hex_str(spec.get("accent"), DEFAULT_ACCENT)
-        banner = ("Preview geometry — add a Tripo API key in Settings for a film-grade version."
+        banner = ("Preview geometry — ask HELIX to connect Tripo for a film-grade version."
                   if preview else "")
         (workspace / VIEWER_FILE).write_text(_VIEWER_HTML
                                              .replace("__TITLE__", _esc(title))

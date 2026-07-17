@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from helix.domain.errors import BuildCancelled, BuildError
 from helix.domain.events import BuildCreated, BuildDeleted, BuildIterated, BuildStarted
 from helix.domain.models import App, BuildKind, slugify
-from helix.domain.vocabulary import kind_label
+from helix.domain.vocabulary import KIND_SYNONYMS, kind_label
 from helix.logging_setup import get_logger
 from helix.ports.coder import CoderAgent, ProgressFn
 from helix.ports.events import EventBus
@@ -31,12 +31,13 @@ if TYPE_CHECKING:
 _LOG = get_logger("forge")
 
 # Filler words dropped before a fuzzy build-name match, so "update my garden hologram" still resolves
-# to the build named "Garden Walkthrough". Conservative on purpose — only obvious connective/kind words
-# (the V3 words plus every V2 synonym the user may still say).
+# to the build named "Garden Walkthrough". Conservative on purpose — only obvious connective words
+# plus every creation word the user may say, old or new, sourced from the ONE vocabulary synonym
+# table so the two never drift apart.
 _NAME_FILLER = frozenset({
     "the", "a", "an", "my", "your", "our", "this", "that", "please",
-    "model", "models", "app", "apps", "application", "task", "tasks", "agent", "build", "3d",
-    "protocol", "protocols", "flow", "flows", "hologram", "holograms", "vault", "vaults",
+    "agents", "build", "3d",
+    *KIND_SYNONYMS,
 })
 
 

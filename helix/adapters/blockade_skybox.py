@@ -43,7 +43,10 @@ class BlockadeSkybox:
         """Generate a 360° panorama for `prompt` and return the image bytes. Blocking (polls to done)."""
         key = (self._key() or "").strip()
         if not key:
-            raise BlockadeError("Add a Blockade Labs API key in Settings → Connections to make 360° scenes.")
+            raise BlockadeError(
+                "360° scenes need Blockade Labs — ask HELIX to connect Blockade and a secure key "
+                "panel opens."
+            )
         prompt = " ".join((prompt or "").split())[:600]
         if not prompt:
             raise BlockadeError("An environment needs a description of the scene.")
@@ -130,7 +133,10 @@ class BlockadeSkybox:
             except Exception:  # noqa: BLE001
                 pass
             if e.code in (401, 403):
-                raise BlockadeError("Blockade Labs rejected the API key — check it in Settings.") from e
+                raise BlockadeError(
+                    "Blockade Labs rejected the API key — ask HELIX to reconnect Blockade with a "
+                    "fresh key."
+                ) from e
             raise BlockadeError(f"Blockade Labs returned HTTP {e.code}. {detail}".strip()) from e
         except urllib.error.URLError as e:
             raise BlockadeError(f"Couldn't reach Blockade Labs: {e.reason}") from e

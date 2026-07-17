@@ -29,8 +29,8 @@ _AUTH_PLACEHOLDER = re.compile(r"\{([A-Z0-9_]+)\}")  # {ENV_NAME} in a Service.a
 
 # Every service the orb may CONNECT just in time (the V3 flow: no settings wall — the model calls
 # connect_service the moment a key is missing and a masked panel opens). Maps the words a user might
-# say to a service id; ids cover call_api's KNOWN_SERVICES plus the HELIX-managed engine keys that
-# live in Settings (Tripo holograms, Blockade environments, Voyage embeddings). Pure data.
+# say to a service id; ids cover call_api's KNOWN_SERVICES plus the engine keys (Tripo holograms,
+# Blockade environments, Voyage embeddings), which the panel writes to the SECRETS store. Pure data.
 #   id -> (label, store, field-specs) where store is "secrets" (env-var names in the secrets store)
 #   or "settings" (a Settings key), and each field is (storage-key, field-label, hint).
 CONNECTABLE: dict[str, tuple[str, str, tuple[tuple[str, str, str], ...]]] = {

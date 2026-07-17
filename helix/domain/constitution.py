@@ -47,6 +47,7 @@ PROTECTED_FILES: tuple[str, ...] = (
     "helix/services/prompts.py",  # the prompts that frame the coder
     "helix/services/connections.py",  # the call_api egress lockdown (host allowlist, redirect refusal, scrub)
     "helix/services/files.py",  # the filesystem seal (private-zone canonicalization, write gate)
+    "helix/services/desktop.py",  # the desktop-control fence (name-only program launch, media-key list)
     "helix/services/remote.py",  # the remote companion's auth + capability fence + bind policy
     "helix/config.py",  # path resolution — imported at startup
     "helix/logging_setup.py",  # imported at startup (runs before the gate loads)

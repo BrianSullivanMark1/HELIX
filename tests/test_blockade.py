@@ -52,7 +52,7 @@ def test_generate_fetches_a_default_style_when_none_set(monkeypatch):
 def test_no_key_is_friendly():
     with pytest.raises(BlockadeError) as e:
         BlockadeSkybox(lambda: "").generate("anything")
-    assert "Blockade Labs API key" in str(e.value)
+    assert "connect Blockade" in str(e.value)  # points at the JIT key panel, not a settings wall
 
 
 def test_empty_prompt_is_rejected():

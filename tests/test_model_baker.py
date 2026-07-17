@@ -64,7 +64,7 @@ def test_environment_without_a_key_shows_a_friendly_page(tmp_path: Path):
     _spec(tmp_path, {"engine": "environment", "prompt": "a forest clearing"})
     baker.bake(tmp_path)
     html = (tmp_path / VIEWER_FILE).read_text(encoding="utf-8")
-    assert "Blockade Labs API key" in html and not (tmp_path / PANO_REL).exists()
+    assert "connect Blockade" in html and not (tmp_path / PANO_REL).exists()
 
 
 def test_environment_generation_failure_is_friendly(tmp_path: Path):
@@ -133,7 +133,7 @@ def test_auto_organic_without_key_is_an_honest_parametric_preview(tmp_path: Path
     baker.bake(tmp_path)
     assert (tmp_path / GLB_REL).exists()
     html = (tmp_path / VIEWER_FILE).read_text(encoding="utf-8")
-    assert "Preview geometry" in html and "Tripo API key" in html  # honest no-key banner
+    assert "Preview geometry" in html and "connect Tripo" in html  # honest no-key banner
 
 
 def test_explicit_neural_without_key_shows_a_friendly_error(tmp_path: Path):
