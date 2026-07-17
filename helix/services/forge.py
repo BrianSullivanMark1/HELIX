@@ -147,6 +147,7 @@ class ForgeService:
             self._data_dir / "helix_usage.json",
             self._data_dir / "helix_workflows.json",
             self._data_dir / "helix_voices.json",
+            self._data_dir / "helix_reflexes.json",  # a sleep reflex consolidated mid-build (growth layer)
             *self._guard_files,
         )
         tree_sig = scan_tree(self._app_root, skip=skip)

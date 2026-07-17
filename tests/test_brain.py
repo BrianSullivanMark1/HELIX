@@ -117,3 +117,26 @@ def test_growth_model_ignores_unknown_families():
 def test_a_stronger_top_tier_family_wins():
     # Mythos ranks above Fable — if it ever appears in the list, growth upscales to it.
     assert best_growth_model(["claude-fable-5", "claude-mythos-5"]) == "claude-mythos-5"
+
+
+def test_malformed_ids_never_crash_or_downgrade():
+    # Junk ids rank 0 and never displace the pinned floor.
+    assert best_growth_model(["", "claude", "gpt-4", "claude-fable", "not-a-model"]) \
+        == PREFERRED_GROWTH_MODEL
+
+
+def test_resolver_never_blocks_and_floors_without_a_key():
+    from helix.adapters.model_select import GrowthModelResolver
+
+    r = GrowthModelResolver(lambda: "")   # no key → the floor, no network
+    assert r.resolve() == PREFERRED_GROWTH_MODEL
+    assert r.resolve() == PREFERRED_GROWTH_MODEL  # idempotent, still instant
+
+
+def test_resolver_uses_a_no_redirect_opener():
+    # The authenticated model-list request must refuse redirects (no x-api-key leak), matching call_api.
+    from helix.adapters import model_select
+
+    assert any(
+        isinstance(h, model_select._NoRedirect) for h in model_select._OPENER.handlers
+    )

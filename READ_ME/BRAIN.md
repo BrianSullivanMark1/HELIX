@@ -81,3 +81,10 @@ conversation stays on a fast model; only the deliberate, self-modifying reasonin
 - Growth (`go_to_sleep` consolidation, Evolve) stays fenced from autonomous agent runs (BUILD_TOOLS)
   and behind the human-approval gate; the constitution is unchanged.
 - Growth reasoning resolves to the top available model (Fable 5 → newer); everyday turns do not.
+- `model_select.py` (adapters/) sends the API key to the fixed `api.anthropic.com/v1/models` host, GET
+  only, with a no-redirect opener so the key can't leak via a 3xx — same posture as `call_api`. It is
+  in the editable self-improvement surface deliberately: it holds no gate logic, only a model-ranking
+  read, and every self-change is still behind the human-approval lock. `reflexes.py` (services/) is
+  likewise editable but can only ever *rest* the mic (never build/spend/wake), and `go_to_sleep` is
+  agent-fenced — so neither needs the constitution's protected status. The safety-critical pieces (the
+  addressing gate in `domain/brain.py`, the voice wiring in `ui/`) ARE immutable (domain + shell).

@@ -1921,7 +1921,10 @@ class ConsoleView(QWidget):
         triggered this cortical judgment consolidates into a fast reflex, so next time the same phrase
         rests the mic instantly without a model turn (the cortex teaching the brainstem)."""
         if self._voice is not None:
+            # Consume the triggering utterance atomically (clear as we read), so a concurrent typed
+            # follow-up can't leave a stale value and consolidation happens at most once per trigger.
             last = getattr(self, "_last_user_utterance", "") or ""
+            self._last_user_utterance = ""
             if last:
                 self._voice.learn_sleep(last)
             self._voice.set_muted(True, announce=False)

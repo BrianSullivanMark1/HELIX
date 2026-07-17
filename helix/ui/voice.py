@@ -27,7 +27,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from helix.domain.brain import is_addressed, is_wake_utterance
+from helix.domain.brain import is_wake_utterance
 from helix.logging_setup import get_logger
 from helix.ports.speech import SpeechIn, SpeechOut
 from helix.ports.stores import SettingsStore

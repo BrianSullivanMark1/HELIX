@@ -21,6 +21,18 @@ from helix.logging_setup import get_logger
 
 _LOG = get_logger("model_select")
 
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never auto-follow a redirect on the authenticated model-list request — urllib would otherwise
+    re-send the x-api-key header to the redirect target. Matches connections._OPENER: a 3xx is
+    surfaced as an error rather than followed, so the key can never leak to another host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
 # The pinned floor — the strongest generally-available model as of this build. Used verbatim when the
 # live list can't be reached, and as the minimum the resolver will return.
 PREFERRED_GROWTH_MODEL = "claude-fable-5"
@@ -86,6 +98,7 @@ class GrowthModelResolver:
         self._lock = threading.Lock()
         self._cached: str | None = None
         self._fetched_at = 0.0
+        self._refreshing = False
 
     def _now(self) -> float:
         if self._clock is not None:
@@ -97,15 +110,30 @@ class GrowthModelResolver:
         return time.monotonic()
 
     def resolve(self) -> str:
-        """The growth model id — cached for a day, pinned floor on any failure. Never raises."""
+        """The growth model id — returns IMMEDIATELY (never blocks a caller, never blocks startup):
+        the cached value, or the pinned Fable 5 floor if nothing is cached yet. When the cache is
+        stale or empty, a background thread refreshes it from the live model list, so a stronger model
+        is adopted on the next call once the fetch lands — a slow or hung network can never freeze the
+        app. Never raises."""
         with self._lock:
-            if self._cached is not None and (self._now() - self._fetched_at) < _CACHE_TTL_S:
+            fresh = self._cached is not None and (self._now() - self._fetched_at) < _CACHE_TTL_S
+            if fresh:
                 return self._cached
-        model = self._fetch_best()
+            current = self._cached or PREFERRED_GROWTH_MODEL
+            if not self._refreshing:
+                self._refreshing = True
+                threading.Thread(target=self._refresh, daemon=True, name="helix-model-select").start()
+        return current
+
+    def _refresh(self) -> None:
+        try:
+            model = self._fetch_best()
+        finally:
+            with self._lock:
+                self._refreshing = False
         with self._lock:
             self._cached = model
             self._fetched_at = self._now()
-        return model
 
     def _fetch_best(self) -> str:
         key = ""
@@ -124,7 +152,7 @@ class GrowthModelResolver:
                     "User-Agent": "HELIX",
                 },
             )
-            with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310 - fixed https host, GET only
+            with _OPENER.open(req, timeout=15) as r:  # no-redirect opener — the key can't leak via a 3xx
                 payload = json.loads(r.read(2_000_000).decode("utf-8", "replace"))
             ids = [m.get("id", "") for m in (payload.get("data") or []) if isinstance(m, dict)]
             best = best_growth_model(ids)
