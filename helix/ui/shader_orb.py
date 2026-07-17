@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QSizePolicy, QStackedLayout, QWidget
 
 from helix.ui.orb import OrbState, OrbStatus, PresenceOrb
@@ -57,8 +58,10 @@ class ShaderOrb(QWidget):
             return
         view = QWebEngineView(self)
         view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        view.page().setBackgroundColor(Qt.GlobalColor.transparent)
-        view.setStyleSheet("background: transparent;")
+        # The page OWNS its background (the dark circuit city) — no window-transparency dependence.
+        # Transparent WebEngine backgrounds fail on some GPUs by painting an opaque WHITE rectangle
+        # behind the overlays; an opaque near-black page can't. Matches the page's own clear colour.
+        view.page().setBackgroundColor(QColor(5, 7, 11))
         # The page is fully self-contained (three.js is spliced inline) — it needs NO remote access,
         # so none is granted.
         view.titleChanged.connect(self._on_title)
@@ -131,7 +134,7 @@ def _orb_html() -> str | None:
 
 
 _ORB_HTML_TEMPLATE = r"""<!doctype html><html><head><meta charset="utf-8" />
-<style>html,body{margin:0;height:100%;background:transparent;overflow:hidden}#c{width:100%;height:100%}</style>
+<style>html,body{margin:0;height:100%;background:#05070b;overflow:hidden}#c{width:100%;height:100%}</style>
 <script>/*__THREE_JS__*/</script>
 </head><body><div id="c"></div>
 <script>
@@ -154,9 +157,10 @@ window.orbBands  = (a) => { if (Array.isArray(a)) bands = a; };
 
 try {
   const el = document.getElementById("c");
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.setClearColor(0x000000, 0);
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false,
+                                             powerPreference: "high-performance" });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  renderer.setClearColor(0x05070b, 1);
   const resize = () => renderer.setSize(el.clientWidth, el.clientHeight);
   el.appendChild(renderer.domElement); resize();
   const scene = new THREE.Scene();
@@ -227,10 +231,44 @@ try {
       gl_FragColor = vec4(c, 1.0);
     }`;
   const core = new THREE.Mesh(
-    new THREE.SphereGeometry(1.0, 96, 96),
+    new THREE.SphereGeometry(1.0, 72, 72),
     new THREE.ShaderMaterial({ uniforms: uni, vertexShader: coreVert, fragmentShader: coreFrag })
   );
   scene.add(core);
+
+  // 1b. The circuit city: a vast, faint circuit plane deep behind the presence — dark always, the
+  //     traces barely-lit in the current hue, fading into black at the edges. The whole app's
+  //     backdrop, so the page owns its background (no reliance on window transparency).
+  const cityMat = new THREE.ShaderMaterial({ uniforms: uni,
+    vertexShader: `varying vec2 vUv; void main(){ vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `varying vec2 vUv; uniform float uTime; uniform vec3 uColor; uniform float uGlow;
+      float h21(vec2 p){ p = fract(p*vec2(123.34, 345.45)); p += dot(p, p+34.345); return fract(p.x*p.y); }
+      void main(){
+        vec2 g = vUv*vec2(52.0, 30.0) + vec2(uTime*0.04, uTime*0.008);
+        vec2 cell = floor(g), f = fract(g);
+        float hx = h21(cell + 7.0), hy = h21(cell + 41.0);
+        float lu = (hx > 0.58) ? smoothstep(0.055, 0.0, min(f.x, 1.0-f.x)) : 0.0;
+        float lv = (hy > 0.62) ? smoothstep(0.055, 0.0, min(f.y, 1.0-f.y)) : 0.0;
+        float wire = max(lu, lv);
+        float hp = h21(cell + 99.0);
+        float pad = 0.0;
+        if (hp > 0.90) {
+          float tw = 0.5 + 0.5*sin(uTime*(0.8 + hp*2.2) + hp*40.0);
+          pad = smoothstep(0.16, 0.0, length(f - 0.5)) * tw;
+        }
+        float charge = (hx > 0.58) ? lu * pow(0.5 + 0.5*sin(g.y*2.2 - uTime*1.4 + hx*6.28), 16.0) : 0.0;
+        float vig = smoothstep(1.05, 0.18, length(vUv - 0.5)*1.6);
+        vec3 base = vec3(0.007, 0.011, 0.020);
+        vec3 c = base
+               + uColor * wire   * (0.050 + 0.028*uGlow) * vig
+               + uColor * pad    * (0.14 + 0.08*uGlow) * vig
+               + uColor * charge * 0.26 * vig;
+        gl_FragColor = vec4(c, 1.0);
+      }`, depthWrite: false });
+  const city = new THREE.Mesh(new THREE.PlaneGeometry(64, 36), cityMat);
+  city.position.z = -8.0;
+  scene.add(city);
 
   // 2. A tight neon halo hugging the rim - depth, never a bright disc.
   const halo = new THREE.Mesh(
@@ -269,7 +307,7 @@ try {
           gl_FragColor = vec4(c, clamp(a, 0.0, 1.0));
         }`,
       transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(cfg.r, cfg.tube, 8, 220), mat);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(cfg.r, cfg.tube, 16, 220), mat);
     const holder = new THREE.Group();
     holder.rotation.x = cfg.tiltX; holder.rotation.z = cfg.tiltZ;
     holder.add(ring); gyro.add(holder);
