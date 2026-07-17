@@ -54,10 +54,13 @@ def compile_smoke_check(worktree: Path) -> tuple[bool, str]:
     # branch could add a root-level `compileall.py` that shadows the stdlib module and runs as code.
     # compile_dir/compile_file resolve their targets by filesystem path (cwd-relative), unaffected.
     code = (
-        "import sys; sys.path[:] = [p for p in sys.path if p not in ('', '.')]; "
+        "import sys, os; sys.path[:] = [p for p in sys.path if p not in ('', '.')]; "
         "import compileall; "
         "ok = compileall.compile_dir('helix', quiet=1, force=True) "
-        "and compileall.compile_file('main.py', quiet=1, force=True); "
+        "and compileall.compile_file('main.py', quiet=1, force=True) "
+        # tests/ is now a growable surface — byte-compile it too so a drafted test with a syntax
+        # error is caught here (before merge), not only when the suite next runs.
+        "and (not os.path.isdir('tests') or compileall.compile_dir('tests', quiet=1, force=True)); "
         "sys.exit(0 if ok else 1)"
     )
     try:

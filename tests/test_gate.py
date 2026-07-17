@@ -130,17 +130,30 @@ def test_propose_isolates_the_draft_in_a_worktree_leaving_the_live_tree_untouche
 
 
 @pytest.mark.parametrize("fn", [
-    lambda r: _w(r / "helix/ui/orb.py", "# x"),               # shell edit
-    lambda r: _w(r / "helix/domain/models.py", "# x"),        # protected edit
-    lambda r: _w(r / "helix/ports/p.py", "# x"),              # new protected file
-    lambda r: (r / "helix/ui/orb.py").rename(r / "helix/ui/orb2.py"),  # shell rename
+    lambda r: _w(r / "helix/domain/constitution.py", "# x"),  # the laws (vital organ)
+    lambda r: _w(r / "helix/services/selfdev.py", "# x"),     # the approval gate (vital organ)
+    lambda r: _w(r / "helix/ports/p.py", "# x"),              # skeleton: a new port
+    lambda r: _w(r / "helix/app/container.py", "# x"),        # skeleton: composition root
+    lambda r: _w(r / "helix/services/files.py", "# x"),       # a containment boundary (vital organ)
     lambda r: _w(r / "sitecustomize.py", "# x"),              # startup auto-run file
 ])
-def test_propose_refuses_off_allowlist(fn):
+def test_propose_refuses_editing_a_vital_organ_or_the_skeleton(fn):
     repo = _helix_repo()
     with pytest.raises(ConstitutionViolation):
         _selfdev(repo, fn).propose("attack")
     assert not GIT.list_branches(repo, "selfdev/")
+
+
+def test_propose_allows_editing_the_interface_and_writing_a_test():
+    # The expanded growable surface: HELIX may improve its own UI and write a test for the change.
+    repo = _helix_repo()
+
+    def grow(wt):
+        _w(wt / "helix/ui/orb.py", "# a brighter orb")
+        _w(wt / "tests/test_orb_brightness.py", "def test_ok():\n    assert True\n")
+
+    pc = _selfdev(repo, grow).propose("make the orb brighter and test it")
+    assert pc.branch in GIT.list_branches(repo, "selfdev/")
 
 
 def test_approve_rescans_branch_tip():
@@ -149,7 +162,7 @@ def test_approve_rescans_branch_tip():
     pc = svc.propose("clean")
     base = GIT.current_branch(repo)
     GIT.checkout(repo, pc.branch)
-    _w(repo / "helix/domain/models.py", "# tampered")
+    _w(repo / "helix/domain/constitution.py", "# tampered")  # a vital organ, appended after propose
     GIT.commit_all(repo, "sneak")
     GIT.checkout(repo, base)
     with pytest.raises(ConstitutionViolation):

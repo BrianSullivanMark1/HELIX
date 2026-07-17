@@ -29,40 +29,57 @@ def test_app_from_request():
     assert a.kind == AppKind.UNKNOWN
 
 
-def test_allowlist_permits_only_services_and_adapters_py():
-    assert not C.check(["helix/services/conversation.py"])
-    assert not C.check(["helix/adapters/anthropic_chat.py"])
-    assert not C.check(["helix/services/newfeature.py"])  # a new editable module is fine
-
-
-def test_allowlist_refuses_everything_else():
-    # shell, domain, ports, app, protected files, startup auto-run files, non-py, novel modules
+def test_growable_surface_permits_brain_interface_and_tests():
+    # The broad growable surface: cognition, hands, interface, brain structures, and its own tests.
     for path in [
-        "helix/ui/orb.py",
-        "helix/domain/models.py",
-        "helix/ports/repo.py",
-        "helix/app/bootstrap.py",
-        "helix/services/selfdev.py",
-        "helix/services/forge.py",
-        "helix/services/desktop.py",
-        "helix/config.py",
+        "helix/services/conversation.py",
+        "helix/adapters/anthropic_chat.py",
+        "helix/services/newfeature.py",     # a new editable module is fine
+        "helix/ui/orb.py",                  # the interface grows
+        "helix/ui/console_view.py",
+        "helix/domain/models.py",           # brain structures grow
+        "helix/domain/brain.py",
+        "helix/domain/vocabulary.py",
+        "tests/test_conversation.py",       # HELIX writes tests for its changes
+        "tests/test_a_new_thing.py",
+    ]:
+        assert not C.check([path]), f"should be editable: {path}"
+
+
+def test_vital_organs_and_skeleton_refused():
+    # The inviolable core (keeps the human in control + recovery) and the skeleton (ports/app).
+    for path in [
+        "helix/domain/constitution.py",     # the laws
+        "helix/services/selfdev.py",        # the approval gate
+        "helix/services/sandbox.py",        # containment primitives
+        "helix/adapters/git_repo.py",       # git executor
+        "helix/services/forge.py",          # build escape guard
+        "helix/services/connections.py",    # egress lockdown
+        "helix/services/files.py",          # filesystem seal
+        "helix/services/desktop.py",        # desktop-control fence
+        "helix/services/prompts.py",        # coder framing + fences
+        "helix/adapters/agent_sdk_chat.py", # token isolation
+        "helix/ports/repo.py",              # skeleton: contract
+        "helix/app/bootstrap.py",           # skeleton: recovery anchor
+        "helix/app/container.py",           # skeleton: composition root
+        "helix/config.py",                  # startup path resolution
         "helix/logging_setup.py",
-        "helix/services/__init__.py",
+        "helix/services/__init__.py",       # package init (runs at import)
         "helix/__init__.py",
         "main.py",
         "sitecustomize.py",
         "usercustomize.py",
-        "conftest.py",
+        "conftest.py",                      # root-level, outside tests/
         "evil.pth",
         "requirements.txt",
-        "helix/newmodule.py",
+        "helix/newmodule.py",               # not under a growable prefix (helix/ root)
     ]:
         assert C.check([path]), f"should be refused: {path}"
 
 
-def test_rename_of_protected_is_refused_via_deleted_path():
+def test_rename_of_a_vital_organ_is_refused_via_deleted_path():
     # a rename surfaces (with --no-renames) as delete(old) + add(new); the old protected path is caught
-    assert C.check([], ["helix/ui/orb.py"])
+    assert C.check([], ["helix/services/selfdev.py"])
     assert C.check([], ["helix/domain/constitution.py"])
 
 
@@ -79,6 +96,7 @@ def test_fingerprint_stable_and_covers_enforcement_source():
 
 
 def test_path_normalization_case_and_separators():
-    assert C.is_protected("helix\\domain\\constitution.py")
-    assert C.is_shell("helix/ui/anything.py")
-    assert not C.is_editable("helix/ui/orb.py")
+    assert C.is_protected("helix\\domain\\constitution.py")   # a vital organ, by either separator
+    assert C.is_editable("helix\\ui\\orb.py")                 # the interface is now growable
+    assert not C.is_shell("helix/ui/anything.py")             # no blanket-immutable shell anymore
+    assert not C.is_editable("helix/domain/constitution.py")  # the laws stay fixed

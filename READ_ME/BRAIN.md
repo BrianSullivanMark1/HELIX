@@ -105,6 +105,27 @@ appears (a future **Fable 6**, or a higher Opus), HELIX **automatically upscales
 to it. It always grows on the most capable brain Anthropic offers, without a code change. The everyday
 conversation stays on a fast model; only the deliberate, self-modifying reasoning reaches for the top.
 
+## What HELIX may grow (the editable surface)
+
+HELIX is meant to grow broadly. The self-improvement surface is **nearly all of `helix/` plus its own
+tests** — its cognition (`services/`), hands (`adapters/`), **interface** (`ui/` — the orb, the
+console), and **brain structures & vocabulary** (`domain/`), and **`tests/`** (a good change comes with
+its test; the smoke-check byte-compiles tests too). What stays fixed is a small **inviolable core** —
+the files that keep the human in control of every change and let a bad one roll back:
+
+- **The approval gate + the laws:** `domain/constitution.py`, `services/selfdev.py`, `services/sandbox.py`,
+  `adapters/git_repo.py` — so HELIX can never unlock itself from your approval or lose its ability to revert.
+- **Startup + recovery:** `config.py`, `logging_setup.py`, `app/bootstrap.py`, `main.py`, all `__init__.py`.
+- **Containment / egress boundaries:** `services/forge.py`, `connections.py`, `files.py`, `desktop.py`,
+  `remote.py`, `prompts.py`, `adapters/api_coder.py`, `agent_sdk_chat.py`.
+- **The skeleton:** `ports/` (the contracts the gate trusts) and `app/` (the composition root).
+
+This is not a limit on the owner — you may hand-edit any file anytime; the core is immutable only to
+*autonomous* self-editing. And every self-change — anywhere on the surface — is still drafted on a
+branch, smoke-checked, constitution-scanned, and **human-approved** before it merges, and every version
+is kept so a bad change rolls back in one step. Biomimetically: the brain rewires most of itself, but
+the genome (the laws) and the brainstem's vital reflexes (the gate, containment, recovery) don't.
+
 ## Invariants (do not regress)
 - Reflexes never call the model; the model never does a reflex's job. Lowest sufficient layer.
 - The addressing gate is the ONLY thing that wakes a sleeping mic (plus explicit wake phrases) — a

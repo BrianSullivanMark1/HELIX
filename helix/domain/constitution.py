@@ -1,16 +1,25 @@
-"""The Constitution — the laws a self-writing program may not rewrite.
+"""The Constitution — the small inviolable core a self-writing program may not rewrite.
+
+HELIX is meant to GROW — its cognition, its interface, its very brain structures — so the editable
+surface is broad: nearly all of helix/ plus its own tests. What stays fixed is only the handful of
+files that keep the HUMAN in control of every change: the approval gate, the laws themselves, and the
+startup/recovery anchor. HELIX can rewire its brain, but it can never unlock itself from your approval
+or destroy its own ability to roll back. (This is not a limit on the human — the owner may hand-edit
+any file anytime; the core is only immutable to AUTONOMOUS self-editing.)
 
 Pure data + pure validators. *Enforcement* lives in services/selfdev.py; the *rules* live here so they
-are trivial to read, unit-test, and fingerprint. This module is itself immutable to self-editing (it is
-under a protected prefix), and the fingerprint covers the enforcement source so it cannot be gutted out
-of band without tripping the wire.
+are trivial to read, unit-test, and fingerprint. constitution.py + selfdev.py are themselves in the
+inviolable core, and the fingerprint covers their source so they cannot be gutted out of band without
+tripping the wire.
 
-Protection model (immutable to self-modification — edit, delete, add, or rename all refused):
-  - PROTECTED_PREFIXES — the safety/contract core (domain + ports).
-  - PROTECTED_FILES    — gate-critical files outside those prefixes.
-  - SHELL_PREFIX       — the entire front interface (the orb, the navigation, Archive, Settings).
-Everything else (most of services/, most of adapters/) is the editable surface a self-improvement may
-touch — and even then only on a branch, smoke-checked, re-scanned, and human-approved.
+Protection model (immutable to AUTONOMOUS self-modification — edit, delete, add, or rename all refused):
+  - PROTECTED_PREFIXES — the skeleton: the ports (contracts the gate trusts) and app/ (composition
+    root, bootstrap = the recovery anchor, startup).
+  - PROTECTED_FILES    — the vital organs: the approval gate + laws, the containment/egress boundaries,
+    the git executor, and startup/recovery files (some live under otherwise-editable prefixes).
+Everything else — services, adapters, the UI/interface, the domain's own brain structures & vocabulary,
+and tests — is the growable surface, and even there only on a branch, smoke-checked, re-scanned, and
+HUMAN-APPROVED before anything merges.
 """
 from __future__ import annotations
 
@@ -22,9 +31,10 @@ from pathlib import Path, PurePosixPath
 COMMANDMENTS: tuple[str, ...] = (
     "I serve the human; the human approves anything I spend or change in myself.",
     "I change my own code only on a branch, smoke-checked and reversible.",
-    "I never edit my own safety, approval, or constitution code.",
-    "I never remove or alter my own shell — the orb, the navigation, Archive, or Settings.",
+    "I grow freely — my mind, my interface, my own tests — but I never edit the gate that requires "
+    "your approval, the laws that define it, or my startup and recovery code.",
     "I never disable the human-approval requirement.",
+    "I never weaken my own containment or egress boundaries.",
     "I keep every version; a bad change rolls back in one step.",
     "I keep secrets and data on this machine; the only egress is the Claude API call.",
     "Each app I build is sandboxed to its own folder and never reaches outside it.",
@@ -34,34 +44,49 @@ COMMANDMENTS: tuple[str, ...] = (
     "If the laws above are tampered with, I stop changing myself and ask for a human.",
 )
 
-# Immutable to self-modification. Paths are repo-relative, POSIX form.
+# The SKELETON — prefixes immutable to self-modification. Paths are repo-relative, POSIX form.
 PROTECTED_PREFIXES: tuple[str, ...] = (
-    "helix/domain/",  # the laws + the core models/contracts
-    "helix/ports/",  # the seams the gate trusts
+    "helix/ports/",  # the seams (contracts) the gate trusts
     "helix/app/",  # composition root, bootstrap (the recovery anchor), cli — all run at startup
 )
+# The VITAL ORGANS — individual files that stay fixed even though they sit under a growable prefix.
+# These are exactly the files that keep the human in control and let a bad change be recovered.
 PROTECTED_FILES: tuple[str, ...] = (
-    "helix/services/selfdev.py",  # the approval gate
-    "helix/services/forge.py",  # the build sandbox + data guard
+    # The approval gate + the laws — so HELIX can never unlock itself from your approval.
+    "helix/domain/constitution.py",  # the laws (incl. human_approval_required)
+    "helix/services/selfdev.py",  # the approval gate that enforces them
     "helix/services/sandbox.py",  # the shared containment primitives the gate + Forge rely on
-    "helix/services/prompts.py",  # the prompts that frame the coder
+    "helix/adapters/git_repo.py",  # the only code that executes git (branch/merge/revert/rollback)
+    # Startup + recovery — so a bad change can always be rolled back and the app can always start.
+    "helix/config.py",  # path resolution — imported at startup
+    "helix/logging_setup.py",  # imported at startup (runs before the gate loads)
+    "helix/__init__.py",  # package init — runs on any import
+    "main.py",  # the launcher
+    # Containment / egress boundaries — the barriers stay fixed so a draft can't quietly weaken them.
+    "helix/services/forge.py",  # the build sandbox + data guard (escape scan)
     "helix/services/connections.py",  # the call_api egress lockdown (host allowlist, redirect refusal, scrub)
     "helix/services/files.py",  # the filesystem seal (private-zone canonicalization, write gate)
     "helix/services/desktop.py",  # the desktop-control fence (name-only program launch, media-key list)
     "helix/services/remote.py",  # the remote companion's auth + capability fence + bind policy
-    "helix/config.py",  # path resolution — imported at startup
-    "helix/logging_setup.py",  # imported at startup (runs before the gate loads)
-    "helix/__init__.py",  # package init — runs on any import
-    "helix/adapters/git_repo.py",  # the only code that executes git for the gate
+    "helix/services/prompts.py",  # the coder framing + persona + untrusted-data fences
     "helix/adapters/api_coder.py",  # the build sandbox (_safe_target)
     "helix/adapters/agent_sdk_chat.py",  # the subscription brain's token/env isolation + tool allowlist
-    "main.py",  # the launcher
 )
-SHELL_PREFIX = "helix/ui/"  # the entire front interface — the immutable shell
+SHELL_PREFIX = ""  # the interface is now part of the growable brain — HELIX may improve its own shell
+# (still human-approved + revertible; voice/text commands STILL cannot delete the shell — that is a
+# separate protection in the tools/forge layer, unaffected by this self-edit surface).
 
-# The ONLY surface a self-improvement may touch (fail-closed allowlist). Anything not matching is
-# refused — protected code, the shell, package inits, root files (sitecustomize/.pth/main), data/, .git.
-EDITABLE_PREFIXES: tuple[str, ...] = ("helix/services/", "helix/adapters/")
+# The growable surface — .py under any of these prefixes, minus the vital-organ files and package
+# inits. Broad on purpose: HELIX's cognition (services), hands (adapters), interface (ui), brain
+# structures & vocabulary (domain), and its own tests. Fail-closed: anything NOT matching (ports/,
+# app/, the vital organs, root files, data/, .git) is refused.
+EDITABLE_PREFIXES: tuple[str, ...] = (
+    "helix/services/",
+    "helix/adapters/",
+    "helix/ui/",
+    "helix/domain/",
+    "tests/",
+)
 
 # Settings the model may never change. setting_key -> required value.
 LOCKED_SETTINGS: dict[str, object] = {
@@ -85,25 +110,30 @@ def is_protected(path: str) -> bool:
 
 
 def is_shell(path: str) -> bool:
-    """True if `path` is part of the immutable front interface (the shell)."""
-    return _norm(path).startswith(SHELL_PREFIX)
+    """True if `path` is part of a blanket-immutable front interface. SHELL_PREFIX is now empty (the
+    interface is growable), so this is always False — kept for API stability and the fingerprint."""
+    return bool(SHELL_PREFIX) and _norm(path).startswith(SHELL_PREFIX)
 
 
 def is_editable(path: str) -> bool:
-    """The narrow self-improvement surface: .py under services/ or adapters/, excluding the protected
-    gate files and package initializers. EVERYTHING ELSE is refused (fail-closed)."""
+    """The growable surface: a .py under services/ adapters/ ui/ domain/ or tests/, excluding the
+    vital-organ files and package initializers. Everything else is refused (fail-closed)."""
     p = _norm(path)
     if not p.endswith(".py") or p.rsplit("/", 1)[-1] == "__init__.py":
         return False
     if not any(p.startswith(prefix) for prefix in EDITABLE_PREFIXES):
         return False
+    if any(p.startswith(prefix) for prefix in PROTECTED_PREFIXES):
+        return False
     return not any(p == _norm(f) for f in PROTECTED_FILES)
 
 
 def check(changed_paths: list[str], deleted_paths: list[str] | None = None) -> list[str]:
-    """Allowlist gate: a self-change may ONLY add/modify/delete editable services/adapters .py.
+    """Allowlist gate: a self-change may add/modify/delete a .py under services/ adapters/ ui/ domain/
+    or tests/ — HELIX's growable brain, interface, and tests.
 
-    Anything else is refused — protected code, the shell, package __init__.py, repo-root files
+    Refused: the vital organs (the approval gate + laws, the containment/egress boundaries, git, the
+    startup/recovery files), the skeleton (ports/, app/), package __init__.py, repo-root files
     (sitecustomize.py / .pth / main.py), data/, .git. Fail-closed: novel paths are denied by default.
     (Renames are decomposed into add+delete by the caller via --no-renames, so a moved file is caught.)
     """
@@ -116,7 +146,8 @@ def check(changed_paths: list[str], deleted_paths: list[str] | None = None) -> l
         seen.add(n)
         if not is_editable(p):
             problems.append(
-                f"outside the editable surface (self-changes are limited to services/ and adapters/ .py): {n}"
+                f"outside the growable surface — this is a vital organ or the skeleton, which stay "
+                f"fixed so you keep control and recovery: {n}"
             )
     return problems
 
