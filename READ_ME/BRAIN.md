@@ -38,7 +38,25 @@ addressing gate (`domain/brain.py:is_addressed`) encodes this:
 - A short utterance that *is* the address (≤3 words containing the name) = addressed.
 
 Salience tokens (the name, salutations like good morning / hey / are you there) get the lowered
-threshold; everything else stays attenuated.
+threshold; everything else stays attenuated. **Carrier** words — the wake grammar's own hey/ok/okay
+plus the imperative "please" — may precede the name and it still leads: *"okay, HELIX, do it"* and
+*"please HELIX, turn it down"* address exactly like *"HELIX, ..."*. Narrative leads (*"so HELIX built
+me an app"*, *"oh HELIX ..."* as songs love to sing) are NOT carriers — those are mentions, and they
+neither wake it nor pass the playback gate below.
+
+**The loudspeaker rule (playback gate).** When the machine's own speakers are audibly playing —
+YouTube, music, a video, read from the Windows render-endpoint peak meter (`ui/mediasense.py`, pure
+ctypes, no dependencies, self-rebinding across device switches, degrades to off) — whatever the mic
+hears is at least partly the machine's own playback, and playback is never the user. While it plays,
+heard speech acts only if it is DIRECTLY addressed (name leading; the short-fragment benefit of the
+doubt is withheld, so a lyric's "my HELIX baby" doesn't count) **or** its voice-print matches a
+registered speaker: the session's no-wake-word privilege is suspended (lyrics can't become billed
+turns), a wake-ish token buried in a lyric can't wake HELIX (the STT is hotword-biased toward its
+name, so it *will* fish it out of music), a bare fished-out name opens nothing, and a video's
+"goodbye" can't end the session. The same rule guards the SLEEPING mic: a song's "wake up!" or a
+fished bare name leaves HELIX asleep — waking over playback takes the name plus the ask ("HELIX, wake
+up") or a registered voice. A recognized voice keeps every privilege over the music; anyone else just
+says the name first — the same thing you do in a loud room.
 
 ## Limbic self-state — interoception, a situated self
 

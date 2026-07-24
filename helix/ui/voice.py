@@ -7,6 +7,10 @@ Part of the immutable shell (helix/ui/). The low-level pieces are a straight, pr
   - VoiceController: ties the listener to the injected SpeechIn (STT) and SpeechOut (TTS) ports and
                      runs the conversation-session state machine (say "HELIX" to engage, "goodbye" to
                      end the session). Transcription and speech run on QtWorkers so the UI never blocks.
+                     While the machine's own speakers are audibly playing (YouTube, music — read from
+                     the render meter, mediasense.py), the PLAYBACK GATE holds: speech acts only when
+                     genuinely addressed by name or from a recognized voice, so playback never becomes
+                     turns, wakes, or session chatter.
 
 Everything degrades silently: no mic, no faster-whisper, or no OS voice → the controller reports
 unavailable and the Console stays a normal text app.
@@ -27,11 +31,12 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from helix.domain.brain import is_wake_utterance
+from helix.domain.brain import is_directly_addressed, is_wake_utterance
 from helix.logging_setup import get_logger
 from helix.ports.speech import SpeechIn, SpeechOut
 from helix.ports.stores import SettingsStore
 from helix.services import voiceid
+from helix.ui.mediasense import MediaSense
 from helix.ui.orb import OrbState
 from helix.ui.workers import QtWorker
 
@@ -708,6 +713,10 @@ class VoiceController(QObject):
         self._last_speaker_ts = 0.0
         # The wake-word matcher for the configured name (default HELIX keeps its curated fuzzy matcher).
         self._wake_re = build_wake_re(settings.get(WAKE_WORD_SETTING) if settings is not None else None)
+        # Playback sense: is the machine ITSELF audibly playing (YouTube, music)? Feeds the playback
+        # gate in _on_wake_text, so the speakers' own sound is never treated as the user. Best-effort:
+        # on any failure it reads "not playing" and voice behaves exactly as before.
+        self._media = MediaSense()
         self._workers: set[QtWorker] = set()
         self._listener: WakeWordListener | None = None
         self._recorder: MicRecorder | None = None
@@ -796,6 +805,7 @@ class VoiceController(QObject):
             return False
         self._listener.utterance.connect(self._on_utterance)
         self._listener.level.connect(self.level)
+        self._listener.level.connect(self._media_tick)  # per-chunk render-meter sample (playback sense)
         self._listener.bands.connect(self.bands)
         if not self._listener.start():
             self._listener = None
@@ -918,7 +928,7 @@ class VoiceController(QObject):
     def toggle_muted(self) -> None:
         self.set_muted(not self._muted)
 
-    def _on_muted_text(self, text: str) -> None:
+    def _on_muted_text(self, text: str, media: bool = False) -> None:
         # Asleep: the ONLY outcomes are an EXPLICIT wake or STOP. V3 wake-matching is strict — a
         # whole-utterance wake phrase or the name LEADING a short address; the name or 'wake' merely
         # occurring inside longer speech (explaining HELIX to someone) leaves it asleep.
@@ -926,6 +936,16 @@ class VoiceController(QObject):
         self._barge_busy = False
         t = (text or "").strip()
         if t and _wants_wake(t, self._wake_re):
+            # THE PLAYBACK GATE, asleep edition: while the machine itself is audibly playing, a wake
+            # must be unmistakably a person — a registered voice, or the name LEADING with an actual
+            # command after it ("HELIX, wake up"). A bare name fished out of a lyric, or a song's own
+            # "wake up!", leaves HELIX asleep — asleep while a movie plays is exactly when the mic
+            # hears the most playback.
+            if media and not self._known_voice():
+                matched, after = split_wake(t, self._wake_re)
+                if not (matched and after and is_directly_addressed(t, self._wake_re)):
+                    self._set_state("idle")
+                    return
             self.set_muted(False)  # speaks the wake confirmation and re-arms the listener (owns state)
             return
         if t and is_stop(t):
@@ -935,14 +955,17 @@ class VoiceController(QObject):
 
     def _on_utterance(self, pcm: bytes) -> None:
         # Asleep: route to the sleep handler — only a wake/stop phrase acts; all other speech is dropped.
+        # The playback flag and the voice-print ride along, so a wake heard over the machine's own
+        # audio can be held unless it is unmistakably a person (see _on_muted_text).
         if self._muted:
             if self._barge_busy:
                 return
             path = self._pcm_to_wav(pcm)
             if path is None:
                 return
+            media = self._media_playing()
             self._barge_busy = True
-            self._transcribe(path, self._on_muted_text)
+            self._transcribe(path, lambda text: self._on_muted_text(text, media), pcm)
             return
         # THE FOCUS SHIELD: the mic is gated off (see _apply_listen_gate) while HELIX is thinking,
         # speaking, or working a background build, so this only fires when HELIX is genuinely idle. If
@@ -953,8 +976,13 @@ class VoiceController(QObject):
         path = self._pcm_to_wav(pcm)
         if path is None:
             return
+        # Sample the playback sense NOW, at capture end (the per-chunk ticks kept it honest through
+        # the utterance): was the machine itself audibly playing while this was heard? The flag rides
+        # WITH this utterance into its handler via a closure — like the voice-print, never a shared
+        # slot a second capture could cross-pair.
+        media = self._media_playing()
         self._set_state("transcribing")
-        self._transcribe(path, self._on_wake_text, pcm)
+        self._transcribe(path, lambda text: self._on_wake_text(text, media), pcm)
 
     def _hush(self) -> None:
         """Silence any in-flight speech/narration immediately."""
@@ -963,6 +991,36 @@ class VoiceController(QObject):
         except Exception:
             pass
         self._narrating = False
+
+    # ----- playback sense (is the machine itself making sound?) -----
+    def _media_tick(self, _level: float = 0.0) -> None:
+        """Per-chunk render-meter sample while the mic streams — keeps MediaSense's recently-hot
+        window honest through brief in-song dips. Best-effort; never breaks listening."""
+        try:
+            self._media.tick()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _media_playing(self) -> bool:
+        """Is the machine audibly playing sound right now (or a moment ago)? False on any failure."""
+        try:
+            return self._media.playing()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _known_voice(self) -> bool:
+        """A PEEK at the current utterance's voice-print: does it match a registered speaker? The bar
+        is the same ACCEPT bar _gate itself attributes speakers with (not the stricter learn-from-this
+        bar), so a registered owner keeps normal session privileges over the music — while sung vocals
+        match nobody. Non-consuming — _gate still owns attribution. A too-short clip (no evidence) is
+        NOT known: benefit of the doubt is what playback abuses."""
+        svc, emb = self._voice_id, self._pending_emb
+        if svc is None or emb is None:
+            return False
+        try:
+            return bool(svc.identify(emb).name)
+        except Exception:  # noqa: BLE001
+            return False
 
     # ----- voice identity (who is speaking) -----
     def _take_emb(self):
@@ -993,12 +1051,17 @@ class VoiceController(QObject):
             if self._voice_id is not None:
                 self._voice_id.distill_notes(name, getattr(flow, "last_answers", []))
 
-    def _flow_intercept(self, text: str) -> bool:
+    def _flow_intercept(self, text: str, media: bool = False) -> bool:
         """While a registration/recalibration chat is open, route speech to it instead of the model.
-        Returns True when the utterance was consumed."""
+        Returns True when the utterance was consumed. While the machine is audibly playing, a LONG
+        unaddressed capture is refused here (a 12s music wall is never a calibration answer — feeding
+        it to the flow would pollute a voice profile with the song's vocalist and keep extending the
+        session); short answers ("Brian", "yes") still flow, so registering over quiet music works."""
         flow = self._flow
         if flow is None or not flow.active or not text:
             return False
+        if media and len(text.split()) > 8 and not is_directly_addressed(text, self._wake_re):
+            return False  # not consumed — the caller's playback gate will judge (and drop) it
         if is_stop(text) or is_dismissal(text):
             flow.cancel()
             self.interrupt()
@@ -1159,14 +1222,32 @@ class VoiceController(QObject):
         self._set_state("thinking")
         self.recognized.emit(command)
 
-    def _on_wake_text(self, text: str) -> None:
+    def _on_wake_text(self, text: str, media: bool = False) -> None:
         text = (text or "").strip()
         if self._muted:  # a sleep landed WHILE this transcribed — the sleep handler owns wake/stop + state
-            self._on_muted_text(text)
+            self._on_muted_text(text, media)
             return
-        if self._flow_intercept(text):  # an open registration/recalibration chat owns the mic
+        if self._flow_intercept(text, media):  # an open registration/recalibration chat owns the mic
             return
         matched, after = split_wake(text, self._wake_re)
+        # THE PLAYBACK GATE (the thalamic cocktail-party rule, loudspeaker edition). `media` means the
+        # machine's own speakers were audibly playing (YouTube, music) while this was captured — so
+        # the mic was hearing playback, not necessarily a person. Playback is never the user: unless
+        # the utterance is DIRECTLY addressed to HELIX (name leading, strict — no short-fragment
+        # benefit of the doubt, so "my HELIX baby" fished from a lyric doesn't count) or its
+        # voice-print matches a registered speaker, it is dropped. This suspends the session's
+        # no-wake-word privilege (lyrics can't become turns), stops a wake-ish token buried mid-lyric
+        # from waking (the STT is hotword-biased toward the name, so it WILL fish it out of music),
+        # and keeps a video's "goodbye" from ending the session with a spoken farewell. A bare name
+        # with no command opens nothing either — addressing HELIX over music takes its name PLUS the
+        # ask ("HELIX, turn it down"); an addressed dismissal ("thanks HELIX") still lands.
+        if media and not self._known_voice():
+            dismiss = self._session and is_dismissal(text) and matched  # a farewell that SAYS the name
+            if (matched and not after and not dismiss) or not (
+                dismiss or is_directly_addressed(text, self._wake_re)
+            ):
+                self._set_state("idle")
+                return
         if self._session and is_dismissal(text):
             who = self._session_speaker or self.current_speaker  # capture before _end_session clears it
             self._end_session()

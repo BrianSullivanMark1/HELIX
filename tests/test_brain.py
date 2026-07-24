@@ -34,6 +34,53 @@ def test_salutation_anywhere_with_the_name_counts_as_addressed():
     assert not is_addressed("we should tell them HELIX exists", rx)  # no opener, name late = about it
 
 
+def test_carrier_words_never_hide_an_address():
+    # Carriers — the wake grammar's own hey/ok/okay plus the imperative "please" (with STT's beloved
+    # commas) — may precede the name and it still LEADS: these address exactly like "HELIX, ...".
+    rx = _wake()
+    for phrase in ("please HELIX, turn the music down", "okay, HELIX, do it",
+                   "okay helix open the report", "hey helix turn the lights off"):
+        assert is_addressed(phrase, rx), phrase
+
+
+def test_narrative_leads_are_mentions_not_addresses():
+    # so/well/oh are NARRATIVE leads, not carriers: "so HELIX built..." reports ABOUT it, and lyrics
+    # love "oh <name> ..." — none of these may wake a sleeping HELIX or pass the playback gate.
+    rx = _wake()
+    for phrase in ("so anyway HELIX can build apps and stuff",
+                   "so HELIX built me an app yesterday",
+                   "well HELIX is pretty weird sometimes",
+                   "oh HELIX take me home tonight",
+                   "people say please HELIX far too often these days"):
+        assert not is_addressed(phrase, rx), phrase
+
+
+def test_directly_addressed_withholds_the_short_fragment_benefit():
+    from helix.domain.brain import is_directly_addressed
+
+    rx = _wake()
+    # A short fragment containing the name is_addressed (benefit of the doubt for a live mic)...
+    assert is_addressed("my helix baby", rx)
+    # ...but is NOT directly addressed — the strict test the playback gate uses.
+    assert not is_directly_addressed("my helix baby", rx)
+    assert is_directly_addressed("helix stop", rx)
+    assert is_directly_addressed("hey helix, what time is it", rx)
+    assert is_directly_addressed("good morning HELIX, how you doing", rx)
+
+
+def test_custom_wake_words_survive_the_carrier_and_token_rules():
+    from helix.domain.brain import is_directly_addressed
+    from helix.ui.voice import build_wake_re
+
+    # A wake word that IS a carrier word ("Okay") is never stripped as one — it stays the lead.
+    rx = build_wake_re("Okay")
+    assert is_addressed("okay turn the lights on now", rx)
+    # A MULTI-word wake word matches on joined text, so it can lead an address too.
+    rx2 = build_wake_re("red queen")
+    assert is_directly_addressed("red queen stop the music", rx2)
+    assert not is_directly_addressed("I told them about red queen yesterday ok", rx2)
+
+
 def test_wake_utterance_composes_phrase_and_gate():
     rx = _wake()
     assert is_wake_utterance("wake up", rx, is_wake)                     # explicit phrase

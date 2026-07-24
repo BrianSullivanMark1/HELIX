@@ -38,10 +38,18 @@ _OPENER = re.compile(
     r"how\s+(?:are\s+you|you\s+doing|goes\s+it|is\s+it\s+going)|what'?s\s+up|wake\s+up)\b",
     re.IGNORECASE,
 )
-# A couple of discourse fillers that may sit before a genuine greeting ("well hello there HELIX") and
-# should be skipped — but NOT greetings themselves, so "so anyway" (pure filler, no greeting) still
-# fails to open.
-_LEAD_FILLER = re.compile(r"^(?:well|oh|um+|uh+|okay|ok|so)\s+", re.IGNORECASE)
+# Discourse fillers that may sit before a genuine greeting ("well hello there HELIX") and should be
+# skipped — but NOT greetings themselves, so "so anyway" (pure filler, no greeting) still fails to
+# open. STT loves inserting commas after these, so trailing punctuation is absorbed with the filler.
+_LEAD_FILLER = re.compile(r"^(?:well|oh|um+|uh+|okay|ok|so|please)(?:[,.!;:]+\s*|\s+)", re.IGNORECASE)
+
+# CARRIER words that may precede the name and still leave it LEADING: the wake grammar's own spoken
+# carriers (hey/ok/okay) plus the imperative marker "please" — "okay, HELIX, do it" and "please
+# HELIX, turn it down" address exactly like "HELIX, ...". Deliberately NOT the narrative fillers
+# (so/well/oh/um): "so HELIX built me an app" is a report ABOUT it, and song lyrics love leading
+# vocals with "oh" — admitting those would wake HELIX on mentions and let music through the
+# playback gate.
+_CARRIERS = frozenset({"hey", "ok", "okay", "please"})
 
 # When an opener leads, the name must still arrive reasonably soon — a greeting followed much later by
 # the name in a different clause ("how are you going to explain HELIX to them") is not an address.
@@ -58,27 +66,50 @@ def is_addressed(text: str, wake_re) -> bool:
 
     Addressed when ANY holds:
       - the utterance is short (≤3 words) and contains the name — it IS the address ("HELIX?", "hey HELIX");
-      - the name LEADS the utterance (it is the first word) — "HELIX, build me a timer";
+      - the name LEADS the utterance, allowing carrier words before it — "HELIX, build me a timer",
+        "okay, HELIX, do it", "please HELIX, turn it down";
       - the utterance OPENS with a greeting/address and the name arrives soon after — "good morning
         HELIX, how you doing", "well hello there HELIX".
     NOT addressed when the name only appears after ordinary words with no opening greeting — "the wake
-    word is HELIX", "so anyway HELIX can build apps", "we should tell them HELIX exists" — speech ABOUT
-    HELIX, not TO it.
+    word is HELIX", "so anyway HELIX can build apps", "so HELIX built me an app", "we should tell them
+    HELIX exists" — speech ABOUT HELIX, not TO it. Narrative leads ("so/well/oh HELIX ...") are NOT
+    carriers, exactly so mentions and sung "oh HELIX ..." lines stay unaddressed.
     """
     if wake_re is None or not (text or "").strip():
         return False
     words = _words(text)
     if not words:
         return False
-    name_positions = [i for i, w in enumerate(words) if wake_re.search(w)]
-    if not name_positions:
+    if len(words) <= 3 and wake_re.search(" ".join(words)):
+        return True  # a short utterance that IS the address ("HELIX?", "hey HELIX")
+    return is_directly_addressed(text, wake_re)
+
+
+def is_directly_addressed(text: str, wake_re) -> bool:
+    """The STRICT address test — is_addressed WITHOUT the short-utterance benefit of the doubt: the
+    name LEADS the utterance (at most carrier words — hey/okay/please — before it), or a greeting
+    opens it with the name close behind. Used where the benefit of the doubt is dangerous: judging
+    speech heard while the machine itself is playing audio, where a hotword-biased STT can fish the
+    name out of a short music fragment ("my HELIX baby") that must NOT count as an address.
+
+    The name is matched on JOINED words (not per-token), so a multi-word custom wake word ("red
+    queen") addresses too; and a carrier is never skipped when it IS the configured name (a wake word
+    of "Okay" stays the lead)."""
+    if wake_re is None:
         return False
-    if len(words) <= 3:
-        return True
-    if name_positions[0] == 0:  # the name is the very first word — a bare address
-        return True
+    words = _words(text)
+    if not words or not wake_re.search(" ".join(words)):
+        return False
+    lead = list(words)
+    while len(lead) > 1 and lead[0] in _CARRIERS and not wake_re.search(lead[0]):
+        lead.pop(0)
+    if wake_re.match(" ".join(lead)):
+        return True  # the name (with at most carriers before it) leads the utterance
     head = _LEAD_FILLER.sub("", (text or "").strip().lower(), count=1)
-    return bool(_OPENER.match(head)) and name_positions[0] <= _OPENER_NAME_WINDOW
+    if not _OPENER.match(head):
+        return False
+    # A greeting opens it — the name must still arrive within the first few words.
+    return bool(wake_re.search(" ".join(_words(head)[: _OPENER_NAME_WINDOW + 1])))
 
 
 def is_wake_utterance(text: str, wake_re, wake_phrase_fn) -> bool:

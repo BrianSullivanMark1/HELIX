@@ -128,6 +128,8 @@ helix/
     theme.py · orb.py · shader_orb.py       # HUD palette + the animated Presence orb (QPainter, optional GPU shader)
     workers.py                              # QtWorker — run a callable on a QThread, emit result/error/progress
     voice.py                                # VoiceController — wake word, identity gate, streamed TTS, barge-in
+    mediasense.py                           # playback sense — WASAPI render meter (ctypes, no deps): is the
+                                            #   machine itself audibly playing? feeds voice.py's playback gate
     chat_input.py                           # the prompt box: Enter sends, and paste/drag an image to attach it
     console_view.py                         # the orb home + transcript + inline charts/tables + image previews + input
     launcher_view.py                        # the Menu — Apps / Protocols / Agents / Holograms / Vault cards + Suggested
