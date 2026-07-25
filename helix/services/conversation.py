@@ -38,7 +38,7 @@ TOOL_DIGEST_CHARS = 1500
 
 # Tools whose results carry IMAGES back to the model — a turn that ran one of these SAW pixels, so
 # it feeds the visual-memory distiller exactly like a turn with attached images.
-SIGHT_TOOLS = frozenset({"view_screen", "view_image", "find_images"})
+SIGHT_TOOLS = frozenset({"view_screen", "view_image", "find_images", "view_camera"})
 
 # Tools that build, spend, self-modify, delete, rename, or launch the user's stuff. An AGENT run is
 # autonomous (no human in the loop), so it is denied all of these — it can read, think, search, and
@@ -74,6 +74,10 @@ BUILD_TOOLS = frozenset(
         # display — whatever is on it (a password manager, a bank page) would ride into a run that
         # processes untrusted content.
         "view_screen",
+        # Camera sight is human-driven only, for the same reason turned outward: an unattended
+        # agent processing untrusted content must never open the webcam and photograph the room —
+        # or the person — behind the machine.
+        "view_camera",
         # Desktop control is human-driven only — text a watcher processes must never launch a
         # program or press the user's keys. (system_status stays readable: it's one status line.)
         "open_program", "media_control",
@@ -242,9 +246,13 @@ class ConversationService:
             prompt = "\n\n".join([user_text, *extras])
             dispatched: list[str] = []  # tools that RAN this turn (their side effects are real)
 
-            def _on_tool(name: str, digest: str) -> None:
+            def _on_tool(name: str, digest: str, saw_pixels: bool | None = None) -> None:
                 dispatched.append(name)
-                if name in SIGHT_TOOLS:
+                # saw_pixels: the bridge reports whether the tool ACTUALLY returned images, so a
+                # failed look (camera window cancelled, screen grab refused) doesn't fire the
+                # visual-memory distiller on a turn that never saw anything. None = an older
+                # caller that can't say — fall back to name membership.
+                if saw_pixels if saw_pixels is not None else (name in SIGHT_TOOLS):
                     saw_images[0] = True
                 if persist:
                     self._remember_tool(name, digest)

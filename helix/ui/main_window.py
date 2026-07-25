@@ -26,6 +26,7 @@ from helix.domain.events import (
     BuildCreated,
     BuildDeleted,
     BuildDeleteRequested,
+    CameraRequested,
     ConnectRequested,
     SleepRequested,
     BuildFinished,
@@ -70,6 +71,7 @@ class HelixMainWindow(QMainWindow):
     _deleteRequestSignal = pyqtSignal(object)
     _openRequestSignal = pyqtSignal(object)
     _connectRequestSignal = pyqtSignal(object)
+    _cameraRequestSignal = pyqtSignal(object)
     _sleepRequestSignal = pyqtSignal(object)
     _selfChangeProgressSignal = pyqtSignal(object)
     _selfChangeFinishedSignal = pyqtSignal(object)
@@ -209,6 +211,12 @@ class HelixMainWindow(QMainWindow):
         # pastes the value into the PANEL (never chat); the model never sees it.
         container.bus.subscribe(ConnectRequested, self._connectRequestSignal.emit)
         self._connectRequestSignal.connect(self._on_connect_requested)
+        # The model asked to look through the camera (view_camera) → the live-preview window opens
+        # HERE on the GUI thread; the tool's worker thread stays parked on the request holder until
+        # the window hands back a frame or closes.
+        self._camera_panel = None
+        container.bus.subscribe(CameraRequested, self._cameraRequestSignal.emit)
+        self._cameraRequestSignal.connect(self._on_camera_requested)
         # The model judged a genuine embedded sleep request (go_to_sleep) → rest the mic quietly;
         # the model's own reply is the goodnight. Only the user's spoken wake word wakes it.
         container.bus.subscribe(SleepRequested, self._sleepRequestSignal.emit)
@@ -467,6 +475,34 @@ class HelixMainWindow(QMainWindow):
             connections=self._c.connections, settings=self._c.settings,
         )
 
+    def _on_camera_requested(self, ev: object) -> None:
+        # One camera window at a time: a stale one (its request is already settled or abandoned)
+        # folds before the fresh look opens. Non-modal — the rest of HELIX stays usable.
+        from helix.ui.camera_view import show_camera_panel
+
+        self._close_camera_panel()
+        panel = show_camera_panel(self, ev.request, settings=self._c.settings)
+        if panel is not None:
+            self._camera_panel = panel
+            # Identity-guarded: a replaced panel's DEFERRED destroy (WA_DeleteOnClose) fires after
+            # the new one is tracked — it must never untrack the live window (teardown relies on
+            # this reference to settle the request and wake the parked turn thread).
+            panel.destroyed.connect(
+                lambda _=None, p=panel: self._camera_panel is p
+                and setattr(self, "_camera_panel", None)
+            )
+            self.console.announce_camera(ev.request.prompt)
+
+    def _close_camera_panel(self) -> None:
+        """Fold any open camera window. Closing settles its request, so a parked tool thread wakes
+        instead of waiting out its timeout — teardown relies on this."""
+        panel, self._camera_panel = self._camera_panel, None
+        if panel is not None:
+            try:
+                panel.close()
+            except Exception:
+                pass
+
     def _on_self_change_progress(self, ev: object) -> None:
         self.console.on_self_change_progress(ev.line)
 
@@ -607,6 +643,7 @@ class HelixMainWindow(QMainWindow):
         self._torn_down = True
         for step in (
             self._remote.stop,  # stop the remote listener first — no new remote turns during teardown
+            self._close_camera_panel,  # settle any open camera request so its parked turn thread wakes
             self._shutdown_heartbeat,  # stop the cadence + join any in-flight scheduled agent
             self._c.build_queue.shutdown,
             self._c.selfdev_lane.shutdown,

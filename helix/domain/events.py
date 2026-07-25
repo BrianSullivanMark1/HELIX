@@ -97,6 +97,21 @@ class ConnectRequested(Event):
 
 
 @dataclass(frozen=True)
+class CameraRequested(Event):
+    """The model asked to LOOK THROUGH THE CAMERA because the user wants to show it a physical
+    thing ("what is this part I'm holding?"). The UI opens a small live-preview window on the GUI
+    thread; the user presents the object; the window hands ONE captured frame back through the
+    request holder to the tool's parked worker thread, and the model sees it as an ephemeral image
+    — never saved. The event stays a frozen fact; the mutability (claim/fulfil/fail/wait) lives
+    inside the holder.
+
+    request: a helix.services.camera.CameraRequest (typed loosely so the domain layer stays free of
+    service imports)."""
+
+    request: object
+
+
+@dataclass(frozen=True)
 class SleepRequested(Event):
     """The model judged that the user genuinely asked HELIX to rest its ears — a sleep request
     embedded in natural speech ("go take a nap while we talk") rather than a crisp voice command

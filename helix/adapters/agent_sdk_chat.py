@@ -127,7 +127,8 @@ class _Sinks:
     """One run's callbacks — carried in the bridge closure, never shared between runs."""
     on_progress: Callable[[str], None] | None = None
     cancel: object | None = None
-    on_tool: Callable[[str, str], None] | None = None
+    on_tool: Callable[..., None] | None = None  # (name, digest, saw_pixels: bool) — third arg says
+    # whether the tool actually returned images (drives the visual-memory bookkeeping upstream)
     user: str = ""  # the recognized speaker key, so a bridged write tool records to the right person
 
 
@@ -217,7 +218,10 @@ class SubscriptionBrain:
                             digest = str(out)
                             content = [{"type": "text", "text": digest}]
                         if sinks.on_tool is not None:
-                            sinks.on_tool(spec_name, digest)
+                            # Third arg: whether pixels ACTUALLY came back, so the sight bookkeeping
+                            # (visual-memory distill) skips a look that failed or was cancelled.
+                            saw_pixels = isinstance(out, ToolOutput) and bool(out.images)
+                            sinks.on_tool(spec_name, digest, saw_pixels)
                         return content
 
                     result = await asyncio.to_thread(_dispatch)

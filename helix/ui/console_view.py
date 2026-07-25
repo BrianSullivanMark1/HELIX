@@ -1952,6 +1952,16 @@ class ConsoleView(QWidget):
         window, a few seconds after the shell is up (lets the voice stack finish warming)."""
         self._announce("HELIX V3 online.")
 
+    def announce_camera(self, prompt: str = "") -> None:
+        """The camera window just opened mid-turn. A voice-first user with their hands on the object
+        may not be looking at the screen, so this one line is spoken even with work narration off —
+        it's an actionable cue (like a reminder), not progress chatter. narrate() keeps the turn
+        state untouched and stays quiet while HELIX is already speaking or the mic is asleep."""
+        line = f"Camera's open — {prompt}" if prompt else "Camera's open — hold it up."
+        self.status.setText(line)
+        if self._voice is not None:
+            self._voice.narrate(line)
+
     def announce_agent_report(self, name: str, report: str) -> None:
         # A background watcher speaking up is UNPROMPTED. By default it lands silently — shown in the
         # transcript, the orb notes it — and is spoken aloud only if the user turned on proactive speech.

@@ -8,7 +8,8 @@ the idea; it also collapsed almost the entire UI into one ~3,900-line file with 
 Qt widgets interleaved. V2 kept the *ideas* and discarded the *structure*, growing from an app-builder
 into a full voice-first assistant with the same discipline. V3 keeps the machine and redesigns the
 surface: the presentation-only vocabulary (App · Protocol · Agent · Hologram · Vault), sight
-(`view_screen` + visual memory), just-in-time connections, and the nightly Evolve drafter.
+(`view_screen`, the `view_camera` show-me window + visual memory), just-in-time connections, and the
+nightly Evolve drafter.
 
 ---
 
@@ -113,6 +114,8 @@ helix/
     files.py           #   the user's disk: list/read always; write behind a toggle; find_images/view_image for vision
     images.py          #   attached/located images → model-ready vision blocks (Pillow: orient, downscale, base64);
                        #     capture_screen for view_screen (ImageGrab off the GUI thread, ephemeral like every image)
+    camera.py          #   the view_camera hand-off: the tool's worker parks on a CameraRequest until the
+                       #     ui/camera_view window settles it with ONE webcam frame (cancel-aware, time-boxed)
     knowledge.py       #   the Vault — searchable notes/documents + local RAG (search/create/remember)
     memory.py · profile.py · lessons.py         # long-term facts, who-you-are, learned prefs; memory.py also
                        #     distills durable VISUAL facts from image turns (after_image_turn, per speaker)
@@ -207,10 +210,18 @@ API. Persistence, tool digests, and behaviour are identical on both paths. `Pref
 **Vision** flows on both paths: images the user attaches/pastes/drags ride on the user turn; images
 HELIX *locates* on disk (`find_images` / `view_image`) come back inside the tool result; and
 `view_screen` captures the display itself (`images.capture_screen`, Pillow `ImageGrab` off the GUI
-thread) into the same pipeline. `services/images.py` normalizes every image (EXIF-orient, downscale to
-~1568px, re-encode, base64) before it's sent; every capture is ephemeral — never persisted. After an
-image turn answers, `MemoryService.after_image_turn` distills durable *visual* facts into per-speaker
-long-term memory in the background, so what HELIX saw stays answerable without the photo.
+thread) into the same pipeline. `view_camera` turns the webcam on the *physical* world ("what is this
+part I'm holding?"): the tool publishes `CameraRequested` and parks its worker on a
+`services/camera.py` CameraRequest; the GUI thread opens `ui/camera_view.py` — a silent live-preview
+window (mirrored preview, un-mirrored capture so markings read correctly) with a countdown and a
+Capture button — and the one frame it hands back rides the same `encode_image_bytes` pipeline. The
+wait is cancel-aware and time-boxed, and every window exit settles the request, so a turn can never
+hang on an open camera. `services/images.py` normalizes every image (EXIF-orient, downscale to
+~1568px, re-encode, base64) before it's sent; every capture is ephemeral — never persisted (camera
+frames never touch disk at all). After an image turn answers, `MemoryService.after_image_turn`
+distills durable *visual* facts into per-speaker long-term memory in the background, so what HELIX
+saw stays answerable without the photo. Like `view_screen`, `view_camera` sits in the `BUILD_TOOLS`
+fence: an unattended agent can never open the webcam.
 
 ---
 

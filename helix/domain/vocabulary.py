@@ -101,6 +101,7 @@ _TOOL_PHRASES: dict[str, str] = {
     "find_images": "Finding the picture",
     "view_image": "Opening the picture",
     "view_screen": "Looking at your screen",
+    "view_camera": "Looking through the camera",
     "connect_service": "Setting up the connection",
     "go_to_sleep": "Resting my ears",
     "open_program": "Opening the program",

@@ -16,6 +16,7 @@ def test_known_tools_map_to_plain_spoken_phrases():
     assert friendly_tool_label("check_email") == "Checking your inbox"
     assert friendly_tool_label("build_3d_model") == "Projecting the hologram"
     assert friendly_tool_label("view_screen") == "Looking at your screen"
+    assert friendly_tool_label("view_camera") == "Looking through the camera"
 
 
 def test_mcp_prefixed_names_are_stripped():
