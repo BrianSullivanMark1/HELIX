@@ -113,6 +113,17 @@ def test_the_turns_stop_token_breaks_the_wait():
     assert req.abandoned  # the window notices on its next tick and folds
 
 
+def test_the_capture_ceiling_reaps_a_forgotten_window():
+    # With no countdown, this worker-side ceiling is the ONLY thing bounding a window someone
+    # walked away from: the wait abandons, the window's next tick folds it, HELIX says no picture.
+    req = CameraRequest()
+    assert req.claim()
+    start = time.monotonic()
+    assert req.wait(claim_timeout=1.0, timeout=0.2) is None
+    assert time.monotonic() - start < 2.0
+    assert req.abandoned and "left open" in req.error
+
+
 def test_a_frame_arriving_after_abandonment_is_dropped_not_resurrected():
     req = CameraRequest()
     req.abandon()
@@ -219,7 +230,7 @@ def _app():
 
 
 def _panel(monkeypatch, req, _app) -> CameraPanel:
-    monkeypatch.setattr(CameraPanel, "_start_camera", lambda self: True)
+    monkeypatch.setattr(CameraPanel, "_start_camera", lambda self, device=None: True)
     return CameraPanel(None, req)
 
 
@@ -302,7 +313,9 @@ def test_a_camera_that_never_delivers_a_frame_fails_after_the_grace_period(monke
     assert "never delivered" in req.error
 
 
-def test_the_first_live_frame_arms_the_countdown_and_the_deadline_captures(monkeypatch, _app):
+def test_a_live_frame_waits_for_the_users_word_and_voice_capture_returns_it(monkeypatch, _app):
+    # No countdown, no auto-capture: frames flow, the window WAITS, and 'take the picture'
+    # (via the voice hook) is what takes the shot.
     req = CameraRequest()
     assert req.claim()
     panel = _panel(monkeypatch, req, _app)
@@ -312,24 +325,100 @@ def test_the_first_live_frame_arms_the_countdown_and_the_deadline_captures(monke
             return _frame()
 
     panel._on_frame(_F())
-    assert panel._deadline is not None and panel._latest is not None
-    panel._deadline = time.monotonic() - 0.1  # countdown ran out
+    assert panel._latest is not None
     panel._tick()
+    assert not panel._settled  # frames alone never capture — the user's word does
+    panel.voice_capture()
     assert req.wait(claim_timeout=1.0, timeout=1.0) is not None
 
 
-def test_more_time_rearms_the_countdown_instead_of_capturing(monkeypatch, _app):
-    # Hands full, object not positioned yet: More time resets to a FRESH window (never stacks).
+def test_the_word_before_the_first_frame_waits_and_captures_on_arrival(monkeypatch, _app):
+    # 'Take the picture' during sensor warm-up (or right after a picker switch) must not fail the
+    # whole look — it waits, and the first frame that lands IS the picture.
+    req = CameraRequest()
+    assert req.claim()
+    panel = _panel(monkeypatch, req, _app)
+    panel.voice_capture()
+    assert not panel._settled and panel._pending_capture
+
+    class _F:
+        def toImage(self):
+            return _frame()
+
+    panel._on_frame(_F())
+    assert req.wait(claim_timeout=1.0, timeout=1.0) is not None
+
+
+def test_the_hint_only_promises_listening_when_voice_is_ready(monkeypatch, _app):
+    from PyQt6.QtWidgets import QLabel
+
+    monkeypatch.setattr(CameraPanel, "_start_camera", lambda self, device=None: True)
+    ready_req = CameraRequest()
+    assert ready_req.claim()
+    ready = CameraPanel(None, ready_req, voice_ready=True)
+    assert any("I'm listening" in w.text() for w in ready.findChildren(QLabel))
+    quiet_req = CameraRequest()
+    assert quiet_req.claim()
+    quiet = CameraPanel(None, quiet_req, voice_ready=False)
+    assert not any("listening" in w.text() for w in quiet.findChildren(QLabel))
+
+
+def test_voice_cancel_closes_without_a_picture(monkeypatch, _app):
     req = CameraRequest()
     assert req.claim()
     panel = _panel(monkeypatch, req, _app)
     panel._latest = _frame()
-    panel._deadline = time.monotonic() + 0.5  # nearly out
-    panel._more_time()
-    remaining = panel._remaining()
-    assert remaining is not None and remaining > 5
-    panel._tick()
-    assert not panel._settled  # still previewing, nothing captured
+    panel.voice_cancel()
+    assert req.wait(claim_timeout=1.0, timeout=1.0) is None
+    assert "closed the camera window" in req.error
+
+
+class _Dev:
+    def __init__(self, name: str, raw: bytes):
+        self._name, self._raw = name, raw
+
+    def description(self) -> str:
+        return self._name
+
+    def id(self) -> bytes:
+        return self._raw
+
+
+class _CamSettings:
+    def __init__(self):
+        self.d = {}
+
+    def get(self, key, default=None):
+        return self.d.get(key, default)
+
+    def set(self, key, value):
+        self.d[key] = value
+
+
+def test_the_picker_lists_cameras_switches_live_and_remembers(monkeypatch, _app):
+    devs = [_Dev("Integrated Camera", b"cam-a"), _Dev("USB Camera", b"cam-b")]
+    monkeypatch.setattr(camera_view, "_video_inputs", lambda: devs)
+    started = []
+
+    def _fake_start(self, device=None):
+        device = device or devs[0]
+        started.append(device)
+        self._active_device_id = camera_view._device_id(device)
+        return True
+
+    monkeypatch.setattr(CameraPanel, "_start_camera", _fake_start)
+    settings = _CamSettings()
+    req = CameraRequest()
+    assert req.claim()
+    panel = CameraPanel(None, req, settings=settings)
+    names = [panel._combo.itemText(i) for i in range(panel._combo.count())]
+    assert names == ["Integrated Camera", "USB Camera"]
+    assert panel._combo.currentIndex() == 0
+    panel._combo.setCurrentIndex(1)  # the user picks the hooked-up camera
+    assert started[-1].description() == "USB Camera"
+    # The choice is REMEMBERED — next window (and _resolve_camera) starts on this camera.
+    assert settings.d[camera_view.CAMERA_DEVICE_SETTING] == camera_view._device_id(devs[1])
+    assert not panel._settled  # switching never settles the request
 
 
 def test_cancel_and_esc_route_through_the_close_funnel_that_stops_the_camera(monkeypatch, _app):
@@ -354,3 +443,205 @@ def test_the_models_window_line_renders_as_plain_text_never_markup(monkeypatch, 
     labels = [w for w in panel.findChildren(QLabel)
               if w.text() == "Hold the <b>label</b> up close"]
     assert labels and all(w.textFormat() == Qt.TextFormat.PlainText for w in labels)
+
+
+# ---- the camera voice grammar + the voice layer's camera session ---------------------------
+
+from helix.ui.voice import VoiceController, camera_command  # noqa: E402
+
+
+def test_camera_grammar_hears_the_take_picture_variants():
+    for say in ("take the picture", "take a picture", "take picture", "take the photo",
+                "okay take the picture now", "hey helix, take the picture", "snap it",
+                "capture", "Take the photo, please.", "cheese"):
+        assert camera_command(say) == "capture", say
+
+
+def test_camera_grammar_hears_the_cancel_variants():
+    for say in ("cancel", "cancel that", "never mind", "close the camera", "stop",
+                "no picture", "forget it"):
+        assert camera_command(say) == "cancel", say
+
+
+def test_camera_grammar_ignores_room_chatter():
+    # Whole-utterance matches only: a sentence merely CONTAINING a capture word does nothing,
+    # so conversation near an open camera window can never snap a frame.
+    for say in ("", "that's a nice camera", "we should take it easy",
+                "I captured the flag in that game yesterday",
+                "picture this, we're on a beach", "can you take the trash out",
+                "let me hold it a little closer"):
+        assert camera_command(say) is None, say
+
+
+def test_camera_grammar_takes_the_name_anywhere_but_never_a_mention():
+    from helix.ui.voice import build_wake_re
+
+    assert camera_command("take the picture, helix") == "capture"  # trailing name works too
+    custom = build_wake_re("friday")
+    assert camera_command("friday, take the picture", custom) == "capture"
+    assert camera_command("take the picture, friday", custom) == "capture"
+    # A sentence MENTIONING the name plus a grammar phrase is talk ABOUT it, not a command.
+    assert camera_command("I told helix take the picture yesterday") is None
+    assert camera_command("I told friday take the picture yesterday", custom) is None
+
+
+def test_the_spoken_camera_lines_never_match_the_grammar():
+    # The camera ears are LIVE while these play (narrate doesn't gate the mic) — a spoken cue or
+    # tool label that matched the grammar would capture itself.
+    assert camera_command("Camera's open — ready when you are.") is None
+    assert camera_command(friendly_tool_label("view_camera")) is None
+
+
+class _VStt:
+    def available(self):
+        return True
+
+    def ready(self):
+        return True
+
+    def transcribe(self, _path):
+        return ""
+
+
+class _VTts:
+    def available(self):
+        return True
+
+    def speak(self, text, allow_fallback=True):
+        pass
+
+    def stop(self):
+        pass
+
+
+class _VSettings:
+    def __init__(self):
+        self.d = {"voice_input_on": True}
+
+    def get(self, key, default=None):
+        return self.d.get(key, default)
+
+    def set(self, key, value):
+        self.d[key] = value
+
+
+class _Listener:
+    def __init__(self):
+        self.active = None
+
+    def set_active(self, on: bool) -> None:
+        self.active = bool(on)
+
+
+def _voice() -> VoiceController:
+    return VoiceController(_VStt(), _VTts(), _VSettings())
+
+
+def test_camera_session_routes_the_grammar_to_the_window_and_nothing_else(_app):
+    vc = _voice()
+    hits: list[str] = []
+    vc.set_camera_session(lambda: hits.append("capture"), lambda: hits.append("cancel"))
+    vc._on_camera_text("take the picture", media=False)
+    vc._on_camera_text("what a lovely day", media=False)  # chatter — ignored, no turn, no session
+    vc._on_camera_text("cancel", media=False)
+    assert hits == ["capture", "cancel"]
+    assert not vc._session  # camera words never open a conversation session
+    vc.clear_camera_session()
+    vc._on_camera_text("take the picture", media=False)  # window gone — dropped
+    assert hits == ["capture", "cancel"]
+
+
+def test_camera_words_over_machine_playback_need_direct_address(_app):
+    # The playback gate, camera edition: a video saying 'take the picture' is never the user.
+    vc = _voice()
+    hits: list[str] = []
+    vc.set_camera_session(lambda: hits.append("capture"), lambda: hits.append("cancel"))
+    vc._on_camera_text("take the picture", media=True)
+    assert hits == []
+    vc._on_camera_text("helix, take the picture", media=True)  # the name leading = addressed
+    assert hits == ["capture"]
+
+
+def test_camera_session_opens_the_ears_and_only_the_session_closes_them(_app):
+    vc = _voice()
+    listener = _Listener()
+    vc._listener = listener
+    vc._state = "thinking"
+    vc._apply_listen_gate()
+    assert listener.active is False  # the normal focus shield: deaf while a turn runs
+    vc.set_camera_session(lambda: None, lambda: None)
+    assert listener.active is True   # the ONE exception: the camera window is up
+    vc._state = "idle"               # an announcement clobbered the state mid-park —
+    vc._apply_listen_gate()
+    assert listener.active is True   # — the ears are keyed to the SESSION and survive it
+    vc._state = "thinking"
+    vc._muted = True
+    vc._apply_listen_gate()
+    assert listener.active is False  # sleep means sleep — even for the camera
+    vc._muted = False
+    vc._state = "speaking"
+    vc._apply_listen_gate()
+    assert listener.active is False  # never while HELIX is audibly speaking (echo)
+    vc._state = "thinking"
+    vc._working = True
+    vc._apply_listen_gate()
+    assert listener.active is False  # never while a background build has the focus shield up
+    vc._working = False
+    vc.clear_camera_session()
+    vc._apply_listen_gate()
+    assert listener.active is False  # window gone — the focus shield is whole again
+
+
+class _ScriptStt:
+    def __init__(self, text: str):
+        self._text = text
+
+    def available(self):
+        return True
+
+    def ready(self):
+        return True
+
+    def transcribe(self, _path):
+        return self._text
+
+
+def test_camera_words_survive_an_announcement_and_never_become_a_model_turn(_app):
+    # A reminder spoken mid-park drives the state thinking→speaking→idle. With the window still
+    # open, 'take the picture' must STILL land on the window — and must never leak into the normal
+    # wake/session grammar as a queued follow-up turn (the focus-shield invariant).
+    vc = VoiceController(_ScriptStt("take the picture"), _VTts(), _VSettings())
+    vc._run = lambda fn, on_done: on_done(fn(lambda _s: None))  # synchronous worker, house style
+    hits: list[str] = []
+    heard: list[str] = []
+    vc.recognized.connect(heard.append)
+    vc.set_camera_session(lambda: hits.append("capture"), lambda: hits.append("cancel"))
+    vc._state = "idle"     # what _speak_done leaves behind after the announcement
+    vc._start_session()    # the 45s session from 'HELIX, what is this?' is still open
+    vc._on_utterance(b"\x00\x00" * 800)
+    assert hits == ["capture"]
+    assert heard == []     # the words went to the window, not to a model turn
+    vc._session_timer.stop()
+
+
+def test_a_stale_transcription_from_a_replaced_window_acts_on_nobody(_app):
+    # STT finishing after its window was replaced must not capture the NEW window.
+    vc = _voice()
+    old_hits: list[int] = []
+    new_hits: list[int] = []
+    vc.set_camera_session(lambda: old_hits.append(1), lambda: old_hits.append(-1))
+    stale = vc._camera_session
+    vc.set_camera_session(lambda: new_hits.append(1), lambda: new_hits.append(-1))
+    vc._on_camera_text("take the picture", media=False, session=stale)
+    assert old_hits == [] and new_hits == []
+    vc._on_camera_text("take the picture", media=False, session=vc._camera_session)
+    assert new_hits == [1]
+
+
+def test_a_registered_voice_keeps_camera_words_over_machine_playback(_app):
+    vc = _voice()
+    hits: list[str] = []
+    vc.set_camera_session(lambda: hits.append("capture"), lambda: hits.append("cancel"))
+    vc._known_voice = lambda: True  # the voice-print matched a registered speaker
+    vc._on_camera_text("take the picture", media=True)
+    assert hits == ["capture"]

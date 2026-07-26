@@ -374,6 +374,45 @@ def is_wake(text: str) -> bool:
     return bool(_WAKE_FORMS.match(_clean_command(text)))
 
 
+# --- the camera window's tiny voice grammar ("take picture" / "cancel") -----------------------
+# Deliberately TIGHT, whole-utterance only: explicit picture words act, everything else is ignored,
+# so room chatter near an open camera window can never snap a frame ("we should take it easy" and a
+# sentence merely CONTAINING 'capture' do nothing). Fillers (okay/please/now/hey/name) are stripped
+# by _clean_command, so "okay HELIX, take the picture now" lands as "take the picture".
+_CAMERA_TAKE = frozenset({
+    "take picture", "take a picture", "take the picture", "take my picture",
+    "take photo", "take a photo", "take the photo",
+    "take pic", "take a pic", "take the pic",
+    "take the shot", "take a shot", "take one",
+    "snap it", "snap the picture", "snap a picture", "snap the photo", "snap a photo",
+    "capture", "capture it", "capture the picture", "capture the photo",
+    "picture", "cheese",
+})
+_CAMERA_CANCEL = frozenset({
+    "cancel", "cancel it", "cancel that", "never mind", "nevermind", "forget it",
+    "close it", "close the camera", "no picture", "stop", "stop it",
+})
+
+
+def camera_command(text: str, wake_re=None) -> str | None:
+    """Classify an utterance heard while the CAMERA WINDOW is open: 'capture', 'cancel', or None
+    (ignored — the room keeps talking, the window keeps waiting for its button or its words). The
+    wake word is optional here — the open window IS the addressing context — and the name may sit
+    ANYWHERE ("HELIX, take the picture" / "take the picture, HELIX"): the whole utterance minus the
+    name must BE a grammar phrase. Deliberately not split_wake: keeping only the text AFTER the
+    name would drop trailing-name commands and let a long mention-sentence ("I told HELIX take the
+    picture yesterday") false-fire on its tail."""
+    raw = text or ""
+    stripped = (wake_re or _WAKE_RE).sub(" ", raw, count=1)  # the name, wherever it sits
+    for candidate in (raw, stripped):  # raw covers the default name (a _clean_command filler)
+        t = _clean_command(candidate)
+        if t in _CAMERA_TAKE:
+            return "capture"
+        if t in _CAMERA_CANCEL:
+            return "cancel"
+    return None
+
+
 def _wants_wake(text: str, wake_re=None) -> bool:
     """Wake test used while asleep — the THALAMIC GATE (domain/brain.py). Sleep means sleep: HELIX
     wakes only for an explicit wake PHRASE ("wake up", "mic on") or an utterance genuinely ADDRESSED
@@ -729,6 +768,10 @@ class VoiceController(QObject):
         self._working = False             # HELIX is building/thinking: the mic goes DEAF so ambient talk
                                           # (a baby, the TV, a "stop" across the room) can't interrupt the
                                           # work. A deliberate stop is UI-only (tap the orb, Esc, Stop).
+        self._camera_session = None       # (on_capture, on_cancel) while the camera window is open —
+                                          # the ONE exception to the focus shield: mid-'thinking' the
+                                          # ears stay live for the tiny camera grammar ONLY
+        self._camera_stt_busy = False     # one in-flight camera transcription at a time
         self._speaking_text = ""          # what TTS is saying right now — the echo check compares to it
         self._speak_gen = 0               # a preempted utterance must not knock a newer turn to idle
         self._mic_ok: bool | None = None  # cache the device probe; don't reopen it on every settle
@@ -835,15 +878,42 @@ class VoiceController(QObject):
         if self._flow is not None and self._flow.active:
             self._flow.cancel()
 
+    # ----- camera session (the open camera window borrows the ears) -----
+    def set_camera_session(self, on_capture, on_cancel) -> None:
+        """The camera window just opened. The turn is parked ('thinking'), which normally keeps the
+        mic deaf — this narrow session re-opens it for ONE purpose: the tiny camera grammar ('take
+        picture' / 'cancel'), handled by _on_camera_text. Everything else heard is ignored — no
+        turns, no sessions, no reflexes — and the callbacks run on the UI thread."""
+        self._camera_session = (on_capture, on_cancel)
+        self._camera_stt_busy = False
+        self._apply_listen_gate()
+
+    def clear_camera_session(self) -> None:
+        """The camera window is gone — the focus shield is whole again."""
+        self._camera_session = None
+        self._apply_listen_gate()
+
     # ----- state machine -----
     def _apply_listen_gate(self) -> None:
         """The ONE rule for whether the mic is live: only while HELIX is genuinely idle — not thinking,
         not speaking, and not working on a background build. So HELIX never hears its own reply and
         ambient speech can't barge into a running turn or cancel a build. (While muted the state is
         idle, so the mic stays live to hear 'wake'/'stop'; the muted branch of _on_utterance filters
-        everything else.)"""
+        everything else.) ONE exception: while the camera window is open, the ears stay live for
+        the camera grammar alone — keyed to the SESSION, not to 'thinking', because the camera
+        doesn't own the state machine (a reminder or sleep confirmation spoken mid-park drives
+        thinking→speaking→idle, and the ears must survive that). Never while HELIX is audibly
+        speaking (echo), never while a background build runs, and never while muted (sleep means
+        sleep)."""
         if self._listener is not None:
-            self._listener.set_active(self.enabled() and not self._working and self._state == "idle")
+            camera = (
+                self._camera_session is not None
+                and not self._muted
+                and self._state != "speaking"
+            )
+            self._listener.set_active(
+                self.enabled() and not self._working and (self._state == "idle" or camera)
+            )
 
     def set_working(self, on: bool) -> None:
         """The Console flags HELIX busy on a background build / self-change draft. While working the mic
@@ -966,6 +1036,29 @@ class VoiceController(QObject):
             media = self._media_playing()
             self._barge_busy = True
             self._transcribe(path, lambda text: self._on_muted_text(text, media), pcm)
+            return
+        # THE CAMERA'S EARS: while the camera window is open, EVERY utterance routes to the camera
+        # grammar and NOWHERE else — keyed to the session, not the state, so an announcement that
+        # drove the state machine through speaking→idle mid-park can neither kill the camera words
+        # nor hand the room the full grammar while the turn is still in flight. The turn state is
+        # left untouched, one transcription runs at a time, and the SESSION rides into the handler
+        # so a transcription that outlives its window can never act on a replacement window.
+        if (
+            self._camera_session is not None
+            and self._state != "speaking"
+            and not self._working
+        ):
+            if self._camera_stt_busy:
+                return
+            path = self._pcm_to_wav(pcm)
+            if path is None:
+                return
+            media = self._media_playing()
+            session = self._camera_session
+            self._camera_stt_busy = True
+            self._transcribe(
+                path, lambda text: self._on_camera_text(text, media, session), pcm
+            )
             return
         # THE FOCUS SHIELD: the mic is gated off (see _apply_listen_gate) while HELIX is thinking,
         # speaking, or working a background build, so this only fires when HELIX is genuinely idle. If
@@ -1222,6 +1315,33 @@ class VoiceController(QObject):
         self._set_state("thinking")
         self.recognized.emit(command)
 
+    def _on_camera_text(self, text: str, media: bool, session=None) -> None:
+        """An utterance heard while the camera window is open. Only the tiny camera grammar acts;
+        everything else is dropped on the floor — no turn, no session, no wake semantics. The
+        playback gate still applies: sound the machine itself plays is never the user, so over
+        audible playback the words must be directly addressed ('HELIX, take the picture') or come
+        from a registered voice. `session` is the camera session this utterance was HEARD under —
+        if a replacement window opened while it transcribed, it acts on nobody."""
+        self._camera_stt_busy = False
+        cam = self._camera_session
+        if cam is None or self._muted:  # the window closed (or a sleep landed) mid-transcription
+            return
+        if session is not None and session is not cam:  # heard at a window that no longer exists
+            return
+        text = (text or "").strip()
+        if not text:
+            return
+        if media and not self._known_voice() and not is_directly_addressed(text, self._wake_re):
+            return
+        action = camera_command(text, self._wake_re)
+        if action is None:
+            return
+        on_capture, on_cancel = cam
+        try:
+            (on_capture if action == "capture" else on_cancel)()
+        except Exception:  # the window may be tearing down this exact moment — never break the ears
+            _LOG.exception("camera voice command failed")
+
     def _on_wake_text(self, text: str, media: bool = False) -> None:
         text = (text or "").strip()
         if self._muted:  # a sleep landed WHILE this transcribed — the sleep handler owns wake/stop + state
@@ -1330,6 +1450,12 @@ class VoiceController(QObject):
         text = (text or "").strip()
         if not text:
             self._set_state("idle")
+            return
+        if self._camera_session is not None and not self._muted:
+            # A deliberate push-to-talk while the camera window is open is FOR the window: route it
+            # through the same tiny grammar (no playback doubt — the user held the button).
+            self._set_state("idle")
+            self._on_camera_text(text, media=False, session=self._camera_session)
             return
         if self._muted:  # asleep (incl. a sleep that landed mid-capture): only wake/stop act, never a turn
             self._on_muted_text(text)

@@ -2,8 +2,11 @@
 
 The model calls view_camera; the tool's worker thread publishes CameraRequested and parks on the
 request holder; HelixMainWindow opens THIS window on the GUI thread. It shows a live MIRRORED
-preview (natural for positioning, like a mirror), counts down, then captures ONE UN-mirrored frame
-— so printed markings on the object read correctly — and hands PNG bytes back through the holder.
+preview (natural for positioning, like a mirror) and waits — no countdown, no time pressure — until
+the user takes the picture BY VOICE ("take the picture" — the voice layer's camera session routes
+the tiny grammar to voice_capture/voice_cancel) or with the buttons. The ONE captured frame is
+UN-mirrored — so printed markings on the object read correctly — and goes back through the holder.
+A camera picker in the window switches between attached webcams and remembers the choice.
 
 Design constraints it honors:
 - Preview via QVideoSink frames painted into a QLabel — no QtMultimediaWidgets dependency.
@@ -18,8 +21,16 @@ from __future__ import annotations
 import time
 
 from PyQt6.QtCore import QBuffer, QIODevice, Qt, QTimer
-from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPixmap
-from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from helix.logging_setup import get_logger
 
@@ -34,10 +45,8 @@ _LOG = get_logger("camera")
 
 CAMERA_DEVICE_SETTING = "camera_device_id"  # chosen webcam (QCameraDevice id); "" = system default
 
-COUNTDOWN_S = 5        # seconds from first live frame to auto-capture — hands stay on the object
-MORE_TIME_S = 10.0     # what the "More time" button re-arms the countdown to (fresh, not stacked)
 STARTUP_GRACE_S = 10.0  # no frame within this after start = camera busy/broken; fail instead of sit
-_TICK_MS = 250          # countdown/abandon poll cadence
+_TICK_MS = 250          # abandon/no-frame poll cadence
 _PREVIEW_W, _PREVIEW_H = 520, 390
 
 
@@ -50,12 +59,20 @@ def _device_id(device) -> str:
         return ""
 
 
+def _video_inputs() -> list:
+    """Every attached camera, [] when QtMultimedia is unavailable. A seam tests can stub."""
+    if not _CAMERA:
+        return []
+    try:
+        return list(QMediaDevices.videoInputs())
+    except Exception:
+        return []
+
+
 def _resolve_camera(settings):
     """The QCameraDevice for the user's chosen webcam — or the system default, or the first one
     present. None when QtMultimedia is unavailable or the machine has no camera."""
-    if not _CAMERA:
-        return None
-    devices = QMediaDevices.videoInputs()
+    devices = _video_inputs()
     if not devices:
         return None
     want = (settings.get(CAMERA_DEVICE_SETTING, "") if settings is not None else "") or ""
@@ -63,24 +80,28 @@ def _resolve_camera(settings):
         for dev in devices:
             if _device_id(dev) == want:
                 return dev
-    default = QMediaDevices.defaultVideoInput()
-    if default is not None and not default.isNull():
-        return default
+    if _CAMERA:
+        default = QMediaDevices.defaultVideoInput()
+        if default is not None and not default.isNull():
+            return default
     return devices[0]
 
 
 class CameraPanel(QDialog):
-    """One camera look: live mirrored preview, a countdown, Capture/Cancel — then it settles the
-    CameraRequest and closes. Non-modal, so the rest of HELIX stays usable while it's up."""
+    """One camera look: live mirrored preview, a camera picker, and capture on the user's word
+    (voice or button) — then it settles the CameraRequest and closes. Non-modal, so the rest of
+    HELIX stays usable while it's up."""
 
-    def __init__(self, parent: QWidget | None, request, *, settings=None) -> None:
+    def __init__(self, parent: QWidget | None, request, *, settings=None,
+                 voice_ready: bool = False) -> None:
         super().__init__(parent)
         self._request = request
         self._settings = settings
         self._latest: QImage | None = None
         self._settled = False
-        self._deadline: float | None = None  # countdown end, armed by the first live frame
+        self._pending_capture = False  # the word came before the first frame: capture on arrival
         self._started_at = time.monotonic()
+        self._active_device_id = ""
         self._camera = None
         self._session = None
         self._sink = None
@@ -97,7 +118,7 @@ class CameraPanel(QDialog):
         head.setObjectName("Title")
         root.addWidget(head)
 
-        line = request.prompt or "Hold it up to the camera — I'll take the picture."
+        line = request.prompt or "Hold it up to the camera — take your time."
         why = QLabel(line)
         why.setObjectName("Status")
         why.setWordWrap(True)
@@ -111,22 +132,36 @@ class CameraPanel(QDialog):
         self._preview.setText("Waking the camera…")
         root.addWidget(self._preview, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        hint = QLabel("Auto-capture counts down once the picture is live — Capture now to skip "
-                      "ahead, More time to reset the count, Cancel (or Esc) to close without one.")
+        picker = QHBoxLayout()
+        pick_label = QLabel("Camera")
+        pick_label.setObjectName("Status")
+        self._combo = QComboBox()
+        self._combo.currentIndexChanged.connect(self._on_camera_pick)
+        picker.addWidget(pick_label)
+        picker.addWidget(self._combo, 1)
+        root.addLayout(picker)
+
+        # The hint tells the truth about the ears: voice_ready is the shell's word that the camera
+        # voice session is actually live (mic on, model warm, not asleep) — never promise
+        # listening that isn't happening.
+        hint = QLabel(
+            "No rush — I'm listening. Say 'take the picture' when you're ready, or 'cancel' to "
+            "close without one. The buttons work too."
+            if voice_ready else
+            "No rush — take the picture with the button when you're ready; Cancel (or Esc) "
+            "closes without one."
+        )
         hint.setObjectName("Status")
         hint.setWordWrap(True)
         root.addWidget(hint)
 
         row = QHBoxLayout()
-        capture = QPushButton("Capture now")
+        capture = QPushButton("Take the picture")
         capture.setObjectName("Primary")
         capture.clicked.connect(self._do_capture)
-        more = QPushButton("More time")
-        more.clicked.connect(self._more_time)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
         row.addWidget(capture)
-        row.addWidget(more)
         row.addWidget(cancel)
         row.addStretch(1)
         root.addLayout(row)
@@ -138,12 +173,16 @@ class CameraPanel(QDialog):
         if not self._start_camera():
             self._settle_fail("I couldn't reach a camera on this machine.")
             QTimer.singleShot(0, self.close)
+            return
+        self._populate_cameras()
 
     # ---- camera plumbing -------------------------------------------------------------------
 
-    def _start_camera(self) -> bool:
-        """Bring the webcam up into a QVideoSink. False = no camera to start."""
-        device = _resolve_camera(self._settings)
+    def _start_camera(self, device=None) -> bool:
+        """Bring a webcam up into a QVideoSink — the given device, or the saved/default one.
+        False = no camera to start."""
+        if device is None:
+            device = _resolve_camera(self._settings)
         if device is None:
             return False
         try:
@@ -155,6 +194,7 @@ class CameraPanel(QDialog):
             self._sink.videoFrameChanged.connect(self._on_frame)
             self._camera.errorOccurred.connect(self._on_camera_error)
             self._camera.start()
+            self._active_device_id = _device_id(device)
             return True
         except Exception:
             _LOG.exception("camera start failed")
@@ -174,6 +214,49 @@ class CameraPanel(QDialog):
         self._camera = None
         self._session = None
         self._sink = None
+
+    def _populate_cameras(self) -> None:
+        """Fill the picker with every attached camera, current one selected. One camera still
+        shows — it names what HELIX is looking through."""
+        devices = _video_inputs()
+        self._combo.blockSignals(True)
+        self._combo.clear()
+        for dev in devices:
+            try:
+                label = dev.description() or "Camera"
+            except Exception:
+                label = "Camera"
+            self._combo.addItem(label, _device_id(dev))
+        idx = self._combo.findData(self._active_device_id)
+        if idx >= 0:
+            self._combo.setCurrentIndex(idx)
+        self._combo.blockSignals(False)
+
+    def _on_camera_pick(self, index: int) -> None:
+        """The user picked a different camera: switch live and REMEMBER the choice (the saved id is
+        what _resolve_camera prefers next time)."""
+        if self._settled:
+            return
+        want = self._combo.itemData(index)
+        if not want or want == self._active_device_id:
+            return
+        device = next((d for d in _video_inputs() if _device_id(d) == want), None)
+        if device is None:
+            return
+        self._stop_camera()
+        self._latest = None
+        self._started_at = time.monotonic()  # the no-frame grace restarts for the new device
+        self._preview.setPixmap(QPixmap())
+        self._preview.setText("Switching camera…")
+        if not self._start_camera(device):
+            self._settle_fail("I couldn't switch to that camera.")
+            self.close()
+            return
+        if self._settings is not None:
+            try:
+                self._settings.set(CAMERA_DEVICE_SETTING, want)
+            except Exception:  # remembering the choice must never break the live switch
+                _LOG.exception("couldn't save the camera choice")
 
     def _on_camera_error(self, *args) -> None:
         # Transient errors after frames are flowing are ignored; a failure before ANY frame means
@@ -196,29 +279,18 @@ class CameraPanel(QDialog):
         if img is None or img.isNull():
             return
         self._latest = img.copy()  # detach from the driver's frame buffer before it's recycled
-        if self._deadline is None:
-            self._deadline = time.monotonic() + COUNTDOWN_S  # first live frame arms the countdown
+        if self._pending_capture:  # they said the word while the sensor was still waking
+            self._pending_capture = False
+            self._do_capture()
+            return
         self._paint_preview()
 
-    # ---- countdown + capture ---------------------------------------------------------------
-
-    def _remaining(self) -> int | None:
-        if self._deadline is None:
-            return None
-        return max(0, int(self._deadline - time.monotonic() + 0.999))
-
-    def _more_time(self) -> None:
-        """Re-arm the countdown to a FRESH window (never stacked — the 90s capture budget stays the
-        hard ceiling on the worker side). Before the first frame this is a no-op; the countdown
-        only ever starts from a live picture."""
-        if self._deadline is not None and not self._settled:
-            self._deadline = time.monotonic() + MORE_TIME_S
-            self._paint_preview()
+    # ---- capture ---------------------------------------------------------------------------
 
     def _tick(self) -> None:
         if self._settled:
             return
-        # The worker gave up (user said stop / timeout) — nothing to hand back; just fold quietly.
+        # The worker gave up (user said stop / the capture ceiling ran out) — fold quietly.
         if self._request.abandoned:
             self.close()
             return
@@ -227,19 +299,16 @@ class CameraPanel(QDialog):
                 "The camera never delivered a picture — another app may be holding it."
             )
             self.close()
-            return
-        remaining = self._remaining()
-        if remaining is not None and remaining <= 0:
-            self._do_capture()
-        elif self._latest is not None:
-            self._paint_preview()  # keep the countdown number fresh even between frames
 
     def _do_capture(self) -> None:
         if self._settled:
             return
         if self._latest is None:
-            self._settle_fail("The camera never delivered a picture.")
-            self.close()
+            # The word came before the sensor's first frame (warm-up, or right after a picker
+            # switch). Don't fail the whole look — capture the moment a frame lands; the startup
+            # grace in _tick still reaps a camera that never delivers at all.
+            self._pending_capture = True
+            self._preview.setText("One moment — the camera is still waking…")
             return
         buf = QBuffer()
         buf.open(QIODevice.OpenModeFlag.WriteOnly)
@@ -258,6 +327,16 @@ class CameraPanel(QDialog):
             self._settled = True
             self._request.fail(reason)
 
+    # ---- voice hooks (called on the UI thread by the voice layer's camera session) -----------
+
+    def voice_capture(self) -> None:
+        """'Take the picture' by voice — same funnel as the button."""
+        self._do_capture()
+
+    def voice_cancel(self) -> None:
+        """'Cancel' by voice — same funnel as the Cancel button."""
+        self.reject()
+
     # ---- painting --------------------------------------------------------------------------
 
     def _paint_preview(self) -> None:
@@ -268,22 +347,7 @@ class CameraPanel(QDialog):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        pm = QPixmap.fromImage(shown)
-        remaining = self._remaining()
-        if remaining is not None and remaining > 0:
-            painter = QPainter(pm)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            font = QFont(self.font())
-            font.setPointSize(44)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.setPen(QColor(0, 0, 0, 170))
-            painter.drawText(pm.rect().adjusted(2, 2, 2, 2), Qt.AlignmentFlag.AlignCenter,
-                             str(remaining))
-            painter.setPen(QColor("#3fe0e0"))
-            painter.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, str(remaining))
-            painter.end()
-        self._preview.setPixmap(pm)
+        self._preview.setPixmap(QPixmap.fromImage(shown))
 
     # ---- teardown --------------------------------------------------------------------------
     # Two Qt facts shape this section (both verified on this PyQt6 build): QDialog.done()/reject()
@@ -308,7 +372,8 @@ class CameraPanel(QDialog):
         event.accept()
 
 
-def show_camera_panel(parent: QWidget | None, request, *, settings=None) -> CameraPanel | None:
+def show_camera_panel(parent: QWidget | None, request, *, settings=None,
+                      voice_ready: bool = False) -> CameraPanel | None:
     """Open the non-modal camera window for ONE CameraRequest on the GUI thread. Settles the
     request immediately (fail) when camera support is missing, and skips a request whose worker
     already gave up. Returns the panel so the caller can track/close it, or None."""
@@ -318,7 +383,7 @@ def show_camera_panel(parent: QWidget | None, request, *, settings=None) -> Came
     if not request.claim():
         return None  # abandoned before the UI got here (stop was faster than the event loop)
     try:
-        panel = CameraPanel(parent, request, settings=settings)
+        panel = CameraPanel(parent, request, settings=settings, voice_ready=voice_ready)
     except Exception:
         # A claimed request MUST be settled by this side — an unsettled claim parks the worker
         # for the full capture timeout with no window to exit through.

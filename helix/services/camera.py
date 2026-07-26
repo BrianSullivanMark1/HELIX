@@ -15,11 +15,11 @@ import threading
 # the other side of the bus (headless, tests, torn-down UI) — give up fast, not after the full wait.
 CLAIM_TIMEOUT_S = 2.0
 
-# The hard ceiling on the worker's park, belt-and-braces — NOT the user's presentation budget.
-# The window itself auto-captures a few seconds after the first live frame (its "More time" button
-# re-arms that countdown), so this only elapses if the window somehow never settles; far under the
-# subscription turn budget, so a wedged window can never hang the brain.
-CAPTURE_TIMEOUT_S = 90.0
+# The hard ceiling on the worker's park, belt-and-braces — NOT a countdown the user races. The
+# window waits for the user's word ("take the picture", or the button) with no time pressure; this
+# only elapses when a window is left open and forgotten (HELIX then says no picture came), and it
+# stays under the subscription turn budget (600s) so a forgotten window can never hang the brain.
+CAPTURE_TIMEOUT_S = 300.0
 
 _POLL_S = 0.1  # wait-loop granularity: how often the parked worker rechecks its cancel token
 

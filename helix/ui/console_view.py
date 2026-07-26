@@ -1952,15 +1952,36 @@ class ConsoleView(QWidget):
         window, a few seconds after the shell is up (lets the voice stack finish warming)."""
         self._announce("HELIX V3 online.")
 
+    def begin_camera_voice(self, on_capture, on_cancel) -> None:
+        """The camera window opened: let the voice layer keep the ears live for the tiny camera
+        grammar ('take the picture' / 'cancel') while the turn is parked."""
+        if self._voice is not None:
+            self._voice.set_camera_session(on_capture, on_cancel)
+
+    def end_camera_voice(self) -> None:
+        if self._voice is not None:
+            self._voice.clear_camera_session()
+
+    def camera_voice_ready(self) -> bool:
+        """Whether the camera window may honestly promise 'I'm listening': hands-free is on, the
+        voice stack is warm, and the mic isn't asleep. A snapshot at open time — good enough for
+        one window's hint text."""
+        v = self._voice
+        try:
+            return bool(v is not None and v.enabled() and v.can_listen() and not v.is_muted())
+        except Exception:
+            return False
+
     def announce_camera(self, prompt: str = "") -> None:
         """The camera window just opened mid-turn. A voice-first user with their hands on the object
         may not be looking at the screen, so this one line is spoken even with work narration off —
         it's an actionable cue (like a reminder), not progress chatter. narrate() keeps the turn
-        state untouched and stays quiet while HELIX is already speaking or the mic is asleep."""
-        line = f"Camera's open — {prompt}" if prompt else "Camera's open — hold it up."
-        self.status.setText(line)
+        state untouched and stays quiet while HELIX is already speaking or the mic is asleep.
+        The SPOKEN line is fixed and deliberately contains NO camera-grammar phrase: the camera
+        ears are live while it plays, so a cue that said 'take picture' could capture itself."""
+        self.status.setText(f"Camera's open — {prompt}" if prompt else "Camera's open.")
         if self._voice is not None:
-            self._voice.narrate(line)
+            self._voice.narrate("Camera's open — ready when you are.")
 
     def announce_agent_report(self, name: str, report: str) -> None:
         # A background watcher speaking up is UNPROMPTED. By default it lands silently — shown in the

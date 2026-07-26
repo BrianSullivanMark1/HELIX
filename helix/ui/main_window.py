@@ -481,27 +481,38 @@ class HelixMainWindow(QMainWindow):
         from helix.ui.camera_view import show_camera_panel
 
         self._close_camera_panel()
-        panel = show_camera_panel(self, ev.request, settings=self._c.settings)
+        panel = show_camera_panel(
+            self, ev.request, settings=self._c.settings,
+            voice_ready=self.console.camera_voice_ready(),
+        )
         if panel is not None:
             self._camera_panel = panel
             # Identity-guarded: a replaced panel's DEFERRED destroy (WA_DeleteOnClose) fires after
             # the new one is tracked — it must never untrack the live window (teardown relies on
-            # this reference to settle the request and wake the parked turn thread).
-            panel.destroyed.connect(
-                lambda _=None, p=panel: self._camera_panel is p
-                and setattr(self, "_camera_panel", None)
-            )
+            # this reference to settle the request and wake the parked turn thread) or tear down
+            # the fresh window's voice session.
+            panel.destroyed.connect(lambda _=None, p=panel: self._on_camera_panel_gone(p))
+            # While the window is up, the ears stay live for the tiny camera grammar — "take the
+            # picture" / "cancel" land on the panel; everything else heard is ignored.
+            self.console.begin_camera_voice(panel.voice_capture, panel.voice_cancel)
             self.console.announce_camera(ev.request.prompt)
+
+    def _on_camera_panel_gone(self, panel: object) -> None:
+        if self._camera_panel is panel:
+            self._camera_panel = None
+            self.console.end_camera_voice()
 
     def _close_camera_panel(self) -> None:
         """Fold any open camera window. Closing settles its request, so a parked tool thread wakes
-        instead of waiting out its timeout — teardown relies on this."""
+        instead of waiting out its timeout — teardown relies on this. The voice layer's camera
+        session ends here too (the destroyed handler no-ops once the tracker is cleared)."""
         panel, self._camera_panel = self._camera_panel, None
         if panel is not None:
             try:
                 panel.close()
             except Exception:
                 pass
+            self.console.end_camera_voice()
 
     def _on_self_change_progress(self, ev: object) -> None:
         self.console.on_self_change_progress(ev.line)
