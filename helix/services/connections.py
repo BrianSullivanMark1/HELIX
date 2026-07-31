@@ -190,6 +190,8 @@ class ConnectionsService:
         # Attach the saved credential(s) as this service's auth headers. Each {ENV_NAME} in a template is
         # filled from the store here, server-side, so a token is never returned to or chosen by the model.
         headers = {"User-Agent": "HELIX", "Accept": "*/*"}
+        for name, value in svc.headers:  # static per-service needs (e.g. SAM.gov's hal+json Accept)
+            headers[name] = value
         for name, template in svc.auth:
             headers[name] = _AUTH_PLACEHOLDER.sub(lambda m: self.value(m.group(1)), template)
         if svc.query:
@@ -213,7 +215,13 @@ class ConnectionsService:
                 detail = e.read(2000).decode("utf-8", "replace")
             except Exception:  # noqa: BLE001
                 detail = ""
-            return self._scrub(svc, f"call_api {svc.label} returned HTTP {e.code}. {detail}".strip())
+            msg = f"call_api {svc.label} returned HTTP {e.code}. {detail}".strip()
+            if svc.recipe:
+                # A wrong endpoint guess often comes back as a bare 404/406 with no body (SAM.gov's
+                # gateway does exactly this) — hand the model the known-good shapes so it can retry
+                # correctly in the same turn instead of dead-ending.
+                msg += f"\nKnown-good {svc.label} request shapes: {svc.recipe}"
+            return self._scrub(svc, msg)
         except Exception as e:  # noqa: BLE001 - never raise into the tool loop
             # Scrub BEFORE logging too — a URLError can embed the full request URL, which for
             # query-param-auth services (SAM.gov) would write the key into helix.log.

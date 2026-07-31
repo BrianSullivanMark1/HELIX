@@ -96,8 +96,9 @@ _DEFAULT_WATCHERS: tuple[tuple[str, str, str], ...] = (
      "like BRMS, MRP, WMS, or APS, and whether Brendan, Alex, Kate, or Thoa look quiet for two or "
      "more days); Alpaca — https://api.alpaca.markets/v2/positions for drift away from commodities, "
      "industrials, and hard assets, or any tilt toward financials or insurance; SAM.gov — "
-     "https://api.sam.gov/opportunities/v2/search?postedFrom=YESTERDAY&postedTo=TODAY&limit=10"
-     "&title=manufacturing with MM/dd/yyyy dates from the current date in context. With a spare call, "
+     "https://sam.gov/api/prod/sgs/v1/search/?index=opp&q=manufacturing&page=0&size=10"
+     "&sort=-modifiedDate&mode=search&is_active=true, counting only notices whose publishDate is "
+     "overnight against the current date in context. With a spare call, "
      "check open PRs on the most active of those repos "
      "(https://api.github.com/repos/OWNER/REPO/pulls?state=open&per_page=20) for any older than 24 "
      "hours. Skip any service call_api says isn't connected — never mention missing keys. If "
@@ -135,11 +136,12 @@ _DEFAULT_WATCHERS: tuple[tuple[str, str, str], ...] = (
      "every 3 hours"),
     ("Procurement Watcher",
      "Watch SAM.gov for new federal solicitations relevant to Brian's business. Call call_api "
-     "https://api.sam.gov/opportunities/v2/search?postedFrom=YESTERDAY&postedTo=TODAY&limit=10"
-     "&title=manufacturing using MM/dd/yyyy dates from the current date in context, and batch one or "
-     "two more title keywords in the same round: MES, compliance. Flag solicitations matching "
-     "manufacturing software, MES, MRP, WMS, or compliance tooling — title, agency, and response "
-     "deadline, one line each, three at most. If nothing new matches, or SAM.gov isn't connected, "
+     "https://sam.gov/api/prod/sgs/v1/search/?index=opp&q=manufacturing+software&page=0&size=10"
+     "&sort=-modifiedDate&mode=search&is_active=true, and batch one or two more q keywords in the "
+     "same round: MES, MRP. Only notices whose publishDate falls within the last day, against the "
+     "current date in context, count as new. Flag solicitations matching manufacturing software, "
+     "MES, MRP, WMS, or compliance tooling — title, agency, and response deadline, one line each, "
+     "three at most. If nothing new matches, or SAM.gov isn't connected, "
      "reply with exactly: QUIET" + _BUDGET_RULE,
      "every morning at 9"),
 )

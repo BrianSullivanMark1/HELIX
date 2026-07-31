@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from helix.domain.connections import KNOWN_SERVICES, service_for_url
+from helix.domain.connections import KNOWN_SERVICES, looks_like_mispaste, service_for_url
 from helix.domain.models import AppKind
 from helix.services.builds import BuildService
 from helix.services.connections import CONNECTABLE, ConnectionsService, resolve_connectable
@@ -119,6 +119,10 @@ def test_service_for_url_matching():
     assert service_for_url("https://files.slack.com/x").id == "slack"  # subdomain
     assert service_for_url("https://paper-api.alpaca.markets/v2/account").id == "alpaca"
     assert service_for_url("https://data.alpaca.markets/v2/stocks/AAPL/trades/latest").id == "alpaca"
+    # SAM.gov spans the site search API (sam.gov, the one the website itself runs on) AND the
+    # documented public host (api.sam.gov) — both must resolve so either path works.
+    assert service_for_url("https://sam.gov/api/prod/sgs/v1/search/?index=opp&q=x").id == "sam"
+    assert service_for_url("https://api.sam.gov/opportunities/v2/search").id == "sam"
     assert service_for_url("https://evil.example.com/slack.com").id != "slack" \
         if service_for_url("https://evil.example.com/slack.com") else True  # path can't spoof host
     assert service_for_url("https://evil.example.com") is None
@@ -163,6 +167,68 @@ def test_call_api_alpaca_needs_both_keys_and_sends_both_headers(tmp_path, monkey
     assert captured["secret"] == "sec-secret-999"
     assert captured["auth"] is None                # Alpaca uses its own headers, not a Bearer token
     assert "sec-secret-999" not in out             # the secret is never leaked back to the model
+
+
+def test_call_api_sam_attaches_query_key_and_accept_header(tmp_path, monkeypatch):
+    # SAM.gov auths via ?api_key= (not a header): the stored key is attached SERVER-SIDE, any
+    # same-named param the model guessed is stripped so the real key always wins, and the service's
+    # static Accept header rides along (the sgs endpoint 406s without application/hal+json).
+    s = _svc(tmp_path)
+    s.set_value("SAM_API_KEY", "sam-key-abc123")
+    captured = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b'{"_embedded":{"results":[{"title":"RFQ"}]}}'
+
+    import helix.services.connections as mod
+
+    def fake_open(req, timeout=0):
+        captured["url"] = req.full_url
+        captured["accept"] = req.get_header("Accept")
+        captured["auth"] = req.get_header("Authorization")
+        return _Resp()
+
+    monkeypatch.setattr(mod._OPENER, "open", fake_open)
+    out = s.call_api("https://sam.gov/api/prod/sgs/v1/search/?index=opp&q=software&api_key=GUESSED")
+    assert "api_key=sam-key-abc123" in captured["url"]      # stored key attached as a query param
+    assert "GUESSED" not in captured["url"]                 # the model's guess is stripped
+    assert "application/hal+json" in captured["accept"]     # per-service Accept applied
+    assert captured["auth"] is None                         # query-param service: no Bearer header
+    assert '"title":"RFQ"' in out and "untrusted external CONTENT" in out
+    assert "sam-key-abc123" not in out                      # never leaked back to the model
+
+
+def test_call_api_sam_http_error_carries_the_recipe(tmp_path, monkeypatch):
+    # api.sam.gov's gateway answers wrong paths with an EMPTY 404 — the error the model gets back
+    # must carry the known-good request shapes so it can retry correctly in the same turn.
+    import urllib.error
+
+    import helix.services.connections as mod
+
+    s = _svc(tmp_path)
+    s.set_value("SAM_API_KEY", "sam-key-abc123")
+
+    def fake_open(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+
+    monkeypatch.setattr(mod._OPENER, "open", fake_open)
+    out = s.call_api("https://api.sam.gov/opportunities/v9/search")
+    assert "HTTP 404" in out
+    assert "Known-good SAM.gov request shapes" in out
+    assert "sgs/v1/search" in out and "opportunities/v2/search" in out
+    assert "sam-key-abc123" not in out  # the key never appears, even in an error echoing the URL
+
+    # a service with no recipe (Slack) still returns the plain error, no hint appended
+    s.set_value("SLACK_TOKEN", "tok-1")
+    out2 = s.call_api("https://slack.com/api/nope")
+    assert "HTTP 404" in out2 and "Known-good" not in out2
 
 
 def test_managed_keys_are_reused_from_helix_not_re_prompted(tmp_path):
@@ -214,6 +280,23 @@ def test_resolve_connectable_maps_spoken_names_ids_and_aliases():
     assert resolve_connectable("SAM.") == "sam"         # label prefix
     assert resolve_connectable("teapot") is None
     assert resolve_connectable("") is None
+
+
+def test_looks_like_mispaste_flags_urls_only():
+    # The mis-paste that actually happened: SAM.gov's endpoint URL pasted into the key field, which
+    # then rode every request as a bogus token. URLs are flagged; unusual-but-real keys are not.
+    assert looks_like_mispaste("https://api.sam.gov/opportunities/v2/search")
+    assert looks_like_mispaste("  HTTP://example.com  ")
+    assert looks_like_mispaste("www.sam.gov")
+    assert looks_like_mispaste("ftp://files.example.com")
+    # the scheme-less rendering of the same mis-paste (docs and error messages print it this way)
+    assert looks_like_mispaste("api.sam.gov/opportunities/v2/search")
+    assert looks_like_mispaste("sam.gov/api/prod/sgs/v1/search/")
+    assert looks_like_mispaste("tsk_abc123") == ""
+    assert looks_like_mispaste("abcd efgh ijkl mnop") == ""  # Google app passwords contain spaces
+    assert looks_like_mispaste("xoxp-1234-5678") == ""
+    assert looks_like_mispaste("eyjhbg.eyjzdw.sflkxw") == ""  # dotted-but-slashless (a JWT) is fine
+    assert looks_like_mispaste("") == ""
 
 
 def test_detect_entry_prefers_a_backend_main_py(tmp_path):

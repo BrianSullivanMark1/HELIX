@@ -6,6 +6,7 @@ call_api tool for agents and the orb). Pure data — no I/O. The secret VALUES n
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -37,6 +38,12 @@ class Service:
     # (param-name, template) pairs attached SERVER-SIDE after the allow-list check, so the key is
     # never chosen by or returned to the model.
     query: tuple[tuple[str, str], ...] = ()
+    # Extra STATIC request headers this service needs (content negotiation, API-version pins — never
+    # secrets, so no templates). Applied over call_api's defaults before the auth headers.
+    headers: tuple[tuple[str, str], ...] = ()
+    # Known-good request shapes, written for the MODEL. call_api appends this to an HTTP error from
+    # this service so a wrong-path guess self-corrects in the same turn instead of dead-ending.
+    recipe: str = ""
 
     @property
     def env(self) -> str:
@@ -74,13 +81,45 @@ KNOWN_SERVICES: tuple[Service, ...] = (
         ),
     ),
     Service(
-        "sam", "SAM.gov", ("api.sam.gov",),
+        # "sam.gov" covers the site API host AND (by suffix) api.sam.gov / api-alpha.sam.gov. The
+        # documented public host api.sam.gov black-holed to empty 404s in July 2026 (verified from a
+        # real browser too), while the sam.gov SGS search API — the one the website itself runs on —
+        # answers anonymously; both stay allow-listed so either path works whenever GSA has it up.
+        "sam", "SAM.gov", ("sam.gov",),
         fields=(Connection("SAM_API_KEY", "SAM.gov API key",
                            "public API key from your SAM.gov account profile"),),
         auth=(),
         query=(("api_key", "{SAM_API_KEY}"),),  # SAM.gov authenticates via query param, not a header
+        # The SGS endpoint 406s unless application/hal+json is explicitly acceptable; listing
+        # application/json and */* after it keeps the documented api.sam.gov endpoints happy too.
+        headers=(("Accept", "application/hal+json, application/json;q=0.9, */*;q=0.8"),),
+        recipe=(
+            "live site search https://sam.gov/api/prod/sgs/v1/search/?index=opp&q=KEYWORDS&page=0"
+            "&size=25&sort=-modifiedDate&mode=search&is_active=true (filters: naics=541511, "
+            "notice_type=r sources-sought | p presolicitation | o solicitation | k combined, "
+            "set_aside=SBA, 8A, SDVOSBC, WOSB); or the documented https://api.sam.gov/opportunities/v2/search"
+            "?postedFrom=MM/dd/yyyy&postedTo=MM/dd/yyyy&limit=25&title=KEYWORDS (both dates "
+            "required, span under one year). If one path errors, try the other."
+        ),
     ),
 )
+
+
+def looks_like_mispaste(value: str) -> str:
+    """A plain-words warning when a pasted credential is obviously NOT a key — today, a web address
+    (the mis-paste that actually happened: an API's endpoint URL pasted where its key belongs, which
+    then rides every request as a bogus token). Empty string when the value looks plausible. Advisory
+    only — the panels warn once and let the user insist, because an unusual-but-real credential must
+    never be hard-refused (some real secrets contain spaces, dots, or other odd shapes)."""
+    v = (value or "").strip().lower()
+    if v.startswith(("http://", "https://", "www.")) or "://" in v:
+        return "That looks like a web address, not a key — paste the API key itself."
+    # The scheme-less rendering of the same mis-paste ("api.sam.gov/opportunities/v2/search", as docs
+    # and error messages often print it): a bare dotted host followed by a /path. The slash is
+    # required on purpose — dotted-but-slashless values (a JWT's segments) stay unflagged.
+    if re.fullmatch(r"([a-z0-9-]+\.)+[a-z]{2,}/\S*", v):
+        return "That looks like a web address, not a key — paste the API key itself."
+    return ""
 
 
 def service_for_url(url: str) -> Service | None:

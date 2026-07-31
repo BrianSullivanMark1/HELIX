@@ -11,8 +11,13 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit  # noqa: E402
 
+from helix.domain.connections import Connection  # noqa: E402
 from helix.services.connections import CONNECTABLE  # noqa: E402
-from helix.ui.connections_dialog import ConnectPanel, show_connect_panel  # noqa: E402
+from helix.ui.connections_dialog import (  # noqa: E402
+    ConnectionsDialog,
+    ConnectPanel,
+    show_connect_panel,
+)
 
 
 class _Settings:
@@ -98,6 +103,75 @@ def test_an_empty_field_writes_nothing(_app, monkeypatch):
     panel._connect_btn.click()
     assert conns.value("ALPACA_API_KEY") == "AK-only"
     assert "ALPACA_SECRET_KEY" not in conns.v  # an empty field never writes (or clears) a value
+
+
+def test_a_pasted_url_warns_once_then_saves_only_if_the_user_insists(_app, monkeypatch):
+    # The SAM.gov mis-paste: the API's endpoint URL pasted where the key belongs. First Connect
+    # holds the save and warns; an unchanged second click means the user insists, so it saves.
+    conns, settings = _Conns(), _Settings()
+    (panel,) = _open(monkeypatch, "sam", "to watch procurement", conns, settings)
+    panel._fields[0][1].setText("https://api.sam.gov/opportunities/v2/search")
+    panel._connect_btn.click()
+    assert conns.v == {}                                  # held — nothing saved yet
+    assert panel.result() == 0                            # panel stays open
+    assert "web address" in panel._status.text()
+    panel._connect_btn.click()                            # unchanged value → the user insists
+    assert conns.value("SAM_API_KEY") == "https://api.sam.gov/opportunities/v2/search"
+    assert panel.result() == 1
+
+    # a corrected value after the warning saves immediately, no second insist needed
+    conns2, settings2 = _Conns(), _Settings()
+    (panel2,) = _open(monkeypatch, "sam", "", conns2, settings2)
+    panel2._fields[0][1].setText("https://api.sam.gov/x")
+    panel2._connect_btn.click()
+    assert conns2.v == {}
+    panel2._fields[0][1].setText("real-key-123")
+    panel2._connect_btn.click()
+    assert conns2.value("SAM_API_KEY") == "real-key-123"
+    assert panel2.result() == 1
+
+
+def test_a_url_typed_field_is_exempt_from_the_mispaste_guard(_app, monkeypatch):
+    # A field whose own naming says its value IS a URL (a webhook, SUPABASE_URL) must save a URL
+    # on the first click — 'that looks like a web address' would be actively wrong advice there.
+    conns, settings = _Conns(), _Settings()
+    monkeypatch.setitem(
+        CONNECTABLE, "hookco",
+        ("HookCo", "secrets", (("HOOKCO_WEBHOOK_URL", "HookCo webhook URL", "https://…"),)),
+    )
+    (panel,) = _open(monkeypatch, "hookco", "", conns, settings)
+    panel._fields[0][1].setText("https://hooks.example.com/T123/B456")
+    panel._connect_btn.click()
+    assert conns.value("HOOKCO_WEBHOOK_URL") == "https://hooks.example.com/T123/B456"
+    assert panel.result() == 1  # saved first click, no warning hold
+
+
+def test_build_dialog_never_re_warns_on_a_stored_unedited_value(_app):
+    # The guard scans only what the user CHANGED this session: a stored URL-shaped value (however it
+    # got there) prefills the dialog, and saving an edit to a DIFFERENT field must not be held
+    # hostage by a warning about a field the user never touched.
+    store = {"SOME_ENDPOINT": "https://xyz.supabase.co", "SLACK_TOKEN": ""}
+    dlg = ConnectionsDialog(
+        None, "Connect", [Connection("SOME_ENDPOINT", "Endpoint"), Connection("SLACK_TOKEN", "Slack")],
+        get_value=lambda k: store.get(k, ""), set_value=store.__setitem__,
+    )
+    dlg._fields[1][1].setText("xoxp-new-token")
+    dlg._save()
+    assert store["SLACK_TOKEN"] == "xoxp-new-token"  # saved on the FIRST click
+    assert dlg.result() == 1
+
+    # but a freshly TYPED URL in a key field still warns first, and an unchanged second click insists
+    store2 = {"API_KEY": ""}
+    dlg2 = ConnectionsDialog(
+        None, "Connect", [Connection("API_KEY", "API key")],
+        get_value=lambda k: store2.get(k, ""), set_value=store2.__setitem__,
+    )
+    dlg2._fields[0][1].setText("api.sam.gov/opportunities/v2/search")
+    dlg2._save()
+    assert store2["API_KEY"] == "" and dlg2.result() == 0
+    assert "web address" in dlg2._status.text()
+    dlg2._save()
+    assert store2["API_KEY"] == "api.sam.gov/opportunities/v2/search" and dlg2.result() == 1
 
 
 def test_fields_are_masked_hinted_and_the_reason_is_shown(_app, monkeypatch):
