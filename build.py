@@ -84,6 +84,14 @@ def main(argv: list[str] | None = None) -> int:
     # template as DATA that a static scan misses — collect both in full so PDF/Word ingestion works frozen.
     for pkg in ("pypdf", "docx"):
         args += ["--collect-all", pkg]
+    # Scanned-PDF OCR (services/ocr.py): pypdfium2_raw ctypes-loads pdfium.dll from a computed path — a
+    # static scan can't see the DLL, so collect both halves in full. The winsdk WinRT modules are
+    # imported lazily inside functions; name them explicitly so a hook regression can't drop them.
+    for pkg in ("pypdfium2", "pypdfium2_raw"):
+        args += ["--collect-all", pkg]
+    for mod in ("winsdk.windows.media.ocr", "winsdk.windows.globalization",
+                "winsdk.windows.graphics.imaging", "winsdk.windows.security.cryptography"):
+        args += ["--hidden-import", mod]
     # The subscription brain imports the Agent SDK lazily (inside functions), so the static scan misses
     # it — pull in the CODE (submodules), not the data. --collect-all would sweep the SDK's bundled
     # _bundled/claude.exe (~248 MB) into every build; HELIX drives the DESKTOP APP's claude.exe via

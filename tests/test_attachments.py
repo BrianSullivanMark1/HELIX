@@ -126,15 +126,26 @@ def test_collect_keeps_rich_docs_but_still_skips_real_binaries(tmp_path: Path):
     assert names == {"report.pdf", "notes.txt"}  # PDF survives; image/zip/unextractable stay out
 
 
-def test_scanned_pdf_says_so_instead_of_vanishing(tmp_path: Path):
-    # A PDF with no text layer (scanned pages) must come through with an explicit note. Dropping it
-    # silently is what made HELIX answer 'binary files I can't read' with no idea why.
-    p = tmp_path / "scanned.pdf"
-    p.write_bytes(b"%PDF-1.4 no text layer here")
+def test_unreadable_pdf_says_so_instead_of_vanishing(tmp_path: Path):
+    # A PDF nothing can be pulled from (here: corrupt) must come through with an explicit note.
+    # Dropping it silently is what made HELIX answer 'binary files I can't read' with no idea why.
+    p = tmp_path / "hopeless.pdf"
+    p.write_bytes(b"%PDF-1.4 no actual pdf structure here")
     out = attachments.bundle([p])
-    assert "scanned.pdf" in out
+    assert "hopeless.pdf" in out
     assert "no text could be extracted" in out
-    assert "scanned images" in out
+
+
+def test_bundle_reads_a_scanned_pdf_via_ocr(make_scanned_pdf):
+    # The full journey: a text-layer-free scan attached to a turn arrives as TEXT, fenced as data.
+    from helix.services import ocr
+    if not ocr.available():
+        pytest.skip("Windows OCR engine unavailable")
+    pdf = make_scanned_pdf("scanned_pws.pdf", ["STATEMENT OF WORK\nENGINEERING SUPPORT SERVICES"])
+    out = attachments.bundle([pdf])
+    assert "STATEMENT OF WORK" in out
+    assert "ENGINEERING SUPPORT SERVICES" in out
+    assert "<<<ATTACHMENTS-" in out  # OCR text is untrusted data like any other file body
 
 
 def test_oversized_pdf_is_gated_before_extraction(tmp_path: Path, monkeypatch):

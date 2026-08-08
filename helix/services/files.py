@@ -270,8 +270,8 @@ class FilesService:
             text = extract(path)
             if not text:
                 return (
-                    f"I couldn't get text out of '{path.name}' — it may be scanned, encrypted, or "
-                    "the reader for that format isn't installed."
+                    f"I couldn't get text out of '{path.name}' — it may be encrypted, blank, a scan "
+                    "too poor to read, or the reader for that format isn't installed."
                 )
         else:
             try:

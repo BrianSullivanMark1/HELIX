@@ -128,9 +128,10 @@ def _read_rich(path: Path) -> str:
         return "(not read — this document is too large to pull text out of quickly)"
     text = doc_extract.extract(path).strip()
     if not text:
+        # doc_extract already tried OCR on scanned pages, so reaching here means something harder.
         return (
-            "(no text could be extracted — this document is likely scanned images rather than text, "
-            "or it is encrypted)"
+            "(no text could be extracted — the document may be encrypted, blank, or a scan too "
+            "poor to read)"
         )
     return _truncated(text)
 

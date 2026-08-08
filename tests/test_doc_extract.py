@@ -43,6 +43,68 @@ def test_extract_docx_round_trips(tmp_path):
     assert "Owner" in text and "Dana" in text  # table cells are included
 
 
+def test_extract_reads_a_scanned_pdf_via_ocr(make_scanned_pdf):
+    from helix.services import ocr
+    if not ocr.available():
+        pytest.skip("Windows OCR engine unavailable")
+    pdf = make_scanned_pdf("scanned.pdf", ["THE QUICK BROWN FOX\nJUMPS OVER THE LAZY DOG"])
+    text = doc_extract.extract(pdf)
+    assert "QUICK BROWN FOX" in text
+    assert "LAZY DOG" in text
+
+
+def test_extract_merges_text_layer_and_ocr_per_page(make_scanned_pdf, tmp_path):
+    # A MIXED document: page 1 has a real text layer, page 2 is pure pixels. Both must come through —
+    # the scan decision is per page, not per document.
+    from helix.services import ocr
+    if not ocr.available():
+        pytest.skip("Windows OCR engine unavailable")
+    canvas = pytest.importorskip("reportlab.pdfgen.canvas")
+    from pypdf import PdfReader, PdfWriter
+
+    typed = tmp_path / "typed.pdf"
+    c = canvas.Canvas(str(typed))
+    c.drawString(72, 720, "Typed page: deliverables are due in thirty days.")
+    c.save()
+    scanned = make_scanned_pdf("scan_part.pdf", ["SCANNED PAGE: SIGNATURE ON FILE"])
+
+    mixed = tmp_path / "mixed.pdf"
+    w = PdfWriter()
+    for src in (typed, scanned):
+        for page in PdfReader(str(src)).pages:
+            w.add_page(page)
+    with open(mixed, "wb") as fh:
+        w.write(fh)
+
+    text = doc_extract.extract(mixed)
+    assert "deliverables are due in thirty days" in text   # text layer kept (never re-OCR'd worse)
+    assert "SIGNATURE ON FILE" in text                     # scanned page transcribed
+
+
+def test_extract_still_returns_text_layer_when_ocr_is_unavailable(tmp_path, monkeypatch):
+    # No OCR on the machine → a typed PDF must read exactly as before (the fallback never subtracts).
+    canvas = pytest.importorskip("reportlab.pdfgen.canvas")
+    from helix.services import ocr
+
+    p = tmp_path / "typed.pdf"
+    c = canvas.Canvas(str(p))
+    c.drawString(72, 720, "Plain typed content survives.")
+    c.save()
+    monkeypatch.setattr(ocr, "available", lambda: False)
+    assert "Plain typed content survives." in doc_extract.extract(p)
+
+
+def test_extract_notes_pages_the_ocr_caps_left_behind(make_scanned_pdf, monkeypatch):
+    from helix.services import ocr
+    if not ocr.available():
+        pytest.skip("Windows OCR engine unavailable")
+    pdf = make_scanned_pdf("long_scan.pdf", ["PAGE ONE CONTENT", "PAGE TWO CONTENT", "PAGE THREE CONTENT"])
+    monkeypatch.setattr(doc_extract, "_OCR_MAX_PAGES", 1)
+    text = doc_extract.extract(pdf)
+    assert "PAGE ONE CONTENT" in text
+    assert "2 more scanned page(s) not transcribed" in text  # honesty over silent omission
+
+
 def test_extract_is_graceful_on_bad_or_missing(tmp_path):
     # A corrupt PDF / DOCX must yield "" rather than raising into the ingest loop.
     bad_pdf = tmp_path / "broken.pdf"
