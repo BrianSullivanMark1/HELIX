@@ -14,11 +14,14 @@ import os
 import secrets
 from pathlib import Path
 
+from helix.services import doc_extract
+
 # Conservative budgets so an attachment can't blow the context window or the user's token bill. A folder
 # is walked breadth-reasonably with these caps; once a limit is hit, collection stops cleanly.
 MAX_FILES = 40
 MAX_FILE_BYTES = 200_000        # ~200 KB per file (longer files are truncated, not skipped)
 MAX_TOTAL_BYTES = 600_000       # ~600 KB of text across every attachment in one turn
+MAX_RICH_BYTES = 25_000_000     # PDF/Word are parsed WHOLE — gate on file size before extracting
 _MAX_SCAN_ENTRIES = 20_000      # stop walking a pathological tree rather than hang
 
 # Folders never worth reading (noise, huge, or machine-generated).
@@ -27,7 +30,9 @@ _SKIP_DIRS = {
     "dist", "build", ".idea", ".vscode", ".mypy_cache", ".pytest_cache", ".next",
     "target", "out", ".gradle", "bin", "obj",
 }
-# Extensions that are binary / not useful as text context — skipped by name before any read.
+# Extensions that are binary / not useful as text context — skipped by name before any read. PDF and
+# Word are listed here (they ARE binary containers) but re-admitted by the rich-doc check at every call
+# site below, because doc_extract can pull real text out of them.
 _BINARY_EXT = {
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".tiff", ".svg",
     ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".mp4", ".mov", ".avi", ".mkv", ".webm",
@@ -54,10 +59,11 @@ def _cancelled(cancel) -> bool:
 
 
 def collect_files(paths: list[Path], cancel=None) -> list[Path]:
-    """Expand the chosen paths into a deduplicated, capped list of readable text files. Folders are
-    walked (skipping noise dirs and binaries); explicit file picks are kept even if binary-by-extension
-    would otherwise drop them, but a NUL sniff still excludes true binaries. A cancel token (polled in
-    the walk) lets a 'stop' interrupt a large folder scan."""
+    """Expand the chosen paths into a deduplicated, capped list of readable files. Folders are walked
+    (skipping noise dirs and binaries); explicit file picks are kept even if binary-by-extension would
+    otherwise drop them, but a NUL sniff still excludes true binaries. Rich documents (PDF/Word) survive
+    both filters — they are binary containers with real text inside, extracted at read time. A cancel
+    token (polled in the walk) lets a 'stop' interrupt a large folder scan."""
     out: list[Path] = []
     seen: set[Path] = set()
     scanned = 0
@@ -80,7 +86,7 @@ def collect_files(paths: list[Path], cancel=None) -> list[Path]:
         except (TypeError, ValueError):
             continue
         if p.is_file():
-            if not _looks_binary(p):
+            if doc_extract.is_rich_doc(p) or not _looks_binary(p):
                 add(p)
         elif p.is_dir():
             for root, dirs, files in os.walk(p):
@@ -92,16 +98,48 @@ def collect_files(paths: list[Path], cancel=None) -> list[Path]:
                     if len(out) >= MAX_FILES or scanned >= _MAX_SCAN_ENTRIES or _cancelled(cancel):
                         break
                     fp = Path(root) / name
-                    if not _looks_binary(fp):
+                    if doc_extract.is_rich_doc(fp) or not _looks_binary(fp):
                         add(fp)
                 if len(out) >= MAX_FILES or scanned >= _MAX_SCAN_ENTRIES:
                     break
     return out[:MAX_FILES]
 
 
+def _truncated(text: str) -> str:
+    """Cap extracted text at the per-file budget, marking it when the tail is dropped."""
+    data = text.encode("utf-8", errors="replace")
+    if len(data) <= MAX_FILE_BYTES:
+        return text
+    # errors="ignore" so a multibyte character split by the cut doesn't leave a replacement char.
+    return data[:MAX_FILE_BYTES].decode("utf-8", errors="ignore") + (
+        "\n… (truncated — file exceeds the per-file size limit)"
+    )
+
+
+def _read_rich(path: Path) -> str:
+    """Extract the text of a PDF/Word attachment. These are parsed WHOLE, so the size gate applies to
+    the file before extraction rather than to the text after it. A document with no text layer says so
+    plainly — that reads very differently to the model than the file being silently dropped."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = -1
+    if size > MAX_RICH_BYTES:
+        return "(not read — this document is too large to pull text out of quickly)"
+    text = doc_extract.extract(path).strip()
+    if not text:
+        return (
+            "(no text could be extracted — this document is likely scanned images rather than text, "
+            "or it is encrypted)"
+        )
+    return _truncated(text)
+
+
 def _read_capped(path: Path) -> str:
     """Read a file as text, truncating past MAX_FILE_BYTES with a clear marker. Reads at most
     MAX_FILE_BYTES+1 bytes so a multi-GB file can't be slurped into RAM before the cap applies."""
+    if doc_extract.is_rich_doc(path):
+        return _read_rich(path)
     try:
         with path.open("rb") as fh:
             data = fh.read(MAX_FILE_BYTES + 1)

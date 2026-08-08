@@ -14,6 +14,19 @@ def test_is_rich_doc_detection():
     assert not doc_extract.is_rich_doc("data.csv")
 
 
+def test_extract_pdf_round_trips(tmp_path):
+    canvas = pytest.importorskip("reportlab.pdfgen.canvas")
+    p = tmp_path / "report.pdf"
+    c = canvas.Canvas(str(p))
+    c.drawString(72, 720, "Statement of Work")
+    c.showPage()
+    c.drawString(72, 720, "Period of performance: 12 months.")
+    c.save()
+    text = doc_extract.extract(p)
+    assert "Statement of Work" in text
+    assert "Period of performance: 12 months." in text  # page two is included, not just the first
+
+
 def test_extract_docx_round_trips(tmp_path):
     docx = pytest.importorskip("docx")  # python-docx
     p = tmp_path / "memo.docx"

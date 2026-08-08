@@ -3,7 +3,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from helix.services import attachments
+
+
+def _write_pdf(path: Path, *lines: str) -> Path:
+    """A real single-page PDF with a genuine text layer, so the PDF tests exercise pypdf for real."""
+    canvas = pytest.importorskip("reportlab.pdfgen.canvas")
+    c = canvas.Canvas(str(path))
+    y = 700
+    for line in lines:
+        c.drawString(72, y, line)
+        y -= 20
+    c.save()
+    return path
 
 
 def test_bundle_includes_file_contents_fenced_as_untrusted(tmp_path: Path):
@@ -79,6 +93,68 @@ def test_total_budget_stops_including_more_files(tmp_path: Path):
         (tmp_path / f"big{i}.txt").write_text(big, encoding="utf-8")
     out = attachments.bundle([tmp_path])
     assert "not shown" in out  # some files omitted once the total budget was reached
+
+
+def test_bundle_reads_an_attached_pdf(tmp_path: Path):
+    # The whole point: attaching a PDF must deliver its TEXT, not drop it as a binary. Regression pin
+    # for the '(no readable text — binary or empty)' dead end.
+    p = _write_pdf(tmp_path / "pws.pdf", "Performance Work Statement", "Contract N00164-26-R-0001")
+    out = attachments.bundle([p])
+    assert "Performance Work Statement" in out
+    assert "Contract N00164-26-R-0001" in out
+    assert "pws.pdf" in out
+    assert "<<<ATTACHMENTS-" in out  # still fenced as untrusted data like any other attachment
+
+
+def test_bundle_reads_an_attached_word_document(tmp_path: Path):
+    docx = pytest.importorskip("docx")  # python-docx
+    p = tmp_path / "memo.docx"
+    d = docx.Document()
+    d.add_paragraph("Deliverables are due Friday.")
+    d.save(str(p))
+    assert "Deliverables are due Friday." in attachments.bundle([p])
+
+
+def test_collect_keeps_rich_docs_but_still_skips_real_binaries(tmp_path: Path):
+    _write_pdf(tmp_path / "report.pdf", "hello")
+    (tmp_path / "notes.txt").write_text("hi", encoding="utf-8")
+    (tmp_path / "photo.jpg").write_bytes(b"\xff\xd8\xff\x00")
+    (tmp_path / "archive.zip").write_bytes(b"PK\x03\x04\x00")
+    (tmp_path / "legacy.xls").write_bytes(b"\xd0\xcf\x11\xe0\x00")
+
+    names = {p.name for p in attachments.collect_files([tmp_path])}
+    assert names == {"report.pdf", "notes.txt"}  # PDF survives; image/zip/unextractable stay out
+
+
+def test_scanned_pdf_says_so_instead_of_vanishing(tmp_path: Path):
+    # A PDF with no text layer (scanned pages) must come through with an explicit note. Dropping it
+    # silently is what made HELIX answer 'binary files I can't read' with no idea why.
+    p = tmp_path / "scanned.pdf"
+    p.write_bytes(b"%PDF-1.4 no text layer here")
+    out = attachments.bundle([p])
+    assert "scanned.pdf" in out
+    assert "no text could be extracted" in out
+    assert "scanned images" in out
+
+
+def test_oversized_pdf_is_gated_before_extraction(tmp_path: Path, monkeypatch):
+    p = _write_pdf(tmp_path / "huge.pdf", "should never be parsed")
+    monkeypatch.setattr(attachments, "MAX_RICH_BYTES", 10)  # smaller than any real PDF
+
+    def _explode(_path):
+        raise AssertionError("extraction must not run for an oversized document")
+
+    monkeypatch.setattr(attachments.doc_extract, "extract", _explode)
+    out = attachments.bundle([p])
+    assert "too large" in out
+
+
+def test_pdf_text_is_truncated_at_the_per_file_budget(tmp_path: Path, monkeypatch):
+    p = _write_pdf(tmp_path / "long.pdf", "filler")
+    monkeypatch.setattr(attachments.doc_extract, "extract", lambda _p: "z" * (attachments.MAX_FILE_BYTES + 5_000))
+    out = attachments.bundle([p])
+    assert "truncated" in out
+    assert len(out) < attachments.MAX_FILE_BYTES + 50_000
 
 
 def test_summary_is_short_and_lists_names(tmp_path: Path):
