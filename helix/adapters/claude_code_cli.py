@@ -69,18 +69,121 @@ def _search_bases() -> list[Path]:
     return bases
 
 
-def resolve_claude_cli() -> str | None:
-    """HELIX_CLAUDE_CLI override → newest claude.exe from the desktop app → `claude` on PATH → None."""
+def cli_candidates() -> list[str]:
+    """Every claude.exe worth trying, best first: HELIX_CLAUDE_CLI override → the desktop app's
+    copies newest-version-first → `claude` on PATH. Existing on disk is all this checks; whether a
+    candidate can actually be LAUNCHED is decided by _launchable()."""
+    out: list[str] = []
     override = os.environ.get(CLI_OVERRIDE_ENV)
     if override and Path(override).exists():
-        return override
-    candidates: list[Path] = []
+        out.append(override)
+    found: list[Path] = []
     for base in _search_bases():
         if base.is_dir():
-            candidates.extend(p for p in base.glob("*/claude.exe") if p.is_file())
-    if candidates:
-        return str(max(candidates, key=lambda p: _version_key(p.parent.name)))
-    return shutil.which("claude")
+            found.extend(p for p in base.glob("*/claude.exe") if p.is_file())
+    found.sort(key=lambda p: _version_key(p.parent.name), reverse=True)
+    out.extend(str(p) for p in found)
+    on_path = shutil.which("claude")
+    if on_path:
+        out.append(on_path)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for p in out:  # the same exe can be reached by two routes (override == PATH); probe it once
+        key = os.path.normcase(os.path.abspath(p))
+        if key not in seen:
+            seen.add(key)
+            ordered.append(p)
+    return ordered
+
+
+_PROBE_TIMEOUT_S = 20.0
+_launch_ok: dict[str, bool] = {}   # normcased path -> did `--version` actually run
+_launch_lock = threading.Lock()
+
+
+def reset_cli_cache() -> None:
+    """Forget which candidates are launchable — call after installing/updating a CLI (and in tests)."""
+    with _launch_lock:
+        _launch_ok.clear()
+
+
+def _launch_known(path: str) -> bool | None:
+    """Cached launchability without ever spawning: True/False if probed, None if not yet."""
+    with _launch_lock:
+        return _launch_ok.get(os.path.normcase(os.path.abspath(path)))
+
+
+def _launchable(path: str) -> bool:
+    """True when this claude.exe actually STARTS. Existing on disk is not enough: the desktop app is
+    an MSIX package, so its bundled claude.exe lives in the package's LocalCache where a
+    non-packaged process can see the file but Windows may still refuse to launch it (its dependencies
+    resolve through the package graph). That surfaces as FileNotFoundError from CreateProcess — which
+    the Agent SDK reports as CLINotFoundError, so HELIX used to dead-end on a path it had just
+    'found'. Probe once per path per process (spawning a ~278 MB exe is not free) and cache."""
+    key = os.path.normcase(os.path.abspath(path))
+    with _launch_lock:
+        cached = _launch_ok.get(key)
+    if cached is not None:
+        return cached
+    ok = False
+    try:
+        proc = subprocess.run(
+            [path, "--version"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            timeout=_PROBE_TIMEOUT_S,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        ok = proc.returncode == 0
+        if not ok:
+            _LOG.warning("claude CLI at %s exited %s on --version; skipping it", path, proc.returncode)
+    except (OSError, subprocess.SubprocessError) as exc:
+        # OSError covers the MSIX case (FileNotFoundError even though the file exists) and any
+        # missing-dependency / permission failure; SubprocessError covers the probe timing out.
+        _LOG.warning("claude CLI at %s cannot be launched (%s: %s); skipping it",
+                     path, type(exc).__name__, exc)
+    with _launch_lock:
+        _launch_ok[key] = ok
+    return ok
+
+
+def resolve_claude_cli(*, allow_probe: bool = True) -> str | None:
+    """The first claude.exe that actually launches, or None when nothing on this machine does.
+    Candidates are re-listed on each call (so a newly installed CLI is picked up without a restart)
+    but launchability is cached, so this costs no subprocess after the first resolution.
+
+    `allow_probe=False` guarantees NO subprocess: it answers from the cache alone and, for a candidate
+    nothing has probed yet, answers optimistically. **Qt GUI-thread callers must pass allow_probe=False**
+    — probing spawns a ~278 MB exe, and a UI that blocks on that (SettingsView's "which brain is live"
+    label is constructed before the first frame) freezes the window for as long as the spawn takes. The
+    container warms this cache on a daemon thread at startup, so the optimistic answer is only ever used
+    in the first moment after launch; a wrong guess there costs one turn that falls back to the API
+    rail, never a frozen window."""
+    for path in cli_candidates():
+        known = _launch_known(path)
+        if known is True:
+            return path
+        if known is None:
+            if not allow_probe:
+                return path            # unprobed: assume usable rather than block the caller
+            if _launchable(path):
+                return path
+    return None
+
+
+def cli_unavailable_reason(*, allow_probe: bool = True) -> str | None:
+    """None when a CLI is usable; otherwise a plain sentence saying what is actually wrong. Exists so
+    a CLI problem is never reported to the user as a credential problem. See resolve_claude_cli for
+    what allow_probe=False means and why GUI-thread callers need it."""
+    candidates = cli_candidates()
+    if not candidates:
+        return ("No Claude Code CLI was found on this machine. Install it with "
+                "`npm install -g @anthropic-ai/claude-code`, or set HELIX_CLAUDE_CLI to a claude.exe.")
+    if resolve_claude_cli(allow_probe=allow_probe) is None:
+        return (f"Found {len(candidates)} Claude Code CLI(s) but none of them will start — the first "
+                f"was {candidates[0]}. The desktop app's copy often can't be launched from outside "
+                f"its installer package; install a standalone CLI with "
+                f"`npm install -g @anthropic-ai/claude-code`, or point HELIX_CLAUDE_CLI at one.")
+    return None
 
 
 def _describe_tool(name: str, tool_input: dict) -> str:
@@ -194,7 +297,17 @@ class ClaudeCodeCli:
 
         stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
         stderr_thread.start()
-        killer = threading.Timer(self._timeout, lambda: _kill_tree(proc))
+
+        # Killing the coder makes it exit nonzero, so the exit code alone cannot tell a crash from the
+        # ceiling firing. Record the cause before the kill or the timeout reaches the user as "exited 1".
+        timed_out = threading.Event()
+
+        def _on_timeout() -> None:
+            timed_out.set()
+            _LOG.warning("coder exceeded its %ss ceiling; killing the process tree", self._timeout)
+            _kill_tree(proc)
+
+        killer = threading.Timer(self._timeout, _on_timeout)
         killer.start()
 
         # Stop watcher: if the user cancels mid-build, kill the child so its stdout closes and the read
@@ -230,7 +343,7 @@ class ClaudeCodeCli:
                         on_progress(note)
             proc.wait()
         except Exception as exc:  # a stream failure must not crash the worker
-            proc.kill()
+            _kill_tree(proc)  # the tree: a bare kill orphans claude.exe's engine child, still billing
             proc.wait()  # reap so we don't leave a zombie / open FDs
             return CoderResult(ok=False, summary="", error=f"Coder stream failed: {exc}")
         finally:
@@ -247,6 +360,14 @@ class ClaudeCodeCli:
 
         summary = str((final or {}).get("result") or "").strip()
         is_error = bool((final or {}).get("is_error"))
+        if timed_out.is_set() and not summary:
+            limit = (f"{self._timeout / 60:.0f} minutes" if self._timeout >= 60
+                     else f"{self._timeout:g} seconds")
+            tail = stderr.strip()[-200:]
+            return CoderResult(
+                ok=False, summary="",
+                error=f"Coder timed out after {limit} and was stopped." + (f" {tail}" if tail else ""),
+            )
         if proc.returncode not in (0, None) and not summary:
             return CoderResult(
                 ok=False, summary="", error=f"Coder exited {proc.returncode}: {stderr.strip()[:500]}"

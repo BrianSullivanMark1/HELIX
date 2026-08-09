@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 from pathlib import Path
+from typing import Callable
 
 from helix.adapters.agent_sdk_chat import PreferredChat, SubscriptionBrain
 from helix.adapters.anthropic_chat import AnthropicChat
@@ -43,7 +45,6 @@ from helix.services.reflexes import ReflexService
 from helix.services.lessons import LessonsService
 from helix.services.location import LocationService
 from helix.services.memory import MemoryService
-from helix.services.model_baker import ModelBaker
 from helix.services.profile import ProfileService
 from helix.services.recommend import RecommendService
 from helix.services.remote import RemoteService
@@ -55,6 +56,7 @@ from helix.services.workflows import WorkflowService
 from helix.services.prompts import CONSOLE_SYSTEM, DEEP_THINK_SYSTEM
 from helix.services.selfdev import SelfDevService
 from helix.services.selfdev_lane import SelfDevLane
+from helix.services.shopping import ShoppingService
 from helix.services.tools import ToolRegistry
 from helix.services.voiceid import VoiceIdService
 
@@ -163,6 +165,26 @@ def _seed_watchers(agent_store: JsonSettings, agents) -> None:
         pass
 
 
+class _LazyBaker:
+    """Wiring only: defers ModelBaker's construction — and with it the trimesh + networkx +
+    scipy.spatial import chain, measured at ~955 ms — until a MODEL build actually finishes.
+
+    Forge's whole use of the baker is one `.bake(workspace)` call on a model build, and nothing else
+    reads it, so a launch that never bakes a hologram has no reason to pay for the mesh stack before
+    its first frame. Same object shape Forge already expects; it neither knows nor cares."""
+
+    __slots__ = ("_make", "_real")
+
+    def __init__(self, make: Callable[[], object]) -> None:
+        self._make = make
+        self._real: object | None = None
+
+    def bake(self, workspace):
+        if self._real is None:
+            self._real = self._make()
+        return self._real.bake(workspace)
+
+
 class Container:
     def __init__(self) -> None:
         # Foundation
@@ -211,12 +233,25 @@ class Container:
         # Say plainly, once per launch, which rail the brain bills to — the subscription (flat, the
         # enterprise plan) or the metered API key. Silent metering is how a surprise bill happens.
         _log = get_logger("container")
-        if (_oauth() or "").strip():
-            _log.info("brain: SUBSCRIPTION token connected — all HELIX reasoning bills to the plan")
-        elif (_key() or "").strip():
-            _log.warning("brain: NO subscription token — running on the METERED API key")
-        else:
-            _log.warning("brain: no Claude auth at all — conversation is offline until connected")
+
+        def _announce_rail() -> None:
+            """Say which rail actually works — off the startup path. Deciding this means probing that a
+            claude.exe will LAUNCH (a saved token proves nothing about the CLI), which costs a
+            subprocess, so it must never sit between launch and the first frame. Running it here also
+            warms the resolver cache, so the first real turn doesn't pay for the probe."""
+            try:
+                reason = self.subscription.why_inactive()
+                if reason is None:
+                    _log.info("brain: SUBSCRIPTION rail live — all HELIX reasoning bills to the plan")
+                elif (_key() or "").strip():
+                    _log.warning("brain: subscription rail unavailable (%s) — running on the METERED "
+                                 "API key", reason)
+                else:
+                    _log.error("brain: NO usable Claude rail — %s", reason)
+            except Exception:  # noqa: BLE001 — a diagnostic must never take the app down
+                _log.warning("brain: could not determine which Claude rail is live", exc_info=True)
+
+        threading.Thread(target=_announce_rail, daemon=True, name="helix-rail-check").start()
         # Plain no-tool chat (profile distiller, voice-identity notes, …): subscription first.
         self.chat = PreferredChat(self.subscription, api_chat)
         # The GROWTH chat: plain (no-tool) reasoning pinned to the strongest available model + high
@@ -317,10 +352,14 @@ class Container:
 
         # neural_available reflects a LIVE Tripo key (the backend is always wired), so auto-routing and the
         # no-key preview banner key off the real thing, not merely "is a backend object present".
-        self.model_baker = ModelBaker(
-            neural_backend=_neural, neural_available=lambda: bool(_tripo_key()),
-            skybox_backend=_skybox, skybox_available=lambda: bool(_blockade_key()),
-        )
+        def _build_baker():
+            from helix.services.model_baker import ModelBaker
+            return ModelBaker(
+                neural_backend=_neural, neural_available=lambda: bool(_tripo_key()),
+                skybox_backend=_skybox, skybox_available=lambda: bool(_blockade_key()),
+            )
+
+        self.model_baker = _LazyBaker(_build_baker)
         self.forge = ForgeService(
             self.builds, self.coder, self.bus, self.repo, self.paths.root, guard_files,
             model_baker=self.model_baker, data_dir=self.paths.data,
@@ -405,12 +444,16 @@ class Container:
         # Desktop control (V3): open installed programs, media keys, one machine-status line. All
         # user-driven — the BUILD_TOOLS fence keeps open_program/media_control off autonomous runs.
         self.desktop = DesktopService()
+        # Shopping (V3): the Amazon cart faculty. The model stages web-search-verified ASINs and, on
+        # the user's go, opens Amazon's own cart page in their browser — pre-filled, never purchased.
+        # User-driven only: the BUILD_TOOLS fence keeps every cart mutation off autonomous runs.
+        self.shopping = ShoppingService()
         self.tools = ToolRegistry(
             self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue,
             tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane, connections=self.connections,
             knowledge=self.knowledge, gmail=self.gmail, reminders=self.reminders, calendar=self.calendar,
             files=self.files, user_memory=self.user_memory, location=self.location,
-            desktop=self.desktop,
+            desktop=self.desktop, shopping=self.shopping,
         )
         # The orb quietly learns who the user is: a background distiller (same fast chat model) keeps a
         # compact profile in the DB, injected into each Console turn like the time anchor. No knobs.

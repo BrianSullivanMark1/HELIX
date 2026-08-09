@@ -8,8 +8,10 @@ and a snapshot lets the model answer "what are you building?" without touching a
 
 Concurrency rules:
   - Up to `max_workers` builds run at once (default 2).
-  - Two builds with the SAME name never run at once — a same-name job waits until the first finishes, so
+  - Two builds with the SAME TARGET never run at once — the second waits until the first finishes, so
     rapid "update X" requests apply IN ORDER to one workspace instead of two coders clobbering it.
+    Target identity is the SLUG, not the display name: the workspace on disk and its git repo are keyed by
+    slug, so "My Timer", "my timer" and "my-timer" are one target however differently they are typed.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from itertools import count
 
 from helix.domain.errors import BuildCancelled
 from helix.domain.events import BuildFinished, BuildProgress
-from helix.domain.models import BuildKind
+from helix.domain.models import BuildKind, slugify
 from helix.logging_setup import get_logger
 from helix.ports.events import EventBus
 from helix.services.cancel import CancelToken
@@ -39,6 +41,12 @@ class BuildJob:
     id: int = field(default_factory=lambda: next(_ids))
     cancel: CancelToken = field(default_factory=CancelToken)
     status: str = "queued"  # queued | running | done | failed | stopped
+
+    @property
+    def target(self) -> str:
+        """The identity the WORKSPACE uses. Matching on the display name would let two spellings of one
+        app ("My Timer" / "my-timer") run at once in the same directory and the same git repo."""
+        return slugify(self.name)
 
 
 class BuildQueue:
@@ -77,9 +85,9 @@ class BuildQueue:
             return [j.name for j in self._active.values()]
 
     def is_active_named(self, name: str) -> bool:
-        key = name.strip().lower()
+        key = slugify(name)
         with self._lock:
-            return any(j.name.lower() == key for j in self._active.values())
+            return any(j.target == key for j in self._active.values())
 
     def snapshot(self) -> tuple[list[str], list[str]]:
         """(names building now, names queued behind them)."""
@@ -107,9 +115,9 @@ class BuildQueue:
 
     def cancel_active_named(self, name: str) -> bool:
         """Stop a SPECIFIC running build by name (the model's cancel_build for the one in progress)."""
-        key = name.strip().lower()
+        key = slugify(name)
         with self._lock:
-            hit = [j for j in self._active.values() if j.name.lower() == key]
+            hit = [j for j in self._active.values() if j.target == key]
             for j in hit:
                 j.cancel.cancel()
         return bool(hit)
@@ -129,10 +137,10 @@ class BuildQueue:
             t.join(timeout)
 
     def cancel_queued(self, name: str) -> bool:
-        slug = name.strip().lower()
+        slug = slugify(name)
         with self._lock:
             for j in list(self._pending):
-                if j.name.lower() == slug:
+                if j.target == slug:
                     self._pending.remove(j)
                     return True
         return False
@@ -145,10 +153,10 @@ class BuildQueue:
 
     def move_first(self, name: str) -> bool:
         """Bump a PENDING build to the front of the queue. Can't touch one already running."""
-        slug = name.strip().lower()
+        slug = slugify(name)
         with self._lock:
             for j in list(self._pending):
-                if j.name.lower() == slug:
+                if j.target == slug:
                     self._pending.remove(j)
                     self._pending.appendleft(j)
                     return True
@@ -156,12 +164,12 @@ class BuildQueue:
 
     # ----- worker threads -----
     def _next_runnable_locked(self) -> BuildJob | None:
-        """Pop the first pending job whose name isn't already building (no same-name concurrency), mark it
-        active, and return it. Returns None when every pending job is blocked by a same-name active build.
-        Caller must hold the lock."""
-        active_names = {j.name.lower() for j in self._active.values()}
+        """Pop the first pending job whose TARGET isn't already building (no same-workspace concurrency),
+        mark it active, and return it. Returns None when every pending job is blocked by an active build of
+        the same target. Caller must hold the lock."""
+        active_targets = {j.target for j in self._active.values()}
         for cand in list(self._pending):
-            if cand.name.lower() not in active_names:
+            if cand.target not in active_targets:
                 self._pending.remove(cand)
                 self._active[cand.id] = cand
                 cand.status = "running"
@@ -176,7 +184,7 @@ class BuildQueue:
             with self._lock:
                 job = None if not self._pending else self._next_runnable_locked()
             if job is None:
-                # Nothing runnable right now (empty, or all pending blocked by a same-name active build).
+                # Nothing runnable right now (empty, or all pending blocked by a same-target active build).
                 # The slot is consumed; a finishing build re-signals when work still remains.
                 continue
             self._build(job)
@@ -221,7 +229,7 @@ class BuildQueue:
             with self._lock:
                 self._active.pop(job.id, None)
                 pending = len(self._pending)
-            # Re-signal if work remains — covers a job that was blocked by THIS build's name and is now
+            # Re-signal if work remains — covers a job that was blocked by THIS build's target and is now
             # runnable, and keeps a backlog draining as slots free up.
             if pending and not self._stopping:
                 self._slots.release()

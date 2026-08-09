@@ -1504,6 +1504,15 @@ class ToolRegistry:
         )
         if app is None:
             return f"I couldn't find anything called '{name}' to open."
+        if app.build_kind == BuildKind.TASK:
+            # A protocol has no screen to bring up — 'opening' one would EXECUTE its main.py headlessly
+            # and leave the viewer waiting on a server that never comes. Running it is run_task's job,
+            # gated behind that tool's own fence; refuse here so asking to LOOK at a protocol can never
+            # silently run the user's script.
+            return (
+                f"'{app.name}' is a {kind_label(app.build_kind.value)} — there's nothing to bring up on "
+                "screen; it does its thing when it's run. Use run_task if they want it run."
+            )
         if self._bus is None:
             return "I can't open things right now."
         self._bus.publish(BuildOpenRequested(slug=app.slug, name=app.name))

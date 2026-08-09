@@ -62,7 +62,9 @@ class _FakeTools:
         self.out = out
 
     def specs(self) -> list:
-        return []
+        # Offer the tool the fake chat emits — dispatch now refuses names the run wasn't offered.
+        from helix.ports.llm import ToolSpec
+        return [ToolSpec("check_email", "read the inbox", {"type": "object", "properties": {}})]
 
     def dispatch(self, *a, **k) -> str:
         return self.out

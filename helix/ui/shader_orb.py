@@ -103,6 +103,11 @@ class ShaderOrb(QWidget):
             self._ready = True
             self._view.show()
             self._view.raise_()
+            # No need to stop the painter orb underneath: this view is opaque
+            # (page().setBackgroundColor above sets alpha 255, which makes WebEngine's render delegate
+            # set WA_OpaquePaintEvent), so Qt's repaint manager subtracts the covered region and the
+            # fallback's update() calls resolve to zero paintEvents on their own. Measured: 0 paints
+            # while occluded, resuming the instant this view hides.
         elif title == _LOST and self._ready:
             _LOG.warning("shader orb GL context lost — painter Presence takes over")
             self._ready = False
@@ -373,7 +378,7 @@ try {
   scene.add(sparks);
 
   // drive
-  const clock = new THREE.Clock(); let started = false; let phase = 0;
+  const clock = new THREE.Clock(); let started = false; let phase = 0; let acc = 0;
   // A dead GL context would leave an opaque black view COVERING the painter orb — tell the shell,
   // and re-announce readiness if the context comes back and renders again.
   renderer.domElement.addEventListener("webglcontextlost", (e) => {
@@ -399,8 +404,26 @@ try {
     sparks.rotation.y -= dt*0.05*(1 + cur.speed*0.3);
     const s = 1.0 + 0.035*Math.sin(phase*1.6) + energy*0.10;
     core.scale.setScalar(s);
+    // The FIRST frame is never throttled: the shell only reveals the WebGL orb once this title lands,
+    // and a dropped first frame would leave it on the painter fallback forever. Same path re-announces
+    // after a context loss (the handler above clears `started`).
+    if (!started){
+      renderer.render(scene, camera);
+      started = true; document.title = READY;
+      acc = 0;
+      return;
+    }
+    // Frame-rate discipline, mirroring the QPainter orb's ~30fps busy / ~15fps idle. This runs for the
+    // lifetime of a permanently-open app, in a separate Chromium process: an ungated
+    // requestAnimationFrame draws at the display's full refresh (60-165Hz) forever, whether or not
+    // anything is moving. The state easing above still runs every frame, so motion stays time-accurate
+    // (each rotation is scaled by dt) — only the GL draw is skipped.
+    if (document.hidden) return;                       // minimised / occluded: nothing to draw for
+    const busy = (energy > 0.01) || !!statusCol || cur.speed > 0.05;
+    acc += dt;
+    if (acc < (busy ? 1/30 : 1/15)) return;
+    acc = 0;
     renderer.render(scene, camera);
-    if (!started){ started = true; document.title = READY; }  // first frame OK -> reveal the WebGL orb
   })();
 } catch (e) { /* leave the title unset so the QPainter orb stays */ }
 </script></body></html>"""

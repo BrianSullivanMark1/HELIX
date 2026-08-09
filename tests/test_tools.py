@@ -17,9 +17,29 @@ class _FakeForge:
         return False  # no workspace build by that name — let the agent path handle deletes in tests
 
 
+class _Build:
+    """Minimal stand-in for a workspace Build — the fields open_build actually reads."""
+
+    def __init__(self, name: str, kind: BuildKind) -> None:
+        self.name = name
+        self.slug = name.lower().replace(" ", "-")
+        self.build_kind = kind
+
+
 class _FakeBuilds:
+    def __init__(self, *builds: _Build) -> None:
+        self._builds = list(builds)
+
     def list(self):
-        return []
+        return list(self._builds)
+
+
+class _FakeBus:
+    def __init__(self) -> None:
+        self.published: list = []
+
+    def publish(self, event) -> None:
+        self.published.append(event)
 
 
 class _FakeQueue:
@@ -209,3 +229,48 @@ def test_think_harder_routes_to_the_deep_thinker_when_wired():
 def test_think_harder_absent_without_a_deep_thinker():
     reg, _ = _registry()
     assert "think_harder" not in {t.name for t in reg.specs()}
+
+
+# ---------- open_build: OPEN means open, never run ----------
+
+def _open_registry(*builds: _Build, bus=None):
+    return ToolRegistry(_FakeForge(), _FakeBuilds(*builds), queue=_FakeQueue(), bus=bus)
+
+
+def test_open_build_promises_run_task_for_protocols():
+    # The contract the implementation below has to keep: the tool the model is shown says a protocol
+    # that should DO its thing goes through run_task.
+    reg = _open_registry()
+    spec = next(t for t in reg.specs() if t.name == "open_build")
+    assert "run_task" in spec.description
+
+
+def test_open_build_refuses_a_protocol_instead_of_running_it():
+    # Opening a protocol used to publish an open request, which the shell services by launching the
+    # build's main.py headlessly — so "show me the tidy-downloads protocol" silently RAN it, the exact
+    # capability open_build's description hands to run_task.
+    bus = _FakeBus()
+    reg = _open_registry(_Build("Tidy Downloads", BuildKind.TASK), bus=bus)
+    out = reg.dispatch("open_build", {"name": "tidy downloads"})
+    assert bus.published == []  # nothing was asked to open — and therefore nothing was run
+    assert "protocol" in out and "run_task" in out
+
+
+def test_open_build_refuses_a_protocol_headlessly_too():
+    # With no bus (agent/test context) the refusal must still come first — not fall through to a launch.
+    reg = _open_registry(_Build("Tidy Downloads", BuildKind.TASK))
+    assert "run_task" in reg.dispatch("open_build", {"name": "Tidy Downloads"})
+
+
+def test_open_build_still_opens_an_app():
+    bus = _FakeBus()
+    reg = _open_registry(_Build("Tip Calc", BuildKind.APP), bus=bus)
+    out = reg.dispatch("open_build", {"name": "tip calc"})
+    assert [e.slug for e in bus.published] == ["tip-calc"] and "Opening Tip Calc" in out
+
+
+def test_open_build_still_opens_a_hologram():
+    bus = _FakeBus()
+    reg = _open_registry(_Build("Garden", BuildKind.MODEL), bus=bus)
+    assert "Opening Garden" in reg.dispatch("open_build", {"name": "garden"})
+    assert [e.slug for e in bus.published] == ["garden"]

@@ -308,3 +308,16 @@ def test_history_coalesces_consecutive_same_role_turns():
     # The API rejects user-then-user; the leading users must coalesce into one well-formed turn.
     assert [t.role for t in chat.last_turns] == [Role.USER]
     assert _all_text(chat.last_turns).startswith("firstsecondthird")  # + the ephemeral time anchor
+
+
+def test_escalation_is_fenced_from_autonomous_runs():
+    from helix.services.conversation import BUILD_TOOLS
+
+    # think_harder hands its argument to the STRONGEST model WITH web access. An unattended watcher
+    # processing untrusted content (an email, a web page) must not be able to launder that text into a
+    # web-enabled deep reasoner — every peer egress/escalation faculty is fenced, and this one was
+    # missed until an audit caught it.
+    assert "think_harder" in BUILD_TOOLS
+    # Reading stays open to an agent — fencing escalation must not have fenced the read faculties a
+    # morning brief is made of.
+    assert "read_file" not in BUILD_TOOLS and "search_knowledge" not in BUILD_TOOLS

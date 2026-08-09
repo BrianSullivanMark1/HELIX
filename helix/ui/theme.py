@@ -17,6 +17,7 @@ GOLD = "#ffc857"  # the orb's warm "I'm speaking" tone
 TEXT = "#e2edf1"
 MUTED = "#7a8a93"
 LINE = "#1b2730"
+SCROLL_HANDLE = "#3a4d5c"  # scrollbar grip — must read clearly on both the near-black root and panels
 
 # Build-status palette — one shared meaning across the orb, the menu tiles, and the Console legend:
 #   blue  = idle / done-and-seen (the default CYAN above)
@@ -68,9 +69,13 @@ QLineEdit, QTextEdit {{
 QLineEdit:focus, QTextEdit:focus {{ border-color: {CYAN_DIM}; }}
 
 QScrollArea {{ border: none; background: transparent; }}
-QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: {LINE}; border-radius: 4px; min-height: 30px; }}
-QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+QScrollBar:vertical {{ background: transparent; width: 18px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: {SCROLL_HANDLE}; border-radius: 7px; min-height: 30px; }}
+QScrollBar::handle:vertical:hover {{ background: {CYAN_DIM}; }}
+QScrollBar:horizontal {{ background: transparent; height: 18px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: {SCROLL_HANDLE}; border-radius: 7px; min-width: 30px; }}
+QScrollBar::handle:horizontal:hover {{ background: {CYAN_DIM}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 
 QFrame#Card {{
     background: {PANEL};

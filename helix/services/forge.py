@@ -163,13 +163,27 @@ class ForgeService:
                 self._revert_escapes(escaped)
                 _LOG.warning("build %r wrote outside its workspace: %s", app.name, escaped)
             if cancel is not None and cancel.is_set():
-                # Stopped mid-build: don't finalize. The token carries the handle so the UI can offer cleanup.
+                # Stopped mid-build: don't finalize. The token carries the handle so the UI can offer
+                # cleanup. The in-progress marker deliberately STAYS until the user answers that offer —
+                # a cancel alone does not settle the build. Clearing it here would strand the routine
+                # case: closing HELIX mid-build cancels every active job, and BuildQueue skips the
+                # cleanup announcement while shutting down (there is no UI left to answer it), so nobody
+                # is ever asked. Without the marker, the next launch's recover_interrupted skips the
+                # build entirely and a half-edited app stays live and broken. keep_build() clears it
+                # when the user says keep; discard_build() removes the work outright.
                 raise BuildCancelled(app.slug, app.name, iterating, bool(app.is_model))
             if not result.ok:
+                # The coder gave up mid-edit. Same treatment as a failed check: a half-applied change must
+                # not stay live (an iteration goes back to its last working version, a never-finalized new
+                # build is removed) — otherwise a broken app sits in the menu looking ready.
+                self._rollback_failed(app, workspace, iterating)
                 raise BuildError(result.error or result.summary or "the build failed")
             if escaped:
                 # Name WHAT it tried to touch — the opaque "wrote outside its workspace" told the user
                 # (and us) nothing; now the announcement and the log pinpoint the offending file(s).
+                # The workspace goes back too: reverting only the escaped files would leave the rest of a
+                # build we just refused to trust live and openable, contradicting "rolled it back".
+                self._rollback_failed(app, workspace, iterating)
                 raise BuildError(
                     f"the build tried to change files outside its own folder "
                     f"({self._escape_names(escaped)}), so I blocked it and rolled it back."
@@ -215,6 +229,13 @@ class ForgeService:
         self._bus.publish(BuildDeleted(app.slug))
         return True
 
+    def keep_build(self, handle: BuildHandle) -> None:
+        """The user answered KEEP to a stopped build's cleanup offer. That answer — not the stop itself —
+        is what settles the build, so this is where the in-progress marker goes. Leaving it would let the
+        next launch's recover_interrupted read it as a crash and roll back (or delete) the very work the
+        user just chose to keep. The counterpart to discard_build."""
+        self._builds.clear_building(handle.slug)
+
     def discard_build(self, handle: BuildHandle) -> bool:
         """Remove the work a stopped build left behind: delete a brand-new build outright, or roll an
         interrupted iteration back to its last committed (good) version. Returns True on success (False
@@ -233,8 +254,10 @@ class ForgeService:
         return True
 
     def _rollback_failed(self, app: App, workspace: Path, iterating: bool) -> None:
-        """Undo a build that failed its pre-finalize checks, so a broken result never sits on disk. An
-        iteration is restored to its last committed version; a never-finalized new build is deleted."""
+        """Undo a build that settled badly — a coder failure, a sandbox escape, or a failed pre-finalize
+        check — so a broken half-edited result never sits on disk. An iteration is restored to its last
+        committed version; a never-finalized new build is deleted. (Cancellation is NOT a bad settle: the
+        user is offered the choice, so it only clears the marker and leaves the work for discard_build.)"""
         try:
             if iterating:
                 self._repo.discard_changes(workspace)  # back to the last good, working version

@@ -231,6 +231,46 @@ def test_sleep_wake_tolerate_mishearings_and_the_name(_app):
         assert not vc.is_muted(), phrase
 
 
+def test_wide_table_scroller_reserves_the_real_scrollbar_height(_app):
+    # A wide chat table scrolls sideways; the reserved strip under it must fit the ACTUAL themed
+    # scrollbar (measured, not the old hardcoded 16px) so a thicker bar never eats the last row.
+    view = ConsoleView(object(), _FakeSettings())
+    wide = QLabel("x" * 400)  # naturally wider than the 860px cap
+    wide.setFixedWidth(1200)
+    area = view._h_scroll(wide)
+    sb_h = area.horizontalScrollBar().sizeHint().height()
+    # setFixedHeight pins min==max — assert on that, not height(), which is unset pre-show.
+    assert area.minimumHeight() >= wide.sizeHint().height() + sb_h  # table + full bar, no overlap
+
+
+def test_narrow_table_scroller_reserves_no_scrollbar_room(_app):
+    # A table narrower than the cap shows no bar — and shouldn't carry dead space for one.
+    view = ConsoleView(object(), _FakeSettings())
+    narrow = QLabel("small")
+    area = view._h_scroll(narrow)
+    assert area.minimumHeight() <= narrow.sizeHint().height() + 4
+
+
+def test_table_row_grows_to_the_scroller_cap_and_tools_stay_pinned(_app):
+    # A wide table must use the row's width up to the 860px cap before growing a scrollbar (Qt caps
+    # a scroll area's PREFERRED width at ~36 chars, which used to squeeze tables to ~530px), and the
+    # hover tools' host must stop at the scroller's cap so copy/export stay on the table's edge.
+    view = ConsoleView(object(), _FakeSettings())
+    spec = {
+        "type": "table",
+        "title": "T",
+        "columns": [f"Column {i} header" for i in range(10)],
+        "rows": [[f"value {r}-{c} text" for c in range(10)] for r in range(3)],
+    }
+    view._add_visual(spec)
+    row = view._tlayout.itemAt(0).layout()
+    assert row.stretch(0) == 1  # the table competes for the row's spare width…
+    assert row.stretch(1) == 0  # …and the trailing spacer yields until the table hits its cap
+    wrap = row.itemAt(0).widget()
+    scroller = wrap.layout().itemAt(0).widget()
+    assert wrap.maximumWidth() == scroller.maximumWidth() <= 862
+
+
 def test_console_attachment_chips_toggle_host_visibility(_app, tmp_path):
     view = ConsoleView(object(), _FakeSettings())
     p = tmp_path / "a.txt"

@@ -547,17 +547,27 @@ class EdgeSpeechOut:
         # Retry transient network blips so a single failed request doesn't drop us to the OS voice — the
         # main cause of consecutive lines coming out in different voices during a build.
         last_exc: Exception | None = None
-        for attempt in range(3):
-            if self._is_stopped(gen):
-                raise RuntimeError("stopped")
-            try:
-                asyncio.run(_go())
-                if os.path.getsize(path) > 0:
-                    return path
-                last_exc = RuntimeError("edge-tts produced no audio")
-            except Exception as exc:
-                last_exc = exc
-        raise last_exc or RuntimeError("edge-tts produced no audio")
+        handed_over = False  # ownership of the temp mp3 moves to the caller only on a successful return
+        try:
+            for attempt in range(3):
+                if self._is_stopped(gen):
+                    raise RuntimeError("stopped")
+                try:
+                    asyncio.run(_go())
+                    if os.path.getsize(path) > 0:
+                        handed_over = True
+                        return path
+                    last_exc = RuntimeError("edge-tts produced no audio")
+                except Exception as exc:
+                    last_exc = exc
+            raise last_exc or RuntimeError("edge-tts produced no audio")
+        finally:
+            # A FAILED or STOPPED synthesis never hands the path out, so nothing downstream can delete
+            # it — without this, every offline reply and every reply the user cuts short strands an mp3
+            # in %TEMP% for the whole session. Reaped off-thread for the same reason playback is: a
+            # stranded chunk's os.remove must never stall the sentence the playback loop is waiting on.
+            if not handed_over:
+                self._reap([path])
 
     def _play(self, path: str, gen: int | None = None) -> None:
         gen = self._gen if gen is None else gen

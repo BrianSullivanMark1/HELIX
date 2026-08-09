@@ -11,12 +11,14 @@ from helix.adapters.api_coder import ApiCoder
 from helix.adapters.git_repo import GitRepo
 from helix.adapters.signal_bus import SignalBus
 from helix.adapters.system_clock import SystemClock
-from helix.domain.errors import BuildError
+from helix.domain.errors import BuildError, ConstitutionViolation
 from helix.domain.events import BuildOpenRequested
 from helix.domain.models import BuildKind
 from helix.ports.coder import CoderResult
 from helix.services.builds import BuildService
+from helix.services.cancel import CancelToken
 from helix.services.forge import ForgeService
+from helix.services.selfdev import SelfDevService
 from helix.services.tools import ToolRegistry
 
 GIT = GitRepo()
@@ -197,6 +199,114 @@ def test_failed_verify_gate_removes_a_never_finalized_new_build():
         _forge(root, coder_bad).build("Doomed Flow", "x", kind=BuildKind.TASK)
     # A brand-new build that never passed its checks must not linger as a broken menu entry.
     assert not (root / "data" / "builds" / "doomed-flow").exists()
+
+
+# ---------- a stopped SELF-change is still contained ----------
+
+class _Settings:
+    def __init__(self) -> None:
+        self._d: dict = {}
+
+    def get(self, k, default=None):
+        return self._d.get(k, default)
+
+    def set(self, k, v):
+        self._d[k] = v
+
+    def all(self):
+        return dict(self._d)
+
+
+class _SelfCoder:
+    """A self-dev coder driven by fn(worktree, cancel), so a test can write and THEN stop mid-run."""
+
+    name = "fake"
+
+    def __init__(self, fn) -> None:
+        self._fn = fn
+
+    def available(self) -> bool:
+        return True
+
+    def run_task(self, repo_dir, prompt, *, on_progress=None, cancel=None, model=None):
+        self._fn(Path(repo_dir), cancel)
+        return CoderResult(ok=True, summary="ok", error=None)
+
+
+def _helix_repo() -> Path:
+    repo = Path(tempfile.mkdtemp()) / "r"
+    GIT.init(repo)
+    _w(repo / ".gitignore", "data/")
+    _w(repo / "helix/ui/orb.py", "# orb")
+    _w(repo / "helix/services/conversation.py", "# conversation")
+    _w(repo / "README.md", "base")
+    GIT.commit_all(repo, "base")
+    return repo
+
+
+def _selfdev(repo: Path, fn) -> SelfDevService:
+    return SelfDevService(
+        _SelfCoder(fn), GIT, _Settings(), CLOCK, repo,
+        worktrees_dir=repo.parent / "wt", smoke_check=lambda p: (True, ""),
+        guard_files=[repo / "data" / "s.json"], data_dir=repo / "data",
+    )
+
+
+def test_cancelled_self_change_still_reverts_its_escaped_writes():
+    # A stop is exactly when the tree can't be assumed clean: whatever the coder wrote into the LIVE
+    # deployed source before the stop must still be caught and reverted, not left behind unchecked.
+    repo = _helix_repo()
+
+    def escape_then_stop(wt, cancel):
+        _w(wt / "helix/services/conversation.py", "# the legit draft edit")
+        _w(repo / "helix/ui/orb.py", "# escaped into the live deployed source")
+        cancel.cancel()  # …and only then does the user hit stop
+
+    with pytest.raises(ConstitutionViolation):
+        _selfdev(repo, escape_then_stop).propose("improve things", cancel=CancelToken())
+    assert (repo / "helix/ui/orb.py").read_text(encoding="utf-8") == "# orb"
+    assert GIT.is_clean(repo)
+    assert not GIT.list_branches(repo, "selfdev/")  # the draft branch is cleaned up too
+
+
+def test_cancelled_self_change_still_restores_a_guarded_file():
+    repo = _helix_repo()
+    guarded = repo / "data" / "s.json"
+    _w(guarded, '{"k":1}')
+
+    def tamper_then_stop(wt, cancel):
+        _w(wt / "helix/services/conversation.py", "# edit")
+        guarded.write_text('{"k":"pwned"}', encoding="utf-8")
+        cancel.cancel()
+
+    with pytest.raises(ConstitutionViolation):
+        _selfdev(repo, tamper_then_stop).propose("settings grab", cancel=CancelToken())
+    assert guarded.read_text(encoding="utf-8") == '{"k":1}'  # reverted byte-for-byte despite the stop
+
+
+def test_cancelled_self_change_with_a_contained_coder_reports_the_stop():
+    # The guards run first, but a clean cancelled run still fails as a STOP (not as a violation).
+    repo = _helix_repo()
+
+    def stop(wt, cancel):
+        _w(wt / "helix/services/conversation.py", "# edit")
+        cancel.cancel()
+
+    with pytest.raises(BuildError, match="stopped"):
+        _selfdev(repo, stop).propose("improve things", cancel=CancelToken())
+    assert not GIT.list_branches(repo, "selfdev/")
+
+
+def test_approve_reaps_a_leftover_smoke_check_worktree():
+    # An approval killed after creating its worktree dir left it on disk; `git worktree add` then refuses
+    # that path, which made the reviewed change PERMANENTLY unapprovable. propose() reaps its own draft
+    # path the same way — approve() must too.
+    repo = _helix_repo()
+    svc = _selfdev(repo, lambda wt, c: _w(wt / "helix/services/conversation.py", "# improved"))
+    pc = svc.propose("improve conversation")
+    _w(repo.parent / "wt" / pc.branch.replace("/", "_") / "stale.txt", "left behind")
+    assert "Applied" in svc.approve(pc.branch)
+    assert pc.branch not in GIT.list_branches(repo, "selfdev/")
 
 
 # ---------- the API coder knows an edit from a build ----------

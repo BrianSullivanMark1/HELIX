@@ -99,6 +99,11 @@ def main(argv: list[str] | None = None) -> int:
     # full.
     args += ["--collect-submodules", "claude_agent_sdk"]
     args += ["--collect-all", "mcp"]
+    # anthropic is now imported lazily too (inside AnthropicChat._client_for_current_key — importing it
+    # at module scope cost ~1.55s of startup for every launch, including subscription-rail launches that
+    # never build an API client). Same reasoning as the Agent SDK above: name it explicitly rather than
+    # trust the static scan to follow an import inside a method. Code only — it ships no bulky data.
+    args += ["--collect-submodules", "anthropic"]
     # scipy 1.16 added a compiled helper (scipy._cyutility) that scipy.linalg/ndimage import at startup;
     # PyInstaller 6.12's bundled scipy hook predates it and skips it, so the frozen app dies importing
     # materials.py (gaussian_filter -> scipy.ndimage -> scipy.linalg -> _cyutility). Pull it in explicitly.

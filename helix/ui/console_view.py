@@ -658,7 +658,7 @@ class _AttachChip(QFrame):
         return lbl
 
 
-def chip_strip(host: QWidget, height: int = 40) -> QScrollArea:
+def chip_strip(host: QWidget, height: int = 44) -> QScrollArea:
     """Put a row of chips into a sideways-scrolling viewport.
 
     A plain QHBoxLayout of QPushButtons reports its full combined width as the page's MINIMUM, and a
@@ -673,7 +673,9 @@ def chip_strip(host: QWidget, height: int = 40) -> QScrollArea:
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     area.setStyleSheet("QScrollArea{background:transparent;border:none;}")
-    area.setFixedHeight(height)  # one chip row + room for the scrollbar only when it's actually needed
+    # One chip row + room for the scrollbar only when it's actually needed. The default fits the
+    # theme's 18px-thick bar (widened for grabbability) under a chip row without clipping it.
+    area.setFixedHeight(height)
     return area
 
 
@@ -752,7 +754,8 @@ class ConsoleView(QWidget):
         self._busy = False  # a CONVERSATIONAL turn is running (now short — builds left the turn)
         self._connect_hint_shown = False  # dedupe the "connect Claude first" hint until auth appears
         self._suggestions = suggestions  # SuggestionService — the quiet ANTICIPATE chip
-        self._suggest_ts = 0.0          # monotonic time of the last shown suggestion (rate-limit)
+        self._suggest_ts = 0.0          # monotonic time of the last suggestion CHECK (rate-limit)
+        self._suggest_scan: QtWorker | None = None  # in-flight scan; one at a time, off the GUI thread
         self._suggest_dismissed: set[str] = set()  # ids the user waved off this session — never re-nag
         self._suggest_current: str = ""  # the id currently on the chip
         # follow-ups typed while a turn runs (never dropped): (text, from_voice, attach paths, speaker)
@@ -1111,6 +1114,12 @@ class ConsoleView(QWidget):
         must run to completion, so neither speech nor a 'stop' interrupts it (the mic is deaf while it
         drafts anyway). It ends on its own; the user drops the result afterward with 'discard it', and
         closing the app unwinds an in-flight draft (selfdev_lane.shutdown)."""
+        # A stop means STOPPED. Follow-ups typed/spoken while HELIX was thinking are queued, and
+        # cancelling only the in-flight turn left them to fire from _drain_pending the moment it
+        # retired — so the orb kept answering after the halt. Drop them first, ahead of every branch
+        # below (the cleanup-offer path returns early and also drains).
+        queued_msgs = len(self._pending_msgs)
+        self._pending_msgs.clear()
         building = self._queue is not None and self._queue.active_name() is not None
         if self._cleanups and not building and not self._busy:
             # A "remove the half-built X?" offer is hanging and nothing is running — Esc / "stop" /
@@ -1123,16 +1132,18 @@ class ConsoleView(QWidget):
             self._cancel.cancel()  # break a mid-flight reply loop
         stopped = self._queue.cancel_active() if self._queue is not None else []  # kill the coder(s)
         dropped = self._queue.clear_queued() if self._queue is not None else []  # a stop drops the queue too
+        msgtail = (f" Dropped {queued_msgs} queued message{'' if queued_msgs == 1 else 's'}."
+                   if queued_msgs else "")
         if stopped:
             label = stopped[0] if len(stopped) == 1 else f"{len(stopped)} builds"
             tail = f" Cleared {len(dropped)} queued." if dropped else ""
-            self.status.setText(f"Stopping {label}…{tail}")
+            self.status.setText(f"Stopping {label}…{tail}{msgtail}")
         elif dropped:
-            self.status.setText(f"Cleared {len(dropped)} queued.")
+            self.status.setText(f"Cleared {len(dropped)} queued.{msgtail}")
         elif self._busy:
-            self.status.setText("Stopping…")
+            self.status.setText(f"Stopping…{msgtail}")
         else:
-            self.status.setText("Stopped.")
+            self.status.setText(f"Stopped.{msgtail}")
 
     def toggle_voice(self) -> None:
         """Flip hands-free voice on/off. Wired to both the Voice button and a tap on the orb."""
@@ -1836,6 +1847,11 @@ class ConsoleView(QWidget):
             self._cleanups.remove(handle)
         except ValueError:
             return
+        if self._forge is not None:
+            # The answer settles the build. Until now the workspace still carried its in-progress
+            # marker, so a restart would have "recovered" it — rolling back or deleting exactly the
+            # work the user just asked to keep.
+            self._forge.keep_build(handle)
         self._announce("Okay, I kept it.")
         self._drain_pending()
 
@@ -1865,13 +1881,43 @@ class ConsoleView(QWidget):
             return
         if self._voice is not None and self._voice.is_active():
             return  # don't pop a chip mid-conversation
+        if self._suggest_scan is not None:
+            return  # a scan is still in flight — the 15s heartbeat must never stack them
         if time.monotonic() - self._suggest_ts < 25 * 60:
             return
-        try:
-            cand = self._suggestions.candidate()
-        except Exception:  # noqa: BLE001 — a suggestion hiccup must never disturb the app
+        # Charge the rate limiter for the ATTEMPT, not the outcome. Advancing it only when a chip was
+        # SHOWN meant the common case — nothing to suggest — re-ran the whole scan every heartbeat.
+        self._suggest_ts = time.monotonic()
+        svc = self._suggestions
+
+        def _scan(_emit) -> object:
+            return svc.candidate()  # git subprocesses + a full manifest scan: never on the GUI thread
+
+        worker = QtWorker(_scan)
+        self._suggest_scan = worker
+        self._workers.add(worker)  # strong ref + shutdown() waits on it, like every other worker
+        worker.finished_ok.connect(self._on_suggestion)
+        # A suggestion hiccup must never disturb the app — the failure is already logged by QtWorker.
+        worker.failed.connect(lambda _msg: None)
+        worker.finished.connect(lambda w=worker: self._retire_suggest(w))
+        worker.start()
+
+    def _retire_suggest(self, worker: QtWorker) -> None:
+        """Suggestion scans are NOT conversational turns, so this deliberately does not touch _busy or
+        drain the pending queue the way _retire does."""
+        self._workers.discard(worker)
+        if self._suggest_scan is worker:
+            self._suggest_scan = None
+        worker.deleteLater()
+
+    def _on_suggestion(self, cand) -> None:
+        """The scan's result, back on the GUI thread. Re-checked because the scan is asynchronous now: a
+        turn may have started, or a chip appeared, while it was running."""
+        if cand is None or self._suggest_current or self._busy:
             return
-        if cand is None or cand.id in self._suggest_dismissed:
+        if self._voice is not None and self._voice.is_active():
+            return
+        if cand.id in self._suggest_dismissed:
             return
         self._show_suggestion(cand)
 
@@ -2150,17 +2196,22 @@ class ConsoleView(QWidget):
             self._insert_visual(_ToolWrap(card, _chart_text(spec), "helix-chart.txt", self._flash_status))
         elif kind == "table":
             scroller = self._h_scroll(self._table_widget(spec))  # wide tables scroll instead of clipping
-            self._insert_visual(
-                _ToolWrap(
-                    scroller, _table_slack(spec), "helix-table.txt", self._flash_status, copy_spec=spec
-                )
+            wrap = _ToolWrap(
+                scroller, _table_slack(spec), "helix-table.txt", self._flash_status, copy_spec=spec
             )
+            # The wrap grows with the row but never past the scroller's cap, so the floating
+            # copy/export tools stay pinned to the table's right edge instead of drifting off it.
+            wrap.setMaximumWidth(scroller.maximumWidth())
+            self._insert_visual(wrap, grow=True)  # full row width (up to the cap) before scrolling
 
     def _h_scroll(self, widget: QWidget) -> QWidget:
         """Wrap a wide widget (a table) in a horizontally-scrollable viewport, so many columns render at
         full width and scroll sideways rather than getting cut off at the window edge."""
-        widget.adjustSize()
         hint = widget.sizeHint()
+        # Size the table to its FULL natural width explicitly — adjustSize() silently caps a
+        # rich-text widget at 2/3 of the screen width, which left wide tables clipped mid-column
+        # with nothing for the scrollbar to scroll. Sideways room is exactly what this area is for.
+        widget.resize(hint)
         max_w = 860  # roomier than before; content wider than this scrolls horizontally
         area = QScrollArea()
         area.setWidget(widget)
@@ -2171,7 +2222,10 @@ class ConsoleView(QWidget):
         area.setStyleSheet("QScrollArea{background:transparent;border:none;}")
         wide = hint.width() > max_w
         area.setMaximumWidth(min(hint.width() + 2, max_w))
-        area.setFixedHeight(hint.height() + (16 if wide else 2))  # room for the h-scrollbar only when shown
+        # Room for the h-scrollbar only when it's shown — measured, not hardcoded, so the theme can
+        # thicken the bar (grabbability) without it eating the table's last row.
+        sb_h = area.horizontalScrollBar().sizeHint().height() if wide else 0
+        area.setFixedHeight(hint.height() + sb_h + 2)
         return area
 
     @staticmethod
@@ -2225,11 +2279,15 @@ class ConsoleView(QWidget):
         # so many-column tables aren't clipped at the window edge.
         return lbl
 
-    def _insert_visual(self, widget: QWidget) -> None:
+    def _insert_visual(self, widget: QWidget, *, grow: bool = False) -> None:
         rowlay = QHBoxLayout()
         rowlay.setContentsMargins(0, 0, 0, 0)
-        rowlay.addWidget(widget)
-        rowlay.addStretch(1)
+        # grow=True (tables): give the widget ALL of the row's spare width up to its own maximum —
+        # a scroll area's PREFERRED width is capped at ~36 chars by Qt, so without a stretch factor
+        # a wide table got squeezed to ~530px and grew a scrollbar long before its 860px cap. The
+        # trailing spacer takes over only once the widget is at its max (stretch 0 = don't compete).
+        rowlay.addWidget(widget, 1 if grow else 0)
+        rowlay.addStretch(0 if grow else 1)
         self._tlayout.insertLayout(self._tlayout.count() - 1, rowlay)
         self._animate_in(widget)
         QTimer.singleShot(0, self._scroll_to_bottom)

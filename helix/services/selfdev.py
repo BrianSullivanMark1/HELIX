@@ -171,8 +171,10 @@ class SelfDevService:
             result = self._coder.run_task(
                 wt, improve_helix_prompt(request), on_progress=on_progress, cancel=cancel, model=model
             )
-            if cancel is not None and cancel.is_set():
-                raise BuildError("the self-change was stopped.")
+            # The containment guards run UNCONDITIONALLY — before the cancel/failure exits — because a
+            # stopped run drove the same coder with the same hands. A cancel is exactly when the tree
+            # cannot be assumed clean: whatever it wrote before the stop is still on disk. (Mirrors
+            # ForgeService, which scans + reverts escapes ahead of its own cancel exit.)
             escaped = tree_changed(self._root, src_sig, skip=src_skip)
             if escaped:
                 self._repo.discard_changes(self._root)  # the live tree must be byte-identical to base
@@ -189,6 +191,8 @@ class SelfDevService:
                 raise ConstitutionViolation(
                     "refused — the coder wrote into protected data/ (" + ", ".join(names[:8]) + ")."
                 )
+            if cancel is not None and cancel.is_set():
+                raise BuildError("the self-change was stopped.")
             if not result.ok:
                 raise BuildError(result.error or "the coder produced no change.")
 
@@ -320,6 +324,11 @@ class SelfDevService:
     def _smoke_in_worktree(self, branch: str) -> tuple[bool, str]:
         self._worktrees.mkdir(parents=True, exist_ok=True)
         wt = self._worktrees / branch.replace("/", "_")
+        # Reap a crash/kill leftover at this exact path first, exactly as propose() does for its draft:
+        # otherwise `git worktree add` refuses the existing dir and the change becomes PERMANENTLY
+        # unapprovable — one interrupted approval would strand the user's reviewed work forever.
+        self._remove_worktree(wt)
+        shutil.rmtree(wt, ignore_errors=True)
         try:
             self._repo.add_worktree(self._root, wt, branch)
         except Exception as exc:

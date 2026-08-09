@@ -6,9 +6,10 @@ model layer never reaches past this file.
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-import anthropic
+if TYPE_CHECKING:  # `import anthropic` costs ~1.55s and is deferred — see _client_for_current_key
+    import anthropic
 
 from helix.domain.errors import MissingApiKey
 from helix.domain.models import Role
@@ -87,6 +88,12 @@ class AnthropicChat:
                 "claude setup-token) or add a Claude API key in Settings."
             )
         if self._client is None or self._client_key != key:
+            # Imported HERE, not at module scope: `import anthropic` measured 1.55s of the 2.8s it took
+            # to import app.container, and it sat between launch and the first frame for every user —
+            # including subscription-rail users whose turns never touch this SDK at all. Paid once, on
+            # the first API call that actually needs a client.
+            import anthropic
+
             self._client = anthropic.Anthropic(api_key=key)
             self._client_key = key
         return self._client

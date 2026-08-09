@@ -42,7 +42,8 @@ import threading
 from dataclasses import dataclass
 from typing import Callable
 
-from helix.adapters.claude_code_cli import resolve_claude_cli
+from helix.adapters.claude_code_cli import cli_unavailable_reason, resolve_claude_cli
+from helix.domain.errors import MissingApiKey
 from helix.domain.vocabulary import friendly_tool_label
 from helix.logging_setup import get_logger
 from helix.ports.llm import Reply, Text, ToolOutput, Turn, Usage
@@ -158,10 +159,27 @@ class SubscriptionBrain:
     def token(self) -> str:
         return (self._oauth() or "").strip()
 
-    def active(self) -> bool:
-        """True when HELIX should run conversation on the subscription: token + CLI + SDK present."""
+    def active(self, *, allow_probe: bool = True) -> bool:
+        """True when HELIX should run conversation on the subscription: token + CLI + SDK present.
+
+        Pass allow_probe=False from the Qt GUI thread — deciding whether a claude.exe will launch means
+        spawning it, and no widget may block on that (see resolve_claude_cli)."""
         return (not self._closed and bool(self.token())
-                and sdk_importable() and resolve_claude_cli() is not None)
+                and sdk_importable() and resolve_claude_cli(allow_probe=allow_probe) is not None)
+
+    def why_inactive(self, *, allow_probe: bool = True) -> str | None:
+        """None when the subscription rail is usable; otherwise the ACTUAL reason it isn't. Three very
+        different problems (no token, no SDK, no launchable CLI) used to collapse into one message
+        telling the user to check their token — so a working token got blamed for a broken CLI."""
+        if self._closed:
+            return "The subscription brain is shut down."
+        if not self.token():
+            return ("No Claude subscription token is saved. Run `claude setup-token` and paste the "
+                    "token into Settings.")
+        if not sdk_importable():
+            return "The claude-agent-sdk package is not importable in this build."
+        # token + SDK are fine; None here means the rail is usable
+        return cli_unavailable_reason(allow_probe=allow_probe)
 
     # ----- the event loop thread -----
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
@@ -364,18 +382,42 @@ class SubscriptionBrain:
         the caller decides whether to fall back to the API path or surface the error. A failed turn
         always drops the session first, so the next turn starts clean and no dead consumer lingers.
         `history` seeds a freshly-(re)connected session; it is NOT re-sent on the retry (which reuses
-        a fresh session too) beyond the first attempt's own freshness."""
+        a fresh session too) beyond the first attempt's own freshness. The retry exists for a DEAD
+        session with nothing done yet: a turn that already ran a tool, or that the user stopped, is
+        never re-sent."""
         _hide_child_windows()  # before any SDK spawn — no blank console window on every turn
         names = tuple(tool_names)
         with self._orb_lock:  # orb turns only — never held while a bridged tool re-enters the brain
+            ran_tool = False
+
+            def _note_tool(*a, **kw):
+                # A dispatched tool means REAL side effects (a build enqueued, a reminder set, money
+                # spent). From here the turn is no longer replayable, so the retry below must not
+                # re-send it — this flag is set even when the caller passed no on_tool of its own.
+                nonlocal ran_tool
+                ran_tool = True
+                if on_tool is not None:
+                    on_tool(*a, **kw)
+
             self._orb_sinks.on_progress = on_progress
             self._orb_sinks.cancel = cancel
-            self._orb_sinks.on_tool = on_tool
+            self._orb_sinks.on_tool = _note_tool
             self._orb_sinks.user = user
             try:
                 try:
                     return self._run(self._orb_turn(prompt, names, self._orb_sinks, history, images))
                 except Exception as first:  # one clean retry on a fresh session (dead CLI, stale pipe)
+                    stopped = cancel is not None and cancel.is_set()
+                    if ran_tool or stopped:
+                        # Re-running would double the side effects, or re-send the very turn the user
+                        # just stopped. Drop the session and let the caller decide what to say.
+                        _LOG.warning("subscription turn failed (%s); NOT retrying (%s)", first,
+                                     "tools already ran" if ran_tool else "user cancelled")
+                        try:
+                            self._run(self._drop_client(), timeout=30.0)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        raise
                     _LOG.warning("subscription turn failed (%s); retrying on a fresh session", first)
                     try:
                         self._run(self._drop_client(), timeout=30.0)
@@ -478,4 +520,17 @@ class PreferredChat:
                 return Reply(blocks=(Text(text),), usage=Usage())
             except Exception:  # noqa: BLE001 — the API chat is the safety net
                 _LOG.warning("subscription chat failed; falling back to the API key", exc_info=True)
-        return self._api.chat(turns, system=system, tools=tools)
+        try:
+            return self._api.chat(turns, system=system, tools=tools)
+        except MissingApiKey as exc:
+            # Both rails are down. The API adapter can only say "no key"; only here do we know why the
+            # SUBSCRIPTION rail didn't serve the turn, so name that instead of blaming a token that may
+            # be perfectly good.
+            probe = getattr(self._sub, "why_inactive", None)
+            reason = probe() if callable(probe) else None
+            if reason:
+                raise MissingApiKey(
+                    f"{reason} There's no Claude API key set either, so HELIX has no way to reach "
+                    f"Claude right now."
+                ) from exc
+            raise

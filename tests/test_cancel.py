@@ -182,7 +182,9 @@ class _Tools:
         self._exc = exc
 
     def specs(self):
-        return []
+        # Offer the tool the fake chat emits — dispatch now refuses names the run wasn't offered.
+        from helix.ports.llm import ToolSpec
+        return [ToolSpec("build_app", "build", {"type": "object", "properties": {}})]
 
     def dispatch(self, name, args, *, on_progress=None, cancel=None, user=""):
         if self._exc:

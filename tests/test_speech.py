@@ -2,6 +2,13 @@
 (closing the app or saying 'stop'), or a desktop voice would keep talking after the window is gone."""
 from __future__ import annotations
 
+import os
+import tempfile
+import time
+
+import pytest
+
+from helix.adapters import speech
 from helix.adapters.speech import EdgeSpeechOut, _rate_string
 
 
@@ -128,6 +135,95 @@ def test_speak_chunks_falls_back_per_failed_sentence():
     e.speak_chunks(["one.", "two.", "three."])
     assert played == ["one..mp3", "three..mp3"]  # the good ones still play, in order
     assert fb.spoke == ["two."]                  # the failed one is spoken in the OS voice
+
+
+def _track_temps(monkeypatch) -> list[str]:
+    """Record every temp file _synthesize creates, so a stranded one is provable."""
+    made: list[str] = []
+    real = tempfile.mkstemp
+
+    def spy(*args, **kwargs):
+        handle, path = real(*args, **kwargs)
+        made.append(path)
+        return handle, path
+
+    monkeypatch.setattr(speech.tempfile, "mkstemp", spy)
+    return made
+
+
+def _fake_edge(monkeypatch, *, audio: bytes = b"", boom: Exception | None = None) -> None:
+    """Stand in for edge-tts at the seam — no network, no real voice service."""
+    import edge_tts
+
+    class _Comm:
+        def __init__(self, text, voice, rate=None) -> None:
+            pass
+
+        async def save(self, path) -> None:
+            if boom is not None:
+                raise boom
+            with open(path, "wb") as fh:
+                fh.write(audio)
+
+    monkeypatch.setattr(edge_tts, "Communicate", _Comm)
+
+
+def _gone(path: str, timeout: float = 5.0) -> bool:
+    # Cleanup runs on a daemon thread (os.remove of an mp3 can block ~0.2s on Windows), so poll.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and os.path.exists(path):
+        time.sleep(0.02)
+    return not os.path.exists(path)
+
+
+def test_a_failed_synthesis_strands_no_temp_mp3(monkeypatch):
+    # An offline reply retries three times and then raises; the mp3 it opened is never handed out, so
+    # only _synthesize itself can delete it — otherwise a long offline session fills %TEMP%.
+    # gen=1 matters: _stopped_gen starts at 0 and _is_stopped is `_stopped_gen >= gen`, so the default
+    # gen=0 short-circuits on the STOPPED branch at the top of the retry loop and this test would never
+    # reach the offline path it claims to cover.
+    made = _track_temps(monkeypatch)
+    _fake_edge(monkeypatch, boom=RuntimeError("offline"))
+    e = _edge(_Fallback())
+    with pytest.raises(RuntimeError, match="offline"):
+        e._synthesize("hello", 1)
+    assert made and all(_gone(p) for p in made)
+
+
+def test_a_silent_render_strands_no_temp_mp3(monkeypatch):
+    # edge-tts answering with zero bytes fails the same way — the empty file must still be reaped.
+    # gen=1 for the same reason as above: otherwise this exits via the stopped branch.
+    made = _track_temps(monkeypatch)
+    _fake_edge(monkeypatch, audio=b"")
+    e = _edge(_Fallback())
+    with pytest.raises(RuntimeError, match="no audio"):
+        e._synthesize("hello", 1)
+    assert made and all(_gone(p) for p in made)
+
+
+def test_a_stopped_synthesis_strands_no_temp_mp3(monkeypatch):
+    # Saying 'stop' partway through a multi-sentence reply aborts the remaining renders before their
+    # first attempt: the file exists (mkstemp made it) but no audio was ever written.
+    made = _track_temps(monkeypatch)
+    _fake_edge(monkeypatch, audio=b"ID3 audio")  # would have succeeded — the stop lands first
+    e = _edge(_Fallback())
+    e._gen = 3
+    e._stopped_gen = 3
+    with pytest.raises(RuntimeError):
+        e._synthesize("hello", 3)
+    assert made and all(_gone(p) for p in made)
+
+
+def test_speak_keeps_the_mp3_alive_for_playback_then_reaps_it(monkeypatch):
+    # The success path is unchanged: the file must still be on disk when the player reads it.
+    made = _track_temps(monkeypatch)
+    _fake_edge(monkeypatch, audio=b"ID3 audio")
+    e = _edge(_Fallback())
+    alive: list[bool] = []
+    e._play = lambda p, gen=None: alive.append(os.path.exists(p))  # type: ignore[method-assign]
+    e.speak("hello")
+    assert alive == [True]
+    assert made and all(_gone(p) for p in made)
 
 
 def test_a_later_utterance_cannot_unstop_an_earlier_killed_one():

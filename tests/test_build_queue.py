@@ -1,5 +1,5 @@
 """BuildQueue — background job runner: runs builds (now a small POOL, so distinct builds run in
-parallel), serializes SAME-NAME builds, announces finish/failure, reorders the queue, and cancels. Uses a
+parallel), serializes SAME-TARGET builds (slug identity, as the workspace is), announces finish/failure, reorders the queue, and cancels. Uses a
 gated fake forge so ordering is deterministic, not timed."""
 from __future__ import annotations
 
@@ -117,6 +117,57 @@ def test_same_name_builds_never_run_at_once():
     forge.release("X")
     assert bus.wait_finishes(2)
     assert forge.calls == ["X", "X"]  # the second ran only after the first finished
+
+
+def test_builds_whose_slugs_collide_never_run_at_once():
+    # The workspace is keyed by SLUG, so these three spellings are ONE directory and one git repo.
+    # Serializing by display name would let all three coders loose in it at the same time.
+    bus, forge = _Bus(), _Forge()
+    q = BuildQueue(forge, bus, max_workers=3)
+    q.enqueue("My Timer", "first", kind=BuildKind.APP)
+    q.enqueue("my timer", "second", kind=BuildKind.APP)
+    q.enqueue("my-timer", "third", kind=BuildKind.APP)
+    assert forge.wait_started("My Timer")
+    time.sleep(0.15)  # give the (wrongly) concurrent siblings time to enter build()
+    assert forge.calls == ["My Timer"]  # only ONE of them is inside build()
+    forge.release("My Timer")
+    forge.release("my timer")
+    forge.release("my-timer")
+    assert bus.wait_finishes(3)
+    assert forge.calls == ["My Timer", "my timer", "my-timer"]  # in order, one workspace at a time
+
+
+def test_slug_identity_does_not_serialize_distinct_targets():
+    # The tightened key must not over-collapse: names that differ as slugs still run in parallel.
+    bus, forge = _Bus(), _Forge()
+    q = BuildQueue(forge, bus, max_workers=2)
+    q.enqueue("My Timer", "x", kind=BuildKind.APP)
+    q.enqueue("My Timer 2", "x", kind=BuildKind.APP)
+    assert forge.wait_started("My Timer")
+    assert forge.wait_started("My Timer 2")  # both in build() before either gate opens
+    forge.release("My Timer")
+    forge.release("My Timer 2")
+    assert bus.wait_finishes(2)
+
+
+def test_queue_lookups_match_the_workspace_identity_not_the_typing():
+    # "cancel my-timer" must find the build the model announced as "My Timer" — same workspace, one target.
+    bus, forge = _Bus(), _Forge()
+    q = BuildQueue(forge, bus, max_workers=1)
+    q.enqueue("My Timer", "x", kind=BuildKind.APP)
+    assert forge.wait_started("My Timer")
+    q.enqueue("Note Pad", "x", kind=BuildKind.APP)
+    q.enqueue("Tip Calc", "x", kind=BuildKind.APP)
+    assert q.is_active_named("my-timer")            # running one found by its slug
+    assert not q.move_first("MY TIMER")             # still can't reorder the running one
+    assert q.move_first("tip calc") and q.snapshot() == (["My Timer"], ["Tip Calc", "Note Pad"])
+    assert q.cancel_queued("note-pad") and q.snapshot() == (["My Timer"], ["Tip Calc"])
+    assert q.cancel_active_named("my timer")        # cancels the running build by slug
+    forge.release("My Timer")
+    forge.release("Tip Calc")
+    assert bus.wait_finishes(2)
+    assert "Note Pad" not in forge.calls
+    assert bus.finished()[0].stopped                # the slug-matched cancel really fired the token
 
 
 def test_second_build_queues_behind_the_active_one_then_runs():

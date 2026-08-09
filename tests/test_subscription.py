@@ -220,6 +220,94 @@ def test_preferred_chat_falls_back_when_subscription_fails():
     assert reply.text == "api reply"
 
 
+def _retry_brain(turn):
+    """A real SubscriptionBrain with its one turn coroutine faked at the seam — no SDK, no CLI:
+    only run_orb_turn's retry policy is under test."""
+    from helix.adapters.agent_sdk_chat import SubscriptionBrain
+
+    brain = SubscriptionBrain(lambda: "sk-ant-oat01-fake", "sys", workdir="C:/neutral")
+    brain._orb_turn = turn
+    return brain
+
+
+def test_dead_session_still_gets_one_clean_retry():
+    # The retry's genuine case: the turn blew up with NOTHING done yet (dead CLI, stale pipe).
+    attempts = []
+
+    async def _turn(prompt, names, sinks, history, images=None):
+        attempts.append(prompt)
+        if len(attempts) == 1:
+            raise RuntimeError("stale pipe")
+        return "second try"
+
+    brain = _retry_brain(_turn)
+    try:
+        assert brain.run_orb_turn("what's up") == "second try"
+        assert len(attempts) == 2
+    finally:
+        brain.shutdown()
+
+
+def test_turn_is_never_retried_once_a_tool_has_run():
+    # A build was enqueued before the failure — re-sending the turn would enqueue it TWICE.
+    attempts = []
+    seen = []
+
+    async def _turn(prompt, names, sinks, history, images=None):
+        attempts.append(prompt)
+        sinks.on_tool("build_app", "started building", False)
+        raise RuntimeError("pipe died after the build was enqueued")
+
+    brain = _retry_brain(_turn)
+    try:
+        with pytest.raises(RuntimeError):
+            brain.run_orb_turn("build me a timer", ("build_app",), on_tool=lambda *a: seen.append(a))
+        assert len(attempts) == 1          # no replay of a turn with real side effects
+        assert len(seen) == 1              # the caller's own on_tool still fired, once
+    finally:
+        brain.shutdown()
+
+
+def test_tool_guard_holds_even_with_no_caller_on_tool():
+    # The side effects happen whether or not the CALLER wanted digests — the guard can't depend on it.
+    attempts = []
+
+    async def _turn(prompt, names, sinks, history, images=None):
+        attempts.append(prompt)
+        sinks.on_tool("set_reminder", "reminder set", False)
+        raise RuntimeError("boom")
+
+    brain = _retry_brain(_turn)
+    try:
+        with pytest.raises(RuntimeError):
+            brain.run_orb_turn("remind me at five", ("set_reminder",))
+        assert len(attempts) == 1
+    finally:
+        brain.shutdown()
+
+
+def test_cancelled_turn_is_never_retried():
+    # The user pressed stop; the interrupt surfaces as an exception. Retrying would re-send the very
+    # turn they just stopped.
+    from helix.services.cancel import CancelToken
+
+    tok = CancelToken()
+    attempts = []
+
+    async def _turn(prompt, names, sinks, history, images=None):
+        attempts.append(prompt)
+        tok.cancel()
+        raise RuntimeError("interrupted")
+
+    brain = _retry_brain(_turn)
+    try:
+        with pytest.raises(RuntimeError):
+            brain.run_orb_turn("long story please", cancel=tok)
+        assert len(attempts) == 1
+    finally:
+        brain.shutdown()
+
+
 def test_child_windows_are_hidden_on_windows():
     # The blank claude.exe console popup fix: our wrapper must OR CREATE_NO_WINDOW into the
     # anyio.open_process call the SDK uses to spawn claude.exe.

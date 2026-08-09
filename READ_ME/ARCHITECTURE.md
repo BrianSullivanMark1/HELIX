@@ -193,6 +193,42 @@ Builds run in a background **queue** (they no longer block the turn); the orb ke
 coder works, and completion is announced separately over the `EventBus`. Scheduled agents and workflows
 run on the single shell heartbeat.
 
+### 5a. Startup cost — what may not be imported before the first frame
+
+"Nothing blocks the orb" has a launch-time counterpart: **no heavy dependency is imported at module
+scope on the path to the first frame.** Import time is paid by every user on every launch, it happens
+before anything is on screen, and it is invisible to the test suite — so it is enforced by a test
+(`tests/test_startup_cost.py`) rather than by discipline. Importing `app.container` cost ~2.8s until two
+stacks were deferred to their point of use:
+
+| Stack | Cost | Deferred to | Needed when |
+| --- | --- | --- | --- |
+| `anthropic` | ~1.55s | `AnthropicChat._client_for_current_key` | the first API-rail call — never, on a subscription-only launch |
+| `trimesh` + `networkx` + `scipy.spatial` | ~955ms | `container._LazyBaker` → `ModelBaker` | a MODEL build finishes and a hologram is baked |
+
+That took the composition root from ~2.8s to ~0.18s, and `app.bootstrap` from ~2.27s to ~0.28s. Two
+consequences worth remembering:
+
+- **A lazily-imported package must be named explicitly in `build.py`.** PyInstaller's static scan is
+  trusted for module-scope imports only; deferred ones are pulled in with `--collect-submodules`
+  (`anthropic`, `claude_agent_sdk`) or `--collect-all` (`trimesh`). A missing entry does not fail the
+  build — it fails at runtime, in the frozen app, on the first call that needs the package.
+- **Deferring construction is sometimes the only way to defer an import.** Moving the `import` statement
+  is useless if the object is still built during wiring, which is why `ModelBaker` sits behind a proxy
+  (`_LazyBaker`) instead of merely having its import moved. That proxy is wiring, so it lives in
+  `app/container.py` per principle 6.
+
+Diagnostics obey the same rule: the "which Claude rail is live" check probes whether a `claude.exe` will
+actually launch, so it runs on a daemon thread rather than between launch and the first frame.
+
+**What remains, and why.** With imports deferred, the largest pre-first-frame cost on a voice-enabled
+launch is the STT pre-warm in `main.py` — measured ~2.5s (faster-whisper ~1.7s + the neural speaker model
+~0.7s). That one is *not* removable in place: faster-whisper's native runtime crashes the process on
+Windows if it is built after `QApplication` initializes, so it must precede every Qt import. It is
+already skipped entirely when `voice_input_on` is off. Moving it off the startup path at all would mean
+moving STT into a **separate process** (the constraint is same-process only) and paying for audio IPC —
+a real option if launch latency ever matters more than that complexity, but not a local fix.
+
 ---
 
 ## 6. Two brains: subscription and API
@@ -206,6 +242,32 @@ the model sees. If the token path is absent or fails mid-turn, it falls back to 
 (`AnthropicChat`), where the same tools, images, and tool-result images are encoded for the Messages
 API. Persistence, tool digests, and behaviour are identical on both paths. `PreferredChat` sends plain
 (no-tool) chat — the distillers — to whichever brain is active.
+
+### 6a. Finding a `claude.exe`, and never blaming the token for it
+
+`resolve_claude_cli()` treats "the file is on disk" as a *candidate*, not an answer. The Claude desktop
+app ships as an MSIX package, so its bundled `claude.exe` lives in the package's `LocalCache`, where a
+non-packaged process (HELIX) can see the file and Windows still refuses to launch it — its dependencies
+resolve through the package graph. `CreateProcess` fails with a not-found error, the Agent SDK reports
+`CLINotFoundError`, and the old resolver dead-ended on a path it had just "found" — while never trying a
+perfectly good standalone `claude` on `PATH`, because the desktop copy was preferred outright.
+
+So candidates are ordered (`HELIX_CLAUDE_CLI` override → desktop copies newest-first → `PATH`) and each
+is **launch-validated** with a real `--version` spawn before it is returned. Launchability is cached per
+path, so this costs no subprocess after the first resolution; `reset_cli_cache()` forgets it when a CLI
+is installed or updated.
+
+Two consequences the code depends on:
+
+- **`allow_probe=False` for anything on the GUI thread.** Validating means spawning a ~278 MB exe.
+  `SettingsView`'s "which brain is live" label is built before the first frame and refreshed on every
+  Save, so it asks without probing and accepts an optimistic answer; the container warms the cache on a
+  daemon thread at startup, so that optimism only applies in the first moment after launch. A wrong
+  guess there costs one turn that falls back to the API rail — never a frozen window.
+- **A CLI problem must never be reported as a credential problem.** Three unrelated failures (no token,
+  no SDK, no launchable CLI) used to collapse into one message telling the user to check their token.
+  `SubscriptionBrain.why_inactive()` names which one it actually is, and `PreferredChat` attaches that
+  reason when the API rail also has no key — so a perfectly good token stops taking the blame.
 
 **Vision** flows on both paths: images the user attaches/pastes/drags ride on the user turn; images
 HELIX *locates* on disk (`find_images` / `view_image`) come back inside the tool result; and

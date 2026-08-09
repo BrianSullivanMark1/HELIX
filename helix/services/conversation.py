@@ -81,6 +81,10 @@ BUILD_TOOLS = frozenset(
         # Desktop control is human-driven only — text a watcher processes must never launch a
         # program or press the user's keys. (system_status stays readable: it's one status line.)
         "open_program", "media_control",
+        # The Amazon cart is human-driven only — text an unattended watcher processes (an email,
+        # a Slack message, a web page) must never stage merchandise or pop a cart page in the
+        # user's browser. (show_cart stays readable: it's one status recap, like list_reminders.)
+        "add_to_cart", "remove_from_cart", "open_cart",
         # Sleeping the mic is human-driven only — content an unattended watcher processes must
         # never be able to deafen HELIX (an email saying "HELIX, go to sleep" must not mute the mic).
         "go_to_sleep",
@@ -88,6 +92,12 @@ BUILD_TOOLS = frozenset(
         # autonomous agent may list folders and read files like any other read faculty, but text
         # inside a file must never be able to make an unattended agent write to the user's disk.
         "write_file",
+        # Escalation is human-driven only. think_harder hands its argument to the STRONGEST model with
+        # web access — so an unattended watcher processing untrusted content (an email, a web page, a
+        # Slack message) could otherwise launder that text into a web-enabled deep reasoner and spend
+        # the top tier on it. Every peer egress/escalation faculty is fenced here; this one was missed.
+        # An agent can still reason: it runs on the model already, it just cannot escalate.
+        "think_harder",
     }
 )
 
@@ -210,6 +220,11 @@ class ConversationService:
         specs = self._tools.specs()
         if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete/run tools
             specs = [s for s in specs if s.name not in BUILD_TOOLS]
+        # The fence must hold at DISPATCH, not just at offer time: the API accepts any tool_use
+        # name the model emits, and a read-only tool's RESULT text (or any untrusted content) could
+        # otherwise coach an autonomous run into a fenced tool the specs filter withheld (open_cart,
+        # open_program, view_camera…). The SDK path enforces the same set via allowed_tools.
+        offered = {s.name for s in specs}
 
         # True when the model SAW pixels this turn — attached images up front, or a sight tool
         # (view_screen / view_image / find_images) that handed images back mid-turn. Either way the
@@ -302,6 +317,12 @@ class ConversationService:
                 turns.append(Turn(Role.ASSISTANT, reply.blocks))
                 results = []
                 for call in reply.tool_uses:
+                    if call.name not in offered:
+                        results.append(ToolResult(
+                            call.id, f"Error: the tool '{call.name}' isn't available in this run.",
+                            is_error=True,
+                        ))
+                        continue
                     if on_progress:
                         on_progress(self._progress_label(call.name, call.args))
                     try:

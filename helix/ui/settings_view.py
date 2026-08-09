@@ -85,6 +85,30 @@ def _peak_rms(pcm: bytes) -> float:
     return math.sqrt(sum(s * s for s in samples) / len(samples))
 
 
+class _WheelGuardMixin:
+    """Wheeling down the settings page must never silently change a control the cursor happens to
+    pass over. Until the control is clicked (focused), the wheel is ignored here so the event
+    bubbles up to the page's scroll area; after a click, the wheel adjusts the control as usual."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # the wheel alone never grants focus
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class _WheelGuardCombo(_WheelGuardMixin, QComboBox):
+    """A QComboBox that only reacts to the wheel once clicked."""
+
+
+class _WheelGuardSlider(_WheelGuardMixin, QSlider):
+    """A QSlider that only reacts to the wheel once clicked."""
+
+
 class SettingsView(QWidget):
     saved = pyqtSignal()
 
@@ -108,8 +132,12 @@ class SettingsView(QWidget):
         self._mic_src = None  # live QAudioSource during a mic test
         self._mic_io = None
         self._mic_peak = 0.0
+        self._mic_gen = 0  # bumped whenever a mic test starts/stops, so a stale timer reports on nobody
         self._test_sink = None  # live QAudioSink during an output test (kept alive so it isn't GC'd)
         self._test_buf = None
+        # Text the user has typed but not saved. The page is long-lived and reloads on every show, so
+        # without this a half-typed key would be wiped by simply leaving Settings and coming back.
+        self._typed: set[QLineEdit] = set()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(36, 22, 36, 18)
@@ -181,7 +209,7 @@ class SettingsView(QWidget):
         form.addWidget(self._connections_manager())
         # Gmail — read-only inbox (an address + a Google App Password). Two fields, one status.
         if self._gmail is not None:
-            self._gmail_addr = QLineEdit()
+            self._gmail_addr = self._track(QLineEdit())
             self._gmail_addr.setPlaceholderText("you@gmail.com")
             self._gmail_pw = self._password("16-character app password")
             form.addWidget(self._gmail_section())
@@ -222,7 +250,7 @@ class SettingsView(QWidget):
             "Conversation & presence",
             "How HELIX listens, how much it says out loud, and when it speaks up on its own.",
         ))
-        self._wake_word = QLineEdit()
+        self._wake_word = self._track(QLineEdit())
         self._wake_word.setPlaceholderText("HELIX")
         form.addWidget(self._labeled(
             "Wake word", "Wake word",
@@ -232,7 +260,7 @@ class SettingsView(QWidget):
             "“HELIX”. Inside a short back-and-forth you don't need to repeat it.",
             self._wake_word,
         ))
-        self._narration = QComboBox()
+        self._narration = _WheelGuardCombo()
         self._narration.addItem("Stay quiet while working (recommended)", "off")
         self._narration.addItem("Speak milestones", "milestones")
         self._narration.addItem("Speak every step", "spoken")
@@ -313,7 +341,7 @@ class SettingsView(QWidget):
         # ── Appearance & voice ──
         form.addSpacing(4)
         form.addWidget(self._section("Appearance & voice"))
-        self._detail = QComboBox()
+        self._detail = _WheelGuardCombo()
         self._detail.addItem("Balanced — faster, lighter", "balanced")
         self._detail.addItem("High — native poly + detailed textures", "high")
         form.addWidget(self._labeled(
@@ -323,10 +351,10 @@ class SettingsView(QWidget):
             self._detail,
         ))
 
-        self._voice = QComboBox()
+        self._voice = _WheelGuardCombo()
         for label, voice_id in TTS_VOICES:
             self._voice.addItem(label, voice_id)
-        self._speed = QSlider(Qt.Orientation.Horizontal)
+        self._speed = _WheelGuardSlider(Qt.Orientation.Horizontal)
         self._speed.setMinimum(8)   # 0.8×
         self._speed.setMaximum(20)  # 2.0×
         self._speed.setSingleStep(1)
@@ -366,12 +394,23 @@ class SettingsView(QWidget):
         self.reload()
 
     # ----- small builders -----
-    @staticmethod
-    def _password(placeholder: str) -> QLineEdit:
+    def _password(self, placeholder: str) -> QLineEdit:
         field = QLineEdit()
         field.setEchoMode(QLineEdit.EchoMode.Password)
         field.setPlaceholderText(placeholder)
+        return self._track(field)
+
+    def _track(self, field: QLineEdit) -> QLineEdit:
+        """Mark a field as user-edited on the first keystroke. textEdited fires only for real typing,
+        never for reload()'s own setText, so loading can tell its values apart from unsaved ones."""
+        field.textEdited.connect(lambda _text, f=field: self._typed.add(f))
         return field
+
+    def _load_text(self, field: QLineEdit, value: str) -> None:
+        """Set a field from the store unless the user has typed into it since the last load or Save."""
+        if field in self._typed:
+            return
+        field.setText(value)
 
     @staticmethod
     def _section(title: str, subtitle: str | None = None) -> QWidget:
@@ -615,7 +654,7 @@ class SettingsView(QWidget):
 
         # Microphone: routes hands-free + push-to-talk capture to the chosen device.
         lay.addWidget(self._device_label("Microphone (HELIX listens here)"))
-        self._mic_combo = QComboBox()
+        self._mic_combo = _WheelGuardCombo()
         self._mic_status = QLabel("")
         self._mic_status.setStyleSheet(f"color:{MUTED};font-size:12px;")
         mic_test = QPushButton("🎤 Test mic")
@@ -626,7 +665,7 @@ class SettingsView(QWidget):
 
         # Output: HELIX follows the Windows default, but you can test ANY device to confirm it plays.
         lay.addWidget(self._device_label("Sound output (test your speakers / earphones)"))
-        self._out_combo = QComboBox()
+        self._out_combo = _WheelGuardCombo()
         self._out_status = QLabel("")
         self._out_status.setStyleSheet(f"color:{MUTED};font-size:12px;")
         out_test = QPushButton("🔊 Test")
@@ -713,9 +752,34 @@ class SettingsView(QWidget):
                     return dev
         return QMediaDevices.defaultAudioOutput()
 
+    def _stop_output_test(self) -> None:
+        """Release the output device. A sink is parented to this long-lived page, so a second Test that
+        simply overwrote the reference would leave the first one running and holding the device forever."""
+        sink, buf = self._test_sink, self._test_buf
+        self._test_sink = self._test_buf = None
+        if sink is not None:
+            try:
+                sink.stateChanged.disconnect(self._on_sink_state)  # stop() below must not re-enter
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                sink.stop()
+            except Exception:  # noqa: BLE001 - a device unplugged mid-chime still has to be let go
+                pass
+            sink.setParent(None)
+            sink.deleteLater()
+        if buf is not None:
+            try:
+                buf.close()
+            except Exception:  # noqa: BLE001
+                pass
+            buf.setParent(None)
+            buf.deleteLater()
+
     def _test_output(self) -> None:
         if not _AUDIO or self._out_combo is None:
             return
+        self._stop_output_test()  # a second click supersedes the first chime instead of orphaning it
         dev = self._output_device(self._out_combo.currentData() or "")
         if dev is None or dev.isNull():
             self._out_status.setText("No output device available.")
@@ -733,20 +797,38 @@ class SettingsView(QWidget):
             self._test_sink.start(self._test_buf)
             self._out_status.setText("Playing a test chime…")
         except Exception:
+            self._stop_output_test()  # half-built sink/buffer must not keep the device
             self._out_status.setText("Couldn't play through this device.")
 
     def _on_sink_state(self, state) -> None:
         if state in (QAudio.State.IdleState, QAudio.State.StoppedState):
-            try:
-                if self._test_sink is not None:
-                    self._test_sink.stop()
-            except Exception:
-                pass
             self._out_status.setText("Done. Heard the chime? Then this device works.")
+            self._stop_output_test()  # the chime is over; hand the device back immediately
+
+    def _stop_mic_test(self) -> None:
+        """Release the capture device and retire the pending finish timer. Without this a second
+        Test mic orphans the first QAudioSource — parented to this long-lived page and never stopped,
+        it holds the microphone for the life of the app, and its 2s timer ends the NEW test early."""
+        self._mic_gen += 1
+        src, io = self._mic_src, self._mic_io
+        self._mic_src = self._mic_io = None
+        if io is not None:
+            try:
+                io.readyRead.disconnect(self._on_mic_ready)
+            except (TypeError, RuntimeError):
+                pass
+        if src is not None:
+            try:
+                src.stop()
+            except Exception:  # noqa: BLE001 - an unplugged mic still has to be let go
+                pass
+            src.setParent(None)
+            src.deleteLater()
 
     def _test_mic(self) -> None:
         if not _AUDIO or self._mic_combo is None:
             return
+        self._stop_mic_test()  # a second click supersedes the first listen instead of orphaning it
         dev = self._input_device(self._mic_combo.currentData() or "")
         if dev is None or dev.isNull():
             self._mic_status.setText("No microphone available.")
@@ -759,16 +841,18 @@ class SettingsView(QWidget):
             self._mic_src = QAudioSource(dev, fmt, self)
             self._mic_io = self._mic_src.start()
         except Exception:
+            self._stop_mic_test()  # a half-opened source must not keep the mic
             self._mic_status.setText("Couldn't open this microphone.")
             return
         if self._mic_io is None:
-            self._mic_src = None
+            self._stop_mic_test()
             self._mic_status.setText("Couldn't open this microphone.")
             return
         self._mic_peak = 0.0
         self._mic_io.readyRead.connect(self._on_mic_ready)
         self._mic_status.setText("Listening… say something.")
-        QTimer.singleShot(2000, self._finish_mic_test)
+        gen = self._mic_gen
+        QTimer.singleShot(2000, lambda: self._finish_mic_test(gen))
 
     def _on_mic_ready(self) -> None:
         if self._mic_io is None:
@@ -777,15 +861,11 @@ class SettingsView(QWidget):
         if chunk:
             self._mic_peak = max(self._mic_peak, _peak_rms(chunk))
 
-    def _finish_mic_test(self) -> None:
-        try:
-            if self._mic_src is not None:
-                self._mic_src.stop()
-        except Exception:
-            pass
-        self._mic_src = None
-        self._mic_io = None
+    def _finish_mic_test(self, gen: int | None = None) -> None:
+        if gen is not None and gen != self._mic_gen:
+            return  # a timer from a superseded (or already stopped) test must not report on this one
         peak = self._mic_peak
+        self._stop_mic_test()
         if peak >= 250:
             self._mic_status.setText(f"Heard you clearly ✓  (level {int(min(100, peak / 80))}%)")
         elif peak >= 60:
@@ -813,7 +893,10 @@ class SettingsView(QWidget):
         amber = "#e0a13f"
         token = (self._settings.get("claude_code_oauth_token") or "").strip()
         key = (self._settings.get("claude_api_key") or "").strip()
-        sub_live = self._subscription is not None and self._subscription.active()
+        # allow_probe=False: this label is built before the first frame and refreshed on every Save.
+        # Deciding launchability for real means spawning a ~278 MB claude.exe, which must never happen
+        # on the GUI thread — the container warms that answer on a daemon thread at startup instead.
+        sub_live = self._subscription is not None and self._subscription.active(allow_probe=False)
         if sub_live:
             text = "● Running on your Claude subscription — off the API meter."
             color, tip = STATUS_DONE, ("Conversation, watchers, and builds draw on your Claude plan, "
@@ -837,9 +920,30 @@ class SettingsView(QWidget):
         self._brain_status.setToolTip(tip)
 
     # ----- load / save -----
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt override
+        """This page is built once at startup and reused, so anything that changes a setting elsewhere
+        (the just-in-time connect panel, a voice toggle, a self-change) would leave it showing app-start
+        values until restart. Re-read the stores every time it is actually opened.
+
+        Nothing here may block: reload() only reads the settings store and enumerates audio devices —
+        deciding whether claude.exe launches stays behind allow_probe=False."""
+        super().showEvent(event)
+        self.reload()
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt override
+        # Leaving the page must not leave the mic or the speakers held open by a running test.
+        self._stop_mic_test()
+        self._stop_output_test()
+        super().hideEvent(event)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        self._stop_mic_test()
+        self._stop_output_test()
+        super().closeEvent(event)
+
     def reload(self) -> None:
-        self._oauth_token.setText(self._settings.get("claude_code_oauth_token", "") or "")
-        self._key.setText(self._settings.get("claude_api_key", "") or "")
+        self._load_text(self._oauth_token, self._settings.get("claude_code_oauth_token", "") or "")
+        self._load_text(self._key, self._settings.get("claude_api_key", "") or "")
         self._evolve.setChecked(bool(self._settings.get("evolve_enabled", True)))  # missing = ON
         detail = (self._settings.get("model_detail") or "balanced").lower()
         didx = self._detail.findData(detail)
@@ -854,12 +958,12 @@ class SettingsView(QWidget):
         self._speed.setValue(int(round(max(0.8, min(2.0, rate)) * 10)))
         self._speed_lbl.setText(f"{self._speed.value() / 10:.1f}×")
         if self._gmail is not None:
-            self._gmail_addr.setText(self._gmail.address())
-            self._gmail_pw.setText(self._gmail.app_password())
+            self._load_text(self._gmail_addr, self._gmail.address())
+            self._load_text(self._gmail_pw, self._gmail.app_password())
         if self._calendar is not None:
-            self._calendar_url.setText(self._calendar.url())
+            self._load_text(self._calendar_url, self._calendar.url())
         self._file_write.setChecked(bool(self._settings.get(WRITE_ACCESS_KEY)))
-        self._wake_word.setText(self._settings.get("wake_word", "") or "")
+        self._load_text(self._wake_word, self._settings.get("wake_word", "") or "")
         nmode = (self._settings.get("narration_mode") or "off").lower()
         nidx = self._narration.findData(nmode)
         self._narration.setCurrentIndex(nidx if nidx >= 0 else 0)
@@ -900,6 +1004,7 @@ class SettingsView(QWidget):
         if _AUDIO and self._mic_combo is not None and self._out_combo is not None:
             self._settings.set(AUDIO_INPUT_SETTING, self._mic_combo.currentData() or "")
             self._settings.set(AUDIO_OUTPUT_SETTING, self._out_combo.currentData() or "")
+        self._typed.clear()  # what was typed is now what's stored, so a later reload may refresh it again
         self._refresh_connection_rows()
         self._refresh_statuses()
         self._refresh_brain_status()  # a just-saved token flips this to "on your subscription" at once
