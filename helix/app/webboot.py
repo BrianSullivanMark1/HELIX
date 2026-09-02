@@ -74,7 +74,11 @@ def run_web(open_mode: str = "window") -> int:
 
     import uvicorn
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    # log_config=None: uvicorn must not install its own logging (its default formatter probes
+    # sys.stdout.isatty() — fatal in a windowed frozen app — and would restyle root logging besides).
+    # Its records flow into HELIX's rotating-file logging like everyone else's.
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
+                            log_config=None, access_log=False)
     server = uvicorn.Server(config)
 
     started = threading.Event()

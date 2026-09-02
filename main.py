@@ -73,7 +73,26 @@ def _prewarm_voice_if_enabled() -> None:
         pass
 
 
+def _ensure_streams() -> None:
+    """A --windowed (GUI-subsystem) frozen app launched from Explorer/the taskbar has sys.stdout and
+    sys.stderr set to None — and the FIRST library that touches one (uvicorn's log config calls
+    sys.stdout.isatty()) kills the launch before a window ever appears. Give the app real, silent
+    streams so every print()/isatty() in any dependency is harmless. Launched from a terminal the
+    streams exist and this is a no-op; child workers (cadworker/watchdog) get pipes from their
+    spawner and are no-ops too."""
+    import io
+    import os
+
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is None:
+            try:
+                setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))  # noqa: SIM115
+            except OSError:
+                setattr(sys, name, io.StringIO())
+
+
 def _run() -> int:
+    _ensure_streams()  # BEFORE anything that might print or probe a stream (see docstring)
     argv = sys.argv[1:]
     if argv[:1] == ["watchdog"]:  # the crash-guard subprocess needs no singleton, no STT, and no Qt
         from helix.app.cli import main
