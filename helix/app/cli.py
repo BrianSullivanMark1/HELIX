@@ -11,10 +11,14 @@ def main(argv: list[str] | None = None) -> int:
         prog="helix", description="HELIX — a local-first desktop app-builder you talk to."
     )
     parser.add_argument(
-        "command", nargs="?", default="ui", choices=["ui", "watchdog", "cadworker"],
-        help="what to run (default: ui)",
+        "command", nargs="?", default="ui", choices=["ui", "web", "qt", "watchdog", "cadworker"],
+        help="what to run (default: ui — the web shell; 'qt' forces the legacy Qt shell)",
     )
     parser.add_argument("job", nargs="?", help="(cadworker) the job file, or --serve")
+    parser.add_argument("--browser", action="store_true",
+                        help="(web) open in the default browser instead of the app window")
+    parser.add_argument("--headless", action="store_true",
+                        help="(web) serve only; print the URL (for the Vite dev server)")
     parser.add_argument("--pid", type=int, help="(watchdog) the HELIX process to guard")
     parser.add_argument("--data", help="(watchdog) the data directory")
     parser.add_argument("--entry", help="(watchdog) the entry script to relaunch")
@@ -42,6 +46,12 @@ def main(argv: list[str] | None = None) -> int:
     if not become_primary_or_signal(AppPaths.resolve().data, is_relaunch=False):
         return 0
 
-    from helix.app.bootstrap import run_app  # imported lazily — this pulls in PyQt6
+    if args.command in ("ui", "web"):  # the web shell IS the default face now
+        from helix.app.webboot import run_web  # no Qt on this path
+
+        mode = "none" if args.headless else ("browser" if args.browser else "window")
+        return run_web(mode)
+
+    from helix.app.bootstrap import run_app  # 'qt' — the legacy shell; this pulls in PyQt6
 
     return run_app()

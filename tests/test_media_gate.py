@@ -20,8 +20,8 @@ pytest.importorskip("PyQt6.QtWidgets")
 
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-from helix.ui import mediasense  # noqa: E402
-from helix.ui.mediasense import MediaSense  # noqa: E402
+from helix.adapters import mediasense  # noqa: E402
+from helix.adapters.mediasense import MediaSense  # noqa: E402
 from helix.ui.voice import VoiceController  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])

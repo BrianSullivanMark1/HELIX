@@ -136,6 +136,11 @@ class AppPaths:
     @classmethod
     def resolve(cls) -> "AppPaths":
         root = _app_root()
+        override = (os.environ.get("HELIX_DATA_DIR") or "").strip()
+        if override:
+            # An explicit data-dir override (tests, a scratch instance beside the real one). The
+            # single-instance lock is per-data-dir, so an override instance never fights the real app.
+            return cls(root=root, data=Path(override))
         if getattr(sys, "frozen", False):
             data = _frozen_data_dir()
             migrate_legacy_data(root / "data", data)

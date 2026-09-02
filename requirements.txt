@@ -45,6 +45,16 @@ mapbox-earcut>=1.0    # polygon triangulation (ISC) — currently unused by heli
 # track the PyQt6 minor above it, and pinning a floor here would fight that resolution.
 PyQt6-WebEngine       # the in-app viewer for built apps/holograms (ui/app_viewer.py) + the WebGL orb
 
+# --- The web shell (V3 overhaul): the React face's localhost backend + the app window ---
+fastapi>=0.110       # the API + WebSocket server the web face talks to
+uvicorn>=0.30        # serves it on 127.0.0.1
+pywebview>=5.0       # the desktop window (Edge WebView2) the face lives in
+sounddevice>=0.4     # the web voice loop's microphone (PortAudio; Qt-free)
+
+# --- 3D models (holograms): the CAD kernel ---
+build123d>=0.7       # the B-rep engine (OCCT) hologram model.py designs compile through — the
+                     # worker subprocess (helix/cad/runner.py) is its only importer
+
 # --- Optional: voice ---
 edge-tts>=6.1         # free neural text-to-speech
 faster-whisper>=1.0   # local, private speech-to-text (audio never leaves the machine)

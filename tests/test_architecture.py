@@ -21,6 +21,10 @@ HELIX = Path(__file__).resolve().parent.parent / "helix"
 
 # (importing module, imported module) pairs that break the rule and are accepted for now.
 ALLOWED_VIOLATIONS: dict[tuple[str, str], str] = {
+    ("helix.ui.mediasense", "helix.adapters.mediasense"):
+        "a re-export shim: the WASAPI meter moved to adapters so the web voice loop (which must not "
+        "import ui) shares it; removing this means porting the Qt VoiceController to take the meter "
+        "by injection from the container, then deleting the shim",
     ("helix.ui.settings_view", "helix.adapters.speech"):
         "reads DEFAULT_TTS_VOICE/TTS_VOICES/edge_available for the voice picker; needs a port or a "
         "service to own the voice catalogue before the view can stop reaching into the adapter",
