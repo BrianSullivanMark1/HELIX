@@ -11,6 +11,15 @@ surface: the presentation-only vocabulary (App · Protocol · Agent · Hologram 
 (`view_screen`, the `view_camera` show-me window + visual memory), just-in-time connections, and the
 nightly Evolve drafter.
 
+**The V3 overhaul (Sept 2026) moved the face to the web.** The brain did not move: services, ports,
+adapters, domain — all unchanged in role. What changed: the default shell is now a **React app served
+over 127.0.0.1** by a FastAPI backend (`helix/api/`), shown in an Edge WebView2 window (pywebview) —
+`helix qt` keeps the legacy PyQt6 shell whole during the transition. Voice runs Qt-free in the
+backend process (the pure grammar was extracted to `services/voicegrammar.py`; both shells share it).
+And the hologram engine is now **build123d** (the OCCT B-rep kernel): a hologram is `model.py`, the
+studio has live parameter sliders on a warm kernel, and exports include STEP — the format Bambu
+Studio slices natively.
+
 ---
 
 ## 1. Principles
@@ -40,7 +49,10 @@ nightly Evolve drafter.
 ## 2. The layers
 
 ```
-    ui/        PyQt6 — views + a QtWorker thread bridge      (depends on services)
+    web/       React (Vite + react-three-fiber) — the face   (talks HTTP/WS to api/)
+       │
+    api/       the web shell's backend: FastAPI + ShellSession + WebVoice (depends on services)
+    ui/        PyQt6 — the legacy shell                       (depends on services)
        │ calls
     services/  use-cases: the Forge + every assistant faculty (depends on ports + domain)
        │ depends on Protocols
@@ -61,6 +73,9 @@ nightly Evolve drafter.
 helix/
   config.py            # AppPaths — app root + data dir (dev vs PyInstaller-frozen; %LOCALAPPDATA% when frozen)
   logging_setup.py     # rotating file log + crash-guard excepthook
+
+  api/                 # THE WEB SHELL (see §7b): server.py + shell.py + voice_loop.py. Never imports ui.
+  cad/                 # the hologram compile worker (runner.py) — the ONLY importer of build123d/OCCT.
 
   domain/              # PURE. No Qt, no I/O, no other helix layer.
     models.py          #   App (a Build), AppKind, BuildKind (app/task/agent/model/knowledge), Version, Message, slugify
@@ -331,24 +346,29 @@ A **hologram** is a 3D model the user designs by voice — "a wall bracket for a
 mounting holes", then "make it 100 wide and add a gusset" — drafted in OpenSCAD, shown as an
 engineering-style drawing, exportable for printing. Four ideas carry the whole feature:
 
-1. **The model is a program.** The coder writes `model.scad` — OpenSCAD, millimetres, a customizer
-   parameter block at the top with ranges, named modules per part, a `// Design:` brief header — and may
-   `use <helix.scad>` (the helper library in `domain/scad.py`, written beside the source by the baker).
-   "Make it wider" is an edit to a named parameter in source, not a regeneration; LLMs know OpenSCAD
-   from years of published source, which is what makes verbal design accurate where stacked primitives
-   with raw coordinates were not. The prompt that teaches this lives in `services/prompts.py`.
+1. **The model is a program.** The coder writes `model.py` — Python on the **build123d** B-rep kernel,
+   millimetres, a `# --- Parameters ---` block with `[min..max..step]` ranges and `[a, b]` choices, a
+   `"""Design: …"""` docstring brief, geometry inside `build()` — importing only `helix_parts`
+   (the library in `domain/cadpy.py`, seeded beside the source by the baker: enclosure generators plus
+   a REAL hardware catalog — Arduino/Mega/Nano, Pi 4/Zero/Pico, ESP32 DevKitC modeled correctly as
+   hole-less, relay modules — so "a case for an Arduino Uno" comes out fitting). "Make it wider" is an
+   edit to a named parameter in source, not a regeneration; Python is the language LLMs write most
+   accurately. Because a design file now EXECUTES, `cadpy.inspect_source` is also a safety gate: an
+   import allowlist, no I/O builtins, no dunders, no top-level geometry (overrides land between exec
+   and `build()`). The prompt that teaches all of this lives in `services/prompts.py`.
 2. **HELIX compiles it, behind a port.** `ports/cad.py` (`CadEngine`) is the seam; today's adapter is
-   the OpenSCAD command line (`adapters/openscad_cli.py`), a browser-WASM compiler is the documented
-   future one, tests use fakes. OpenSCAD is not a Python package and is not installed on most machines:
-   the adapter finds it (a settings override, PATH, Program Files, `%LOCALAPPDATA%\Programs`, scoop,
-   the winget default dir; `openscad.com` over `openscad.exe` on Windows, because the .exe is the GUI
-   subsystem and swallows every compiler message) and, when it is missing, the model proposes a
-   **just-in-time install** (`install_openscad` → `winget install --id OpenSCAD.OpenSCAD`) that the user
-   confirms — the same move HELIX makes for an API key. `build_3d_model` **pre-flights** with
-   `available()` and offers the install instead of spending a coder run on a design nothing can compile;
-   the install itself blocks inside the conversation turn — on that turn's worker thread in
-   `ToolRegistry.dispatch`, never the Qt thread and never the build queue — narrated line by line, and is
-   in the `BUILD_TOOLS` fence (an unattended watcher can never install software).
+   `adapters/build123d_cad.py`, and tests use fakes. build123d drags in the OCCT kernel (~2s import,
+   heavy resident memory), so the app process NEVER imports it: the adapter spawns the
+   `helix/cad/runner.py` worker (`python -m helix.cad.runner` in dev; `HELIX.exe cadworker` frozen),
+   and ONE run writes the whole artifact set — STL + **STEP** (Bambu Studio's native food) + 3MF (a
+   real `Mesher` export, per-part) + the critic's preview (a numpy/Pillow software render: no GL,
+   headless-safe) + a meta report (bbox, volume, PLA grams) — where OpenSCAD paid three full compiles.
+   The adapter caches the run per source-sha, so the baker's compile→3mf→preview sequence costs one
+   kernel session; a resident `--serve` worker (kernel imported once) serves the studio's slider
+   recompiles in ~0.6s. When the kernel is missing, the model proposes a **just-in-time install**
+   (`install_cad_engine` → pip, dev only; frozen builds ship it) that the user confirms — still in the
+   `BUILD_TOOLS` fence, still pre-flighted by `build_3d_model` so a coder run is never spent on a
+   design nothing can compile.
 3. **Compile → preview → critique → repair, inside the one repair pass.** The Forge's pre-finalize check
    for a MODEL build *is* `ModelBaker.check()`: static lints (`inspect_source`) → compile to
    `assets/model.stl` → render `assets/preview.png` → one look from the vision critic (wired in the
@@ -371,12 +391,56 @@ engineering-style drawing, exportable for printing. Four ideas carry the whole f
    `file://` page in a Chrome tab** (Chrome blocks local fetches over `file://`; a `<script src>`
    sidecar is the one thing it allows). No bloom, no image-based lighting, no exposure boost.
 
+4b. **The studio is where you touch it.** In the web shell a hologram opens in the STUDIO
+(`web/src/pages/Studio.tsx`): a Z-up millimetre viewport (flat shading + crease edges, grid, orbit)
+beside sliders parsed from the parameter block. A drag debounces, recompiles through the warm worker
+with overrides (the design file untouched), and updates the mesh + print panel live; **Save to
+design** rewrites the literals via `cadpy.set_params` (annotations survive byte-for-byte), re-bakes,
+and git-commits. A Bambu P1S panel checks the 256³ bed and puts STEP first.
+
 What did not change: a **360° environment** is still a Blockade Labs panorama in a skybox viewer; an
 explicit **reference** ("show me what a real X looks like") is still a Tripo mesh in a small GLB viewer
 — a likeness to look at, never the design; an **animated** hologram is still a hand-authored Three.js
-page on `render_kit.py`. The primitive-JSON engine and its procedural PBR textures (`materials.py`,
-the only scipy user) are retired; a workspace left in that format is asked, in-build, to be redrawn
-as `model.scad`.
+page on `render_kit.py`. Retired engines migrate on their next edit: the primitive-JSON engine
+(`materials.py`) and now the OpenSCAD engine (`model.scad`) both read as "redraw this as model.py" in
+the same build's repair pass, while their old generated pages keep working untouched.
+
+### 7b. The web shell — how the React face talks to the brain
+
+`helix/api/` plays the role `helix/ui/` plays for Qt — it calls services, marshals events, owns no
+business logic, and **never imports helix.ui** (no Qt loads in the web process):
+
+- **`server.py`** — FastAPI on `127.0.0.1` only. `/` serves the built React app (`web/dist` in dev,
+  `helix/webui` frozen); `/builds/…` serves build workspaces statically (apps and viewers iframe
+  natively — the QtWebEngine download hack is gone); `/ws` is the ONE event stream; `/api/…` is
+  ~40 thin routes. Every `/api` and `/ws` request must carry the per-install token (minted into
+  settings, delivered in the launch URL) and a localhost Origin/Host — a random web page probing
+  local ports can neither read nor act. The Settings routes enforce `LOCKED_SETTINGS` and treat
+  credentials as write-only (presence reported, values never).
+- **`shell.py` (`ShellSession`)** — the console's brain as a server: the submit gauntlet in the Qt
+  order (sleep/wake as commands, cleanup-offer answers, stop phrases, the kept-message
+  no-credential hold), the turn lifecycle with queued follow-ups, the stop contract, the 900 ms
+  coalescing build announcer, cleanup-offer queue, delete confirmation as action buttons, the
+  ANTICIPATE chip with its attempt-charged limiter, the QUIET sentinel, the situation/speaker
+  blocks, the camera hand-off, the JIT connect panel, and the 15 s heartbeat (evolve, reminders as
+  ONE spoken line, one scheduled run per tick). Everything the user sees rides `push()`; everything
+  they do arrives as a method call from the routes. `tests/test_webshell.py` pins the contracts.
+- **`voice_loop.py` (`WebVoice`)** — the VoiceController state machine ported off Qt onto
+  sounddevice + threads: the same listen gate ("the mic is live only while HELIX is genuinely
+  idle", camera-session exception included), the same playback gate over the machine's own audio
+  (`adapters/mediasense.py` — moved from ui/, shim left behind), the same identity gate/enrollment
+  flow, sleep-means-sleep, TTS streaming with generation-counter preemption. The pure grammar left
+  ui/voice.py verbatim for **`services/voicegrammar.py`**; both shells re-import it, so the two can
+  never drift.
+- **`app/webboot.py`** — the web counterpart of bootstrap.py: container, recovery, uvicorn on a
+  thread, the pywebview window (or `--browser`/`--headless`), and the same teardown duties.
+  `helix` boots the web shell by default now; `helix qt` keeps the legacy shell.
+- **`web/`** — the React face (Vite, react-three-fiber, zustand, Tailwind): the GLSL circuit-sphere
+  orb (state-driven, audio-reactive, tap-to-talk), the console (plain-text bubbles ALWAYS — the
+  untrusted-string rule survives the port — with SVG charts/tables for viz blocks and action
+  buttons that round-trip the shell's registry), the hologram studio, menu, settings, vault,
+  viewer, the getUserMedia camera modal (capture by button or the backend's voice shutter), and the
+  masked JIT connect modal with the warn-once mis-paste guard. Fonts are bundled — offline-first.
 
 ---
 

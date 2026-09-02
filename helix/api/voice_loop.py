@@ -24,8 +24,8 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from helix.adapters.mediasense import MediaSense
 from helix.domain.brain import is_directly_addressed
@@ -34,15 +34,15 @@ from helix.ports.speech import SpeechIn, SpeechOut
 from helix.ports.stores import SettingsStore
 from helix.services import voiceid
 from helix.services.voicegrammar import (
+    _RECENT_SPEAKER_S,
+    _SLEEP_CONFIRM,
+    _WAKE_CONFIRM,
     PTT_MAX_MS,
     SESSION_IDLE_MS,
     STT_PREWARM_ERROR_SETTING,
     VOICE_SETTING,
     WAKE_WORD_SETTING,
     VadSegmenter,
-    _RECENT_SPEAKER_S,
-    _SLEEP_CONFIRM,
-    _WAKE_CONFIRM,
     _pcm_bands,
     _pcm_rms,
     _wants_wake,

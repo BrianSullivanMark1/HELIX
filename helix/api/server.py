@@ -25,10 +25,10 @@ from fastapi import FastAPI, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from helix.domain import cadpy
 from helix.domain.constitution import LOCKED_SETTINGS
 from helix.domain.models import BuildKind
 from helix.domain.vocabulary import kind_label
-from helix.domain import cadpy
 from helix.logging_setup import get_logger
 from helix.services.connections import CONNECTABLE
 

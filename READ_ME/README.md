@@ -22,6 +22,16 @@ pip install -r requirements.txt
 python main.py
 ```
 
+That opens **the web shell** — HELIX's face is a React app served over `127.0.0.1`, shown in its own
+window (Edge WebView2 via pywebview). Variants:
+
+- `python main.py web --browser` — open in your default browser instead of the app window.
+- `python main.py web --headless` — backend only (prints the tokened URL; used by the Vite dev flow).
+- `python main.py qt` — the legacy PyQt6 shell, kept whole during the transition.
+
+Working on the face itself? `python main.py web --headless` in one terminal, `npm run dev` in
+`web/` in another, then open the printed URL's `?t=` token against `http://localhost:5173`.
+
 On first launch there are no keys and no data. Open **⚙ Settings** and connect Claude one of two ways:
 
 - **A Claude Code subscription token** (recommended) — `claude setup-token`, paste it in. Conversations,
@@ -60,7 +70,9 @@ A packaged install is built with `python build.py --with-voice`; the frozen app 
 - **Make things** — five kinds of creation, all conjured, changed, and removed just by talking, made
   by the **Forge**: **Apps** (interactive screens), **Protocols** (saved procedures that do a thing
   when run), **Agents** (AI minds with a standing goal), **Holograms** (3D models you design by
-  talking — drafted in OpenSCAD, shown as an engineering-style drawing, exportable for printing; also
+  talking — written as Python on the build123d CAD kernel, shown in a live STUDIO with parameter
+  sliders that recompile in about a second, exportable as STEP/STL/3MF tuned for a Bambu P1S; the
+  parts library knows real Arduino/ESP32/Pi/relay footprints so an enclosure comes out FITTING; also
   360° scenes), and a **Vault** (your searchable notes and documents). Every creation is its own
   versioned project.
 - **Reach your world (read-only)** — your files, Gmail, calendar, and connected services (Slack,
@@ -80,14 +92,17 @@ A packaged install is built with `python build.py --with-voice`; the frozen app 
 ## Layout
 
 ```
-helix/domain    pure models + the Constitution + the V3 vocabulary (no Qt, no I/O)
+helix/domain    pure models + the Constitution + the V3 vocabulary + cadpy (the hologram language)
 helix/ports     Protocols — the contracts
-helix/adapters  Claude (API + subscription) · Claude Code · git · SQLite · voice · embeddings · …
+helix/adapters  Claude (API + subscription) · Claude Code · git · SQLite · voice · build123d · …
 helix/services  the use-cases: the Forge + creations, and every assistant faculty (files, sight,
                 vault, memory, location, agents, connections, reminders, workflows, evolve/self-dev)
-helix/ui        PyQt6 — views + a QtWorker thread bridge
-helix/app       the composition root + CLI + single-instance guard
-main.py         launcher (pre-warms speech before Qt starts)
+helix/api       THE WEB SHELL's backend: FastAPI over localhost + the shell brain + the Qt-free voice loop
+helix/cad       the hologram compile worker (a subprocess; the only importer of the CAD kernel)
+helix/ui        PyQt6 — the legacy shell, kept whole during the transition
+helix/app       the composition root + CLI + web/Qt bootstraps + single-instance guard
+web/            the React face (Vite + react-three-fiber): the orb, the console, the hologram studio
+main.py         launcher (pre-warms speech first; routes web/qt/cadworker/watchdog)
 ```
 
 The dependency rule: `ui → services → ports ← adapters`, everyone may use `domain`, `domain` depends on

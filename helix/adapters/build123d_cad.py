@@ -27,8 +27,8 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from helix.logging_setup import get_logger
 from helix.ports.cad import CadResult

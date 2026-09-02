@@ -63,6 +63,26 @@ def _unify_vc_runtime(dist_dir: Path) -> None:
     print(f"Unified {count} VC++ runtime DLL(s) to the system's newest (launch-crash fix).")
 
 
+def _build_web_face() -> Path | None:
+    """Build the React face (web/ -> web/dist) so the frozen app can serve it as helix/webui.
+    Needs npm at BUILD time only — the shipped app serves static files. A missing npm (or a failed
+    build) falls back to any existing dist; none at all means the frozen app runs backend-only."""
+    web = ROOT / "web"
+    dist = web / "dist"
+    if not (web / "package.json").is_file():
+        return dist if (dist / "index.html").is_file() else None
+    npm = shutil.which("npm")
+    if npm is None:
+        print("npm not found — shipping the existing web/dist as-is." if (dist / "index.html").is_file()
+              else "npm not found and no web/dist — the frozen app will be backend-only.")
+        return dist if (dist / "index.html").is_file() else None
+    print("Building the web face (npm run build)…")
+    result = subprocess.run([npm, "run", "build"], cwd=str(web))
+    if result.returncode != 0:
+        print("web build FAILED — shipping the existing dist if any.")
+    return dist if (dist / "index.html").is_file() else None
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     icon = ROOT / "assets" / "helix.ico"
@@ -76,6 +96,23 @@ def main(argv: list[str] | None = None) -> int:
     assets = ROOT / "helix" / "ui" / "assets"
     if assets.exists():
         args += ["--add-data", f"{assets}{os.pathsep}helix/ui/assets"]
+    # THE WEB FACE: the built React app rides as helix/webui (webboot._web_dist's frozen location).
+    web_dist = _build_web_face()
+    if web_dist is not None:
+        args += ["--add-data", f"{web_dist}{os.pathsep}helix/webui"]
+    # The web shell's server + window + mic. fastapi/uvicorn are imported at module scope on the web
+    # path; uvicorn's workers/loops resolve dynamically, so collect it in full. pywebview loads its
+    # Windows backend (winforms/WebView2) dynamically — collect it whole. sounddevice ctypes-loads a
+    # bundled PortAudio DLL its hook knows how to carry.
+    for pkg in ("uvicorn", "webview", "sounddevice"):
+        args += ["--collect-all", pkg]
+    args += ["--collect-submodules", "fastapi"]
+    # THE CAD KERNEL (holograms): build123d rides on OCP — a ~300 MB compiled OCCT binding whose DLLs
+    # a static scan cannot follow (the runner subprocess is the only importer, and it re-invokes
+    # HELIX.exe as `cadworker`). Collect the whole stack; without it every hologram in the frozen app
+    # dies at compile time — the failure mode the lazy-import rule warns about.
+    for pkg in ("build123d", "OCP", "ocpsvg", "ezdxf"):
+        args += ["--collect-all", pkg]
     # The retired primitive engine loaded these lazily at runtime (trimesh.boolean -> manifold3d;
     # extrude -> shapely / mapbox_earcut), so PyInstaller's static scan misses them — collect each in
     # full. Holograms are compiled by the OpenSCAD CLI now (a separate program, found or winget-installed

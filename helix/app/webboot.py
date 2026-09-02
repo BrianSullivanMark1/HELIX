@@ -100,7 +100,7 @@ def run_web(open_mode: str = "window") -> int:
             try:
                 import webview  # pywebview: an Edge WebView2 window — HELIX as its own app
 
-                window = webview.create_window(
+                webview.create_window(
                     "HELIX", url, width=1180, height=820, background_color="#080b0f",
                 )
                 webview.start()  # blocks until the window closes

@@ -16,8 +16,8 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from helix.domain.events import (
     AgentsChanged,
@@ -330,15 +330,16 @@ class ShellSession:
         self._start_turn(prompt, from_voice, paths, speaker)
 
     def _cleanup_answer(self, text: str) -> bool | None:
-        words = set(w.strip(".,!?").lower() for w in text.split())
+        """yes → remove, no → keep, neither → an ordinary message. ANY negation can never be a yes
+        ('no, don't remove it' keeps the work) — the safe reading wins on mixed words."""
+        words = set(w.strip(".,!?'’").lower() for w in text.split())
         if len(words) > 6:
             return None
         neg = any(w in _NO for w in words) or "n't" in text.lower() or "not" in words
-        yes = any(w in _YES for w in words)
-        if yes and not neg:
-            return True
-        if neg and not yes:
+        if neg:
             return False
+        if any(w in _YES for w in words):
+            return True
         return None
 
     # ----- the turn -----
@@ -912,7 +913,13 @@ class ShellSession:
 
     def _on_scheduled_report(self, name: str, text: str) -> None:
         flat = " ".join((text or "").split())
-        first = next((w for w in flat.split() if w.isalpha()), "")
+        # The first token, letters only — so "QUIET", "quiet." and "Quiet —" all read as the sentinel.
+        first = ""
+        for token in flat.split():
+            letters = "".join(ch for ch in token if ch.isalpha())
+            if letters:
+                first = letters
+                break
         if not flat or first.upper() == "QUIET":
             self._status(f"{name}: all quiet.")
             return

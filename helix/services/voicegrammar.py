@@ -114,7 +114,7 @@ def _pcm_bands(pcm: bytes, n: int = 16) -> list[float]:
         )
         if edges.size < 2:
             return [0.0] * n
-        out = [float(spec[a:max(a + 1, b)].mean()) for a, b in zip(edges[:-1], edges[1:])]
+        out = [float(spec[a:max(a + 1, b)].mean()) for a, b in zip(edges[:-1], edges[1:], strict=False)]
         out += [0.0] * (n - len(out))
         return [min(1.0, (v / 90000.0) ** 0.6) for v in out[:n]]
     except Exception:
@@ -204,7 +204,7 @@ def split_visuals(text: str) -> tuple[str, list[dict]]:
     transcript; only the prose is spoken — so the data itself is seen, never read aloud."""
     specs: list[dict] = []
 
-    def _take(match: "re.Match[str]") -> str:
+    def _take(match: re.Match[str]) -> str:
         try:
             spec = json.loads(match.group(1).strip())
         except Exception:
