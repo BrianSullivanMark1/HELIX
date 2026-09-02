@@ -113,6 +113,29 @@ def main(argv: list[str] | None = None) -> int:
     # dies at compile time — the failure mode the lazy-import rule warns about.
     for pkg in ("build123d", "OCP", "ocpsvg", "ezdxf"):
         args += ["--collect-all", pkg]
+    # matplotlib is an OPTIONAL dep of the CAD stack (ezdxf/build123d 2D previews) that nothing in
+    # HELIX imports — and PyInstaller's matplotlib hook CRASHES the whole build on this machine (its
+    # isolated import hits a numpy/matplotlib ABI mismatch). Excluding it prunes the hook entirely;
+    # the cad worker's compile path (core + Mesher + STL/STEP exporters) never touches it.
+    args += ["--exclude-module", "matplotlib"]
+    # numpy 2.x keeps its real internals under numpy._core, and the stock hook shipped a bundle
+    # missing numpy._core._exceptions — the frozen cadworker then died with "CAD engine isn't
+    # available" on every hologram. Collect numpy in full; the wheels are already on disk.
+    args += ["--collect-all", "numpy"]
+    # scipy is BACK (build123d.topology imports scipy.optimize), and with it the old friend this
+    # file's history warned about: scipy 1.16's compiled helper `scipy._cyutility`, which
+    # PyInstaller 6.12's hook skips — the frozen cadworker then dies importing scipy.linalg. Name
+    # it explicitly again, and collect scipy's submodules so the next helper can't hide either.
+    args += ["--collect-submodules", "scipy", "--hidden-import", "scipy._cyutility"]
+    # …and the REST of build123d's module-scope import surface, swept by AST once instead of being
+    # discovered one runtime crash at a time (numpy → scipy → lib3mf was the trail). Its __init__
+    # star-imports every submodule, so everything installed that those import must ship: lib3mf
+    # ctypes-loads a DLL, fontTools/sympy/sklearn carry data or compiled pieces, the rest are small.
+    # (vtkmodules is in its source too but NOT installed here — build123d guards it — so it is not
+    # named: collecting a missing package fails the build.)
+    for pkg in ("lib3mf", "anytree", "fontTools", "ocp_gordon", "svgpathtools", "sympy",
+                "trianglesolver", "webcolors", "sklearn", "IPython"):
+        args += ["--collect-all", pkg]
     # The retired primitive engine loaded these lazily at runtime (trimesh.boolean -> manifold3d;
     # extrude -> shapely / mapbox_earcut), so PyInstaller's static scan misses them — collect each in
     # full. Holograms are compiled by the OpenSCAD CLI now (a separate program, found or winget-installed
