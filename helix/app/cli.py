@@ -6,6 +6,27 @@ import argparse
 from pathlib import Path
 
 
+def open_running_face() -> None:
+    """HELIX is already running — the icon click means "show me HELIX", so open (another) browser
+    tab on the running backend and step aside. Port + token live in settings, written by the running
+    instance at its own startup. Best-effort: the hard guarantee stays the single-instance lock.
+    Called from BOTH gates (main.py's, and this module's backstop for the console-script entry)."""
+    try:
+        import webbrowser
+
+        from helix.adapters.json_settings import JsonSettings
+        from helix.api.server import DEFAULT_PORT, PORT_SETTING, TOKEN_SETTING
+        from helix.config import AppPaths
+
+        settings = JsonSettings(AppPaths.resolve().settings_file)
+        token = (settings.get(TOKEN_SETTING) or "").strip()
+        port = int(settings.get(PORT_SETTING) or DEFAULT_PORT)
+        if token:
+            webbrowser.open(f"http://127.0.0.1:{port}/?t={token}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="helix", description="HELIX — a local-first desktop app-builder you talk to."
@@ -16,7 +37,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("job", nargs="?", help="(cadworker) the job file, or --serve")
     parser.add_argument("--browser", action="store_true",
-                        help="(web) open in the default browser instead of the app window")
+                        help="(web) open in the default browser (this is already the default)")
+    parser.add_argument("--window", action="store_true",
+                        help="(web) open in HELIX's own app window (WebView2) instead of the browser")
     parser.add_argument("--headless", action="store_true",
                         help="(web) serve only; print the URL (for the Vite dev server)")
     parser.add_argument("--pid", type=int, help="(watchdog) the HELIX process to guard")
@@ -44,12 +67,16 @@ def main(argv: list[str] | None = None) -> int:
     from helix.config import AppPaths
 
     if not become_primary_or_signal(AppPaths.resolve().data, is_relaunch=False):
+        if args.command in ("ui", "web") and not args.headless:
+            open_running_face()
         return 0
 
     if args.command in ("ui", "web"):  # the web shell IS the default face now
         from helix.app.webboot import run_web  # no Qt on this path
 
-        mode = "none" if args.headless else ("browser" if args.browser else "window")
+        # The face lives in the user's own BROWSER by default — HELIX runs as a background presence
+        # and the icon opens a tab on it. --window opts back into the WebView2 app window.
+        mode = "none" if args.headless else ("window" if args.window else "browser")
         return run_web(mode)
 
     from helix.app.bootstrap import run_app  # 'qt' — the legacy shell; this pulls in PyQt6

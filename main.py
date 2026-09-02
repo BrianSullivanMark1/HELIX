@@ -109,7 +109,14 @@ def _run() -> int:
 
     is_relaunch = "--relaunch" in argv
     if not become_primary_or_signal(AppPaths.resolve().data, is_relaunch=is_relaunch):
-        return 0  # another instance owns this data dir; we asked it to surface and now step aside
+        # Another instance owns this data dir. In the browser-tab world a repeat icon click means
+        # "show me HELIX" — open a tab on the running backend before stepping aside (a no-op for
+        # the qt/headless modes, whose surfacing is the activation ping above).
+        if not any(a in ("qt", "watchdog", "cadworker", "--headless") for a in argv):
+            from helix.app.cli import open_running_face  # no Qt on this path
+
+            open_running_face()
+        return 0
 
     _prewarm_voice_if_enabled()
     from helix.app.cli import main  # imported after prewarm — Qt loads lazily inside
