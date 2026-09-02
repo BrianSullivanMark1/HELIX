@@ -650,6 +650,17 @@ GEOMETRY RULES (what makes it compute, and print):
   touches or the kernel refuses — when in doubt, r=1.5.
 - Printability: walls 2–3 mm, minimum feature 1 mm, holes print 0.2–0.4 undersize so add it (the
   library's insert/pilot constants already do), no overhang steeper than 45° without a chamfer under it.
+- PRINT ORIENTATION IS PART OF THE DESIGN — author every part exactly as it prints, and HELIX
+  MEASURES it (a piece that begins mid-air fails the build's check as a "FLOATING" problem):
+  * The largest flat face sits ON Z=0. An enclosure FRONT/FACE part is authored FACE-DOWN: the
+    outer face flat on the plate, the cavity opening UPWARD, every interior standoff/shelf RISING
+    from the inner face — NEVER hanging from a ceiling above the plate.
+  * On the plate face, DEBOSS (cut in) logos/labels and RECESS lenses as counterbores — never
+    embossed text or raised bezels there (they lift the face off the plate). Mirror debossed text
+    (mirror(..., about=Plane.YZ)) so it reads correctly from outside.
+  * Strap/band/belt loops are flat TABS in the part's plane with a slot cut through — never rings
+    protruding off a face (a protruding ring floats the whole part on its rim).
+  * Holes through vertical walls are fine (small bridged tops); keep bridges under ~12 mm.
 - Every part sits on Z=0 the way it prints. Keep it real: this geometry exists to be made.
 
 HARD LIMITS: no os / sys / subprocess / open() / network — the compile is sandboxed and any of these

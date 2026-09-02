@@ -64,6 +64,88 @@ def _arrange(parts: list[tuple[str, object]]):
     return placed
 
 
+def _read_stl_tris(stl_path: Path):
+    """Binary STL → (n, 3, 3) float64 triangle vertices, or None. Shared by the preview renderer
+    and the printability analysis."""
+    import numpy as np
+
+    raw = stl_path.read_bytes()
+    if len(raw) < 84:
+        return None
+    n = int.from_bytes(raw[80:84], "little")
+    if len(raw) < 84 + n * 50:
+        return None
+    body = np.frombuffer(raw, dtype=np.uint8, offset=84)
+    tris = body[: n * 50].reshape(n, 50)
+    floats = np.frombuffer(tris[:, :48].tobytes(), dtype="<f4").reshape(n, 12)
+    return floats[:, 3:12].reshape(n, 3, 3).astype(np.float64)
+
+
+# Printability thresholds (FDM, a Bambu P1S at 0.2 mm layers in mind). Faces steeper DOWN than 45°
+# want support; ones that begin above the first layers are the slicer's "floating regions". Tuned on
+# the IronEye case: debossed labels, lens counterbores and port ceilings are millimetre bridges every
+# enclosure has (printed clean, no support), so near-plate ceilings are ignored and the warning fires
+# only at real support-job area — while a hung interior (tens of cm²) or a lifted floor still shouts.
+_OVERHANG_NZ = -0.72          # unit face normal z below this ≈ steeper than 45° downward
+_WARN_MIN_Z_MM = 1.2          # ceilings at/below this are near-plate cosmetic recesses — bridged fine
+_WARN_AREA_CM2 = 3.0          # report overhang past this much area
+_ISLAND_GAP_MM = 0.6          # a solid whose lowest point is above this floats entirely
+
+
+def overhang_report(v) -> dict:
+    """Steep-downward-face analysis over placed triangles (Z-up, plate at Z=0): the area that would
+    need support, and where it starts. Pure numpy — unit-tested with synthetic triangles."""
+    import numpy as np
+
+    if v is None or len(v) == 0:
+        return {"overhang_cm2": 0.0, "lowest_mm": None}
+    e1 = v[:, 1] - v[:, 0]
+    e2 = v[:, 2] - v[:, 0]
+    fn = np.cross(e1, e2)
+    ln = np.linalg.norm(fn, axis=1)
+    ok = ln > 1e-12
+    v, fn, ln = v[ok], fn[ok], ln[ok]
+    nz = fn[:, 2] / ln
+    area = ln / 2.0
+    face_low = v[:, :, 2].min(axis=1)
+    bad = (nz < _OVERHANG_NZ) & (face_low > _WARN_MIN_Z_MM)
+    total_cm2 = float(area[bad].sum() / 100.0)
+    lowest = float(face_low[bad].min()) if bad.any() else None
+    return {"overhang_cm2": round(total_cm2, 2), "lowest_mm": round(lowest, 2) if lowest else None}
+
+
+def _print_warnings(parts, stl_path: Path) -> list[str]:
+    """The printability verdicts for meta.json — what the studio shows and the baker's repair loop
+    reads. Two classes: a FLOATING solid (always wrong — a piece of a part begins mid-air, the
+    slicer's 'floating regions' warning), and steep OVERHANG area (needs supports, or a redesign
+    with the flat face down). Never raises; an analysis hiccup just reports nothing."""
+    warnings: list[str] = []
+    try:
+        for name, shape in parts:
+            solids = list(getattr(shape, "solids", lambda: [])() or [])
+            for solid in solids if len(solids) > 1 else []:
+                gap = float(solid.bounding_box().min.Z)
+                if gap > _ISLAND_GAP_MM:
+                    warnings.append(
+                        f"FLOATING: a piece of '{name}' starts {gap:.1f} mm above the plate — "
+                        f"nothing below it to print on. Re-author the part so every piece rests "
+                        f"on Z=0 or on material beneath it."
+                    )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        report = overhang_report(_read_stl_tris(stl_path))
+        if report["overhang_cm2"] >= _WARN_AREA_CM2:
+            warnings.append(
+                f"OVERHANG: ≈{report['overhang_cm2']:.1f} cm² of faces steeper than 45° downward "
+                f"(lowest at {report['lowest_mm']} mm) — the slicer will want supports. Prefer the "
+                f"flat face on the plate, deboss instead of emboss, chamfer undersides."
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return warnings
+
+
 def _render_preview(stl_path: Path, png_path: Path, size=(1280, 960)) -> bool:
     """A flat-shaded orthographic preview off the binary STL — what the vision critic looks at.
     Pure numpy + Pillow (no GL, works headless): isometric-ish view, painter's sort, matcap-flat
@@ -72,16 +154,10 @@ def _render_preview(stl_path: Path, png_path: Path, size=(1280, 960)) -> bool:
     import numpy as np
     from PIL import Image, ImageDraw
 
-    raw = stl_path.read_bytes()
-    if len(raw) < 84:
+    v = _read_stl_tris(stl_path)
+    if v is None:
         return False
-    n = int.from_bytes(raw[80:84], "little")
-    if len(raw) < 84 + n * 50:
-        return False
-    body = np.frombuffer(raw, dtype=np.uint8, offset=84)
-    tris = body[: n * 50].reshape(n, 50)
-    floats = np.frombuffer(tris[:, :48].tobytes(), dtype="<f4").reshape(n, 12)
-    v = floats[:, 3:12].reshape(n, 3, 3).astype(np.float64)
+    n = len(v)
 
     # View: rotate the model so we look from front-right-above (the classic drawing angle).
     def rot(axis, deg):
@@ -234,6 +310,8 @@ def run_job(job_path: str) -> int:
         meta["solid_grams_pla"] = round(vol_cm3 * 1.24, 1)  # solid PLA; shells print near-solid
     except Exception:  # noqa: BLE001 — metadata is a nicety
         pass
+    if "stl" in produced:
+        meta["print_warnings"] = _print_warnings(parts, Path(produced["stl"]))
     if "meta" in outputs:
         try:
             outputs["meta"].parent.mkdir(parents=True, exist_ok=True)

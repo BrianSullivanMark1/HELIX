@@ -45,6 +45,7 @@ import base64
 import dataclasses
 import hashlib
 import json
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,6 +105,15 @@ _NO_ENGINE_HINT = (
     "Holograms are computed by the build123d CAD kernel — free, about a minute to install — and it "
     "isn't set up in this environment yet; ask HELIX to install it."
 )
+
+
+def _overhang_cm2(warning: str) -> float:
+    """The area out of an 'OVERHANG: ≈X cm² …' warning line, 0.0 when unreadable."""
+    m = re.search(r"([\d.]+)\s*cm", warning)
+    try:
+        return float(m.group(1)) if m else 0.0
+    except ValueError:
+        return 0.0
 
 
 class SpecError(Exception):
@@ -288,6 +298,24 @@ class ModelBaker:
                 rec.stl_ok = False
                 return self._compile_problem(res)
             rec.stl_ok, rec.stl_seconds = True, float(res.seconds or 0.0)
+        # PRINTABILITY GATE: the engine's one-run meta carries the print analysis. A FLOATING piece
+        # (part of a part beginning mid-air — the slicer's 'floating regions' refusal) is always
+        # wrong and goes to the repair loop like a compile error; mere overhang stays a warning the
+        # studio shows. Duck-typed: fakes and engines without meta_for simply skip the gate.
+        meta = getattr(self._cad, "meta_for", lambda _s: None)(src)
+        warns = [str(w) for w in ((meta or {}).get("print_warnings") or [])]
+        floating = [w for w in warns if w.startswith("FLOATING")]
+        # Huge overhang is the same disease in one solid (a lifted floor, a hung interior): a part
+        # authored in the wrong orientation. Small legitimate support jobs stay warnings.
+        severe = [w for w in warns if w.startswith("OVERHANG") and _overhang_cm2(w) >= 20.0]
+        if floating or severe:
+            return (
+                "The design prints with unsupported geometry hanging in mid-air — a slicer will "
+                "refuse it or demand supports everywhere. " + " ".join(floating + severe)
+                + " Author every part in its PRINT orientation: largest flat face sitting on Z=0, "
+                  "cavity opening UPWARD with interior standoffs rising (never hanging from a "
+                  "ceiling), labels DEBOSSED into the plate face, strap loops as flat slotted tabs."
+            )
         # The preview is best effort — a render hiccup is NOT the coder's problem — and the critic, when
         # wired, gets ONE look per bake cycle. A second check (after the repair pass) never re-critiques.
         png = self._render_preview(ws, src, rec)

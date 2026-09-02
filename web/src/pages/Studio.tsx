@@ -28,7 +28,8 @@ interface Hologram {
   brief: { title: string; summary: string; parts: string[] };
   params: Param[];
   files: { stl: string; step: string; mf: string; preview: string };
-  meta: { bbox_mm?: number[]; volume_cm3?: number; solid_grams_pla?: number; parts?: string[] };
+  meta: { bbox_mm?: number[]; volume_cm3?: number; solid_grams_pla?: number; parts?: string[];
+          print_warnings?: string[] };
   engine: string;
 }
 
@@ -324,6 +325,14 @@ export default function Studio({ slug, title }: { slug: string; title: string })
               <div>≈ <span style={{ color: "var(--text)" }}>{meta.solid_grams_pla} g</span> PLA solid</div>
             )}
             {(meta.parts?.length ?? 0) > 1 && <div>Parts: {meta.parts!.join(", ")}</div>}
+            {(meta.print_warnings?.length ?? 0) === 0 && bbox.length === 3 && (
+              <div style={{ color: "var(--done)" }}>✓ No floating regions or steep overhangs</div>
+            )}
+            {(meta.print_warnings ?? []).map((w, i) => (
+              <div key={i} style={{ color: w.startsWith("FLOATING") ? "var(--error)" : "var(--working)" }}>
+                ⚠ {w}
+              </div>
+            ))}
           </div>
           <div className="flex gap-2 mt-3 flex-wrap">
             {holo?.files.step && (

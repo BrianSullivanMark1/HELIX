@@ -574,6 +574,17 @@ def screw_boss(height: float, insert_d: float = INSERT_M3) -> Part:
     return standoff(height, insert_d, od=insert_d + 4.4)
 
 
+def strap_tab(slot_w: float, slot_h: float = 6.0, thickness: float = 3.0,
+              margin: float = 4.0) -> Part:
+    """A PRINTABLE strap/band anchor: a flat tab with the slot cut through it, lying in the XY
+    plane on Z=0 — thread the elastic through the slot. Use this instead of a ring protruding off
+    a face (a protruding ring floats the part on its rim and the slicer refuses it). Center the tab
+    beyond the part's edge and union it flush with the part's plate face."""
+    tab = rbox(slot_w + 2 * margin, slot_h + 2 * margin, thickness, r=margin * 0.8)
+    slot = Pos(0, 0, -1) * rbox(slot_w, slot_h, thickness + 2, r=min(2.0, slot_h / 2 - 0.1))
+    return tab - slot
+
+
 def arrange(*parts: Part, gap: float = 8.0) -> Compound:
     """Lay parts side by side along X (each sitting on Z=0) — the print-plate layout for a
     multi-part design. Use as the final return: `return arrange(body, lid)` — or return the dict
@@ -609,6 +620,7 @@ Helpers (all sit on Z=0, centered X/Y; enclosure sizes are INNER/cavity mm):
   usb_cutout(wall,kind)              subtract; kinds usb_c, micro_usb, usb_a, barrel_5_5, rj45
   cable_gland_boss(wall,thread_d)    -> (boss, hole): add boss, subtract hole
   screw_boss(h,insert_d)             lid screw boss
+  strap_tab(slot_w,slot_h,t,margin)  flat slotted band anchor ON the plate — never a protruding ring
   arrange(*parts,gap)                print-plate layout, or return {"body": b, "lid": l}
 build123d in 6 lines (algebra mode): parts combine with + - &; move with Pos(x,y,z)*p and
   Rot(x,y,z)*p; primitives Box(l,w,h,align=...), Cylinder(r,h); round with
