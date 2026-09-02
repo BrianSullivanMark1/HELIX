@@ -1,152 +1,538 @@
-"""ModelBaker — turn a declarative model.json into a real polygon mesh (assets/model.glb) + a viewer.
+"""ModelBaker — compile a hologram's model.scad into a mesh and wrap it in a technical-illustration viewer.
 
-This is the heart of HELIX's high-detail 3D channel. The coder no longer hand-writes Three.js geometry
-(which capped at "a pile of labeled primitives"); instead it writes a small, declarative `model.json`
-spec, and HELIX's OWN Python bakes that into a real GLB mesh with proper normals, PBR materials, and
-boolean cutaways — then drops a single, fixed GLTFLoader viewer (`index.html`) that loads it. The coder
-stays shell-less: it only Writes a JSON file; the geometry is built here, in-process.
+A hologram is a PROGRAM. The coder writes `model.scad` (OpenSCAD, millimetres, a customizer parameter
+block at the top, named modules per part, a design-brief header) and HELIX does the rest here: the
+static lints, the compile through the CadEngine port, the render the vision critic looks at, the STL /
+3MF / SCAD exports, and the single fixed viewer page (`index.html`). The coder never touches geometry
+coordinates or the viewer — "make it 100 wide" is an edit to a named parameter in source, which is what
+makes verbal design accurate. LLMs know OpenSCAD very well; they are bad at raw [x,y,z] primitives, which
+is why the old declarative model.json primitive engine (and its procedural PBR textures) is gone.
 
-Design notes:
-  - Spec is authored Y-UP (Y is up, X right, Z toward the viewer) — matches the Three.js mental model.
-    trimesh's axis-aligned primitives (cylinder/cone/capsule/lathe/extrude) are Z-aligned natively, so
-    they are rotated to Y-up here. Boxes/spheres are symmetric and authored directly.
-  - Every primitive is centred at the origin, so a part's `position` places its centre.
-  - A static mesh (`model.json`) is baked here; an ANIMATED model is a hand-authored Three.js
-    `index.html` and is left untouched (the coder still writes those directly).
-  - Any failure writes a friendly in-viewer message instead of leaving a blank page or crashing the build.
+Three entry points, all called by the Forge on a worker thread and all NEVER raising — together they are
+one BAKE CYCLE, and the Forge owns it:
+
+  - prepare(workspace) — before the coder runs. Seeds the helper library (helix.scad) into the workspace,
+    so a coder that lists the folder finds the ONLY library it is told about, and opens a fresh cycle for
+    this workspace (the critic's one look is per cycle — see _Record.checks).
+  - check(workspace)   — the pre-finalize gate for MODEL builds, after each coder pass. Lints, refreshes the
+    helper library, compiles to assets/model.stl, renders assets/preview.png and (on the FIRST check of
+    the cycle only) asks the critic. Returns a problem string for the Forge's one-pass repair loop, or None.
+  - bake(workspace)    — after the gate passes. Reuses check's compile (the record is keyed by the
+    source's sha256 plus the library, so the same text is never compiled twice), writes the exports, the
+    base64 STL sidecar the viewer reads over file://, the vendored three.js, and the viewer page; and it
+    closes the cycle however it ends.
+
+The viewer is a TECHNICAL ILLUSTRATION, not a product shot: flat matcap shading with crease-edge lines on
+dark slate, a millimetre grid, axes, bounding-box dimensions, a section plane, wireframe, the parameter
+panel, and export links. It is self-contained on purpose — the vendored three.js r128 UMD build is
+copied beside it and every piece of data is inlined or loaded via <script src> — because Chrome refuses
+fetch()/XHR of local files over file:// and the same page must open as a plain file in a browser tab AND
+inside HELIX's QWebEngineView. No CDN, no bloom, no image-based lighting, no tone-mapping boost: the old
+glossy rig was "way too bright", and a drawing you can measure is what a designer wants to see.
+
+Everything that is not the new engine stays as it was: a 360° ENVIRONMENT (model.json, engine
+"environment") is still a Blockade panorama in a skybox viewer; an explicit Tripo REFERENCE (model.json,
+engine "neural") is still a GLB in a small viewer — a likeness to look at, not the design; a hand-authored
+ANIMATED index.html is left alone with the render kit beside it. A workspace from the retired primitive
+engine (model.json with "parts" and no model.scad) gets a friendly page asking for a redesign — never a
+crash, never a blank page.
 """
 from __future__ import annotations
 
+import base64
+import dataclasses
+import hashlib
 import json
-import math
-import re
+import threading
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Callable
 
-import numpy as np
-import trimesh
-from trimesh.visual.material import PBRMaterial
-
-from helix.services import materials, render_kit
+from helix.domain import scad
+from helix.logging_setup import get_logger
+from helix.ports.cad import CadEngine
+from helix.services import render_kit
 from helix.services.builds import MANIFEST  # single source of truth for the manifest filename
 
-# Optional hosted text/image-to-3D backend (Phase 2). Given (prompt, image_path|None) -> GLB bytes.
+_LOG = get_logger("model_baker")
+
+# Optional hosted text/image-to-3D backend (the Tripo REFERENCE). Given (prompt, image_path|None) -> GLB bytes.
 NeuralBackend = Callable[[str, Path | None], bytes]
 # Optional hosted text-to-360°-panorama backend (environments/scenes). Given prompt -> image bytes.
 SkyboxBackend = Callable[[str], bytes]
+# The vision critic: (preview_png_path, brief_text) -> ONE short problem sentence, or None if it looks right.
+Critic = Callable[[Path, str], str | None]
 
-SPEC_FILE = "model.json"
-GLB_REL = "assets/model.glb"
-PANO_REL = "assets/panorama.jpg"   # the equirectangular 360° image for an environment scene
+SPEC_FILE = "model.json"                 # environments, references, and the retired primitive engine
+SOURCE_FILE = "model.scad"               # THE design
+STL_REL = "assets/model.stl"             # compiled mesh — the viewer's and the printer's food
+STL_JS_REL = "assets/model.stl.js"       # the same STL as `window.HELIX_STL = "<base64>"` (file:// safe)
+MF_REL = "assets/model.3mf"              # slicer-friendly export, best effort
+PREVIEW_REL = "assets/preview.png"       # what the vision critic looks at
+THREE_REL = "assets/three.min.js"        # the vendored three.js r128 UMD build, copied beside the page
+GLB_REL = "assets/model.glb"             # a Tripo reference mesh
+PANO_REL = "assets/panorama.jpg"         # the equirectangular 360° image for an environment scene
 VIEWER_FILE = "index.html"
 # Stamped into every generated viewer so bake() can tell its OWN page from a hand-authored animated one.
 VIEWER_SENTINEL = "<!-- HELIX-GENERATED-VIEWER -->"
 
-DEFAULT_BG = "#080b0f"
-DEFAULT_ACCENT = "#3fe0e0"
+DEFAULT_BG = "#10161c"                   # dark slate — a drawing board, not a showroom
+DEFAULT_ACCENT = "#3fe0e0"               # HELIX accent, for the chrome only — never for the model
 
-_AXIS_SHAPES = {"cylinder", "cone", "capsule", "lathe", "extrude"}
+# The page's fallback when no vendored three.js path is handed in (a bare ModelBaker() in a test, or a
+# container that forgot). Stated in the page as a comment so a stray CDN reference is never a mystery.
+THREE_CDN = "https://unpkg.com/three@0.128.0/build/three.min.js"
+
+# The Forge runs the coder at most TWICE per build (the build, then one repair pass) and calls check()
+# after each; prepare() opens the cycle before the first pass and bake() closes it, whatever happens in
+# between. This ceiling is the fallback for a baker driven WITHOUT the Forge (a bare baker in a test, a
+# future caller that forgets prepare): a third check on the same workspace can then only be a NEW build,
+# so a cycle nobody closed cannot leave "already critiqued" behind forever.
+_CHECKS_PER_CYCLE = 2
+
+# Best-effort extras are skipped when the STL compile was already slow: the 3MF export is a second full
+# CGAL compile and the preview is a third, so a heavy model would otherwise wait three times as long for
+# files the viewer does not need. The preview gets the larger budget because the critic needs it.
+_MF_BUDGET_S = 20.0
+_PREVIEW_BUDGET_S = 90.0
+
+_NO_ENGINE_HINT = (
+    "Holograms are compiled by OpenSCAD — free, open source, about a minute to install — and it isn't "
+    "set up on this machine yet; ask HELIX to install it."
+)
 
 
 class SpecError(Exception):
     """The model.json was missing, malformed, or described nothing we can build."""
 
 
-# Subject classification for engine="auto" routing. Organic/scene/character subjects look best from the
-# neural engine; clearly technical/diagram subjects are parametric's home turf (clean primitives win).
-_ORGANIC_WORDS = (
-    "person", "people", "human", "man", "woman", "child", "character", "figure", "creature", "animal",
-    "dog", "cat", "horse", "bird", "fish", "dragon", "monster", "knight", "soldier", "warrior", "hero",
-    "face", "head", "body", "hand", "tree", "trees", "plant", "flower", "garden", "forest", "jungle",
-    "landscape", "scene", "terrain", "rock", "mountain", "island", "food", "fruit", "car", "vehicle",
-    "ship", "boat", "plane", "armor", "armour", "suit", "statue", "sculpture", "helmet", "sword", "skull",
-)
-_TECHNICAL_WORDS = (
-    "gear", "gears", "engine", "motor", "circuit", "schematic", "diagram", "blueprint", "floor plan",
-    "floorplan", "molecule", "atom", "chip", "pcb", "mechanism", "assembly", "cutaway", "turbine",
-    "piston", "bracket", "gearbox", "valve", "truss", "lattice", "exploded", "cross section",
-    "cross-section", "chart", "graph", "framework", "scaffold", "bolt", "screw", "pipe", "wiring",
-)
+@dataclass
+class _Record:
+    """What the baker remembers about one workspace across a bake cycle (prepare → check → bake).
+
+    The artefact fields are keyed by `sha` (the source text + the helper library) so the same text is
+    never compiled twice — they outlive the cycle on purpose; `checks` implements "the critic speaks only
+    on the FIRST check of a bake cycle" — its verdict must always leave the Forge's one repair pass
+    available, so a picky critic can never fail and roll back a design that compiles on that repair
+    pass. prepare() zeroes it when a build begins and bake() zeroes it however the build ends."""
+
+    sha: str = ""
+    stl_ok: bool = False
+    stl_seconds: float = 0.0
+    preview_ok: bool = False
+    mf_ok: bool = False
+    checks: int = 0          # checks seen this cycle; the critic speaks only on the first
 
 
 class ModelBaker:
     def __init__(
-        self, neural_backend: NeuralBackend | None = None, neural_available=None,
-        skybox_backend: SkyboxBackend | None = None, skybox_available=None,
+        self,
+        cad: CadEngine | None = None,
+        *,
+        three_js: Path | None = None,
+        neural_backend: NeuralBackend | None = None,
+        neural_available=None,
+        skybox_backend: SkyboxBackend | None = None,
+        skybox_available=None,
+        critic: Critic | None = None,
     ) -> None:
-        # neural_backend is the hosted high-detail path (Tripo). The container wires it UNCONDITIONALLY
-        # (it raises only at call time if no key), so `self._neural is not None` is NOT a real availability
-        # check — `neural_available()` is (it reflects a live Tripo key). Defaults to wired==available for
-        # back-compat / tests with no backend.
+        # `cad` is the hologram engine behind the port (OpenSCAD CLI today). None means "no engine wired"
+        # and behaves exactly like an engine that is not installed: check() passes, bake() writes the
+        # install page. `three_js` is the vendored three.min.js, handed in by the container as a plain
+        # Path because a service must not import ui.
+        self._cad = cad
+        self._three_js = Path(three_js) if three_js else None
+        self._critic = critic
+        # neural_backend is the hosted Tripo REFERENCE. The container wires it UNCONDITIONALLY (it raises
+        # only at call time if no key), so `self._neural is not None` is NOT a real availability check —
+        # `neural_available()` is (it reflects a live Tripo key). Defaults to wired==available for tests.
         self._neural = neural_backend
         self._neural_available = neural_available or (lambda: neural_backend is not None)
         # skybox_backend is the hosted environment/scene path (Blockade Labs): a whole 360° PLACE, shown
         # as a skybox. Same wired-unconditionally / availability-reflects-a-live-key pattern as neural.
         self._skybox = skybox_backend
         self._skybox_available = skybox_available or (lambda: skybox_backend is not None)
+        # Per-workspace compile records. Builds of DIFFERENT holograms may run on a few worker threads at
+        # once (same-name builds serialize), so the dict is guarded; the records themselves are only ever
+        # touched by the one thread building that workspace.
+        self._records: dict[str, _Record] = {}
+        self._lock = threading.Lock()
+
+    # ----- engine state -----
+    def engine_missing(self) -> bool:
+        """True when there is nothing to compile with — no engine wired, or one that isn't installed.
+        Cheap (available() spawns nothing) and never raises."""
+        if self._cad is None:
+            return True
+        try:
+            return not self._cad.available()
+        except Exception:  # noqa: BLE001 — a probing hiccup reads as "missing", never as a crash
+            _LOG.warning("cad.available() raised", exc_info=True)
+            return True
+
+    def _install_hint(self) -> str:
+        if self._cad is None:
+            return _NO_ENGINE_HINT
+        try:
+            return self._cad.install_hint() or _NO_ENGINE_HINT
+        except Exception:  # noqa: BLE001
+            return _NO_ENGINE_HINT
+
+    def _engine_version(self) -> str:
+        if self._cad is None:
+            return ""
+        try:
+            return self._cad.version() or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _record(self, workspace: Path) -> _Record:
+        key = str(Path(workspace).resolve())
+        with self._lock:
+            rec = self._records.get(key)
+            if rec is None:
+                rec = self._records[key] = _Record()
+            return rec
+
+    # ----- opening the cycle -----
+    def prepare(self, workspace: Path) -> None:
+        """Called by the Forge for every MODEL build — new or iterating — once the workspace exists and
+        BEFORE the coder runs. Two jobs, both idempotent, and it never raises:
+
+        1. Seed helix.scad beside where model.scad will go. The coder's prompt names it as the ONLY
+           library here; before this, the file was first written by check() — AFTER the coder — so on a
+           fresh hologram a coder that listed the folder found no helix.scad and could reinvent the
+           helpers or skip `use <helix.scad>` altogether.
+        2. Open a fresh bake cycle for this workspace, so the critic's one look lands on THIS build's
+           first check. Resetting here — not only in bake() — is what keeps a cycle that never reached
+           bake() (a repair pass that was cancelled, died, or escaped; an engine that was missing) from
+           leaving "already critiqued" behind, where the next build of the same hologram would run with
+           first=False and never hear the critic."""
+        try:
+            ws = Path(workspace)
+            self._write_lib(ws)
+            self._record(ws).checks = 0
+        except Exception:  # noqa: BLE001 — a preparation hiccup must never fail a build
+            _LOG.warning("prepare failed unexpectedly", exc_info=True)
+
+    # ----- the pre-finalize gate -----
+    def check(self, workspace: Path) -> str | None:
+        """The Forge's pre-finalize check for MODEL builds. Returns a problem string for the repair loop,
+        or None when the work passes. Never raises: a baker bug must not be able to fail a build, so an
+        unexpected exception is logged and reads as a pass (bake() will then show what it can)."""
+        try:
+            return self._check(Path(workspace))
+        except Exception:  # noqa: BLE001
+            _LOG.warning("model check failed unexpectedly", exc_info=True)
+            return None
+
+    def _check(self, ws: Path) -> str | None:
+        # Count this check FIRST, before any early return: the critic may only speak on the FIRST check
+        # of a cycle (see _CHECKS_PER_CYCLE), whatever that first check ends up saying. A first check that
+        # found no model.scad at all, a retired model.json, or a lint or compile failure still means the
+        # repair pass is the LAST pass — and a critic speaking on the repaired design would roll back a
+        # model that compiles. Counting lower down let exactly that happen: the early returns skipped the
+        # counter, so the check after the repair was treated as check one and the critic spoke.
+        rec = self._record(ws)
+        if rec.checks >= _CHECKS_PER_CYCLE:
+            rec.checks = 0   # a new build of this hologram (a baker driven without the Forge's prepare)
+        rec.checks += 1
+        first = rec.checks == 1
+        src = ws / SOURCE_FILE
+        if not src.is_file():
+            spec = self._read_spec(ws)
+            if spec is None:
+                if (ws / SPEC_FILE).is_file():
+                    return ("model.json is not valid JSON — write the design as model.scad instead "
+                            "(a hologram is an OpenSCAD program).")
+                viewer = ws / VIEWER_FILE
+                if viewer.is_file() and not self._is_generated_viewer(viewer):
+                    return None  # a hand-authored ANIMATED page: the Forge's HTML/py gate covers it
+                return "no model.scad was produced"
+            if str(spec.get("engine", "")).lower() in ("environment", "neural"):
+                return None  # a 360° scene or a Tripo reference: nothing to compile
+            # Anything else is the retired primitive format (a 'parts' list, engine 'auto'/'parametric').
+            # Asking for model.scad here lets the Forge's repair pass MIGRATE the design in the same build
+            # ("make it wider" on an old hologram just works); if that pass fails too, the Forge rolls
+            # back and the old page keeps working as it was.
+            return (
+                "model.json with a 'parts' list is the retired primitive format — write the design as "
+                "model.scad (OpenSCAD, millimetres) instead; the old model.json is ignored."
+            )
+        source = src.read_text(encoding="utf-8", errors="replace")
+        lints = scad.inspect_source(source)
+        if lints:
+            return " ".join(lints)
+        # The helper library lives nowhere else: prepare() seeds it before the coder runs, and it is
+        # refreshed here too so `use <helix.scad>` resolves (the engine runs with cwd at the source) even
+        # in an old workspace nobody prepared — and an upgraded HELIX never compiles against a stale one.
+        self._write_lib(ws)
+        if self.engine_missing():
+            return None  # not the coder's fault; bake() shows the install page
+        sha = _sha(source)
+        if rec.sha != sha:
+            rec.sha, rec.stl_ok, rec.preview_ok, rec.mf_ok, rec.stl_seconds = sha, False, False, False, 0.0
+        stl = ws / STL_REL
+        if not (rec.stl_ok and stl.is_file()):
+            res = self._cad.compile_stl(src, stl)  # type: ignore[union-attr]
+            if not res.ok:
+                rec.stl_ok = False
+                return self._compile_problem(res)
+            rec.stl_ok, rec.stl_seconds = True, float(res.seconds or 0.0)
+        # The preview is best effort — a render hiccup is NOT the coder's problem — and the critic, when
+        # wired, gets ONE look per bake cycle. A second check (after the repair pass) never re-critiques.
+        png = self._render_preview(ws, src, rec)
+        if self._critic is None or not first or png is None:
+            return None
+        try:
+            verdict = self._critic(png, self._brief_text(source))
+        except Exception:  # noqa: BLE001 — a failing critic must never fail a build
+            _LOG.warning("hologram critic raised", exc_info=True)
+            return None
+        verdict = (verdict or "").strip()
+        if not verdict:
+            return None
+        return (
+            f"Looking at the rendered preview ({PREVIEW_REL}): {verdict.rstrip('.')}. "
+            f"Fix the model so it matches the brief."
+        )
+
+    def _compile_problem(self, res) -> str:
+        """The repair-loop string for a failed compile: the warm sentence, then the compiler's own words
+        fenced as DATA (the coder needs file:line to fix it; the user only ever hears the sentence)."""
+        problem = (res.problem or "The hologram's source couldn't be compiled.").strip()
+        detail = (res.detail or "").strip()
+        return f"{problem} OpenSCAD said: {detail}" if detail else problem
+
+    def _render_preview(self, ws: Path, src: Path, rec: _Record) -> Path | None:
+        """assets/preview.png for THIS source, or None. Best effort: a failed render is not a problem, and
+        a stale picture of an older design is removed so neither the critic nor the page can see it."""
+        png = ws / PREVIEW_REL
+        if rec.preview_ok and png.is_file():
+            return png
+        if rec.stl_seconds > _PREVIEW_BUDGET_S:
+            _unlink(png)
+            return None
+        try:
+            res = self._cad.render_png(src, png)  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            _LOG.warning("preview render raised", exc_info=True)
+            res = None
+        rec.preview_ok = bool(res is not None and res.ok and png.is_file())
+        if not rec.preview_ok:
+            _unlink(png)
+        return png if rec.preview_ok else None
 
     @staticmethod
-    def _classify(prompt: str, title: str) -> tuple[int, int]:
-        """(organic_hits, technical_hits) for engine='auto' routing. Single-word keywords match on WORD
-        boundaries (so 'man' doesn't fire on 'mechanism', 'car' not on 'carpet'); multi-word phrases
-        ('cross section', 'floor plan') match as substrings."""
-        text = f"{prompt} {title}".lower()
-        words = set(re.findall(r"[a-z]+", text))
-
-        def hits(vocab: tuple[str, ...]) -> int:
-            n = 0
-            for w in vocab:
-                if " " in w or "-" in w:
-                    n += 1 if w in text else 0
-                else:
-                    n += 1 if w in words else 0
-            return n
-
-        return hits(_ORGANIC_WORDS), hits(_TECHNICAL_WORDS)
+    def _brief_text(source: str) -> str:
+        """What the critic is told the model is supposed to be: the header brief plus the parameter block,
+        as plain lines. The critic judges the picture against THIS, not against the raw source."""
+        brief = scad.parse_brief(source)
+        lines: list[str] = []
+        if brief.get("title"):
+            lines.append(f"Design: {brief['title']}")
+        if brief.get("summary") and brief["summary"] != brief.get("title"):
+            lines.append(f"Summary: {brief['summary']}")
+        if brief.get("parts"):
+            lines.append("Parts: " + ", ".join(brief["parts"]))
+        params = scad.parse_params(source)
+        if params:
+            lines.append("Parameters:")
+            for p in params:
+                rng = ""
+                if p.minimum is not None or p.maximum is not None:
+                    rng = f" [{_num(p.minimum)}..{_num(p.maximum)}]"
+                elif p.choices:
+                    rng = " [" + ", ".join(p.choices) + "]"
+                desc = f" — {p.description}" if p.description else ""
+                lines.append(f"  {p.name} = {p.value}{rng}{desc}")
+        return "\n".join(lines) or "(the source carries no design brief)"
 
     # ----- public entry point -----
     def bake(self, workspace: Path) -> None:
-        """Read the workspace's model spec and (re)bake assets/model.glb + the viewer in place.
+        """Turn the workspace's design into the exports + the viewer page, in place.
 
-        Called by ForgeService AFTER the coder runs and the escape guard passes, BEFORE finalize — so the
-        baked index.html is what _detect_entry finds and what gets committed. Never raises: a bad spec
-        becomes a friendly error page so the build still completes and the user sees a clear message."""
-        spec_path = workspace / SPEC_FILE
-        viewer = workspace / VIEWER_FILE
+        Called by ForgeService AFTER the coder runs, the escape guard passes and check() is happy, BEFORE
+        finalize — so the baked index.html is what _detect_entry finds and what gets committed. Never
+        raises: every failure becomes a friendly page so the build still completes and the user sees a
+        clear message."""
+        ws = Path(workspace)
+        try:
+            self._bake(ws)
+        except Exception as exc:  # noqa: BLE001 — never let a baking bug fail the whole build
+            _LOG.warning("bake failed unexpectedly", exc_info=True)
+            try:
+                self._write_error(ws, f"Couldn't build the hologram: {exc}")
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            # EVERY way out of a bake closes the cycle — the install notice, a bake-time compile failure,
+            # an environment or a reference, a baking bug — not only the happy path. Closing it from inside
+            # _bake_scad alone left the engine-missing notice and every non-SCAD path with the count still
+            # standing, so the first build after OpenSCAD landed was taken for "check 2" and never heard
+            # the critic.
+            self._end_cycle(ws)
+
+    def _bake(self, ws: Path) -> None:
+        src = ws / SOURCE_FILE
+        spec_path = ws / SPEC_FILE
+        viewer = ws / VIEWER_FILE
+        if src.is_file():
+            self._bake_scad(ws, src)   # THE design — model.scad always wins
+            return
         if not spec_path.exists():
-            # No spec: this is the hand-authored ANIMATED path (the coder wrote index.html itself), or a
-            # build that produced nothing. Leave a real page alone (and ship the render kit it imports);
-            # otherwise explain.
-            if not viewer.exists():
-                self._write_error(workspace, "The hologram build produced no model.json and no page.")
+            # No design and no spec: this is the hand-authored ANIMATED path (the coder wrote index.html
+            # itself), or a build that produced nothing. Leave a real page alone (and ship the render kit
+            # it imports); otherwise explain. Our OWN leftover page (the sentinel) is not a result — a
+            # stale viewer of an older design must not be shown as if the build had made it.
+            if not viewer.exists() or self._is_generated_viewer(viewer):
+                self._write_error(ws, "The hologram build produced no model.scad and no page of its own.")
             else:
-                self._write_render_kit(workspace)
+                self._write_render_kit(ws)
             return
         # A static→animated CONVERSION: the coder replaced our generated viewer with its own animated
         # index.html. Respect it — skip baking and drop the now-stale model.json, so a re-bake doesn't
-        # silently overwrite the animation with the old static mesh.
+        # silently overwrite the animation with an old scene.
         if viewer.exists() and not self._is_generated_viewer(viewer):
             try:
                 spec_path.unlink()
             except OSError:
                 pass
-            self._write_render_kit(workspace)
+            self._write_render_kit(ws)
             return
         try:
             spec = json.loads(spec_path.read_text(encoding="utf-8"))
             if not isinstance(spec, dict):
                 raise SpecError("model.json must be a JSON object.")
-            if str(spec.get("engine", "auto")).lower() == "environment":
-                self._bake_environment(workspace, spec)  # a 360° scene, not a mesh
-                return
-            glb, preview = self._make_glb(spec, workspace)
-            (workspace / "assets").mkdir(parents=True, exist_ok=True)
-            (workspace / GLB_REL).write_bytes(glb)
-            self._write_viewer(workspace, spec, preview=preview)
+            engine = str(spec.get("engine", "")).lower()
+            if engine == "environment":
+                self._bake_environment(ws, spec)   # a 360° scene, not a mesh
+            elif engine == "neural":
+                self._bake_reference(ws, spec)     # an explicit Tripo likeness
+            elif self._is_legacy_spec(spec):
+                self._write_legacy_page(ws, spec)  # the retired primitive engine
+            else:
+                raise SpecError(
+                    "The hologram has no model.scad — the design is an OpenSCAD program, and none was written."
+                )
         except SpecError as exc:
-            self._write_error(workspace, str(exc))
-        except Exception as exc:  # never let a baking bug fail the whole build
-            self._write_error(workspace, f"Couldn't build the hologram: {exc}")
+            self._write_error(ws, str(exc))
+        except json.JSONDecodeError:
+            self._write_error(ws, "model.json isn't valid JSON.")
+
+    # ----- the OpenSCAD design -----
+    def _bake_scad(self, ws: Path, src: Path) -> None:
+        source = src.read_text(encoding="utf-8", errors="replace")
+        self._write_lib(ws)
+        brief = scad.parse_brief(source)
+        params = scad.parse_params(source)
+        title = self._title(ws, {}, brief)
+        if self.engine_missing():
+            self._write_notice(
+                ws, title=title, heading="The hologram engine isn't installed yet",
+                message=self._install_hint(), brief=brief, source=source,
+                note="The design itself is finished and saved; once the engine is installed, ask for any "
+                     "change and HELIX will compile and show it.",
+            )
+            return
+        rec = self._record(ws)
+        sha = _sha(source)
+        stl = ws / STL_REL
+        if not (rec.sha == sha and rec.stl_ok and stl.is_file()):
+            rec.sha, rec.stl_ok, rec.preview_ok, rec.mf_ok, rec.stl_seconds = sha, False, False, False, 0.0
+            res = self._cad.compile_stl(src, stl)  # type: ignore[union-attr]
+            if not res.ok:
+                self._write_notice(
+                    ws, title=title, heading="This hologram didn't compile",
+                    message=res.problem or "The hologram's source couldn't be compiled.",
+                    brief=brief, source=source,
+                    note="Ask for a small change and HELIX will repair the design.",
+                )
+                return
+            rec.stl_ok, rec.stl_seconds = True, float(res.seconds or 0.0)
+        has_3mf = self._export_3mf(ws, src, rec)
+        has_preview = self._render_preview(ws, src, rec) is not None
+        stl_bytes = stl.read_bytes()
+        assets = ws / "assets"
+        assets.mkdir(parents=True, exist_ok=True)
+        # The sidecar is how the viewer gets the mesh over file://: a <script src> is allowed where a
+        # fetch() of a local file is not. The plain .stl stays beside it for the export link.
+        (ws / STL_JS_REL).write_text(
+            "window.HELIX_STL=\"" + base64.b64encode(stl_bytes).decode("ascii") + "\";\n",
+            encoding="utf-8",
+        )
+        three_src = self._copy_three(ws)
+        data = {
+            "title": title,
+            "summary": brief.get("summary", ""),
+            "parts": list(brief.get("parts") or []),
+            "params": [dataclasses.asdict(p) for p in params],
+            "files": {"stl": STL_REL, "mf": MF_REL if has_3mf else "", "scad": SOURCE_FILE,
+                      "preview": PREVIEW_REL if has_preview else ""},
+            "engine": self._engine_version(),
+            "source": source,
+        }
+        page = (
+            _VIEWER_HTML
+            .replace("__TITLE__", _esc(title))
+            .replace("__THREE_SRC__", three_src)
+            .replace("__THREE_NOTE__", "" if three_src == THREE_REL else _CDN_NOTE)
+            .replace("__STL_JS__", STL_JS_REL)
+            .replace("__DATA__", _json_for_script(data))   # last: the data may contain anything
+        )
+        (ws / VIEWER_FILE).write_text(page, encoding="utf-8")
+
+    def _end_cycle(self, ws: Path) -> None:
+        """bake() closes the cycle: the next check of this workspace is a new build's first. Never
+        raises (it runs in bake()'s finally, where an exception would escape the never-raises promise)."""
+        try:
+            self._record(ws).checks = 0
+        except Exception:  # noqa: BLE001
+            _LOG.warning("could not close the bake cycle", exc_info=True)
+
+    def _export_3mf(self, ws: Path, src: Path, rec: _Record) -> bool:
+        """Best effort, by contract. Returns whether assets/model.3mf matches THIS source — a stale file
+        from an older compile (the engine leaves `out` untouched on failure) is removed rather than linked."""
+        out = ws / MF_REL
+        if rec.mf_ok and out.is_file():
+            return True
+        if rec.stl_seconds > _MF_BUDGET_S:
+            _unlink(out)
+            return False
+        try:
+            res = self._cad.export_3mf(src, out)  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            _LOG.warning("3MF export raised", exc_info=True)
+            res = None
+        rec.mf_ok = bool(res is not None and res.ok and out.is_file())
+        if not rec.mf_ok:
+            _unlink(out)
+        return rec.mf_ok
+
+    def _copy_three(self, ws: Path) -> str:
+        """Put the vendored three.js beside the page (idempotent) and return the src the page should use.
+        Falls back to the CDN only when no vendored file was handed in — and says so in the page."""
+        if self._three_js is None:
+            return THREE_CDN
+        dst = ws / THREE_REL
+        try:
+            if not self._three_js.is_file():
+                return THREE_CDN
+            if not (dst.is_file() and dst.stat().st_size == self._three_js.stat().st_size):
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(self._three_js.read_bytes())
+            return THREE_REL
+        except OSError:
+            _LOG.warning("could not copy three.js into the workspace", exc_info=True)
+            return THREE_CDN
+
+    def _write_lib(self, ws: Path) -> None:
+        try:
+            lib = ws / scad.HELIX_LIB_FILE
+            if not (lib.is_file() and lib.read_text(encoding="utf-8", errors="replace") == scad.HELIX_LIB):
+                lib.write_text(scad.HELIX_LIB, encoding="utf-8")
+        except OSError:
+            _LOG.warning("could not write %s", scad.HELIX_LIB_FILE, exc_info=True)
 
     # ----- environment (360° scene) -----
     def _bake_environment(self, workspace: Path, spec: dict) -> None:
@@ -189,260 +575,109 @@ class ModelBaker:
             _SKYBOX_HTML.replace("__TITLE__", _esc(title)).replace("__ACCENT__", accent)
             .replace("__PANO__", PANO_REL), encoding="utf-8")
 
-    # ----- glb construction -----
-    def _make_glb(self, spec: dict, workspace: Path) -> "tuple[bytes, bool]":
-        """Pick the engine and produce (GLB bytes, is_preview).
-
-        engine "neural" → hosted high-detail (no silent fallback — the user asked for it). "parametric" →
-        local primitive mesh (clean mechanical/diagram shapes). "auto" (default) → route by SUBJECT: an
-        organic/scene/character subject goes neural (when a Tripo key is live), a clearly technical/diagram
-        subject stays parametric even with a key, and the ambiguous middle prefers neural when available.
-        A neural attempt that fails falls back to parts when they exist. is_preview = an organic subject we
-        could only render parametrically because no key is set (the viewer shows an honest banner)."""
-        engine = str(spec.get("engine", "auto")).lower()
-        parts = spec.get("parts")
-        parts = parts if isinstance(parts, list) and parts else []
+    # ----- the Tripo reference -----
+    def _bake_reference(self, workspace: Path, spec: dict) -> None:
+        """engine="neural": an EXPLICIT "show me what a real X looks like" — a hosted text-to-mesh likeness
+        in a small GLB viewer. It is a reference to look at, never the design, and the page says so."""
         prompt = str(spec.get("prompt") or spec.get("title") or "").strip()
-        title = str(spec.get("title") or "")
-        has_neural = self._neural is not None and self._neural_available()
-
-        if engine == "neural":
-            if not has_neural:
-                raise SpecError(
-                    "High-detail (neural) holograms aren't enabled — ask HELIX to connect Tripo "
-                    "and a secure key panel opens."
-                )
-            return self._neural_glb(spec, workspace, prompt), False
-
-        if engine == "auto":
-            org, tech = self._classify(prompt, title)
-            technical, organic = tech > org, org > tech
-            if has_neural and not technical and prompt:  # organic + ambiguous prefer neural when keyed
-                try:
-                    return self._neural_glb(spec, workspace, prompt), False
-                except SpecError:
-                    if not parts:
-                        raise
-                except Exception as exc:
-                    if not parts:
-                        raise SpecError(f"High-detail generation failed: {exc}")
-                # neural attempt failed but parts exist — fall through to the local mesh.
-            if not parts:
-                if organic and not has_neural:
-                    raise SpecError("This looks like an organic subject — ask HELIX to connect Tripo "
-                                    "for a film-grade hologram.")
-                raise SpecError("model.json needs a 'parts' list (or an enabled neural 'prompt').")
-            return self._parametric_glb(parts), (organic and not has_neural)
-
-        # engine == "parametric" (or anything unknown)
-        if not parts:
-            raise SpecError("A parametric hologram needs a 'parts' list.")
-        return self._parametric_glb(parts), False
-
-    def _neural_glb(self, spec: dict, workspace: Path, prompt: str) -> bytes:
         if not prompt:
-            raise SpecError("A high-detail hologram needs a 'prompt' describing the subject.")
-        image = spec.get("image")
-        image_path = (workspace / image) if isinstance(image, str) and image else None
-        glb = self._neural(prompt, image_path)  # type: ignore[misc]
+            self._write_error(workspace, "A reference hologram needs a 'prompt' describing the subject.")
+            return
+        if self._neural is None or not self._neural_available():
+            self._write_error(
+                workspace,
+                "Reference holograms need Tripo — ask HELIX to connect Tripo and a secure key panel "
+                "opens. (To DESIGN the object instead, describe it and HELIX will model it.)")
+            return
+        try:
+            image = spec.get("image")
+            image_path = (workspace / image) if isinstance(image, str) and image else None
+            glb = self._neural(prompt, image_path)
+        except Exception as exc:  # noqa: BLE001 — surface the service's message, never crash
+            self._write_error(workspace, f"Couldn't fetch the reference: {exc}")
+            return
         if not glb:
-            raise SpecError("the high-detail service returned nothing.")
-        return glb
-
-    def _parametric_glb(self, parts: list) -> bytes:
-        geometry: dict[str, trimesh.Trimesh] = {}
-        for i, part in enumerate(parts):
-            if not isinstance(part, dict):
-                continue
-            name = str(part.get("name") or f"part_{i}")
-            for j, mesh in enumerate(self._build_part(part)):  # one part can yield many (mirror/array)
-                if mesh is None or mesh.is_empty:
-                    continue
-                key, n = (name if j == 0 else f"{name}_{j}"), 1
-                while key in geometry:  # names must be unique in the scene
-                    key, n = f"{name}_{j}_{n}", n + 1
-                geometry[key] = mesh
-        if not geometry:
-            raise SpecError("None of the parts produced any geometry.")
-        scene = trimesh.Scene(geometry)
-        glb = scene.export(file_type="glb")
-        return glb if isinstance(glb, (bytes, bytearray)) else bytes(glb)
-
-    def _build_part(self, part: dict) -> list[trimesh.Trimesh]:
-        """A placed part, expanded by its modifiers into one or more world-space meshes."""
-        solid = self._solid(part)
-        if solid is None or solid.is_empty:
-            return []
-        # Material: a named texture PRESET gets real surface (baseColor+normal+roughness+AO) via triplanar
-        # UVs computed HERE — after _solid's booleans (which discard visuals) and smoothing (which changes
-        # vertex count), so the UVs match the final geometry. Otherwise, flat solid color as before.
-        preset = str(part.get("material") or "").strip().lower()
-        if preset in materials.PRESETS:
-            try:
-                uv = _triplanar_uv(solid, _material_scale(part, solid))
-                solid.visual = trimesh.visual.TextureVisuals(
-                    uv=uv, material=materials.material_for(preset, _f(part.get("opacity"), 1.0))
-                )
-            except Exception:  # never fail a part over texturing — fall back to flat color
-                solid.visual = trimesh.visual.TextureVisuals(material=_material(part))
-        else:
-            solid.visual = trimesh.visual.TextureVisuals(material=_material(part))
-        solid.apply_transform(self._matrix(part))            # place the primary instance
-        instances = [solid]
-        for axis in _as_list(part.get("mirror")):            # bilateral symmetry, for free
-            refl = _reflect_matrix(axis)
-            if refl is not None:
-                instances += [_transformed_copy(i, refl) for i in list(instances)]
-        arr = part.get("array")
-        if isinstance(arr, dict):                            # repeated detail (rivets, ribs, vents)
-            instances = _expand_array(instances, arr)
-        return instances
-
-    def _solid(self, part: dict) -> trimesh.Trimesh | None:
-        """One primitive + its boolean children + optional smoothing — Y-up, centred, untransformed.
-
-        A 'modifier stack' done locally: subtract (cutaways/holes), union (fuse into one form),
-        intersect (clip to a boundary), then smooth (subdivide + Taubin) to round a blocky base into a
-        sculpted, bevelled-looking surface."""
-        base = self._mesh_for(part)
-        if base is None:
-            return None
-        for op, key in ((_difference, "subtract"), (_union, "union"), (_intersection, "intersect")):
-            for child in part.get(key, []) or []:
-                if not isinstance(child, dict):
-                    continue
-                other = self._mesh_for(child)
-                if other is None or other.is_empty:
-                    continue
-                other.apply_transform(self._matrix(child))   # child placed in the parent's local space
-                try:
-                    base = op(base, other)
-                except Exception:
-                    pass  # a failed boolean just leaves the part as-is — better than no model
-                if base is None or base.is_empty:
-                    return None
-        passes = int(_f(part.get("smooth"), 0))
-        if passes > 0:
-            try:
-                base = _smooth(base, passes)
-            except Exception:
-                pass  # smoothing is a nicety; never fail the part over it
-        return base
-
-    def _mesh_for(self, part: dict) -> trimesh.Trimesh | None:
-        """Build one primitive, Y-up and centred at the origin (no part transform applied yet)."""
-        shape = str(part.get("shape", "box")).lower()
-        sections = int(part.get("sections", 64) or 64)
-        sections = max(8, min(256, sections))
-        m = self._primitive(shape, part, sections)
-        if m is None or m.is_empty:
-            return None
-        m.apply_translation(-m.bounds.mean(axis=0))  # centre every shape at the origin
-        if shape in _AXIS_SHAPES:
-            # native trimesh axis is Z; rotate -90° about X so the principal axis runs +Y (up).
-            m.apply_transform(trimesh.transformations.rotation_matrix(-math.pi / 2, (1, 0, 0)))
-        return m
-
-    def _primitive(self, shape: str, part: dict, sections: int) -> trimesh.Trimesh | None:
-        if shape == "box":
-            return trimesh.creation.box(extents=_vec3(part.get("size"), 1.0))
-        if shape == "sphere":
-            r = _f(part.get("radius"), 0.5)
-            return trimesh.creation.icosphere(subdivisions=min(5, max(2, sections // 16)), radius=r)
-        if shape == "cylinder":
-            rt = part.get("radius_top")
-            rb = part.get("radius_bottom")
-            r = _f(part.get("radius"), 0.5)
-            h = _f(part.get("height"), 1.0)
-            if rt is not None or rb is not None:  # frustum
-                return self._revolve_profile(
-                    [[0, 0], [_f(rb, r), 0], [_f(rt, r), h], [0, h]], sections
-                )
-            return trimesh.creation.cylinder(radius=r, height=h, sections=sections)
-        if shape == "cone":
-            return trimesh.creation.cone(radius=_f(part.get("radius"), 0.5),
-                                         height=_f(part.get("height"), 1.0), sections=sections)
-        if shape == "capsule":
-            return trimesh.creation.capsule(radius=_f(part.get("radius"), 0.3),
-                                            height=_f(part.get("height"), 1.0), count=[16, 16])
-        if shape == "torus":
-            R = _f(part.get("radius"), 0.5)
-            r = _f(part.get("tube"), max(0.05, R * 0.25))
-            try:
-                t = trimesh.creation.torus(major_radius=R, minor_radius=r,
-                                           major_sections=sections, minor_sections=max(12, sections // 4))
-            except TypeError:
-                t = trimesh.creation.torus(R, r)
-            # trimesh torus lies in the XY plane (hole axis Z); make it lie flat (hole axis Y) so it reads
-            # as a ring on the ground unless the author rotates it.
-            t.apply_transform(trimesh.transformations.rotation_matrix(-math.pi / 2, (1, 0, 0)))
-            return t
-        if shape in ("lathe", "revolve"):
-            profile = part.get("profile")
-            if not isinstance(profile, list) or len(profile) < 2:
-                raise SpecError("a 'lathe' part needs a 'profile' of at least two [radius, height] points.")
-            return self._revolve_profile(profile, sections)
-        if shape == "extrude":
-            poly = part.get("polygon")
-            if not isinstance(poly, list) or len(poly) < 3:
-                raise SpecError("an 'extrude' part needs a 'polygon' of at least three [x, y] points.")
-            return self._extrude_polygon(poly, _f(part.get("height"), 1.0))
-        raise SpecError(f"unknown shape '{shape}'.")
-
-    @staticmethod
-    def _revolve_profile(profile: Sequence[Sequence[float]], sections: int) -> trimesh.Trimesh:
-        pts = np.array([[abs(_f(p[0], 0.0)), _f(p[1], 0.0)] for p in profile], dtype=float)
-        return trimesh.creation.revolve(pts, sections=sections)
-
-    @staticmethod
-    def _extrude_polygon(polygon: Sequence[Sequence[float]], height: float) -> trimesh.Trimesh:
-        from shapely.geometry import Polygon
-
-        ring = [(_f(p[0], 0.0), _f(p[1], 0.0)) for p in polygon]
-        poly = Polygon(ring)
-        if not poly.is_valid:
-            poly = poly.buffer(0)  # repair self-intersections / winding
-        return trimesh.creation.extrude_polygon(poly, height=max(1e-3, height))
-
-    @staticmethod
-    def _matrix(part: dict) -> np.ndarray:
-        pos = _vec3(part.get("position"), 0.0)
-        rot = _vec3(part.get("rotation"), 0.0)
-        scale = part.get("scale", 1.0)
-        sx, sy, sz = _vec3(scale, 1.0) if isinstance(scale, (list, tuple)) else (
-            _f(scale, 1.0), _f(scale, 1.0), _f(scale, 1.0)
-        )
-        T = trimesh.transformations.translation_matrix(pos)
-        R = trimesh.transformations.euler_matrix(
-            math.radians(rot[0]), math.radians(rot[1]), math.radians(rot[2]), axes="sxyz"
-        )
-        S = np.diag([sx or 1.0, sy or 1.0, sz or 1.0, 1.0])
-        return T @ R @ S
-
-    # ----- viewer + error page -----
-    def _write_viewer(self, workspace: Path, spec: dict, preview: bool = False) -> None:
+            self._write_error(workspace, "The reference service returned nothing.")
+            return
+        try:
+            (workspace / "assets").mkdir(parents=True, exist_ok=True)
+            (workspace / GLB_REL).write_bytes(glb)
+        except OSError as exc:
+            self._write_error(workspace, f"Couldn't save the reference: {exc}")
+            return
         title = self._title(workspace, spec)
-        bg = _hex_str(spec.get("background"), DEFAULT_BG)
-        accent = _hex_str(spec.get("accent"), DEFAULT_ACCENT)
-        banner = ("Preview geometry — ask HELIX to connect Tripo for a film-grade version."
-                  if preview else "")
-        (workspace / VIEWER_FILE).write_text(_VIEWER_HTML
-                                             .replace("__TITLE__", _esc(title))
-                                             .replace("__BANNER__", _esc(banner))
-                                             .replace("__BG__", bg)
-                                             .replace("__ACCENT__", accent)
-                                             .replace("__GLB__", GLB_REL), encoding="utf-8")
+        (workspace / VIEWER_FILE).write_text(
+            _REFERENCE_HTML.replace("__TITLE__", _esc(title)).replace("__ACCENT__", DEFAULT_ACCENT)
+            .replace("__BG__", DEFAULT_BG).replace("__GLB__", GLB_REL), encoding="utf-8")
+
+    # ----- pages -----
+    @staticmethod
+    def _read_spec(ws: Path) -> dict | None:
+        try:
+            spec = json.loads((ws / SPEC_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return spec if isinstance(spec, dict) else None
+
+    @staticmethod
+    def _is_legacy_spec(spec: dict) -> bool:
+        """A model.json from the retired primitive engine: a 'parts' list, or an engine name that only
+        that engine knew ('parametric' / 'auto')."""
+        if isinstance(spec.get("parts"), list):
+            return True
+        return str(spec.get("engine", "")).lower() in {"parametric", "auto"}
+
+    def _write_legacy_page(self, ws: Path, spec: dict) -> None:
+        title = self._title(ws, spec)
+        self._write_notice(
+            ws, title=title, heading="This hologram was made with HELIX's older engine",
+            message="Say “redesign it” and HELIX will rebuild it as a parametric design you can change by "
+                    "voice — “make it wider”, “add a gusset”, “two more holes”.",
+            brief={"title": title, "summary": str(spec.get("prompt") or ""), "parts": []},
+            source=None, note="",
+        )
+
+    def _write_notice(
+        self, ws: Path, *, title: str, heading: str, message: str, brief: dict,
+        source: str | None, note: str = "",
+    ) -> None:
+        """A friendly page in the viewer's chrome with NO dead controls: used when the engine is missing,
+        when a compile fails at bake time, and for a retired-engine workspace. The source, when there is
+        one, is shown in a collapsed panel — it IS the design, and seeing it is part of trusting it."""
+        summary = str(brief.get("summary") or "")
+        parts = [str(p) for p in (brief.get("parts") or [])]
+        source_block = ""
+        if source:
+            source_block = (
+                '<details class="src"><summary>Source — model.scad</summary>'
+                f'<pre>{_esc(source)}</pre>'
+                f'<p class="links"><a href="{SOURCE_FILE}" download>Download model.scad</a></p></details>'
+            )
+        parts_block = ""
+        if parts:
+            parts_block = "<p class=\"parts\"><span>Parts:</span> " + _esc(", ".join(parts)) + "</p>"
+        (ws / VIEWER_FILE).write_text(
+            _NOTICE_HTML
+            .replace("__TITLE__", _esc(title))
+            .replace("__HEADING__", _esc(heading))
+            .replace("__MESSAGE__", _esc(message))
+            .replace("__NOTE__", _esc(note))
+            .replace("__SUMMARY__", _esc(summary) if summary and summary != title else "")
+            .replace("__PARTS__", parts_block)
+            .replace("__SOURCE__", source_block),
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _is_generated_viewer(viewer: Path) -> bool:
         """True if index.html is HELIX's OWN baked viewer (vs a hand-authored animated page). Matches the
-        sentinel OR a reference to the baked GLB, so viewers from before the sentinel still count — that
+        sentinel OR a reference to a baked mesh, so viewers from before the sentinel still count — that
         avoids ever mistaking a real (older) generated viewer for hand-authored and deleting its spec."""
         try:
             html = viewer.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return True  # unreadable → don't risk dropping the spec; just re-bake
-        return VIEWER_SENTINEL in html or GLB_REL in html
+        return VIEWER_SENTINEL in html or GLB_REL in html or STL_JS_REL in html
 
     def _write_render_kit(self, workspace: Path) -> None:
         """Ship the shared render kit next to a hand-authored animated index.html (which imports it)."""
@@ -452,7 +687,7 @@ class ModelBaker:
             pass
 
     def _write_error(self, workspace: Path, message: str) -> None:
-        try:  # drop a stale mesh so the error page isn't sitting next to a now-invalid old GLB
+        try:  # drop a stale reference mesh so the error page isn't sitting next to a now-invalid old GLB
             (workspace / GLB_REL).unlink()
         except OSError:
             pass
@@ -461,175 +696,49 @@ class ModelBaker:
             .replace("__MSG__", _esc(message)), encoding="utf-8")
 
     @staticmethod
-    def _title(workspace: Path, spec: dict) -> str:
-        t = spec.get("title")
+    def _title(workspace: Path, spec: dict, brief: dict | None = None) -> str:
+        """The design's name: the brief's title → model.json's title → the build's name → 'Hologram'."""
+        if brief:
+            t = brief.get("title")
+            if isinstance(t, str) and t.strip():
+                return t.strip()
+        t = spec.get("title") if isinstance(spec, dict) else None
         if isinstance(t, str) and t.strip():
             return t.strip()
         try:
             man = json.loads((workspace / MANIFEST).read_text(encoding="utf-8"))
-            if isinstance(man.get("name"), str):
+            if isinstance(man.get("name"), str) and man["name"].strip():
                 return man["name"]
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         return "Hologram"
 
 
-# ----- texture helpers -----
-def _material_scale(part: dict, mesh: trimesh.Trimesh) -> float:
-    """World units per texture tile. Honors an explicit part 'material_scale', else ~a few tiles across
-    the part so detail reads at any size."""
-    explicit = part.get("material_scale")
-    if isinstance(explicit, (int, float)) and explicit > 0:
-        return float(explicit)
+# ----- small helpers -----
+def _unlink(path: Path) -> None:
     try:
-        extent = float(max(mesh.extents))
-    except Exception:
-        extent = 1.0
-    return max(extent / 4.0, 0.1)
+        path.unlink()
+    except OSError:
+        pass
 
 
-def _triplanar_uv(mesh: trimesh.Trimesh, scale: float) -> np.ndarray:
-    """Per-vertex triplanar UVs: each vertex is projected onto the plane of its dominant normal axis,
-    scaled to world size so tiling is consistent. Good for the mostly-axis-aligned technical parts the
-    parametric engine targets; HELIX (not the coder) computes it."""
-    v = np.asarray(mesh.vertices, dtype=float)
-    n = np.asarray(mesh.vertex_normals, dtype=float)
-    if len(v) == 0:
-        return np.zeros((0, 2))
-    axis = np.argmax(np.abs(n), axis=1)  # 0=x,1=y,2=z dominant
-    uv = np.zeros((len(v), 2))
-    for a, cols in ((0, (2, 1)), (1, (0, 2)), (2, (0, 1))):
-        m = axis == a
-        if m.any():
-            uv[m] = v[m][:, cols]
-    return uv / max(scale, 1e-6)
+def _sha(source: str) -> str:
+    # The library is part of the key: an upgraded helix.scad must recompile even unchanged source.
+    return hashlib.sha256((source + "\n" + scad.HELIX_LIB).encode("utf-8")).hexdigest()
 
 
-# ----- small value helpers -----
-def _f(value: Any, default: float) -> float:
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _vec3(value: Any, default: float) -> tuple[float, float, float]:
-    if isinstance(value, (int, float)):
-        return (float(value), float(value), float(value))
-    if isinstance(value, (list, tuple)) and len(value) >= 3:
-        return (_f(value[0], default), _f(value[1], default), _f(value[2], default))
-    return (default, default, default)
-
-
-def _hex_str(value: Any, default: str) -> str:
-    if isinstance(value, str):
-        s = value.strip()
-        if len(s) == 7 and s.startswith("#"):
-            try:
-                int(s[1:], 16)
-                return s.lower()
-            except ValueError:
-                pass
-    return default
-
-
-def _rgb01(value: Any, default: tuple[float, float, float]) -> tuple[float, float, float]:
-    s = _hex_str(value, "")
-    if not s:
-        return default
-    return (int(s[1:3], 16) / 255.0, int(s[3:5], 16) / 255.0, int(s[5:7], 16) / 255.0)
-
-
-def _material(part: dict) -> PBRMaterial:
-    r, g, b = _rgb01(part.get("color"), (0.8, 0.8, 0.82))
-    opacity = _f(part.get("opacity"), 1.0)
-    opacity = min(1.0, max(0.0, opacity))
-    mat = PBRMaterial(
-        baseColorFactor=[r, g, b, opacity],
-        metallicFactor=min(1.0, max(0.0, _f(part.get("metalness"), 0.0))),
-        roughnessFactor=min(1.0, max(0.0, _f(part.get("roughness"), 0.6))),
-    )
-    if part.get("emissive"):
-        er, eg, eb = _rgb01(part.get("emissive"), (0.0, 0.0, 0.0))
-        strength = min(1.0, max(0.0, _f(part.get("emissive_strength"), 1.0)))
-        mat.emissiveFactor = [er * strength, eg * strength, eb * strength]
-    if opacity < 1.0:
-        mat.alphaMode = "BLEND"
-    return mat
-
-
-def _difference(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh:
-    try:
-        return trimesh.boolean.difference([a, b], engine="manifold")
-    except TypeError:  # older/newer trimesh signature without the engine kw
-        return trimesh.boolean.difference([a, b])
-
-
-def _union(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh:
-    try:
-        return trimesh.boolean.union([a, b], engine="manifold")
-    except TypeError:
-        return trimesh.boolean.union([a, b])
-
-
-def _intersection(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh:
-    try:
-        return trimesh.boolean.intersection([a, b], engine="manifold")
-    except TypeError:
-        return trimesh.boolean.intersection([a, b])
-
-
-def _smooth(mesh: trimesh.Trimesh, passes: int) -> trimesh.Trimesh:
-    """Subdivide then Taubin-smooth — rounds a blocky base into a sculpted, soft-edged surface."""
-    for _ in range(max(1, min(3, passes))):
-        mesh = mesh.subdivide()
-    trimesh.smoothing.filter_taubin(mesh, iterations=10)
-    return mesh
-
-
-def _as_list(value: Any) -> list[str]:
+def _num(value: float | None) -> str:
     if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        return [str(v) for v in value]
-    return [str(value)]
+        return ""
+    return str(int(value)) if float(value).is_integer() else str(value)
 
 
-def _reflect_matrix(axis: str) -> np.ndarray | None:
-    idx = {"x": 0, "y": 1, "z": 2}.get(str(axis).lower())
-    if idx is None:
-        return None
-    diag = [1.0, 1.0, 1.0]
-    diag[idx] = -1.0
-    return np.diag([*diag, 1.0])
-
-
-def _transformed_copy(mesh: trimesh.Trimesh, matrix: np.ndarray) -> trimesh.Trimesh:
-    # trimesh.apply_transform auto-flips winding on a negative-determinant (mirror) transform, so the
-    # reflected copy keeps outward-facing normals — no manual invert needed.
-    c = mesh.copy()
-    c.apply_transform(matrix)
-    return c
-
-
-def _expand_array(instances: list[trimesh.Trimesh], arr: dict) -> list[trimesh.Trimesh]:
-    count = max(1, min(64, int(_f(arr.get("count"), 1))))
-    offset = np.array(_vec3(arr.get("offset"), 0.0))
-    rot = _vec3(arr.get("rotation"), 0.0)
-    out: list[trimesh.Trimesh] = []
-    for inst in instances:
-        for i in range(count):
-            if i == 0:
-                out.append(inst)
-                continue
-            matrix = trimesh.transformations.translation_matrix(offset * i) @ \
-                trimesh.transformations.euler_matrix(
-                    math.radians(rot[0] * i), math.radians(rot[1] * i), math.radians(rot[2] * i),
-                    axes="sxyz")
-            out.append(_transformed_copy(inst, matrix))
-    return out
+def _hex_str(value, default: str) -> str:
+    if isinstance(value, str):
+        v = value.strip()
+        if len(v) == 7 and v.startswith("#") and all(c in "0123456789abcdefABCDEF" for c in v[1:]):
+            return v
+    return default
 
 
 def _esc(text: str) -> str:
@@ -637,9 +746,24 @@ def _esc(text: str) -> str:
             .replace('"', "&quot;"))
 
 
-# A single fixed viewer template, written verbatim by HELIX (never authored by the model). It loads the
-# baked GLB, frames the whole model, and gives orbit/zoom with the HELIX look + a studio environment so
-# metallic/PBR surfaces read well.
+def _json_for_script(data: dict) -> str:
+    """JSON safe to inline inside a <script> block: a '</' in the design's source or a comment in a
+    parameter description must not be able to close the script element early."""
+    return json.dumps(data, ensure_ascii=False).replace("</", "<\\/").replace("<!--", "<\\!--")
+
+
+_CDN_NOTE = (
+    "<!-- No vendored three.js was handed to the baker, so this page loads it from a CDN; "
+    "a HELIX build ships assets/three.min.js beside the page and needs no network. -->"
+)
+
+# A single fixed viewer template, written verbatim by HELIX (never authored by the model). three.js r128
+# UMD (THREE.* globals — outputEncoding era; no addons, because addons are ES modules and would drag a
+# CDN back in). OpenSCAD is Z-up, so the WORLD is Z-up here (camera.up = +Z, the grid lies in XY): model
+# coordinates are world coordinates, and the section plane, the axes and the dimensions read straight
+# off the STL with no sign gymnastics. The data the page needs is inlined as window.HELIX_MODEL; the
+# mesh arrives as window.HELIX_STL (base64) from a sidecar <script src>, because fetch() of a local file
+# is refused over file://.
 _VIEWER_HTML = """<!doctype html>
 <!-- HELIX-GENERATED-VIEWER -->
 <html lang="en">
@@ -648,227 +772,422 @@ _VIEWER_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>__TITLE__</title>
 <style>
-  :root { --accent: __ACCENT__; }
-  html, body { margin: 0; height: 100%; background: __BG__; overflow: hidden;
-    font-family: -apple-system, "Segoe UI", system-ui, sans-serif; color: #cfeff0; }
-  #app { position: fixed; inset: 0; }
-  #title { position: fixed; top: 14px; left: 16px; font-size: 14px; font-weight: 600;
-    letter-spacing: .04em; color: var(--accent); opacity: .85; pointer-events: none;
-    text-shadow: 0 1px 8px rgba(0,0,0,.6); }
-  #panel { position: fixed; bottom: 14px; right: 14px; display: flex; gap: 6px;
-    background: rgba(8,11,15,.55); border: 1px solid rgba(63,224,224,.25); border-radius: 10px;
-    padding: 6px; backdrop-filter: blur(6px); }
-  #panel button { background: transparent; color: #bfe9ea; border: 1px solid rgba(63,224,224,.25);
-    border-radius: 7px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
-  #panel button:hover { border-color: var(--accent); color: var(--accent); }
-  #panel button.on { color: var(--accent); border-color: var(--accent); }
-  #msg { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
-    text-align: center; padding: 24px; font-size: 15px; color: #9fc7c8; }
-  #banner { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); max-width: 70%;
-    display: none; background: rgba(8,11,15,.82); border: 1px solid rgba(224,161,63,.5);
-    color: #e6c089; border-radius: 10px; padding: 7px 14px; font-size: 12px; text-align: center;
-    z-index: 2; backdrop-filter: blur(6px); }
-  /* Futuristic HUD frame — pure CSS over the canvas, never intercepts pointer events (so the
-     OrbitControls + buttons keep working) and never touches the WebGL render. */
-  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 1; }
-  #hud .vignette { position: absolute; inset: 0;
-    background: radial-gradient(ellipse at center, transparent 56%, rgba(0,0,0,.55) 100%); }
-  #hud .scan { position: absolute; inset: 0; opacity: .05; mix-blend-mode: screen;
-    background: repeating-linear-gradient(0deg, #3fe0e0 0, #3fe0e0 1px, transparent 1px, transparent 3px); }
-  #hud .corner { position: absolute; width: 26px; height: 26px; border: 1.5px solid rgba(63,224,224,.5); }
-  #hud .tl { top: 16px; left: 16px; border-right: none; border-bottom: none; }
-  #hud .tr { top: 16px; right: 16px; border-left: none; border-bottom: none; }
-  #hud .bl { bottom: 16px; left: 16px; border-right: none; border-top: none; }
-  #hud .br { bottom: 16px; right: 16px; border-left: none; border-top: none; }
-  @keyframes hud-in { from { opacity: 0; } to { opacity: 1; } }
-  #app, #hud, #title, #panel { animation: hud-in .6s ease both; }
+  :root { --accent: #3fe0e0; --bg: #10161c; --ink: #d5dde3; --dim: #8a98a4; --line: rgba(213,221,227,.14); }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; font-size: 13px;
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif; color: var(--ink); }
+  #app { position: fixed; inset: 0; cursor: grab; touch-action: none; }
+  #app:active { cursor: grabbing; }
+  #vignette { position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.45) 100%); }
+  .hud { position: fixed; background: rgba(16,22,28,.8); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; backdrop-filter: blur(6px); z-index: 2; }
+  #info { top: 14px; left: 14px; max-width: 360px; }
+  #info h1 { margin: 0 0 2px; font-size: 14px; font-weight: 600; letter-spacing: .04em; color: var(--accent); }
+  #info .sum { color: var(--dim); margin: 0 0 6px; line-height: 1.35; }
+  #info .stats { font-variant-numeric: tabular-nums; line-height: 1.55; }
+  #info .stats span { color: var(--dim); margin-right: 4px; }
+  #info .ver { color: var(--dim); font-size: 11px; margin-top: 4px; }
+  #tools { top: 14px; right: 14px; width: 262px; max-height: calc(100% - 28px); overflow: auto; }
+  #tools h2 { margin: 8px 0 5px; font-size: 11px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--dim); }
+  #tools h2:first-child { margin-top: 0; }
+  .row { display: flex; flex-wrap: wrap; gap: 5px; }
+  button, .seg b { background: transparent; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 9px; font-size: 12px; cursor: pointer; font-family: inherit; }
+  button:hover, .seg b:hover { border-color: var(--accent); color: var(--accent); }
+  button.on, .seg b.on { color: var(--accent); border-color: var(--accent); }
+  .seg { display: inline-flex; gap: 4px; }
+  #section { width: 100%; margin: 6px 0 2px; accent-color: var(--accent); }
+  #sectionLabel { color: var(--dim); font-variant-numeric: tabular-nums; }
+  #params { margin: 0; padding: 0; list-style: none; }
+  #params li { padding: 5px 0; border-top: 1px solid var(--line); }
+  #params li:first-child { border-top: none; }
+  #params .n { font-weight: 600; }
+  #params .v { color: var(--accent); font-variant-numeric: tabular-nums; margin-left: 6px; }
+  #params .r, #params .d { color: var(--dim); font-size: 12px; display: block; }
+  #params .say { color: var(--dim); font-size: 11px; font-style: italic; }
+  #exports a { color: var(--accent); text-decoration: none; border: 1px solid var(--line); border-radius: 7px;
+    padding: 4px 8px; font-size: 12px; }
+  #exports a:hover { border-color: var(--accent); }
+  details.src summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+  details.src pre { margin: 6px 0 0; max-height: 260px; overflow: auto; font-size: 11px; line-height: 1.4;
+    color: var(--ink); background: rgba(0,0,0,.25); border-radius: 7px; padding: 8px; white-space: pre; }
+  #hint { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); color: var(--dim);
+    font-size: 11px; pointer-events: none; z-index: 2; text-shadow: 0 1px 6px rgba(0,0,0,.7); }
+  #msg { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 3;
+    text-align: center; padding: 24px; font-size: 15px; color: var(--dim); pointer-events: none; }
+  @media (max-width: 720px) { #tools { display: none; } #info { max-width: 60%; } }
 </style>
 </head>
 <body>
   <div id="app"></div>
-  <div id="hud"><div class="vignette"></div><div class="scan"></div>
-    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i></div>
-  <div id="title">__TITLE__</div>
-  <div id="banner">__BANNER__</div>
-  <div id="panel">
-    <button id="play" style="display:none">Pause</button>
-    <button id="spin">Auto-rotate</button>
-    <button id="wire">Wireframe</button>
-    <button id="reset">Reset view</button>
+  <div id="vignette"></div>
+  <div id="info" class="hud">
+    <h1 id="title">__TITLE__</h1>
+    <p class="sum" id="summary"></p>
+    <div class="stats">
+      <div><span>Size</span><b id="dims">—</b></div>
+      <div><span>Faces</span><b id="faces">—</b></div>
+      <div><span>Grid</span><b id="gridLabel">—</b></div>
+    </div>
+    <div class="ver" id="engine"></div>
   </div>
+  <div id="tools" class="hud">
+    <h2>View</h2>
+    <div class="row">
+      <button id="wire">Wireframe</button>
+      <button id="shade">Flat-lit</button>
+      <button id="reset">Reset view</button>
+    </div>
+    <h2>Section plane</h2>
+    <div class="seg" id="axisPick"><b data-axis="">Off</b><b data-axis="x">X</b><b data-axis="y">Y</b><b data-axis="z">Z</b></div>
+    <input id="section" type="range" min="0" max="1000" value="500" disabled />
+    <div id="sectionLabel">No section</div>
+    <h2>Parameters</h2>
+    <ul id="params"></ul>
+    <h2>Export</h2>
+    <div class="row" id="exports"></div>
+    <h2>Source</h2>
+    <details class="src"><summary>model.scad</summary><pre id="source"></pre></details>
+  </div>
+  <div id="hint">drag to orbit · right-drag or shift-drag to pan · wheel to zoom</div>
   <div id="msg"></div>
-  <script type="importmap">
-  { "imports": {
-      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
-  } }
+  __THREE_NOTE__
+  <script src="__THREE_SRC__"></script>
+  <script src="__STL_JS__"></script>
+  <script>
+  window.HELIX_MODEL = __DATA__;
   </script>
-  <script type="module">
-  import * as THREE from "three";
-  import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-  import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-  import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-  import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
-  import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
-  import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
-  import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
-  import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
-  import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
+  <script>
+  (function () {
+    "use strict";
+    var D = window.HELIX_MODEL || {};
+    var $ = function (id) { return document.getElementById(id); };
+    var fail = function (m) { var e = $("msg"); e.textContent = m; e.style.display = "flex"; };
+    var fmt = function (n) { return (Math.round(n * 10) / 10).toString(); };
 
-  const fail = (m) => { const e = document.getElementById("msg");
-    e.textContent = m; e.style.display = "flex"; };
-  const _bn = document.getElementById("banner");  // shown only when a preview banner was baked in
-  if (_bn && _bn.textContent.trim()) _bn.style.display = "block";
-
-  try {
-    const app = document.getElementById("app");
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
-    renderer.shadowMap.enabled = true;          // soft contact shadows ground the model
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    app.appendChild(renderer.domElement);
-
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color("__BG__");
-
-    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 5000);
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
-
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-
-    const key = new THREE.DirectionalLight(0xffffff, 2.6); key.position.set(3, 5, 4);
-    key.castShadow = true; key.shadow.mapSize.set(2048, 2048); key.shadow.bias = -0.0005;
-    key.shadow.normalBias = 0.02; scene.add(key); scene.add(key.target);
-    const fill = new THREE.DirectionalLight(0x88ccff, 0.8); fill.position.set(-4, 2, -3); scene.add(fill);
-    scene.add(new THREE.HemisphereLight(0xbfe9ea, 0x0a0e12, 0.5));
-
-    // Post-processing: a soft UnrealBloom so emissive parts (arc reactors, screens, glowing edges)
-    // actually bloom — the futuristic touch. Follows the official three.js bloom example (RenderPass +
-    // UnrealBloomPass + OutputPass, keeping ACES tone mapping). Guarded: if it can't initialise we fall
-    // straight back to direct rendering, so a model is never lost to a post-processing hiccup.
-    let composer = null, gtao = null;
-    try {
-      composer = new EffectComposer(renderer);
-      composer.addPass(new RenderPass(scene, camera));
-      // Ground-truth ambient occlusion in the crevices — what makes flat solid-color parts read as solid
-      // 3D forms and reveals booleaned cutaways/recesses. Its own try/catch + a perf guard below.
-      try {
-        gtao = new GTAOPass(scene, camera, window.innerWidth, window.innerHeight);
-        gtao.blendIntensity = 0.55;
-        composer.addPass(gtao);
-      } catch (e) { gtao = null; }
-      composer.addPass(new UnrealBloomPass(
-        new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.4, 0.85));
-      composer.addPass(new OutputPass());
-    } catch (e) { composer = null; }
-
-    let model = null, grid = null, ground = null, radius = 1, mixer = null, playing = true;
-    const clock = new THREE.Clock();
-    const home = { pos: new THREE.Vector3(), target: new THREE.Vector3() };
-
-    const frame = () => {
-      const box = new THREE.Box3().setFromObject(model);
-      const size = box.getSize(new THREE.Vector3());
-      const center = box.getCenter(new THREE.Vector3());
-      model.position.sub(center);                       // recentre at the origin
-      const box2 = new THREE.Box3().setFromObject(model);
-      const c2 = box2.getCenter(new THREE.Vector3());
-      radius = Math.max(size.x, size.y, size.z, 1e-3) * 0.5;
-      const dist = radius / Math.sin((camera.fov * Math.PI / 180) / 2) * 1.25;
-      camera.near = radius / 100; camera.far = radius * 100; camera.updateProjectionMatrix();
-      camera.position.set(c2.x + dist * 0.7, c2.y + dist * 0.45, c2.z + dist);
-      controls.target.copy(c2); controls.update();
-      home.pos.copy(camera.position); home.target.copy(c2);
-      // Aim the shadow-casting key light at the model and size its ortho frustum to fit (a frustum that's
-      // too big gives blocky shadows; too small clips them).
-      key.position.set(c2.x + radius * 2.2, c2.y + radius * 3.4, c2.z + radius * 2.0);
-      key.target.position.copy(c2); key.target.updateMatrixWorld();
-      const sc = key.shadow.camera;
-      sc.left = -radius * 1.7; sc.right = radius * 1.7; sc.top = radius * 1.7; sc.bottom = -radius * 1.7;
-      sc.near = radius * 0.05; sc.far = radius * 14; sc.updateProjectionMatrix();
-      // A real ground plane that CATCHES the contact shadow (the single biggest "it's grounded" cue),
-      // with a faint grid kept on top for the HUD feel.
-      if (ground) scene.remove(ground);
-      ground = new THREE.Mesh(
-        new THREE.CircleGeometry(radius * 9, 64),
-        new THREE.MeshStandardMaterial({ color: 0x0c1319, roughness: 1.0, metalness: 0.0 }));
-      ground.rotation.x = -Math.PI / 2; ground.position.y = box2.min.y - radius * 0.003;
-      ground.receiveShadow = true; scene.add(ground);
-      if (grid) scene.remove(grid);
-      grid = new THREE.GridHelper(radius * 6, 24, 0x224a4a, 0x132a2a);
-      grid.position.y = box2.min.y; grid.material.opacity = 0.16; grid.material.transparent = true;
-      scene.add(grid);
-    };
-
-    new GLTFLoader().load("__GLB__", (gltf) => {
-      model = gltf.scene;
-      // Derive creased normals ONLY when a mesh ships without them (the baked parametric GLB) — so flat
-      // faces stay crisp and curves read smooth. Skip meshes that already have normals (rigged/animated
-      // models do), since re-indexing would disturb skinning.
-      model.traverse((o) => { if (o.isMesh) {
-        o.castShadow = true; o.receiveShadow = true;
-        if (o.geometry && !o.geometry.attributes.normal) o.geometry = toCreasedNormals(o.geometry, Math.PI / 3);
-      } });
-      scene.add(model); frame();
-      if (gltf.animations && gltf.animations.length) {   // an animated/rigged model — play it
-        mixer = new THREE.AnimationMixer(model);
-        gltf.animations.forEach((clip) => mixer.clipAction(clip).play());
-        const play = document.getElementById("play");
-        play.style.display = "";
-        play.onclick = () => { playing = !playing; play.textContent = playing ? "Pause" : "Play";
-          play.classList.toggle("on", !playing); };
-      }
-    }, undefined, () => fail("Couldn't load the hologram mesh."));
-
-    addEventListener("resize", () => {
-      camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      if (composer) composer.setSize(window.innerWidth, window.innerHeight);
-      if (gtao && gtao.setSize) gtao.setSize(window.innerWidth, window.innerHeight);
+    // ---- The chrome that needs no WebGL: brief, parameters, exports, source. Filled first so a page
+    // whose 3D view cannot start (no WebGL, a missing sidecar) still shows the whole design. ----
+    $("summary").textContent = D.summary || "";
+    $("engine").textContent = D.engine ? "OpenSCAD " + D.engine : "";
+    var ul = $("params");
+    (D.params || []).forEach(function (p) {
+      var li = document.createElement("li");
+      var n = document.createElement("span"); n.className = "n"; n.textContent = p.name;
+      var v = document.createElement("span"); v.className = "v"; v.textContent = p.value;
+      li.appendChild(n); li.appendChild(v);
+      var range = "";
+      if (p.minimum !== null && p.minimum !== undefined && p.maximum !== null && p.maximum !== undefined)
+        range = p.minimum + " – " + p.maximum + (p.step ? " by " + p.step : "");
+      else if (p.choices && p.choices.length) range = p.choices.join(" · ");
+      if (range) { var r = document.createElement("span"); r.className = "r"; r.textContent = range; li.appendChild(r); }
+      if (p.description) { var d = document.createElement("span"); d.className = "d"; d.textContent = p.description; li.appendChild(d); }
+      var say = document.createElement("span"); say.className = "say";
+      say.textContent = "say: make " + p.name + " " + (p.kind === "bool" ? (p.value === "true" ? "false" : "true") : "<value>");
+      li.appendChild(say);
+      ul.appendChild(li);
     });
+    if (!(D.params || []).length) { var none = document.createElement("li"); none.className = "d";
+      none.textContent = "No adjustable parameters — say what to change and HELIX edits the design."; ul.appendChild(none); }
+    var ex = $("exports"); var F = D.files || {};
+    [["STL", F.stl], ["3MF", F.mf], ["SCAD", F.scad], ["Preview", F.preview]].forEach(function (pair) {
+      if (!pair[1]) return;
+      var a = document.createElement("a"); a.href = pair[1]; a.setAttribute("download", ""); a.textContent = pair[0]; ex.appendChild(a);
+    });
+    $("source").textContent = D.source || "";
 
-    const spinBtn = document.getElementById("spin");
-    spinBtn.onclick = () => { controls.autoRotate = !controls.autoRotate;
-      controls.autoRotateSpeed = 1.4; spinBtn.classList.toggle("on", controls.autoRotate); };
-    const wireBtn = document.getElementById("wire");
-    let wire = false;
-    wireBtn.onclick = () => { wire = !wire; wireBtn.classList.toggle("on", wire);
-      if (model) model.traverse((o) => { if (o.isMesh) o.material.wireframe = wire; }); };
-    document.getElementById("reset").onclick = () => {
-      camera.position.copy(home.pos); controls.target.copy(home.target); controls.update(); };
-
-    // Perf guard: if the machine can't sustain ~30fps with shadows + AO (a heavy mesh / weak GPU), drop
-    // the expensive bits automatically so the viewer stays smooth — keeps the baker settings-free.
-    let pf = 0, pacc = 0, perfChecked = false;
-    (function loop() {
-      requestAnimationFrame(loop);
-      const dt = clock.getDelta();
-      if (!perfChecked && model) {
-        pf++; pacc += dt;
-        if (pf >= 45) {
-          perfChecked = true;
-          if (pacc / pf > 0.033) {
-            renderer.shadowMap.enabled = false;  // recompile so shadows DROP cleanly (not freeze/black)
-            if (model) model.traverse((o) => { if (o.isMesh && o.material) o.material.needsUpdate = true; });
-            if (ground && ground.material) ground.material.needsUpdate = true;
-            if (gtao) gtao.enabled = false;
-          }
-        }
+    // ---- STL parsing. OpenSCAD 2021.01 writes ASCII STL by default (a 2 MB file is normal), so the
+    // ASCII path is one regex over the vertex lines, never a per-character walk. Binary is recognised by
+    // its exact length (84 + 50 * triangles) — the only reliable tell, since some writers start a binary
+    // file with the word "solid" too. ----
+    function bytesFromBase64(b64) {
+      var bin = atob(b64), n = bin.length, out = new Uint8Array(n);
+      for (var i = 0; i < n; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+    function parseBinary(bytes) {
+      var dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      var n = dv.getUint32(80, true), pos = new Float32Array(n * 9), o = 84, k = 0;
+      for (var i = 0; i < n; i++) {
+        o += 12;                                   // the stored facet normal is ignored; faces are recomputed
+        for (var v = 0; v < 9; v++) { pos[k++] = dv.getFloat32(o, true); o += 4; }
+        o += 2;                                    // attribute byte count
       }
-      if (mixer && playing) mixer.update(dt);
-      controls.update();
-      if (composer) composer.render(dt); else renderer.render(scene, camera);
-    })();
-  } catch (err) {
-    fail("Couldn't start the 3D view: " + (err && err.message ? err.message : err));
-  }
+      return pos;
+    }
+    var VERTEX_RE = /vertex\\s+([-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?)\\s+([-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?)\\s+([-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?)/g;
+    function parseAscii(text) {
+      var arr = [], m;
+      VERTEX_RE.lastIndex = 0;
+      while ((m = VERTEX_RE.exec(text)) !== null) arr.push(+m[1], +m[2], +m[3]);
+      arr.length -= arr.length % 9;                // a truncated trailing facet is dropped, not drawn
+      return new Float32Array(arr);
+    }
+    function parseSTL(bytes) {
+      if (bytes.byteLength >= 84) {
+        var dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        var n = dv.getUint32(80, true);
+        if (84 + n * 50 === bytes.byteLength) return parseBinary(bytes);
+      }
+      return parseAscii(new TextDecoder("utf-8").decode(bytes));
+    }
+
+    // ---- A procedural matcap: a soft key from the top-left on neutral grey with a faint rim, drawn on a
+    // canvas so the page needs no image asset. Lit-looking without a single light or an environment. ----
+    function makeMatcap() {
+      var c = document.createElement("canvas"); c.width = c.height = 256;
+      var g = c.getContext("2d");
+      var key = g.createRadialGradient(92, 84, 6, 128, 128, 156);
+      key.addColorStop(0, "#f4f6f8"); key.addColorStop(0.3, "#bcc4cb");
+      key.addColorStop(0.72, "#6f7983"); key.addColorStop(1, "#343b42");
+      g.fillStyle = key; g.fillRect(0, 0, 256, 256);
+      var rim = g.createRadialGradient(128, 128, 96, 128, 128, 128);
+      rim.addColorStop(0, "rgba(255,255,255,0)"); rim.addColorStop(1, "rgba(205,222,232,0.38)");
+      g.fillStyle = rim; g.fillRect(0, 0, 256, 256);
+      return new THREE.CanvasTexture(c);
+    }
+
+    if (typeof THREE === "undefined") { fail("Couldn't start the 3D view — the viewer library didn't load."); return; }
+    if (!window.HELIX_STL) { fail("Couldn't load the hologram mesh."); return; }
+
+    try {
+      var positions = parseSTL(bytesFromBase64(window.HELIX_STL));
+      if (!positions.length) { fail("The compiled model is empty — nothing to show yet."); return; }
+      var app = $("app");
+      var renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.localClippingEnabled = true;          // the section plane
+      app.appendChild(renderer.domElement);
+
+      var scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x10161c);
+      var camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 10000);
+      camera.up.set(0, 0, 1);                          // OpenSCAD is Z-up; so is this world
+
+      // Geometry straight from the STL: unshared vertices → computeVertexNormals gives per-FACE normals,
+      // the faceted look that reads as CAD. Crease edges above 30° are drawn as lines over it.
+      var geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geom.computeVertexNormals();
+      geom.computeBoundingBox();
+      var bb = geom.boundingBox;
+      var size = bb.getSize(new THREE.Vector3()), center = bb.getCenter(new THREE.Vector3());
+      var radius = Math.max(size.length() / 2, 0.5);
+
+      var matcapMat = new THREE.MeshMatcapMaterial({ matcap: makeMatcap(), color: 0xffffff,
+        side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+      var flatMat = new THREE.MeshLambertMaterial({ color: 0xb9c1c9, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+      var edgeMat = new THREE.LineBasicMaterial({ color: 0xd2dbe2, transparent: true, opacity: 0.6 });
+      var mats = [matcapMat, flatMat, edgeMat];
+      var mesh = new THREE.Mesh(geom, matcapMat);
+      var edges = new THREE.LineSegments(new THREE.EdgesGeometry(geom, 30), edgeMat);
+      scene.add(mesh); scene.add(edges);
+      // Lights only matter to the flat-lit variant: a soft sky/ground pair and one gentle key. Low
+      // intensities, no tone-mapping exposure — a drawing, not a showroom.
+      scene.add(new THREE.HemisphereLight(0xe2e8ee, 0x2a3139, 0.85));
+      var sun = new THREE.DirectionalLight(0xffffff, 0.55); sun.position.set(1, -1.2, 2.2); scene.add(sun);
+
+      // Grid in millimetres, sized from the model: 10 mm minor / 100 mm major for anything up to 500 mm,
+      // scaled by a decade either way beyond that, and the spacing is written in the HUD so the picture
+      // can be read like a drawing. Lines snap to multiples of the major spacing so the origin sits on one.
+      var extent = Math.max(size.x, size.y, size.z, 1);
+      var minor = 10;
+      while (extent > minor * 50) minor *= 10;
+      while (extent < minor * 2 && minor > 0.1) minor /= 10;
+      var major = minor * 10;
+      var span = Math.max(2, Math.ceil((extent * 1.8) / major)) * major;
+      var gcx = Math.round(center.x / major) * major, gcy = Math.round(center.y / major) * major;
+      var gridMinor = new THREE.GridHelper(span, Math.round(span / minor), 0x2a3540, 0x1e2831);
+      var gridMajor = new THREE.GridHelper(span, Math.round(span / major), 0x3b4855, 0x3b4855);
+      [gridMinor, gridMajor].forEach(function (gr) {
+        gr.rotation.x = Math.PI / 2;                 // GridHelper is XZ; lay it in the XY plane
+        gr.position.set(gcx, gcy, bb.min.z);
+        gr.material.transparent = true; gr.material.opacity = 0.9;
+        scene.add(gr);
+      });
+      var axes = new THREE.AxesHelper(major);
+      axes.position.set(0, 0, Math.min(0, bb.min.z));
+      scene.add(axes);
+      $("gridLabel").textContent = minor + " mm · " + major + " mm";
+      $("dims").textContent = fmt(size.x) + " × " + fmt(size.y) + " × " + fmt(size.z) + " mm  (W × D × H)";
+      $("faces").textContent = (positions.length / 9).toLocaleString() + " triangles";
+
+      // ---- Orbit / pan / zoom, by hand (OrbitControls is an addon = an ES module = a CDN). Spherical
+      // coordinates about a target with Z up; pan slides the target in the camera plane. ----
+      var fovRad = camera.fov * Math.PI / 180;
+      var view = { target: new THREE.Vector3(), az: 0, el: 0, r: 1 };
+      function home() {
+        view.target.copy(center);
+        view.az = -Math.PI / 2 + 0.55;               // from the front-right, a little above — OpenSCAD's habit
+        view.el = 0.5;
+        view.r = (radius / Math.sin(fovRad / 2)) * 1.15;
+        applyCamera();
+      }
+      function applyCamera() {
+        var ce = Math.cos(view.el);
+        camera.position.set(
+          view.target.x + view.r * ce * Math.cos(view.az),
+          view.target.y + view.r * ce * Math.sin(view.az),
+          view.target.z + view.r * Math.sin(view.el));
+        camera.lookAt(view.target);
+        camera.near = Math.max(view.r / 500, 0.01);
+        camera.far = view.r * 20 + radius * 20;
+        camera.updateProjectionMatrix();
+        render();
+      }
+      function rotate(dx, dy) {
+        view.az -= dx * 0.0065;
+        view.el = Math.max(-1.52, Math.min(1.52, view.el + dy * 0.0065));
+        applyCamera();
+      }
+      function pan(dx, dy) {
+        var h = renderer.domElement.clientHeight || 1;
+        var perPixel = (2 * view.r * Math.tan(fovRad / 2)) / h;
+        var right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+        var upv = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+        view.target.addScaledVector(right, -dx * perPixel).addScaledVector(upv, dy * perPixel);
+        applyCamera();
+      }
+      function zoom(f) {
+        view.r = Math.max(radius * 0.05, Math.min(radius * 60, view.r * f));
+        applyCamera();
+      }
+      var el = renderer.domElement, pointers = new Map(), pinch = 0;
+      el.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+      el.addEventListener("pointerdown", function (e) {
+        try { el.setPointerCapture(e.pointerId); } catch (_) { /* a synthetic or already-released pointer */ }
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, button: e.button, shift: e.shiftKey });
+        if (pointers.size === 2) { var p = Array.from(pointers.values()); pinch = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y); }
+      });
+      el.addEventListener("pointermove", function (e) {
+        var p = pointers.get(e.pointerId); if (!p) return;
+        var dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
+        if (pointers.size === 2) {                   // touch pinch: zoom + two-finger pan
+          var q = Array.from(pointers.values()), d = Math.hypot(q[0].x - q[1].x, q[0].y - q[1].y);
+          if (pinch > 0 && d > 0) zoom(pinch / d);
+          pinch = d; pan(dx / 2, dy / 2); return;
+        }
+        if (p.button === 2 || p.button === 1 || p.shift) pan(dx, dy); else rotate(dx, dy);
+      });
+      var release = function (e) { pointers.delete(e.pointerId); pinch = 0; };
+      el.addEventListener("pointerup", release); el.addEventListener("pointercancel", release);
+      el.addEventListener("wheel", function (e) { e.preventDefault(); zoom(Math.exp(e.deltaY * 0.0012)); }, { passive: false });
+
+      // ---- Section plane: one THREE.Plane per axis, slid across the model's extent; the mesh is
+      // double-sided so the cut shows the inside. Edges clip with it. ----
+      var planes = { x: new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0),
+                     y: new THREE.Plane(new THREE.Vector3(0, -1, 0), 0),
+                     z: new THREE.Plane(new THREE.Vector3(0, 0, -1), 0) };
+      var sectionAxis = "";
+      var slider = $("section");
+      function applySection() {
+        var label = $("sectionLabel");
+        if (!sectionAxis) {
+          mats.forEach(function (m) { m.clippingPlanes = []; m.needsUpdate = true; });
+          slider.disabled = true; label.textContent = "No section";
+        } else {
+          var lo = bb.min[sectionAxis], hi = bb.max[sectionAxis];
+          var c = lo + (hi - lo) * (slider.value / 1000);
+          var pl = planes[sectionAxis]; pl.constant = c;  // keeps axis ≤ c (distance = c − coord ≥ 0)
+          mats.forEach(function (m) { m.clippingPlanes = [pl]; m.needsUpdate = true; });
+          slider.disabled = false;
+          label.textContent = "Cut at " + sectionAxis.toUpperCase() + " = " + fmt(c) + " mm";
+        }
+        render();
+      }
+      Array.prototype.forEach.call($("axisPick").querySelectorAll("b"), function (b) {
+        b.classList.toggle("on", b.getAttribute("data-axis") === sectionAxis);
+        b.addEventListener("click", function () {
+          sectionAxis = b.getAttribute("data-axis");
+          Array.prototype.forEach.call($("axisPick").querySelectorAll("b"), function (o) {
+            o.classList.toggle("on", o === b); });
+          applySection();
+        });
+      });
+      slider.addEventListener("input", applySection);
+
+      // ---- View toggles ----
+      var wire = false, flat = false;
+      $("wire").addEventListener("click", function () {
+        wire = !wire; $("wire").classList.toggle("on", wire);
+        matcapMat.wireframe = flatMat.wireframe = wire; render();
+      });
+      $("shade").addEventListener("click", function () {
+        flat = !flat; $("shade").classList.toggle("on", flat);
+        mesh.material = flat ? flatMat : matcapMat; render();
+      });
+      $("reset").addEventListener("click", home);
+      // The canvas follows the window — checked on EVERY render, not only on a resize event, because a
+      // page that loads while its window is still 0×0 (a hidden pane, a QWebEngineView before layout)
+      // may never be told about the size it grew into, and would stay a 0×0 canvas with a NaN aspect.
+      var fitted = { w: 0, h: 0 };
+      function fit() {
+        var w = window.innerWidth, h = window.innerHeight;
+        if (!w || !h || (w === fitted.w && h === fitted.h)) return;
+        fitted.w = w; fitted.h = h;
+        camera.aspect = w / h; camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+      }
+      window.addEventListener("resize", render);
+
+      // Render on demand — a still drawing must not burn the GPU at 60 fps beside the orb.
+      var queued = false;
+      function render() {
+        if (queued) return;
+        queued = true;
+        requestAnimationFrame(function () { queued = false; fit(); renderer.render(scene, camera); });
+      }
+      home();
+    } catch (err) {
+      fail("Couldn't start the 3D view: " + (err && err.message ? err.message : err));
+    }
+  })();
   </script>
+</body>
+</html>
+"""
+
+# The friendly page in the viewer's chrome with no dead controls: the engine isn't installed, a compile
+# failed at bake time, or the workspace is from the retired engine. The design (when there is one) is
+# shown in full — it is finished and saved even when it cannot be compiled yet.
+_NOTICE_HTML = """<!doctype html>
+<!-- HELIX-GENERATED-VIEWER -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>__TITLE__</title>
+<style>
+  :root { --accent: #3fe0e0; --bg: #10161c; --ink: #d5dde3; --dim: #8a98a4; --line: rgba(213,221,227,.14); }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); font-size: 14px;
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+  body { display: flex; align-items: flex-start; justify-content: center; padding: 48px 16px; box-sizing: border-box; }
+  .card { max-width: 640px; width: 100%; background: rgba(16,22,28,.8); border: 1px solid var(--line);
+    border-radius: 12px; padding: 22px 24px; }
+  .name { color: var(--accent); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 6px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 10px; }
+  p { line-height: 1.5; margin: 0 0 10px; }
+  .note, .sum, .parts { color: var(--dim); }
+  .parts span { color: var(--ink); }
+  details.src { margin-top: 14px; }
+  details.src summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+  details.src pre { margin: 8px 0 0; max-height: 360px; overflow: auto; font-size: 11px; line-height: 1.4;
+    background: rgba(0,0,0,.25); border-radius: 7px; padding: 8px; white-space: pre; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <p class="name">__TITLE__</p>
+    <h1>__HEADING__</h1>
+    <p>__MESSAGE__</p>
+    <p class="sum">__SUMMARY__</p>
+    __PARTS__
+    <p class="note">__NOTE__</p>
+    __SOURCE__
+  </div>
 </body>
 </html>
 """
@@ -967,6 +1286,107 @@ _SKYBOX_HTML = """<!doctype html>
     addEventListener("resize", () => {
       camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight); });
+    (function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+  } catch (err) {
+    fail("Couldn't start the 3D view: " + (err && err.message ? err.message : err));
+  }
+  </script>
+</body>
+</html>
+"""
+
+# The Tripo REFERENCE viewer: a hosted likeness in a plain GLB viewer, labelled as what it is. It keeps
+# the module build + GLTFLoader from the CDN because the vendored r128 UMD bundle has no glTF loader, and
+# a reference already needs the network (Tripo is a hosted service). A neutral room environment so PBR
+# textures read, exposure 1.0 and NOTHING else — no bloom, no AO, no shadows: the glossy rig was too bright.
+_REFERENCE_HTML = """<!doctype html>
+<!-- HELIX-GENERATED-VIEWER -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>__TITLE__</title>
+<style>
+  :root { --accent: __ACCENT__; }
+  html, body { margin: 0; height: 100%; background: __BG__; overflow: hidden;
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif; color: #d5dde3; }
+  #app { position: fixed; inset: 0; }
+  #title { position: fixed; top: 14px; left: 16px; font-size: 14px; font-weight: 600;
+    letter-spacing: .04em; color: var(--accent); opacity: .9; pointer-events: none;
+    text-shadow: 0 1px 8px rgba(0,0,0,.6); }
+  #banner { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); max-width: 70%;
+    background: rgba(16,22,28,.82); border: 1px solid rgba(213,221,227,.18); color: #8a98a4;
+    border-radius: 10px; padding: 7px 14px; font-size: 12px; text-align: center; pointer-events: none; }
+  #panel { position: fixed; bottom: 14px; right: 14px; display: flex; gap: 6px;
+    background: rgba(16,22,28,.6); border: 1px solid rgba(213,221,227,.14); border-radius: 10px;
+    padding: 6px; backdrop-filter: blur(6px); }
+  #panel button { background: transparent; color: #d5dde3; border: 1px solid rgba(213,221,227,.14);
+    border-radius: 7px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+  #panel button:hover, #panel button.on { border-color: var(--accent); color: var(--accent); }
+  #msg { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    text-align: center; padding: 24px; font-size: 15px; color: #8a98a4; }
+</style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="title">__TITLE__</div>
+  <div id="banner">Reference from Tripo — a likeness to look at, not the design.</div>
+  <div id="panel"><button id="spin">Auto-rotate</button><button id="reset">Reset view</button></div>
+  <div id="msg"></div>
+  <script type="importmap">
+  { "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+  </script>
+  <script type="module">
+  import * as THREE from "three";
+  import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+  import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+  import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+  const fail = (m) => { const e = document.getElementById("msg");
+    e.textContent = m; e.style.display = "flex"; };
+  try {
+    const app = document.getElementById("app");
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    app.appendChild(renderer.domElement);
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color("__BG__");
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 5000);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true; controls.dampingFactor = 0.08;
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    scene.add(new THREE.HemisphereLight(0xe2e8ee, 0x2a3139, 0.4));
+    const home = { pos: new THREE.Vector3(), target: new THREE.Vector3() };
+    let model = null;
+    const frame = () => {
+      const box = new THREE.Box3().setFromObject(model);
+      const size = box.getSize(new THREE.Vector3()), c = box.getCenter(new THREE.Vector3());
+      const radius = Math.max(size.x, size.y, size.z, 1e-3) * 0.5;
+      const dist = radius / Math.sin((camera.fov * Math.PI / 180) / 2) * 1.25;
+      camera.near = radius / 100; camera.far = radius * 100; camera.updateProjectionMatrix();
+      camera.position.set(c.x + dist * 0.7, c.y + dist * 0.45, c.z + dist);
+      controls.target.copy(c); controls.update();
+      home.pos.copy(camera.position); home.target.copy(c);
+      const grid = new THREE.GridHelper(radius * 6, 24, 0x3b4855, 0x1e2831);
+      grid.position.y = box.min.y; grid.material.opacity = 0.5; grid.material.transparent = true;
+      scene.add(grid);
+    };
+    new GLTFLoader().load("__GLB__", (gltf) => { model = gltf.scene; scene.add(model); frame(); },
+      undefined, () => fail("Couldn't load the reference mesh."));
+    addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight); });
+    const spinBtn = document.getElementById("spin");
+    spinBtn.onclick = () => { controls.autoRotate = !controls.autoRotate;
+      controls.autoRotateSpeed = 1.4; spinBtn.classList.toggle("on", controls.autoRotate); };
+    document.getElementById("reset").onclick = () => {
+      camera.position.copy(home.pos); controls.target.copy(home.target); controls.update(); };
     (function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
   } catch (err) {
     fail("Couldn't start the 3D view: " + (err && err.message ? err.message : err));

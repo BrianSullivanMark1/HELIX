@@ -50,6 +50,7 @@ class ConnectionsDialog(QDialog):
         conns: list[Connection],
         get_value: Callable[[str], str],
         set_value: Callable[[str, str], None],
+        is_managed: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self._set_value = set_value
@@ -77,17 +78,32 @@ class ConnectionsDialog(QDialog):
         self._exempt: list[bool] = []   # URL-typed fields never trigger the mis-paste guard
         self._initial: list[str] = []   # prefilled values — only what the user CHANGES is scanned
         for c in conns:
-            label = QLabel(c.label + (f"  ({c.hint})" if c.hint else ""))
+            # A key HELIX already holds centrally (ANTHROPIC_API_KEY is the common one — the coder is
+            # told to declare it) is shown as ALREADY PROVIDED rather than as another blank to fill,
+            # because the value in the box came from Settings, not from this panel.
+            #
+            # "Already connected" is a claim about POSSESSION, so it is gated on the value, never on
+            # is_managed alone: that predicate only tests membership in the container's static managed
+            # map, which registers ANTHROPIC/CLAUDE/TRIPO/VOYAGE/BLOCKADE unconditionally whether or
+            # not any of them has ever been set. A subscription-only install has no claude_api_key, so
+            # membership-only would tell that user "leave it as is" over an EMPTY box — while the
+            # launcher card that opened this panel is lit amber "Connect" from the very same empty
+            # value. An unset managed key keeps its own hint and reads as the blank it actually is.
+            current = get_value(c.key) or ""
+            managed = is_managed is not None and bool(is_managed(c.key)) and bool(current.strip())
+            # (a distinct name — `note` above is the panel's intro QLabel, still alive in this scope)
+            aside = "already connected in HELIX — leave it as is" if managed else c.hint
+            label = QLabel(c.label + (f"  ({aside})" if aside else ""))
             root.addWidget(label)
             field = QLineEdit()
             field.setEchoMode(QLineEdit.EchoMode.Password)
             if c.hint:
                 field.setPlaceholderText(c.hint)
-            field.setText(get_value(c.key) or "")
+            field.setText(current)
             root.addWidget(field)
             self._fields.append((c.key, field))
             self._exempt.append(_expects_url(c.key, c.label, c.hint))
-            self._initial.append((get_value(c.key) or "").strip())
+            self._initial.append(current.strip())
 
         row = QHBoxLayout()
         save = QPushButton("Save")
@@ -115,8 +131,16 @@ class ConnectionsDialog(QDialog):
             self._warned = values
             self._status.setText(warn + " Save again to keep it anyway.")
             return
-        for (key, field), value in zip(self._fields, values):
-            self._set_value(key, value)
+        # Only what the user actually CHANGED is written. A prefilled value can come from somewhere
+        # other than the secrets store — a HELIX-managed key (the Claude key lives in Settings and is
+        # served through value()) prefills this panel too, and writing it back would COPY it into the
+        # secrets store, where it wins over Settings forever: rotating the key in Settings would then
+        # never reach this build again, and it would keep injecting the frozen snapshot. Re-saving an
+        # untouched field is a no-op for every other key anyway, so the guard costs nothing. Clearing
+        # a field is still a change, so an override the user wants gone is written away as "".
+        for (key, field), value, initial in zip(self._fields, values, self._initial):
+            if value != initial:
+                self._set_value(key, value)
         self.accept()
 
 

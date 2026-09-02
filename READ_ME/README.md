@@ -30,7 +30,10 @@ On first launch there are no keys and no data. Open **⚙ Settings** and connect
 - **A Claude API key** — pay-per-token, and the automatic fallback if the token path is ever unavailable.
 
 Then just talk to the orb. That one credential is the only setup wall — every *other* key (Slack,
-GitHub, a hologram engine) is asked for **just in time**, the moment something actually needs it.
+GitHub) is asked for **just in time**, the moment something actually needs it. The same goes for the
+hologram engine: holograms are compiled by **OpenSCAD** (free, open source, a separate program), and if
+it isn't on the machine the first time you ask for one, HELIX offers to install it (winget, about a
+minute) and builds once you say yes.
 
 Voice is optional and additive (no mic / no models → it's a clean text app):
 
@@ -56,9 +59,10 @@ A packaged install is built with `python build.py --with-voice`; the frozen app 
   answer needs no photo.
 - **Make things** — five kinds of creation, all conjured, changed, and removed just by talking, made
   by the **Forge**: **Apps** (interactive screens), **Protocols** (saved procedures that do a thing
-  when run), **Agents** (AI minds with a standing goal), **Holograms** (interactive 3D objects and
-  scenes), and a **Vault** (your searchable notes and documents). Every creation is its own versioned
-  project.
+  when run), **Agents** (AI minds with a standing goal), **Holograms** (3D models you design by
+  talking — drafted in OpenSCAD, shown as an engineering-style drawing, exportable for printing; also
+  360° scenes), and a **Vault** (your searchable notes and documents). Every creation is its own
+  versioned project.
 - **Reach your world (read-only)** — your files, Gmail, calendar, and connected services (Slack,
   GitHub, Alpaca, SAM.gov) answer questions; it never sends, posts, or trades. Connections happen
   **just in time**: when a key is needed, a masked panel opens naming the service and why — no

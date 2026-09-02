@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from helix.adapters.anthropic_chat import AnthropicChat, _estimate_cost
 from helix.domain.models import Role
-from helix.ports.llm import Text, Turn
+from helix.ports.llm import Text, ToolSpec, Turn
 
 
 class _FakeClient:
@@ -89,3 +89,27 @@ def test_cost_estimate_is_model_aware():
     assert abs(_estimate_cost("claude-sonnet-4-6", u) - 3.0) < 1e-6
     assert abs(_estimate_cost("claude-haiku-4-5", u) - 1.0) < 1e-6
     assert abs(_estimate_cost("unknown-model", u) - 5.0) < 1e-6  # falls back to Opus rate
+
+
+def test_the_web_less_twin_sends_no_server_side_web_tools_while_the_original_still_does():
+    """An autonomous run gets a twin of the shared chat with web_search/web_fetch shed — and shedding
+    them must not disarm the orb's own chat, which is the SAME object serving turns on another thread."""
+    chat, fake = _chat(web_search=True)
+    twin = chat.without_web()
+    assert twin is not chat, "the twin must be its own object — a shared flag would race the orb"
+    twin_client = _FakeClient(_response())
+    twin._client_for_current_key = lambda: twin_client  # type: ignore[method-assign]
+
+    spec = ToolSpec("list_apps", "list them", {"type": "object"})
+    twin.chat([Turn(Role.USER, (Text("what's in the inbox?"),))], tools=[spec])
+    sent = twin_client.kwargs["tools"]
+    assert [t["name"] for t in sent] == ["list_apps"], "an autonomous run was handed the web tools"
+
+    chat.chat([Turn(Role.USER, (Text("weather in Paris?"),))], tools=[spec])
+    assert fake.kwargs["tools"][0]["type"] == "web_search_20260209"  # the orb keeps its web tools
+
+
+def test_shedding_web_from_a_chat_that_never_had_it_hands_back_the_same_chat():
+    # Nothing to shed, so nothing to build: the twin of a web-less chat is that chat.
+    chat, _fake = _chat(web_search=False)
+    assert chat.without_web() is chat

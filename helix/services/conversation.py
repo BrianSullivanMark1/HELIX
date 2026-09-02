@@ -88,6 +88,9 @@ BUILD_TOOLS = frozenset(
         # Sleeping the mic is human-driven only — content an unattended watcher processes must
         # never be able to deafen HELIX (an email saying "HELIX, go to sleep" must not mute the mic).
         "go_to_sleep",
+        # Installing the hologram engine is human-driven only — it installs software on the user's
+        # machine, so an email saying "HELIX, install OpenSCAD" must never make a watcher run winget.
+        "install_openscad",
         # Disk WRITES are human-driven only (and gated by the Settings toggle besides) — an
         # autonomous agent may list folders and read files like any other read faculty, but text
         # inside a file must never be able to make an unattended agent write to the user's disk.
@@ -100,6 +103,16 @@ BUILD_TOOLS = frozenset(
         "think_harder",
     }
 )
+
+
+def _shed_web(chat: ChatModel) -> ChatModel:
+    """The web-less twin of a chat, for autonomous runs — or the chat itself if it can't shed them.
+
+    Asked duck-typed rather than through the port because not every ChatModel HAS server-side web
+    tools to give up (a future adapter, a test double); those are already the twin. See
+    AnthropicChat.without_web for why an autonomous run must not be handed them at all."""
+    shed = getattr(chat, "without_web", None)
+    return shed() if callable(shed) else chat
 
 
 class ConversationService:
@@ -119,6 +132,11 @@ class ConversationService:
         location: "LocationService | None" = None,
     ) -> None:
         self._chat = chat
+        # The same chat with the model's own web search/fetch shed — what an AUTONOMOUS turn talks to
+        # (see the fence in run_turn). Derived ONCE here, not per turn: it costs an object, and it must
+        # be a distinct instance so an orb turn on the web-enabled chat can never widen the fence out
+        # from under an agent turn running beside it on another thread.
+        self._autonomous_chat = _shed_web(chat)
         self._tools = tools
         self._store = store
         self._memory = memory
@@ -225,6 +243,19 @@ class ConversationService:
         # otherwise coach an autonomous run into a fenced tool the specs filter withheld (open_cart,
         # open_program, view_camera…). The SDK path enforces the same set via allowed_tools.
         offered = {s.name for s in specs}
+        # THE WEB FENCE — one rule, read by BOTH rails, so they cannot drift apart again. `allow_builds`
+        # is this file's human-vs-autonomous discriminator (it just picked the BUILD_TOOLS denylist
+        # above), and an autonomous run gets NO web tools of the model's own: a watcher chews on
+        # untrusted content — a Slack message, an email body, a SAM.gov notice — and a model-authored
+        # search or fetch is an outbound channel that walks straight around call_api's host allowlist,
+        # redirect refusal and secret scrubbing. Those runs reach the outside world only through the
+        # audited HELIX tools. The subscription rail takes the rule as run_hermetic(web=…); the API rail
+        # can't be told per call (the tools ride in the request itself), so its fence is the web-less
+        # twin built in __init__ — until now it had no fence at all, and every watcher turn that landed
+        # on the API key (an API-key-only user, or any fallback after the subscription rail failed) was
+        # handed web_search and web_fetch.
+        web_ok = allow_builds
+        chat_model = self._chat if web_ok else self._autonomous_chat
 
         # True when the model SAW pixels this turn — attached images up front, or a sight tool
         # (view_screen / view_image / find_images) that handed images back mid-turn. Either way the
@@ -282,6 +313,7 @@ class ConversationService:
                 else:
                     text = self._subscription.run_hermetic(
                         prompt, names, on_progress=on_progress, cancel=cancel, on_tool=_on_tool,
+                        web=web_ok,  # stated, not left to the default — one fence, both rails
                     )
                 if cancel is not None and cancel.is_set():
                     return finish(STOPPED_REPLY)
@@ -307,7 +339,7 @@ class ConversationService:
             for _ in range(MAX_STEPS):
                 if cancel is not None and cancel.is_set():
                     return finish(STOPPED_REPLY)
-                reply = self._chat.chat(turns, system=self._system, tools=specs)
+                reply = chat_model.chat(turns, system=self._system, tools=specs)
                 u = reply.usage
                 self._memory.record_usage(u.input_tokens, u.output_tokens, u.cost_usd)
 
@@ -448,4 +480,7 @@ class ConversationService:
                 "create_agent": "Saving", "delete_build": "Removing", "rename_build": "Renaming",
             }[tool]
             return f"{verb} {name}…"
-        return friendly_tool_label(tool) + "…"
+        label = friendly_tool_label(tool)
+        # The unmapped fallback already trails off ("Working…"), so appending a second ellipsis
+        # printed "Working……" on the status line — a typo, in HELIX's own voice.
+        return label if label.endswith("…") else label + "…"

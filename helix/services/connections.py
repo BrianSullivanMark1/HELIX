@@ -27,6 +27,17 @@ CONNECTIONS_FILE = "connections.json"  # a build declares its needed keys here
 _MAX_BODY = 200_000                    # cap a call_api response so a huge payload can't blow up context
 _AUTH_PLACEHOLDER = re.compile(r"\{([A-Z0-9_]+)\}")  # {ENV_NAME} in a Service.auth header template
 
+# Hosts that answer call_api WITHOUT any credential, per service id. Matched EXACTLY (never by suffix),
+# because the distinction is per-host: sam.gov itself serves the SGS search API the website runs on, and
+# it answers anonymously — that's the one path GSA actually has up, and it's the one both shipped
+# Procurement/Morning watcher goals and the SAM recipe point at — while api.sam.gov's documented
+# opportunities API still needs the key and would 403 without it. Gating the WHOLE service on a stored
+# key made a keyless install's Procurement Watcher permanently silent (its goal replies QUIET when SAM
+# "isn't connected") and popped a credential panel for a request that needs no credential. This narrows
+# WHEN a key is required; it changes nothing about WHERE call_api may go — the host allow-list is still
+# Service.hosts alone, and https + GET + no-redirects + scrubbing are untouched.
+_ANONYMOUS_HOSTS: dict[str, tuple[str, ...]] = {"sam": ("sam.gov",)}
+
 # Every service the orb may CONNECT just in time (the V3 flow: no settings wall — the model calls
 # connect_service the moment a key is missing and a masked panel opens). Maps the words a user might
 # say to a service id; ids cover call_api's KNOWN_SERVICES plus the engine keys (Tripo holograms,
@@ -184,15 +195,24 @@ class ConnectionsService:
         if svc is None:
             names = ", ".join(s.label for s in KNOWN_SERVICES)
             return (f"call_api error: that host isn't a connectable service. I can only read: {names}.")
-        if any(not self.value(f.key) for f in svc.fields):
-            return (f"call_api error: {svc.label} isn't connected yet. Call connect_service with "
-                    f"service '{svc.id}' to open a secure key panel for the user.")
+        if self._needs_credentials(svc, url) and any(not self.value(f.key) for f in svc.fields):
+            msg = (f"call_api error: {svc.label} isn't connected yet. Call connect_service with "
+                   f"service '{svc.id}' to open a secure key panel for the user.")
+            if _ANONYMOUS_HOSTS.get(svc.id) and svc.recipe:
+                # This service has a path that answers WITHOUT a key, and the model just guessed the
+                # one that doesn't — hand it the keyless shapes so it retries in the same turn rather
+                # than making the orb ask for a credential the user may not need at all.
+                msg += (f"\n{svc.label} can also be read without a key — known-good request shapes: "
+                        f"{svc.recipe}")
+            return msg
         # Attach the saved credential(s) as this service's auth headers. Each {ENV_NAME} in a template is
         # filled from the store here, server-side, so a token is never returned to or chosen by the model.
         headers = {"User-Agent": "HELIX", "Accept": "*/*"}
         for name, value in svc.headers:  # static per-service needs (e.g. SAM.gov's hal+json Accept)
             headers[name] = value
         for name, template in svc.auth:
+            if self._unfilled(template):
+                continue  # never send a literal "Bearer " with no token — see _unfilled
             headers[name] = _AUTH_PLACEHOLDER.sub(lambda m: self.value(m.group(1)), template)
         if svc.query:
             # Query-param auth (SAM.gov): attach server-side too — and strip any same-named param the
@@ -201,6 +221,8 @@ class ConnectionsService:
             reserved = {name for name, _t in svc.query}
             q = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in reserved]
             for name, template in svc.query:
+                if self._unfilled(template):
+                    continue  # an unset key must not ride along as a bogus "api_key=" — see _unfilled
                 q.append((name, _AUTH_PLACEHOLDER.sub(lambda m: self.value(m.group(1)), template)))
             url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
         req = urllib.request.Request(url, headers=headers)
@@ -227,6 +249,23 @@ class ConnectionsService:
             # query-param-auth services (SAM.gov) would write the key into helix.log.
             _LOG.warning("call_api failed for %s: %s", svc.label, self._scrub(svc, str(e)))
             return self._scrub(svc, f"call_api error reaching {svc.label}: {e}")
+
+    def _needs_credentials(self, svc, url: str) -> bool:
+        """False only for a host this service serves anonymously (_ANONYMOUS_HOSTS) — everything else
+        still has to be connected before call_api will build a request. Exact host match on purpose:
+        api.sam.gov is a subdomain of an anonymous host but is NOT itself anonymous."""
+        try:
+            host = (urlsplit(url).hostname or "").lower()
+        except ValueError:
+            return True  # an unparseable host is never given the benefit of the doubt
+        return host not in _ANONYMOUS_HOSTS.get(svc.id, ())
+
+    def _unfilled(self, template: str) -> bool:
+        """True if any {ENV_NAME} in an auth header / query template has no stored value. Such a
+        template must be dropped rather than substituted: sending `Authorization: Bearer ` or
+        `api_key=` with an empty value turns a clean anonymous read into a 401/403 the model can't
+        explain, and tells the service more about the user than a plain request does."""
+        return any(not self.value(k) for k in _AUTH_PLACEHOLDER.findall(template or ""))
 
     def _scrub(self, svc, text: str) -> str:
         """Redact this service's secret values anywhere in text returned to the model — a body or an

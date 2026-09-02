@@ -10,6 +10,7 @@ import array
 import pytest
 
 from helix.ui.voice import (
+    STT_PREWARM_ERROR_SETTING,
     VadSegmenter,
     _pcm_rms,
     _wants_wake,
@@ -245,3 +246,13 @@ def test_vad_drops_a_too_short_blip():
     seg = VadSegmenter()
     seg.push(_pcm(4000, 400))            # ~25 ms — below WAKE_MIN_SPEECH_S
     assert seg.push(_pcm(0, 60000)) is None
+
+
+def test_the_prewarm_error_key_matches_the_launcher_that_writes_it():
+    """voice.py spells the settings key out instead of importing it, because main.py is the frozen
+    build's entry SCRIPT and isn't importable there. Spelled twice means it can drift, and a drift
+    would be silent: the Console would read "" forever and go back to offering a restart that can't
+    help. So the two spellings are pinned equal here."""
+    import main as launcher
+
+    assert STT_PREWARM_ERROR_SETTING == launcher.STT_PREWARM_ERROR

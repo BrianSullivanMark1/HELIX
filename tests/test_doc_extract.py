@@ -112,3 +112,95 @@ def test_extract_is_graceful_on_bad_or_missing(tmp_path):
     assert doc_extract.extract(bad_pdf) == ""
     assert doc_extract.extract(tmp_path / "missing.docx") == ""
     assert doc_extract.extract(tmp_path / "note.txt") == ""  # not a rich doc → handled by the caller
+
+
+def _mixed_typed_and_blank_layer_pdf(tmp_path):
+    """A contract shaped like the real ones: a typed first page, then a page whose text layer is empty
+    because it is a scan of a signature. Built with reportlab alone so it needs no OCR engine."""
+    canvas = pytest.importorskip("reportlab.pdfgen.canvas")
+    p = tmp_path / "contract.pdf"
+    c = canvas.Canvas(str(p))
+    c.drawString(72, 720, "Deliverables are due within thirty days of award.")
+    c.showPage()
+    c.showPage()            # page two carries no text layer at all — pixels, as far as pypdf can tell
+    c.save()
+    return p
+
+
+def test_a_mixed_contract_says_so_when_ocr_fails_outright(tmp_path, monkeypatch):
+    # OCR present but returning nothing at all is a FAILURE, not a cap. The typed pages still come
+    # through — the danger is the model reasoning over a contract whose signature page vanished.
+    from helix.services import ocr
+
+    monkeypatch.setattr(ocr, "available", lambda: True)
+    monkeypatch.setattr(ocr, "scan_pdf_pages", lambda *a, **k: {})
+    text = doc_extract.extract(_mixed_typed_and_blank_layer_pdf(tmp_path))
+    assert "Deliverables are due within thirty days" in text     # what was read is still read
+    assert "1 scanned page(s) could not be read" in text         # and what was lost is said out loud
+
+
+def _typed_page_then_two_blank_layers(tmp_path):
+    """A typed first page followed by two pages with no text layer at all — the shape of a contract
+    whose exhibits are scans. Needs no OCR engine: reportlab alone produces the empty text layers."""
+    canvas = pytest.importorskip("reportlab.pdfgen.canvas")
+    p = tmp_path / "exhibits.pdf"
+    c = canvas.Canvas(str(p))
+    c.drawString(72, 720, "Deliverables are due within thirty days of award.")
+    c.showPage()
+    c.showPage()
+    c.showPage()
+    c.save()
+    return p
+
+
+def test_a_page_that_errored_is_not_blamed_on_the_ocr_caps(tmp_path, monkeypatch):
+    # ocr._scan guards every page individually now, so ONE page tripping pdfium leaves its index out
+    # of the returned dict while its neighbours come back read — a shape that could not happen before
+    # that guard landed, and which lands in exactly the same "missed" list the caps fill. With two
+    # suspected scans and a cap of a hundred, nothing was rationed; saying "OCR page/time limit" would
+    # hand the user, and the model reading this text, a cause that never applied.
+    from helix.services import ocr
+
+    monkeypatch.setattr(ocr, "available", lambda: True)
+    monkeypatch.setattr(ocr, "scan_pdf_pages",
+                        lambda path, idxs, **k: {idxs[0]: "EXHIBIT A — SIGNATURE ON FILE"})
+    text = doc_extract.extract(_typed_page_then_two_blank_layers(tmp_path))
+    assert "EXHIBIT A" in text                                  # the page that did read is kept
+    assert "1 more scanned page(s) not transcribed" in text     # the one that didn't is still said
+    assert "limit" not in text and "cap" not in text, (
+        "a page that errored is being reported as rationed away by the page/time caps"
+    )
+
+
+def test_the_page_cap_is_still_named_when_it_actually_bit(tmp_path, monkeypatch):
+    # The other half of the same choice: when there genuinely were more suspected scans than
+    # _OCR_MAX_PAGES, the cap DID bite (scan_pdf_pages never looks past that slice), and a user with a
+    # long scan deserves to know the document was too long rather than that it was unreadable.
+    from helix.services import ocr
+
+    monkeypatch.setattr(doc_extract, "_OCR_MAX_PAGES", 1)
+    monkeypatch.setattr(ocr, "available", lambda: True)
+    monkeypatch.setattr(ocr, "scan_pdf_pages",
+                        lambda path, idxs, *, max_pages, budget_s: {idxs[0]: "EXHIBIT A — PAGE ONE"})
+    text = doc_extract.extract(_typed_page_then_two_blank_layers(tmp_path))
+    assert "1 more scanned page(s) not transcribed" in text
+    assert "page limit" in text
+
+
+def test_a_typed_pdf_with_short_pages_is_never_accused_of_hiding_scans(tmp_path, monkeypatch):
+    # Pages under the scan threshold are only a SUSPICION — a cover sheet is short and fully typed.
+    # If OCR fails on one of those, saying "pages could not be read" would be a lie to the model.
+    from helix.services import ocr
+
+    canvas = pytest.importorskip("reportlab.pdfgen.canvas")
+    p = tmp_path / "short.pdf"
+    c = canvas.Canvas(str(p))
+    c.drawString(72, 720, "Statement of Work")          # 17 chars — under _SCAN_TEXT_MIN
+    c.showPage()
+    c.drawString(72, 720, "Period of performance: 12 months.")   # 33 — also under it
+    c.save()
+    monkeypatch.setattr(ocr, "available", lambda: True)
+    monkeypatch.setattr(ocr, "scan_pdf_pages", lambda *a, **k: {})
+    text = doc_extract.extract(p)
+    assert "Statement of Work" in text
+    assert "could not be read" not in text and "not transcribed" not in text

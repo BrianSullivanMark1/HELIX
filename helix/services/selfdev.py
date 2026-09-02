@@ -5,8 +5,9 @@ through this service, which enforces domain/constitution.py:
 
     propose:  clean tree → fingerprint check → branch → coder edits → stage → CONSTITUTION SCAN →
               commit on the branch → switch the working tree back to base (deployed code unchanged)
-    approve:  fingerprint check → smoke-check the branch in an ISOLATED worktree → revertible --no-ff
-              merge into base → (UI then offers restart)
+    approve:  fingerprint check → smoke-check the branch in an ISOLATED worktree → clean-tree check
+              (the merge and its unwind must own the tree) → revertible --no-ff merge into base →
+              (UI then offers restart)
     reject:   delete the branch
 
 Nothing merges without a human approving, the smoke-check must pass, and a change that touches a
@@ -39,6 +40,7 @@ _LOG = get_logger("selfdev")
 SmokeCheck = Callable[[Path], "tuple[bool, str]"]
 BRANCH_PREFIX = "selfdev/"
 FINGERPRINT_SETTING = "constitution_fingerprint"
+DIFF_CAP = 16_000  # chars of a self-change diff a review surface gets — enough to judge, never a flood
 
 
 def compile_smoke_check(worktree: Path) -> tuple[bool, str]:
@@ -118,8 +120,11 @@ class SelfDevService:
     def _require_intact(self) -> None:
         if not self._fingerprint_ok():
             raise ConstitutionViolation(
+                # Not "Archive → factory reset": there is no Archive screen in the app (the persona is
+                # forbidden to name one), so the old wording sent the user hunting a menu that does not
+                # exist at the moment they most need a real instruction.
                 "the Constitution was changed outside the approval gate — self-editing is paused until "
-                "a human restores it (Archive → factory reset, or restore the original file)."
+                "a human puts HELIX's original safety code back in place."
             )
         if self._settings.get("human_approval_required", True) is not True:
             raise ConstitutionViolation("human_approval_required is locked on and may not be disabled.")
@@ -177,7 +182,15 @@ class SelfDevService:
             # ForgeService, which scans + reverts escapes ahead of its own cancel exit.)
             escaped = tree_changed(self._root, src_sig, skip=src_skip)
             if escaped:
-                self._repo.discard_changes(self._root)  # the live tree must be byte-identical to base
+                # Revert exactly what escaped, and nothing else. This used to be discard_changes —
+                # `git reset --hard` PLUS `git clean -fd` across HELIX's live root — which undid the
+                # containment breach by ALSO destroying every uncommitted edit and every untracked
+                # file the user had in the tree: their half-written script, their notes, work they
+                # never handed to HELIX at all. The breach is a known, enumerated list of paths, so
+                # restore_paths puts precisely those back (tracked → checkout, newly added → removed)
+                # and leaves the user's tree otherwise untouched. Containment must not cost more than
+                # the thing it is containing.
+                self._repo.restore_paths(self._root, list(escaped))
                 raise ConstitutionViolation(
                     "refused — the coder wrote into the live HELIX source outside its draft worktree ("
                     + ", ".join(Path(p).name for p in escaped[:8]) + ")."
@@ -287,15 +300,147 @@ class SelfDevService:
         if not ok:
             raise BuildError(f"smoke-check failed — not merging: {err}")
 
-        self._repo.merge_no_ff(self._root, change_id, f"merge {change_id}")
-        self._repo.delete_branch(self._root, change_id)
+        # A self-change may only be merged into a tree HELIX OWNS — one with nothing uncommitted in it.
+        # Two reasons, and the second is the dangerous one. First, git itself refuses a merge that would
+        # overwrite a locally-modified file ("Please commit your changes or stash them before you
+        # merge"), so a dirty tree is precisely the case where the merge below fails. Second, the only
+        # tool the unwind has is `git reset --hard <base>` across HELIX's whole root, and that reset
+        # cannot tell a half-written merge from Brian's own half-finished edit to a HELIX source file:
+        # it throws both away, repo-wide, while the message the user hears swears "HELIX's own code is
+        # untouched". So decide it here, where refusing has touched NOTHING. This is no new burden —
+        # propose() already refuses to draft against uncommitted work, so a tree that can't be applied
+        # to couldn't have been drafted from either. Read it as late as possible, one call before the
+        # merge: a check taken before the smoke-check would be seconds of compiling out of date.
+        try:
+            owns_tree = self._repo.is_clean(self._root)
+        except Exception:  # noqa: BLE001 — if git can't even report status, assume we do NOT own the tree
+            owns_tree = False
+        if not owns_tree:
+            raise BuildError(
+                "HELIX's own code has uncommitted edits sitting in it right now, and applying this "
+                "change could bury them. Commit or stash those edits first, then apply this again — "
+                "nothing has been touched."
+            )
+
+        # Where the live tree stands BEFORE the merge, read while it is still trustworthy. merge_no_ff
+        # runs `git merge` and THEN `git log -1` to report the new commit, so it can raise AFTER git
+        # has already written the merge commit — a timeout, a killed subprocess, any git that dies
+        # reading its own log. In that window HEAD is no longer base, and an unwind that only means
+        # "reset --hard HEAD" would tidy the tree while LEAVING the change merged: HELIX would be
+        # running code it just told the user it had not applied. Aim the unwind at this sha instead.
+        try:
+            base_sha = self._repo.branch_head(self._root, base).sha
+        except Exception:  # noqa: BLE001 — not fatal; the unwind aborts in place and claims nothing
+            base_sha = ""
+        try:
+            self._repo.merge_no_ff(self._root, change_id, f"merge {change_id}")
+        except Exception as exc:
+            # A merge that CONFLICTS leaves git mid-merge: MERGE_HEAD set and `<<<<<<<` markers written
+            # straight into HELIX's own deployed .py files. Left there, the next launch runs on poisoned
+            # source and — because the tree is now dirty — every later propose() is refused ("working
+            # tree has uncommitted changes"), so self-editing is bricked until a human runs git by hand.
+            # It is a reachable state: draft A, draft B, approve A (base moves), approve B. So unwind —
+            # the live tree must end this call byte-identical to base, exactly as the escape backstop in
+            # propose() insists. Safe to do so here and ONLY here, because the clean-tree check above
+            # means everything this reset can throw away is something this call itself put there. The
+            # branch is deliberately KEPT: nothing was applied, so it is still the user's to read and
+            # discard.
+            healed = self._unwind_failed_merge(base_sha)
+            _LOG.warning("merge of %s failed; live tree %s", change_id,
+                         "restored to base" if healed else "COULD NOT BE RESTORED", exc_info=True)
+            if healed:
+                raise BuildError(
+                    "This change no longer fits the code it was drafted against — nothing was applied, "
+                    "and HELIX's own code is untouched. Discard it and ask for the same improvement "
+                    "again; the new draft will be written against today's version."
+                ) from exc
+            # The unhealed branch must not promise what the code cannot check. It is reached when the
+            # reset itself failed, or when we never had a base sha to aim at — and in that second case
+            # git may ALREADY have written the merge commit, so "nothing is running" would be a lie
+            # that the next launch exposes. Name the one recovery that genuinely exists instead: the
+            # startup self-heal (helix/app/bootstrap.py) rolls back to the last commit that booted.
+            # Never "the Archive" — there is no such screen, and the persona is forbidden to name one.
+            raise BuildError(
+                "This change couldn't be applied cleanly, and HELIX couldn't put its own code back the "
+                "way it was. I can't promise the change didn't land, so please don't ask for another "
+                "self-change until this is sorted out — and if HELIX won't start after a restart, it "
+                "rolls itself back to the last version that booted."
+            ) from exc
+        try:
+            self._repo.delete_branch(self._root, change_id)
+        except Exception:  # noqa: BLE001 — the merge is COMMITTED; the user must be told that, not this
+            # Tidying the merged branch is bookkeeping, and failing it after a successful merge used to
+            # raise straight past the return — so the caller rendered "Couldn't apply it: …" about a
+            # change that IS applied and will load at the next restart. The stale branch costs nothing:
+            # its diff vs base is now empty, so pending() skips it as a phantom and recover_interrupted()
+            # deletes it on the next launch.
+            _LOG.warning("merged %s but could not delete the branch", change_id, exc_info=True)
         _LOG.info("approved + merged %s", change_id)
         return "Applied. Restart HELIX to load the new version."
 
+    def _unwind_failed_merge(self, base_sha: str = "") -> bool:
+        """Put the live tree back exactly as it was before a merge that didn't complete.
+
+        restore_to is `git reset --hard <sha>`, which clears MERGE_HEAD along with the half-merged
+        index — git's own documented way to abandon a merge in progress — and, because it names the
+        commit the tree stood on BEFORE the attempt, it also throws away a merge commit git may
+        already have created before merge_no_ff raised. A bare reset to HEAD cannot: in that case HEAD
+        IS the merge commit, so the "unwind" would leave the change applied and running while the user
+        is told nothing was.
+
+        Deliberately NOT discard_changes here, even though it is the verb propose() uses to undo a
+        coder escape: that one is reset --hard PLUS `git clean -fd`, which also deletes every
+        untracked, non-ignored file sitting in HELIX's own root — a user's notes, a half-written
+        script, anything dropped beside the source. A merge leaves no untracked debris that the reset
+        does not already handle, so the clean has nothing to gain here and somebody's file to lose.
+
+        The caller MUST have just confirmed is_clean() on the live tree — approve() does, one call
+        before the merge. A hard reset cannot tell a half-merge from the user's own unfinished edit to
+        HELIX's source, so unwinding a tree we do not own would destroy their work repo-wide.
+
+        Returns whether the tree is genuinely back at base, because the message the user gets depends
+        on it.
+        """
+        try:
+            if base_sha:
+                self._repo.restore_to(self._root, base_sha)
+                return True
+            # We never got a sha (reading HEAD failed before the merge even started, so git was already
+            # unwell) — and that is not an unrelated coincidence: the failing command is `git log -1`,
+            # the SAME call merge_no_ff makes after committing, so this is exactly the case where the
+            # merge is most likely to be committed already. Abort in place: reset --hard HEAD clears
+            # MERGE_HEAD and the conflict markers, which is the damage that actually poisons the next
+            # launch. Two things it deliberately does NOT do. It does not reach for discard_changes,
+            # which is that same reset PLUS `git clean -fd`, deleting every untracked, non-ignored file
+            # in HELIX's own root — a user's notes, a half-written script, anything dropped beside the
+            # source, none of which a merge ever put there. And it does not report success: if HEAD is
+            # the merge commit then this tidied the tree while LEAVING the change applied, and with git
+            # log broken there is no way to tell which happened, so the caller must say so plainly
+            # rather than claim a restoration we cannot see.
+            self._repo.restore_to(self._root, "HEAD")
+            return False
+        except Exception:  # noqa: BLE001 — the caller is already raising; report, never mask
+            _LOG.warning("could not unwind the failed merge in %s", self._root, exc_info=True)
+            return False
+
     def diff(self, change_id: str) -> str:
-        """The unified diff of a pending change vs base — for the human to actually review."""
+        """The unified diff of a pending change vs base — the only way a human can see what a self-change
+        ACTUALLY does before merging it into HELIX's own source. Every other surface shows a one-line
+        summary written by the coder itself, and "nothing merges without a human approving" is worth
+        little if the human has nothing to approve but a sentence.
+
+        Refuse an id that isn't a pending change rather than diffing it: change_id arrives from a
+        model-driven tool call, and `git diff base <anything>` would happily render an unrelated ref.
+        """
+        if change_id not in self._repo.list_branches(self._root, BRANCH_PREFIX):
+            raise BuildError("no such pending change.")
         base = self._repo.current_branch(self._root)
-        return self._repo.diff(self._root, base, change_id)
+        text = self._repo.diff(self._root, base, change_id)
+        if len(text) > DIFF_CAP:
+            # A review surface, not a firehose: a huge diff would blow the model's context (or the
+            # console's) and the reviewer would see none of it. Say plainly that it was cut.
+            text = text[:DIFF_CAP].rstrip() + "\n\n… (only the first part of this change is shown)"
+        return text
 
     def reject(self, change_id: str) -> None:
         self._repo.delete_branch(self._root, change_id)

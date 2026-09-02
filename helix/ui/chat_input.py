@@ -17,8 +17,9 @@ from PyQt6.QtWidgets import QTextEdit
 # only as a fallback height before the widget is first laid out — once shown we measure it for real.
 _QSS_CHROME = 2 * 10 + 2 * 1
 
-# Image files that a paste/drop should ATTACH (for vision) rather than insert as a file path. Kept in
-# step with helix.services.images.IMAGE_EXTS; duplicated here so this low-level widget stays service-free.
+# Which dropped files go to VISION rather than to the text bundle: everything local is attached, this
+# set only decides which signal carries it. Kept in step with helix.services.images.IMAGE_EXTS;
+# duplicated here so this low-level widget stays service-free.
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
 
@@ -30,6 +31,7 @@ class ChatInput(QTextEdit):
     submitted = pyqtSignal()  # Enter pressed — the owner reads text() and sends, like returnPressed did
     imagePasted = pyqtSignal(object)     # a raw image (QImage) pasted or dropped from the clipboard
     imageFilesPasted = pyqtSignal(list)  # local image file paths (str) pasted or dropped in
+    filesDropped = pyqtSignal(list)      # local NON-image paths (documents, folders) pasted or dropped in
 
     def __init__(self, placeholder: str = "", *, max_lines: int = 6) -> None:
         super().__init__()
@@ -66,28 +68,51 @@ class ChatInput(QTextEdit):
             return
         super().keyPressEvent(event)
 
-    # ----- paste / drop an image → attach it for vision (instead of pasting a path or nothing) -----
+    # ----- paste / drop a file → attach it (instead of pasting a path or nothing) -----
     @staticmethod
-    def _image_urls(source) -> list[str]:
+    def _local_files(source) -> tuple[list[str], list[str]]:
+        """Split the local paths a paste/drop carries into (images, everything else). "Everything else"
+        is deliberately unfiltered — documents and whole folders included — because that is exactly what
+        the paperclip's "Attach files…"/"Attach folder…" already accepts; dragging is the same gesture
+        with fewer clicks, so it must not accept less."""
         if not source.hasUrls():
-            return []
-        out: list[str] = []
+            return [], []
+        images: list[str] = []
+        others: list[str] = []
         for u in source.urls():
-            if u.isLocalFile() and Path(u.toLocalFile()).suffix.lower() in _IMAGE_SUFFIXES:
-                out.append(u.toLocalFile())
-        return out
+            if not u.isLocalFile():
+                continue
+            path = u.toLocalFile()
+            bucket = images if Path(path).suffix.lower() in _IMAGE_SUFFIXES else others
+            bucket.append(path)
+        return images, others
 
     def canInsertFromMimeData(self, source) -> bool:
-        if source.hasImage() or self._image_urls(source):
+        images, others = self._local_files(source)
+        if source.hasImage() or images or others:
             return True
         return super().canInsertFromMimeData(source)
 
     def insertFromMimeData(self, source) -> None:
-        # Local image FILE(s) first (a drag from a folder, or a "copy image" that carries a file URL) —
-        # attach them rather than pasting their path as text.
-        urls = self._image_urls(source)
-        if urls:
-            self.imageFilesPasted.emit(urls)
+        # Local FILE(s) first (a drag from a folder, or a "copy image" that carries a file URL) — attach
+        # them rather than pasting their path as text. A dropped PDF used to fail the image filter and
+        # land in the box as a literal file:/// URL, which the model can't open — the path isn't even
+        # resolvable, since it keeps its scheme. Images and other files go out on their own signals and
+        # a MIXED drop (a PNG plus a PDF) emits BOTH, because claiming only the first kind would drop
+        # the other half of the drag on the floor.
+        images, others = self._local_files(source)
+        handled = False
+        # Emit only where someone is listening. This same widget is also the "Edit with AI" bar
+        # (app_viewer), which wires `submitted` alone and has no attachment tray to stage anything into;
+        # an unconditional emit there would turn a drop into a silent no-op. With nobody connected we
+        # fall through to QTextEdit, so the user at least sees the path land instead of nothing at all.
+        if images and self.receivers(self.imageFilesPasted):
+            self.imageFilesPasted.emit(images)
+            handled = True
+        if others and self.receivers(self.filesDropped):
+            self.filesDropped.emit(others)
+            handled = True
+        if handled:
             return
         # Raw image bytes on the clipboard (a screenshot, "copy image" from a browser).
         if source.hasImage():

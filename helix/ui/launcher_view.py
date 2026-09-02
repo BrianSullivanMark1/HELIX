@@ -3,7 +3,8 @@
   • Apps      — built apps that open a screen (Open / Rename / Remove).
   • Protocols — built scripts that *do a thing* when run (Run / Rename / Remove).
   • Agents    — saved goals HELIX runs on demand (Run / Rename / Remove).
-  • Holograms — 3D scenes and animations the orb made to show you (build_3d_model) (Open / Rename / Remove).
+  • Holograms — 3D models the user designs by talking (drafted in OpenSCAD, shown as an engineering-style
+                drawing; build_3d_model) (Open / Rename / Remove).
   • Vault     — searchable collections of the user's own notes/documents (Open / Rename / Remove).
 
 Builds are data, not shell: they're freely removable. The tabs and New app are the immutable shell

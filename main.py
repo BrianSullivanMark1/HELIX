@@ -15,10 +15,31 @@ from __future__ import annotations
 
 import sys
 
+STT_PREWARM_ERROR = "stt_prewarm_error"  # settings key: why voice couldn't load, "" when it's fine
+
+
+def _record_stt_prewarm(paths, settings, reason: str) -> None:
+    """Leave a findable trace of a failed STT pre-warm — and clear it the moment one succeeds.
+
+    Without this the failure is invisible: prewarm swallows its own exception, the UI reads "model not
+    loaded" as "just needs a restart", and restarting re-runs the identical load, so the user is handed
+    a Restart button that provably cannot help and helix.log says nothing at all. setup_logging is
+    idempotent and is called again by the container seconds later, so bringing it forward here (only on
+    the failure path — the happy path must stay as fast as it is) just means the line actually lands."""
+    if reason:
+        from helix.logging_setup import get_logger, setup_logging
+
+        setup_logging(paths.log_file)
+        get_logger("speech").warning("voice pre-warm failed — STT is unavailable this run: %s", reason)
+        settings.set(STT_PREWARM_ERROR, reason)
+    elif settings.get(STT_PREWARM_ERROR, ""):
+        settings.set(STT_PREWARM_ERROR, "")  # whatever was wrong has been fixed; don't keep saying so
+
 
 def _prewarm_voice_if_enabled() -> None:
-    """If hands-free voice is saved as on, load the local STT model now (before Qt). Best-effort and
-    silent: any failure just leaves voice unavailable for this run. Imports here touch no Qt."""
+    """If hands-free voice is saved as on, load the local STT model now (before Qt). Best-effort: a
+    failure leaves voice unavailable for this run, but it is RECORDED rather than swallowed, so a
+    permanently-dead mic can be diagnosed. Imports here touch no Qt."""
     try:
         from helix.adapters import speech
         from helix.adapters.json_settings import JsonSettings
@@ -26,17 +47,28 @@ def _prewarm_voice_if_enabled() -> None:
 
         paths = AppPaths.resolve()
         settings = JsonSettings(paths.settings_file)
-        if settings.get("voice_input_on", False):
-            speech.prewarm()
-            try:
-                # The neural speaker-recognition model (voice identity). Also pre-Qt for symmetry;
-                # downloads once on the first voice-enabled launch, like whisper's weights. Failure
-                # just leaves voice identity on its built-in DSP fallback.
-                from helix.adapters import speaker_embed
+        if not settings.get("voice_input_on", False):
+            # Voice is off, so no pre-warm was ATTEMPTED — and a record that outlives its run is worse
+            # than none. The console reads a non-empty record as "restarting provably cannot help" and
+            # hides the Restart button; left standing after the user switched voice off and back on, it
+            # would suppress the one offer that now works — the mirror image of the loop it exists to
+            # end. The record only ever describes this run, so a run that did not try clears it.
+            _record_stt_prewarm(paths, settings, "")
+            return
+        ok = speech.prewarm()
+        _record_stt_prewarm(
+            paths, settings,
+            "" if ok else (speech.last_prewarm_error() or "the speech model could not be loaded"),
+        )
+        try:
+            # The neural speaker-recognition model (voice identity). Also pre-Qt for symmetry;
+            # downloads once on the first voice-enabled launch, like whisper's weights. Failure
+            # just leaves voice identity on its built-in DSP fallback.
+            from helix.adapters import speaker_embed
 
-                speaker_embed.prewarm(paths.data / "models")
-            except Exception:
-                pass
+            speaker_embed.prewarm(paths.data / "models")
+        except Exception:
+            pass
     except Exception:
         pass
 

@@ -220,6 +220,71 @@ def test_preferred_chat_falls_back_when_subscription_fails():
     assert reply.text == "api reply"
 
 
+def test_preferred_chat_hands_a_pictures_images_to_the_subscription():
+    """The hologram critic sends the rendered preview as an Image block in a plain (no-tool) call. On a
+    subscription-only machine that call lands HERE, and _flatten keeps only the text — so the critic
+    was about to judge a preview it could not see. The pictures must ride along, in order, as vision."""
+    from helix.ports.llm import Image
+
+    sub = _Sub()
+    api = _ApiChat()
+    chat = PreferredChat(sub, api)
+    img = Image(media_type="image/png", data="iVBORw0KGgo=")
+    reply = chat.chat([Turn(Role.USER, (img, Text("Design brief: a bracket")))], system="critic")
+    assert reply.text == "hermetic reply"
+    assert api.calls == 0, "an active subscription must carry the picture, not bounce to the meter"
+    prompt, _names, kw = sub.hermetic_calls[0]
+    assert "Design brief: a bracket" in prompt
+    assert kw.get("images") == (img,), f"the Image block did not reach run_hermetic: {kw!r}"
+    # A text-only distill stays exactly as it was: no images argument worth sending.
+    chat.chat([Turn(Role.USER, (Text("distill this"),))])
+    assert not sub.hermetic_calls[1][2].get("images")
+
+
+def test_a_hermetic_run_with_images_sends_the_structured_vision_message(monkeypatch, tmp_path):
+    """The same envelope the orb turn uses for an attachment — images first, then the text — handed to
+    the SDK's one-shot query(). A plain string would silently drop the picture on the floor (the CLI
+    would answer about a preview it never received); a text-only run must still be the plain string,
+    because that is the form every CLI version understands."""
+    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from helix.adapters.agent_sdk_chat import SubscriptionBrain
+    from helix.ports.llm import Image
+
+    seen: list = []
+
+    async def _fake_query(*, prompt, options):
+        if isinstance(prompt, str):
+            seen.append(prompt)
+        else:
+            seen.append([m async for m in prompt])
+        yield AssistantMessage(content=[TextBlock("OK")], model="claude-sonnet-4-6")
+
+    monkeypatch.setattr(claude_agent_sdk, "query", _fake_query)
+    brain = SubscriptionBrain(lambda: "sk-ant-oat01-fake", "sys", workdir=str(tmp_path))
+    try:
+        img = Image(media_type="image/png", data="iVBORw0KGgo=")
+        out = brain.run_hermetic("Design brief: a bracket", system="critic", images=[img])
+        brain.run_hermetic("distill this")
+    finally:
+        brain.shutdown()
+    assert out == "OK"
+    messages = seen[0]
+    assert isinstance(messages, list) and len(messages) == 1, (
+        f"expected ONE structured user message, got {seen[0]!r}")
+    msg = messages[0]
+    assert msg["type"] == "user" and msg["message"]["role"] == "user"
+    content = msg["message"]["content"]
+    assert content == [
+        {"type": "image",
+         "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+        {"type": "text", "text": "Design brief: a bracket"},
+    ], f"the vision envelope drifted: {content!r}"
+    assert seen[1] == "distill this", "a text-only run must stay a plain string prompt"
+
+
 def _retry_brain(turn):
     """A real SubscriptionBrain with its one turn coroutine faked at the seam — no SDK, no CLI:
     only run_orb_turn's retry policy is under test."""
@@ -372,3 +437,302 @@ def test_web_tools_denied_for_autonomous_runs():
 
     web = brain._options((), "claude-sonnet-4-6", "low", _Sinks(), web=True)
     assert web.tools == ["WebSearch", "WebFetch"]               # user-driven runs keep web
+
+
+# ---------------------------------------------------------------------------
+# THE WEB FENCE: an autonomous run gets no web tools of the model's own, on EITHER rail.
+# ---------------------------------------------------------------------------
+
+
+class _FakeApiClient:
+    """Records the Messages API kwargs and answers with a plain, tool-free reply."""
+
+    def __init__(self) -> None:
+        self.kwargs: dict = {}
+
+    @property
+    def messages(self) -> "_FakeApiClient":
+        return self
+
+    def create(self, **kwargs):
+        from types import SimpleNamespace
+
+        self.kwargs = kwargs
+        usage = SimpleNamespace(
+            input_tokens=1, output_tokens=1, cache_creation_input_tokens=0, cache_read_input_tokens=0
+        )
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="all done")],
+            stop_reason="end_turn", usage=usage,
+        )
+
+
+def test_an_autonomous_turn_on_the_api_rail_is_never_offered_the_web_tools(monkeypatch):
+    """A watcher chews on untrusted content, so it must not get Anthropic's server-side
+    web_search/web_fetch — that is an egress channel around call_api's allowlist and scrubbing. The
+    subscription rail has always fenced it; the API rail served orb turns and watcher turns from ONE
+    web-enabled chat, so a token-less user's every agent run was handed the web."""
+    from helix.adapters.anthropic_chat import AnthropicChat
+
+    fake = _FakeApiClient()
+    monkeypatch.setattr(AnthropicChat, "_client_for_current_key", lambda self: fake)
+    api = AnthropicChat(lambda: "sk-test", web_search=True)
+    svc, _store, _api = _service(None, api=api)  # no subscription: every turn lands on the API rail
+
+    svc.run_turn("summarize that Slack thread", allow_builds=False, persist=False)
+    kinds = [t.get("type", "") for t in fake.kwargs["tools"]]
+    assert not any(k.startswith("web_") for k in kinds), f"an autonomous run was handed {kinds}"
+    assert "list_apps" in [t.get("name") for t in fake.kwargs["tools"]]  # its own tools still there
+
+    svc.run_turn("what's the weather in Paris?")  # a human at the orb keeps the web
+    assert fake.kwargs["tools"][0]["type"].startswith("web_search")
+
+
+def test_an_autonomous_turn_tells_the_subscription_rail_to_withhold_the_web_too(monkeypatch):
+    # Same rule, stated out loud on the other rail rather than left to run_hermetic's default — one
+    # fence, both rails, so they cannot drift apart again.
+    sub = _Sub()
+    svc, _store, _api = _service(sub)
+    svc.run_turn("summarize that Slack thread", allow_builds=False, persist=False)
+    _prompt, _names, kw = sub.hermetic_calls[0]
+    assert kw.get("web") is False
+
+
+def test_a_hermetic_run_narrates_tool_milestones_not_the_models_half_formed_prose(monkeypatch,
+                                                                                  tmp_path):
+    """Agent runs and think_harder both stream their progress to the Console status line AND the
+    voice. Pushing the model's first interim sentence there made HELIX read its own thinking aloud —
+    the very thing the orb path was fixed to stop doing. Only tool milestones surface, in the
+    friendly phrase both rails use."""
+    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
+    from claude_agent_sdk import AssistantMessage, TextBlock, ToolUseBlock
+
+    from helix.adapters.agent_sdk_chat import SubscriptionBrain
+
+    async def _fake_query(*, prompt, options):
+        yield AssistantMessage(
+            content=[TextBlock("Hmm, let me work out whether the inbox even matters here."),
+                     ToolUseBlock("t1", "mcp__helix__check_email", {})],
+            model="claude-sonnet-4-6",
+        )
+        yield AssistantMessage(
+            content=[TextBlock("Two new emails, both from Dave.")], model="claude-sonnet-4-6"
+        )
+
+    monkeypatch.setattr(claude_agent_sdk, "query", _fake_query)
+    lines: list[str] = []
+    brain = SubscriptionBrain(lambda: "sk-ant-oat01-fake", "sys", workdir=str(tmp_path))
+    try:
+        out = brain.run_hermetic("what's in my inbox?", on_progress=lines.append)
+    finally:
+        brain.shutdown()
+    assert out == "Two new emails, both from Dave."
+    assert lines == ["Checking your inbox…"], f"narrated {lines}"
+
+
+def test_the_deep_reasoners_api_fallback_names_the_real_subscription_failure():
+    """think_harder falls back to a BARE AnthropicChat, which can only say "check your token". When
+    the subscription rail is structurally perfect and the turn still died, that sends the user off to
+    re-issue a credential that had just worked — so the fallback must say what actually happened."""
+    from helix.app.container import _deep_think_on_api
+    from helix.domain.errors import MissingApiKey
+
+    class _NoKeyChat:
+        def chat(self, turns, system=None, tools=None):
+            raise MissingApiKey(
+                "Claude isn't reachable right now. Check your subscription token (run "
+                "claude setup-token) or add a Claude API key in Settings."
+            )
+
+    class _StructurallyPerfectSub:
+        def why_inactive(self):
+            return None  # token saved, SDK present, a CLI that launches
+
+        def last_failure(self):
+            return "The filename or extension is too long"
+
+    with pytest.raises(MissingApiKey) as caught:
+        _deep_think_on_api(_NoKeyChat(), _StructurallyPerfectSub(), "think that through properly")
+    said = str(caught.value)
+    assert "The filename or extension is too long" in said
+    assert "Check your subscription token" not in said, "still blaming a token that was never wrong"
+
+
+def test_an_unmapped_tools_progress_line_trails_off_exactly_once():
+    # The unmapped fallback already ends in an ellipsis, so appending another printed "Working……".
+    assert ConversationService._progress_label("some_new_tool", {}) == "Working…"
+    assert ConversationService._progress_label("check_email", {}) == "Checking your inbox…"
+
+
+def test_the_production_chat_shape_fences_an_autonomous_turn(monkeypatch):
+    """The shape the CONTAINER actually wires: ConversationService gets a PreferredChat, not a bare
+    AnthropicChat. So the whole web fence rests on PreferredChat.without_web() forwarding the shed to
+    its API leg — and until now nothing exercised that hop, which is exactly how the original hole
+    (every watcher turn on the API key handed web_search/web_fetch) survived review."""
+    from helix.adapters.anthropic_chat import AnthropicChat
+
+    fake = _FakeApiClient()
+    monkeypatch.setattr(AnthropicChat, "_client_for_current_key", lambda self: fake)
+    # An INACTIVE subscription is the token-less user's everyday case: every turn lands on the API leg.
+    preferred = PreferredChat(_Sub(active=False), AnthropicChat(lambda: "sk-test", web_search=True))
+    svc, _store, _api = _service(_Sub(active=False), api=preferred)
+
+    svc.run_turn("summarize that Slack thread", allow_builds=False, persist=False)
+    kinds = [t.get("type", "") for t in fake.kwargs["tools"]]
+    assert not any(k.startswith("web_") for k in kinds), f"an autonomous run was handed {kinds}"
+    assert "list_apps" in [t.get("name") for t in fake.kwargs["tools"]]  # its own tools still there
+
+    svc.run_turn("what's the weather in Paris?")  # a human at the orb still gets the web
+    assert fake.kwargs["tools"][0]["type"].startswith("web_search"), "the fence shed too much"
+
+
+@pytest.fixture(scope="module")
+def _qt_app():
+    """One QApplication for this module — constructing the real Container touches Qt, and a second
+    QApplication in the same process aborts the interpreter."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # must be set BEFORE PyQt6 is imported
+    pytest.importorskip("PyQt6.QtWidgets")
+    from PyQt6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture
+def container(_qt_app, tmp_path, monkeypatch):
+    """The real composition root, pointed at a throwaway data dir so the user's own data is never
+    touched. It has to be the real thing: the wiring IS what's under test, and a hand-built stand-in
+    would happily reproduce whatever the container actually does wrong."""
+    import helix.config as config
+
+    root = config.AppPaths.resolve().root  # the repo itself — read-only for our purposes
+    monkeypatch.setattr(
+        config.AppPaths, "resolve",
+        staticmethod(lambda: config.AppPaths(root=root, data=tmp_path)),
+    )
+    from helix.app.container import Container
+
+    return Container()
+
+
+def test_the_unattended_services_are_wired_to_a_web_less_chat(container):
+    """The distillers and Evolve think with NOBODY watching, over text HELIX didn't write (a Slack
+    thread pasted into the transcript, an email body, the log tail). ConversationService sheds the web
+    per turn for its agent runs; these have no human turn to distinguish, so the container must hand
+    them the shed twin at wiring time. It handed them the web-enabled `self.chat` instead."""
+    unattended = {
+        "profile": container.profile, "lessons": container.lessons,
+        "user_memory": container.user_memory, "voice_id": container.voice_id,
+        "evolve": container.evolve,
+    }
+    open_fence = [
+        name for name, svc in unattended.items()
+        if getattr(getattr(svc, "_chat", None), "_api", None) is None
+        or svc._chat._api._web_search
+    ]
+    assert not open_fence, f"unattended services still hold a web-enabled chat: {open_fence}"
+    # ...and the orb's own chat KEEPS it: a human asking "what's the weather?" must still be able to
+    # search. Without this the fix could be "shed everything" and nobody would notice.
+    assert container.chat._api._web_search is True
+
+
+def test_a_stopped_turn_is_not_recorded_as_a_rail_failure():
+    """Pressing Stop surfaces as an ordinary exception from the interrupted turn. Settings shows
+    last_failure() to the user as an amber "your subscription is having trouble" warning, so
+    recording a cancellation would accuse a perfectly healthy rail — and keep accusing it until some
+    later turn happened to succeed."""
+    from helix.services.cancel import CancelToken
+
+    tok = CancelToken()
+
+    async def _turn(prompt, names, sinks, history, images=None):
+        tok.cancel()
+        raise RuntimeError("interrupted")
+
+    brain = _retry_brain(_turn)
+    try:
+        with pytest.raises(RuntimeError):
+            brain.run_orb_turn("long story please", cancel=tok)
+        assert brain.last_failure() is None, f"a user cancel was blamed on the rail: {brain.last_failure()}"
+    finally:
+        brain.shutdown()
+
+
+def test_a_genuine_failure_is_still_recorded():
+    # The other half of the guard above: an uncancelled turn that dies must STILL name its cause, or
+    # the "no rail" message goes back to blaming the token.
+    async def _turn(prompt, names, sinks, history, images=None):
+        raise RuntimeError("The filename or extension is too long")
+
+    brain = _retry_brain(_turn)
+    try:
+        with pytest.raises(RuntimeError):
+            brain.run_orb_turn("hello")
+        assert brain.last_failure() == "The filename or extension is too long"
+    finally:
+        brain.shutdown()
+
+
+def test_the_no_rail_message_closes_the_failure_sentence():
+    """raise_no_rail glues "There's no Claude API key set either…" onto the reason. A raw exception
+    string carries no punctuation of its own, so the two ran together into one breathless run-on
+    sentence — which the voice reads without a pause."""
+    from helix.adapters.agent_sdk_chat import raise_no_rail
+    from helix.domain.errors import MissingApiKey
+
+    class _StructurallyPerfectSub:
+        def why_inactive(self):
+            return None
+
+        def last_failure(self):
+            return "The filename or extension is too long"
+
+    with pytest.raises(MissingApiKey) as caught:
+        raise_no_rail(_StructurallyPerfectSub(), MissingApiKey("no key"))
+    said = str(caught.value)
+    assert "too long. There's no Claude API key" in said, said
+    assert "too long There's" not in said
+
+
+def test_a_failure_that_already_ends_in_punctuation_is_not_double_stopped():
+    from helix.adapters.agent_sdk_chat import raise_no_rail
+    from helix.domain.errors import MissingApiKey
+
+    class _Sub2:
+        def why_inactive(self):
+            return None
+
+        def last_failure(self):
+            return "The plan's usage limit was reached."
+
+    with pytest.raises(MissingApiKey) as caught:
+        raise_no_rail(_Sub2(), MissingApiKey("no key"))
+    assert "reached.." not in str(caught.value)
+
+
+def test_the_subscription_rail_narrates_a_build_by_name(monkeypatch, tmp_path):
+    """Both rails, one voice. The API rail has said "Building Tip Calculator…" all along; this rail
+    said "Building that…" for the same build, because the personalization keyed off the raw tool
+    name and this rail's names arrive MCP-prefixed (`mcp__helix__build_app`)."""
+    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
+    from claude_agent_sdk import AssistantMessage, ToolUseBlock
+
+    from helix.adapters.agent_sdk_chat import SubscriptionBrain
+
+    async def _fake_query(*, prompt, options):
+        yield AssistantMessage(
+            content=[ToolUseBlock("t1", "mcp__helix__build_app", {"name": "Tip Calculator"})],
+            model="claude-sonnet-4-6",
+        )
+
+    monkeypatch.setattr(claude_agent_sdk, "query", _fake_query)
+    lines: list[str] = []
+    brain = SubscriptionBrain(lambda: "sk-ant-oat01-fake", "sys", workdir=str(tmp_path))
+    try:
+        brain.run_hermetic("build me a tip calculator", on_progress=lines.append)
+    finally:
+        brain.shutdown()
+    assert lines == ["Building Tip Calculator…"], f"narrated {lines}"

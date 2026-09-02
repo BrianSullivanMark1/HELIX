@@ -56,7 +56,8 @@ def _make_engine():
 def scan_pdf_pages(path, indices: list[int], *, max_pages: int, budget_s: float) -> dict[int, str]:
     """OCR the given zero-based pages of a PDF → {index: text}. Stops early at max_pages or when the
     wall-clock budget runs out (the caller reports what was left untranscribed). A page that renders
-    blank or fails simply maps to "". Returns {} when OCR is unavailable or the document won't open."""
+    blank maps to ""; a page that FAILS is left out of the dict entirely, so the caller counts it as
+    untranscribed and says so. Returns {} when OCR is unavailable or the document won't open."""
     if not indices or max_pages <= 0 or not available():
         return {}
     try:
@@ -85,14 +86,26 @@ def _scan(path, indices: list[int], budget_s: float) -> dict[int, str]:
             for idx in indices:
                 if idx >= n or time.monotonic() > deadline:
                     break
-                page = doc[idx]
-                w_pt, h_pt = page.get_size()
-                scale = min(_DPI / 72, _MAX_SIDE_PX / max(w_pt, h_pt, 1.0))
-                arr = page.render(scale=scale).to_numpy()
-                if arr.shape[2] == 3:  # pdfium renders BGR; the engine wants BGRA — pad opaque alpha
-                    h, w, _ = arr.shape
-                    arr = np.dstack([arr, np.full((h, w, 1), 255, np.uint8)])
-                out[idx] = await _recognize(engine, np.ascontiguousarray(arr))
+                # Guard EVERY page individually. Without this, one corrupt page object, one render that
+                # trips pdfium, or one WinRT hiccup inside _recognize unwound the whole loop before
+                # `return out` and the catch-all above handed back {} — a 90-page scan came back empty
+                # because of page 44, and the caller, seeing nothing read at all, couldn't even tell
+                # anyone pages were lost. Now the pages already transcribed survive the bad one.
+                try:
+                    page = doc[idx]
+                    w_pt, h_pt = page.get_size()
+                    scale = min(_DPI / 72, _MAX_SIDE_PX / max(w_pt, h_pt, 1.0))
+                    arr = page.render(scale=scale).to_numpy()
+                    if arr.shape[2] == 3:  # pdfium renders BGR; the engine wants BGRA — pad opaque alpha
+                        h, w, _ = arr.shape
+                        arr = np.dstack([arr, np.full((h, w, 1), 255, np.uint8)])
+                    out[idx] = await _recognize(engine, np.ascontiguousarray(arr))
+                except Exception as exc:  # noqa: BLE001 — one bad page must not cost the other 89
+                    # Deliberately leave `idx` ABSENT rather than storing "": an empty string reads as a
+                    # genuinely blank page, counts as "read" to the caller, and the page then disappears
+                    # without a word. An absent index lands in the caller's "missed" list, which is what
+                    # gets said out loud in the extracted text.
+                    _LOG.warning("OCR failed on page %d of %s: %s", idx, path, exc)
         finally:
             doc.close()
 

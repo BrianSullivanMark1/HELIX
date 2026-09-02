@@ -236,3 +236,176 @@ def test_a_later_utterance_cannot_unstop_an_earlier_killed_one():
     e._gen = 6  # …and B (gen 6) then started
     assert e._is_stopped(5)  # A is still considered stopped
     assert not e._is_stopped(6)  # B is not
+
+
+def test_a_failed_stt_prewarm_remembers_why_it_gave_up(monkeypatch):
+    # prewarm swallowed its own exceptions, so a machine that can't build the whisper weights (no disk
+    # space, a corrupt HF cache, a proxy blocking huggingface) left NO trace anywhere — while the UI
+    # kept offering a restart that re-runs the identical failing load. Keep the reason.
+    monkeypatch.setattr(speech, "_MODELS", {})
+    monkeypatch.setattr(speech, "_ACTIVE_MODEL", None)
+    monkeypatch.setattr(speech, "_LAST_PREWARM_ERROR", None)
+    monkeypatch.setattr(speech, "stt_importable", lambda: True)
+
+    def boom(size, device="cpu"):
+        raise OSError(f"no space left on device while fetching {size}")
+
+    monkeypatch.setattr(speech, "_build_model", boom)
+    assert speech.prewarm() is False
+    reason = speech.last_prewarm_error()
+    assert reason and "no space left" in reason
+    assert speech.DEFAULT_STT_MODEL in reason      # names the preferred size...
+    assert "base.en" in reason                     # ...and the lighter fallback that also failed
+
+    # and a later success clears it, so a fixed machine doesn't keep reporting an old failure
+    monkeypatch.setattr(speech, "_build_model", lambda size, device="cpu": object())
+    assert speech.prewarm() is True
+    assert speech.last_prewarm_error() is None
+
+
+def test_prewarm_without_faster_whisper_says_so_rather_than_nothing(monkeypatch):
+    monkeypatch.setattr(speech, "_LAST_PREWARM_ERROR", None)
+    monkeypatch.setattr(speech, "stt_importable", lambda: False)
+    assert speech.prewarm() is False
+    assert "faster-whisper" in (speech.last_prewarm_error() or "")
+
+
+def test_the_launcher_writes_a_failed_prewarm_to_the_log_and_to_settings(monkeypatch, caplog, tmp_path):
+    # The launcher pre-warms BEFORE setup_logging has attached a handler, so the reason has to be
+    # recorded deliberately or it is lost: the log line is what a person reads, and the settings key is
+    # what the UI needs to stop promising a restart that cannot help.
+    import logging
+
+    import helix.logging_setup as logging_setup
+    import main as launcher
+
+    configured: list = []
+    monkeypatch.setattr(
+        logging_setup, "setup_logging",
+        lambda path, **kw: configured.append(path) or logging.getLogger("helix"),
+    )
+
+    class _Paths:
+        log_file = tmp_path / "helix.log"
+
+    class _Settings:
+        def __init__(self):
+            self.d = {}
+
+        def get(self, k, default=None):
+            return self.d.get(k, default)
+
+        def set(self, k, v):
+            self.d[k] = v
+
+    settings = _Settings()
+    paths = _Paths()
+    caplog.set_level(logging.WARNING)
+    launcher._record_stt_prewarm(paths, settings, "small.en: OSError: no space left on device")
+    assert configured == [paths.log_file]  # logging is brought forward so the line actually lands
+    assert "no space left on device" in caplog.text
+    assert settings.d[launcher.STT_PREWARM_ERROR] == "small.en: OSError: no space left on device"
+
+    # a later good launch clears the flag, and a good launch with nothing stored writes nothing at all
+    launcher._record_stt_prewarm(paths, settings, "")
+    assert settings.d[launcher.STT_PREWARM_ERROR] == ""
+    fresh = _Settings()
+    launcher._record_stt_prewarm(paths, fresh, "")
+    assert fresh.d == {}
+
+
+def test_a_launch_with_voice_off_forgets_a_failure_from_an_earlier_run(monkeypatch, tmp_path):
+    """The record says "restarting cannot help", so the console hides the Restart button while it
+    stands. If a run that never even ATTEMPTED the pre-warm left it standing, then a user who switched
+    voice off after a failure and later switched it back on would be refused the one restart that now
+    works — the mirror image of the loop this record exists to end. A run that did not try clears it."""
+    import main as launcher
+
+    class _Settings:
+        def __init__(self, d):
+            self.d = dict(d)
+
+        def get(self, k, default=None):
+            return self.d.get(k, default)
+
+        def set(self, k, v):
+            self.d[k] = v
+
+    settings = _Settings({"voice_input_on": False,
+                          launcher.STT_PREWARM_ERROR: "small.en: OSError: no space left on device"})
+
+    class _Paths:
+        log_file = tmp_path / "helix.log"
+        settings_file = tmp_path / "settings.json"
+        data = tmp_path
+
+    # Both are imported INSIDE the function, so patch them where they are looked up, not on `launcher`.
+    monkeypatch.setattr("helix.config.AppPaths.resolve", staticmethod(_Paths))
+    monkeypatch.setattr("helix.adapters.json_settings.JsonSettings", lambda _p: settings)
+    monkeypatch.setattr(launcher, "_record_stt_prewarm",
+                        lambda paths, s, reason: s.set(launcher.STT_PREWARM_ERROR, reason))
+
+    def _boom():  # voice is off, so the model must never be touched
+        raise AssertionError("pre-warmed the speech model with voice switched off")
+
+    monkeypatch.setattr("helix.adapters.speech.prewarm", _boom)
+
+    launcher._prewarm_voice_if_enabled()
+    assert settings.d[launcher.STT_PREWARM_ERROR] == "", (
+        "a stale pre-warm failure survived a launch that never tried — the Restart button stays hidden"
+    )
+
+
+def test_a_launch_with_voice_on_records_the_prewarm_result_it_actually_got(monkeypatch, tmp_path):
+    """The join between the two halves — speech.prewarm()/last_prewarm_error() and the settings record
+    the Console reads. Both halves were pinned; the ONE line that connects them was not, so renaming or
+    reordering it left every test green while the record silently stopped being written: prewarm_error()
+    reads "" forever and the Console goes back to offering the Restart button that provably cannot help.
+    The voice-OFF test above deliberately stubs _record_stt_prewarm out, so nothing else drives this."""
+    import helix.logging_setup as logging_setup
+    import main as launcher
+
+    class _Settings:
+        def __init__(self, d):
+            self.d = dict(d)
+
+        def get(self, k, default=None):
+            return self.d.get(k, default)
+
+        def set(self, k, v):
+            self.d[k] = v
+
+    class _Paths:
+        log_file = tmp_path / "helix.log"
+        settings_file = tmp_path / "settings.json"
+        data = tmp_path
+
+    # Imported inside _prewarm_voice_if_enabled, so patch them where they are looked up. setup_logging
+    # is stubbed because the real one attaches handlers to the root logger for the rest of the session.
+    monkeypatch.setattr("helix.config.AppPaths.resolve", staticmethod(_Paths))
+    monkeypatch.setattr("helix.adapters.json_settings.JsonSettings", lambda _p: _Settings({}))
+    monkeypatch.setattr(logging_setup, "setup_logging", lambda path, **kw: None)
+    monkeypatch.setattr("helix.adapters.speaker_embed.prewarm", lambda _dir: True)
+
+    def _run(settings) -> dict:
+        monkeypatch.setattr("helix.adapters.json_settings.JsonSettings", lambda _p: settings)
+        launcher._prewarm_voice_if_enabled()
+        return settings.d
+
+    # A pre-warm that failed leaves the reason the adapter gave, verbatim — that string is the whole
+    # point of the record, and the Console shows it in place of the useless Restart offer.
+    monkeypatch.setattr(speech, "prewarm", lambda: False)
+    monkeypatch.setattr(speech, "last_prewarm_error", lambda: "small.en: OSError: no space left")
+    d = _run(_Settings({"voice_input_on": True}))
+    assert d[launcher.STT_PREWARM_ERROR] == "small.en: OSError: no space left"
+
+    # A failure the adapter couldn't explain still has to be recorded — "" would read as "voice is fine".
+    monkeypatch.setattr(speech, "last_prewarm_error", lambda: None)
+    d = _run(_Settings({"voice_input_on": True}))
+    assert d[launcher.STT_PREWARM_ERROR] == "the speech model could not be loaded"
+
+    # And the mirror: a pre-warm that worked clears whatever the last bad run left behind.
+    monkeypatch.setattr(speech, "prewarm", lambda: True)
+    d = _run(_Settings({"voice_input_on": True,
+                        launcher.STT_PREWARM_ERROR: "small.en: OSError: no space left"}))
+    assert d[launcher.STT_PREWARM_ERROR] == ""

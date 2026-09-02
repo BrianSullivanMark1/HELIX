@@ -19,6 +19,7 @@ from helix.domain.knowledge import (
     tokenize,
 )
 from helix.domain.models import App, BuildKind
+from helix.services import attachments, doc_extract
 from helix.services.builds import BuildService
 from helix.services.conversation import BUILD_TOOLS
 from helix.services.knowledge import KnowledgeService
@@ -183,6 +184,54 @@ def test_add_files_ingests_a_word_document(tmp_path):
     added = ks.add_files(base.slug, [p])
     assert [a.title for a in added] == ["vault.docx"]
     assert "12-24-36" in ks.search("vault combination")
+
+
+def test_a_document_too_large_to_parse_is_skipped_before_it_reaches_the_extractor(tmp_path, monkeypatch):
+    # PDF/Word are parsed WHOLE. attachments and files both refuse an oversized one before extracting;
+    # ingestion was the only reader with no gate at either end, so a 300 MB scan was parsed in full and
+    # then written into the vault. The gate has to be BEFORE extract(), not after.
+    ks = _svc(tmp_path)
+    base = ks.create("Docs")
+    big = tmp_path / "huge.pdf"
+    big.write_bytes(b"%PDF-1.4" + b"0" * 500)
+    monkeypatch.setattr(attachments, "MAX_RICH_BYTES", 10)  # same knob the sibling readers are pinned on
+
+    def _boom(_path):
+        raise AssertionError("an oversized document must never reach the extractor")
+
+    monkeypatch.setattr(doc_extract, "extract", _boom)
+    assert ks.add_files(base.slug, [big]) == []
+    assert ks.count(base.slug) == 0
+
+
+def test_extracted_document_text_is_capped_like_a_plain_text_file(tmp_path, monkeypatch):
+    # A document under the file gate can still yield megabytes of text, which _store writes to disk and
+    # every later search re-chunks. The plain-text branch has always been capped; this pins that the
+    # rich-doc branch gets the same budget and the same marker.
+    ks = _svc(tmp_path)
+    base = ks.create("Docs")
+    p = tmp_path / "lease.pdf"
+    p.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(attachments, "MAX_FILE_BYTES", 200)
+    monkeypatch.setattr(doc_extract, "extract", lambda _p: "lease clause. " * 400)
+    (doc,) = ks.add_files(base.slug, [p])
+    stored = ks.doc_text(base.slug, doc.id)
+    assert stored.endswith("… (truncated — file exceeds the per-file size limit)")
+    assert len(stored.encode("utf-8")) < 400  # the tail really was dropped, not just marked
+
+
+def test_ingesting_files_reports_progress_for_each_one(tmp_path):
+    # The Vault view runs ingestion on a worker and shows these lines; without them a 30s OCR pass is
+    # indistinguishable from a hung window.
+    ks = _svc(tmp_path)
+    base = ks.create("Docs")
+    a = tmp_path / "a.txt"
+    a.write_text("alpha", encoding="utf-8")
+    b = tmp_path / "b.txt"
+    b.write_text("beta", encoding="utf-8")
+    lines: list[str] = []
+    ks.add_files(base.slug, [a, b], on_progress=lines.append)
+    assert lines == ["Reading a.txt (1 of 2)…", "Reading b.txt (2 of 2)…"]
 
 
 def test_ingest_outbox_harvests_results_and_clears_them(tmp_path):

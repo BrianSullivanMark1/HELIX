@@ -102,6 +102,7 @@ class CameraPanel(QDialog):
         self._pending_capture = False  # the word came before the first frame: capture on arrival
         self._started_at = time.monotonic()
         self._active_device_id = ""
+        self._pending_device_id = ""  # a picked camera not yet PROVEN by a frame — see _on_frame
         self._camera = None
         self._session = None
         self._sink = None
@@ -233,8 +234,9 @@ class CameraPanel(QDialog):
         self._combo.blockSignals(False)
 
     def _on_camera_pick(self, index: int) -> None:
-        """The user picked a different camera: switch live and REMEMBER the choice (the saved id is
-        what _resolve_camera prefers next time)."""
+        """The user picked a different camera: switch live, and remember the choice once the new
+        device has actually delivered a picture (the saved id is what _resolve_camera prefers next
+        time, so it must only ever name a camera that demonstrably works)."""
         if self._settled:
             return
         want = self._combo.itemData(index)
@@ -246,17 +248,36 @@ class CameraPanel(QDialog):
         self._stop_camera()
         self._latest = None
         self._started_at = time.monotonic()  # the no-frame grace restarts for the new device
+        # "Take the picture" said while camera A sat dark described CAMERA A. Carrying the latch over
+        # spends camera B's very first frame — a black, still-auto-exposing warm-up shot taken before
+        # the user can see what B is even pointed at — and the look is gone. Switching cameras is
+        # exactly what someone does BECAUSE the word didn't land, so the word has to come again.
+        self._pending_capture = False
         self._preview.setPixmap(QPixmap())
         self._preview.setText("Switching camera…")
         if not self._start_camera(device):
             self._settle_fail("I couldn't switch to that camera.")
             self.close()
             return
-        if self._settings is not None:
-            try:
-                self._settings.set(CAMERA_DEVICE_SETTING, want)
-            except Exception:  # remembering the choice must never break the live switch
-                _LOG.exception("couldn't save the camera choice")
+        # Deliberately NOT saved yet. start() is asynchronous: it returns True for a camera that
+        # enumerates and opens and then never delivers a single frame (held by Zoom, a stalled
+        # virtual cam). Persisting here burns that id into every FUTURE look — _resolve_camera
+        # prefers the saved id over the system default, and nothing else in the app can clear it —
+        # so each look would open the dead camera and die on the startup grace. Both ways a started
+        # camera can still fail (the _tick no-frame reap and the async _on_camera_error) land after
+        # this line, which is why only a delivered frame is allowed to commit the choice.
+        self._pending_device_id = want
+
+    def _remember_camera(self, device_id: str) -> None:
+        """Persist the picked webcam. Called from _on_frame only — a frame is the one piece of
+        evidence that the device actually delivers pictures."""
+        self._pending_device_id = ""
+        if self._settings is None:
+            return
+        try:
+            self._settings.set(CAMERA_DEVICE_SETTING, device_id)
+        except Exception:  # remembering the choice must never break the live preview
+            _LOG.exception("couldn't save the camera choice")
 
     def _on_camera_error(self, *args) -> None:
         # Transient errors after frames are flowing are ignored; a failure before ANY frame means
@@ -279,6 +300,8 @@ class CameraPanel(QDialog):
         if img is None or img.isNull():
             return
         self._latest = img.copy()  # detach from the driver's frame buffer before it's recycled
+        if self._pending_device_id:  # this camera just proved itself — now the choice is worth saving
+            self._remember_camera(self._pending_device_id)
         if self._pending_capture:  # they said the word while the sensor was still waking
             self._pending_capture = False
             self._do_capture()

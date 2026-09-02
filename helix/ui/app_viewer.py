@@ -9,8 +9,8 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 
-from PyQt6.QtCore import QUrl, pyqtSignal
-from PyQt6.QtWebEngineCore import QWebEngineSettings
+from PyQt6.QtCore import QStandardPaths, QTimer, QUrl, pyqtSignal
+from PyQt6.QtWebEngineCore import QWebEngineDownloadRequest, QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
@@ -97,6 +97,11 @@ class AppViewer(QWidget):
         back.clicked.connect(self.closeRequested.emit)
         self._title = QLabel("")
         self._title.setStyleSheet(f"color:{CYAN};font-weight:600;")
+        # One-line status in the header ("Saved model.stl to Downloads"). It lives up here, not in the edit
+        # bar's status label, because that bar is hidden until Edit is pressed — a download toast in a
+        # hidden bar is a toast nobody sees. Cleared after a few seconds so the header returns to quiet.
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"color:{MUTED};")
         edit_btn = QPushButton("✨ Edit")
         edit_btn.setObjectName("Nav")
         edit_btn.setToolTip("Describe a change and HELIX updates this build live")
@@ -113,6 +118,7 @@ class AppViewer(QWidget):
         browser.clicked.connect(self.openExternallyRequested.emit)
         row.addWidget(back)
         row.addWidget(self._title)
+        row.addWidget(self._status)
         row.addStretch(1)
         row.addWidget(point_btn)
         row.addWidget(edit_btn)
@@ -136,6 +142,12 @@ class AppViewer(QWidget):
         # JS→Qt bridge for "point at an element": the injected script hands the picked selector/snippet
         # back through the page title (no QWebChannel needed).
         self._web.page().titleChanged.connect(self._on_title_changed)
+        # A hologram's export row is plain <a download> links (STL / 3MF / SCAD / preview). In a browser tab
+        # that saves the file; inside QtWebEngine a download nobody accepts is cancelled SILENTLY — no dialog,
+        # no file, no error — so without this slot all four export buttons are dead in-app. The handler
+        # accepts every download into the user's Downloads folder (Qt does the IO off this thread) and says
+        # so in the header when it lands.
+        self._web.page().profile().downloadRequested.connect(self._on_download_requested)
         card.addWidget(self._web, stretch=1)
 
         # Live "Edit with AI" bar — hidden until you press Edit. Typing a change and pressing Update
@@ -219,6 +231,46 @@ class AppViewer(QWidget):
         else:
             change = text
         self.editRequested.emit(change)
+
+    def _say(self, msg: str, *, hold_ms: int = 6000) -> None:
+        """Show a short line in the header, then clear it — the viewer's own quiet toast. The clear only
+        fires if the line is still ours, so a newer message is never wiped by an older timer."""
+        self._status.setText(msg)
+        if hold_ms <= 0:
+            return
+
+        def _clear() -> None:
+            if self._status.text() == msg:
+                self._status.setText("")
+
+        QTimer.singleShot(hold_ms, _clear)
+
+    def _on_download_requested(self, request) -> None:
+        """Accept a page-initiated download (a hologram's STL / 3MF / SCAD / preview export) into the user's
+        Downloads folder, keeping the page's suggested file name (Qt uniquifies it — model (1).stl — when
+        the directory is set, so a second export never overwrites the first). Only the directory changes;
+        a custom file name is never set, because that would switch the uniquifying off."""
+        downloads = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+        where = "Downloads"
+        if not downloads:  # no Downloads folder on this account: the home folder, and say so honestly
+            downloads = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.HomeLocation)
+            where = "your home folder"
+        if downloads:
+            request.setDownloadDirectory(downloads)
+        name = request.downloadFileName() or "the file"
+        self._say(f"Saving {name}…", hold_ms=0)
+
+        def _finished() -> None:
+            done = QWebEngineDownloadRequest.DownloadState.DownloadCompleted
+            if request.state() == done:
+                # Re-read the name: Qt may have uniquified it after we looked.
+                self._say(f"Saved {request.downloadFileName() or name} to {where}")
+            else:
+                reason = request.interruptReasonString()
+                self._say(f"Couldn't save {name}" + (f" — {reason}" if reason else ""))
+
+        request.isFinishedChanged.connect(_finished)
+        request.accept()
 
     def set_edit_status(self, msg: str) -> None:
         """The main window pushes build progress/finish here so the edit bar reflects the live update."""

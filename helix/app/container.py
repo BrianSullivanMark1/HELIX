@@ -6,12 +6,13 @@ one-line change here. This module is a PROTECTED_PATH: the self-coder may never 
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
 from typing import Callable
 
-from helix.adapters.agent_sdk_chat import PreferredChat, SubscriptionBrain
+from helix.adapters.agent_sdk_chat import PreferredChat, SubscriptionBrain, raise_no_rail
 from helix.adapters.anthropic_chat import AnthropicChat
 from helix.adapters.api_coder import ApiCoder
 from helix.adapters.claude_code_cli import ClaudeCodeCli
@@ -19,6 +20,7 @@ from helix.adapters.coder_select import FallbackCoder
 from helix.adapters.git_repo import GitRepo
 from helix.adapters.json_settings import JsonSettings
 from helix.adapters.model_select import GrowthModelResolver
+from helix.adapters.openscad_cli import OpenScadCli
 from helix.adapters.restart import Restarter
 from helix.adapters.signal_bus import SignalBus
 from helix.adapters.speech import EdgeSpeechOut, OsSpeechOut, WhisperSpeechIn, active_model
@@ -26,6 +28,7 @@ from helix.adapters.sqlite_store import SqliteStore
 from helix.adapters.system_clock import SystemClock
 from helix.adapters.voyage_embed import VoyageEmbedder
 from helix.config import AppPaths
+from helix.domain.errors import MissingApiKey
 from helix.domain.models import Role
 from helix.logging_setup import get_logger, setup_logging
 from helix.ports.llm import Text, Turn
@@ -38,6 +41,7 @@ from helix.services.conversation import ConversationService
 from helix.services.files import FilesService
 from helix.services.forge import ForgeService
 from helix.services.gmail import GmailService
+from helix.services.images import load_image_block
 from helix.services.knowledge import KnowledgeService
 from helix.services.desktop import DesktopService
 from helix.services.evolve import EvolveService
@@ -166,12 +170,19 @@ def _seed_watchers(agent_store: JsonSettings, agents) -> None:
 
 
 class _LazyBaker:
-    """Wiring only: defers ModelBaker's construction — and with it the trimesh + networkx +
-    scipy.spatial import chain, measured at ~955 ms — until a MODEL build actually finishes.
+    """Wiring only: defers ModelBaker's construction until a MODEL build actually reaches its check.
 
-    Forge's whole use of the baker is one `.bake(workspace)` call on a model build, and nothing else
-    reads it, so a launch that never bakes a hologram has no reason to pay for the mesh stack before
-    its first frame. Same object shape Forge already expects; it neither knows nor cares."""
+    It used to stand between launch and a ~955 ms mesh stack (trimesh + networkx + scipy); the baker
+    now compiles through the CadEngine and imports nothing heavy, but the seam stays: the Forge only
+    ever reaches for the baker from a build worker, and nothing a launch draws needs it, so the viewer's
+    page templates are parsed the first time a hologram is built rather than before the first frame.
+    Same object shape Forge expects — prepare() / check() / bake() / engine_missing() — it neither
+    knows nor cares. The shape is the whole contract here, and it is the easy thing to break: when
+    prepare() was added to ModelBaker and the Forge started calling it before every hologram's coder
+    run, this proxy still forwarded only the older three, so every hologram build in the RUNNING app
+    would have died with an AttributeError while the suite — which hands the Forge a real ModelBaker —
+    stayed green. tests/test_container_wiring.py now asserts the proxy forwards every public method the
+    real class has, so a new baker method cannot ship half-wired again."""
 
     __slots__ = ("_make", "_real")
 
@@ -179,10 +190,117 @@ class _LazyBaker:
         self._make = make
         self._real: object | None = None
 
-    def bake(self, workspace):
+    def _get(self):
         if self._real is None:
             self._real = self._make()
-        return self._real.bake(workspace)
+        return self._real
+
+    def prepare(self, workspace):
+        return self._get().prepare(workspace)
+
+    def check(self, workspace):
+        return self._get().check(workspace)
+
+    def bake(self, workspace):
+        return self._get().bake(workspace)
+
+    def engine_missing(self) -> bool:
+        return self._get().engine_missing()
+
+
+# The vision critic's instruction. It judges the RENDERED preview against the coder's own brief: a
+# contradiction (a floating part, a blind hole, a missing feature) is what the repair pass can fix; style
+# is not, and a picky critic would spend the ONE repair pass on taste. "exactly OK" gives the parser a
+# fixed token to look for, so a good design is never sent back for a sentence of praise.
+_CRITIC_SYSTEM = (
+    "You are checking a 3D design HELIX just compiled. Here is the design brief and parameters, and the "
+    "rendered preview. Reply with ONE short sentence naming the single most important visible problem "
+    "that contradicts the brief (a floating/disconnected part, a hole that does not go through, a "
+    "feature in the brief that is missing, grossly wrong proportion) — or exactly OK if it looks right. "
+    "Be strict about contradictions and lenient about style."
+)
+_CRITIC_MAX_CHARS = 200
+
+
+def _critic_verdict(reply_text: str) -> str | None:
+    """The critic's words → None (it looks right) or ONE problem sentence for the repair prompt.
+
+    The parse is lenient about HOW the model says OK ("OK", "OK.", "OK — it matches the brief",
+    "**OK**", '"OK"', "Okay") because a false problem is the expensive mistake: it burns the build's
+    only repair pass on a design that was right. Leading punctuation is skipped before the first word is
+    read — a model that bolds or quotes its verdict used to be parsed as a PROBLEM, and the repair prompt
+    then read "Looking at the rendered preview…: **OK**. Fix the model…" — exactly the waste this
+    leniency exists to prevent. A real problem sentence never opens with the word OK. Anything else is
+    clipped to its first sentence, capped so a rambling verdict cannot swell the repair prompt."""
+    text = " ".join((reply_text or "").split())
+    if not text:
+        return None
+    first_word = re.split(r"[^A-Za-z0-9]+", re.sub(r"^[^A-Za-z0-9]+", "", text), maxsplit=1)[0]
+    if first_word.casefold() in ("ok", "okay"):
+        return None
+    sentence = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0].strip()
+    if len(sentence) > _CRITIC_MAX_CHARS:
+        sentence = sentence[: _CRITIC_MAX_CHARS - 1].rstrip() + "…"
+    return sentence or None
+
+
+def make_hologram_critic(chat, rail_usable: Callable[[], bool], record_usage=None):
+    """The baker's `critic(preview_png, brief_text) -> problem | None`, on the fenced rail-preferring
+    chat.
+
+    `chat` is the unattended PreferredChat (without_web()): the critic looks at a picture HELIX rendered
+    and must never be able to search or fetch. It carries the preview as an Image block in a user Turn,
+    and BOTH rails can see it — PreferredChat hands the pictures to the subscription's run_hermetic as
+    vision, and falls back to AnthropicChat.chat otherwise. That matters because the one machine this
+    redesign is for runs subscription-only: wired to the API chat behind an API-key gate, every hologram
+    there compiled and rendered while the "vision critique feeds the repair loop" step silently never
+    happened. `rail_usable` says whether ANY rail can serve (subscription active or an API key set); when
+    neither can, the critic abstains without loading the picture — it still compiles, it just skips the
+    look. The closure never raises: a critic outage (no rail, a network blip, an unreadable PNG) must
+    never fail a build, so every failure reads as "looks right" and the build goes on."""
+    log = get_logger("container")
+
+    def _critic(preview_png, brief_text: str) -> str | None:
+        try:
+            if not rail_usable():
+                return None
+            image = load_image_block(preview_png)
+            if image is None:
+                return None
+            blocks = (
+                image,
+                Text("Design brief and parameters:\n" + (brief_text or "(no brief)")),
+            )
+            reply = chat.chat([Turn(Role.USER, blocks)], system=_CRITIC_SYSTEM)
+            if record_usage is not None:
+                try:
+                    u = reply.usage
+                    record_usage(u.input_tokens, u.output_tokens, u.cost_usd)
+                except Exception:  # noqa: BLE001 — the ledger is a nicety, the verdict is the job
+                    pass
+            return _critic_verdict(reply.text)
+        except Exception:  # noqa: BLE001
+            log.warning("hologram critic unavailable; skipping the look", exc_info=True)
+            return None
+
+    return _critic
+
+
+def _deep_think_on_api(deep_chat, subscription, question: str):
+    """think_harder's API leg — the escalation the deep reasoner falls back to when the subscription
+    rail didn't serve it.
+
+    Its own function so the fallback can't lose the one thing it kept getting wrong: this chat is a
+    BARE AnthropicChat (it has to be — PreferredChat would fire the expensive hermetic run a SECOND
+    time, past the cancel guard, and would drop on_progress, cancel and the web access a user-asked
+    reasoner is deliberately granted), and a bare adapter can only say "check your subscription token
+    or add an API key". So the user who watched HELIX answer, then asked it to think harder, was told
+    to re-issue a credential that had just worked. raise_no_rail says what actually happened instead —
+    the same sentence PreferredChat gives the orb, from the same helper."""
+    try:
+        return deep_chat.chat([Turn(Role.USER, (Text(question),))], system=DEEP_THINK_SYSTEM)
+    except MissingApiKey as exc:
+        raise_no_rail(subscription, exc)
 
 
 class Container:
@@ -252,14 +370,32 @@ class Container:
                 _log.warning("brain: could not determine which Claude rail is live", exc_info=True)
 
         threading.Thread(target=_announce_rail, daemon=True, name="helix-rail-check").start()
-        # Plain no-tool chat (profile distiller, voice-identity notes, …): subscription first.
+        # Plain no-tool chat (the orb's own turns, via ConversationService): subscription first.
         self.chat = PreferredChat(self.subscription, api_chat)
+        # THE UNATTENDED CHAT — the same rail-preferring chat with the API rail's server-side
+        # web_search/web_fetch shed (PreferredChat.without_web forwards the shed to its API leg; the
+        # subscription leg has always been fenced by run_hermetic's web=False default).
+        #
+        # Everything wired to THIS thinks with nobody watching, over content HELIX did not write: the
+        # profile/lessons/long-term-memory distillers are fed the raw transcript, which contains
+        # whatever an email, a Slack thread or a SAM.gov notice dragged in; the voice-identity notes
+        # distill spoken answers; Evolve reads the day's lessons and the log tail. A model-authored
+        # search or fetch from any of them is an outbound channel that walks straight around
+        # call_api's host allowlist, redirect refusal and secret scrubbing — with no human at the orb
+        # to notice. ConversationService keeps the WEB-ENABLED self.chat because it sheds per turn
+        # itself (a human at the orb may search; its agent/watcher turns may not); nothing else here
+        # has that distinction to make, so it takes the fenced twin once, at wiring time.
+        unattended_chat = self.chat.without_web()
         # The GROWTH chat: plain (no-tool) reasoning pinned to the strongest available model + high
         # effort, subscription-first like self.chat. Evolve's nightly self-improvement pass runs on
         # this so HELIX always grows on its best brain (Fable 5 → a future Fable 6, resolved live).
+        # Fenced like the distillers: Evolve runs at night, unattended, on mined text — and it drafts
+        # a change to HELIX's OWN code, so it is the last place to hand the model a free egress path.
+        # (The deep reasoner keeps its web: think_harder is a human ASKING for a search, and it takes
+        # the bare `deep_chat` below, not this.)
         growth_chat = PreferredChat(
             self.subscription, deep_chat, model=self.growth_model.resolve(), effort="high",
-        )
+        ).without_web()
 
         def _deep_think(question: str, on_progress=None, cancel=None) -> str:
             if cancel is not None and getattr(cancel, "is_set", lambda: False)():
@@ -277,7 +413,7 @@ class Container:
             # don't now fire the priciest call on the API meter.
             if cancel is not None and getattr(cancel, "is_set", lambda: False)():
                 return ""
-            reply = deep_chat.chat([Turn(Role.USER, (Text(question),))], system=DEEP_THINK_SYSTEM)
+            reply = _deep_think_on_api(deep_chat, self.subscription, question)
             # Meter the Opus escalation like the main loop does — it's the most expensive call path, and
             # was previously invisible to the usage ledger.
             u = reply.usage
@@ -306,9 +442,10 @@ class Container:
         # settings mid-build; a key pasted while a build runs must survive). Constructed early so every
         # engine-key getter below can prefer it — the V3 just-in-time connect panel writes here.
         self.secrets = JsonSettings(self.paths.data / "helix_secrets.json")
-        # The model baker turns a built model.json into a real polygon mesh (assets/model.glb) + viewer,
-        # in-process. If a Tripo key is present (secrets, settings, or env), it also gets a neural
-        # backend — the high-detail "turbo" path for organic/character subjects. Opt-in: no key → local-only.
+        # The hologram baker compiles a built model.scad through the CadEngine (below) into a mesh + the
+        # technical-illustration viewer, in-process. If a Tripo key is present (secrets, settings, or
+        # env), it also gets the neural backend — the demoted REFERENCE path ("show me what a real X
+        # looks like"), never the design itself. Opt-in: no key → the reference is simply declined.
         def _tripo_key() -> str | None:
             # Secrets first (the JIT connect panel, guard-safe), then Settings (legacy), then the env var.
             return (
@@ -350,16 +487,47 @@ class Container:
                 _blockade_key, style_provider=lambda: self.settings.get("skybox_style_id")
             ).generate(prompt)
 
-        # neural_available reflects a LIVE Tripo key (the backend is always wired), so auto-routing and the
-        # no-key preview banner key off the real thing, not merely "is a backend object present".
+        # THE HOLOGRAM ENGINE: a hologram is an OpenSCAD program the coder writes and HELIX compiles, and
+        # this is the ONE CadEngine instance — the OpenSCAD command line, found on PATH / in the usual
+        # install dirs / at a path the user typed into settings, or installed just in time with winget
+        # when the user says "install it". Constructed once (discovery is cached and re-probed after a
+        # failed run or an install) and shared by the baker, which compiles with it on the build worker,
+        # and by the tool registry, which pre-flights build_3d_model with it and offers the install —
+        # two instances would let the registry's "installed" and the baker's "missing" disagree. The
+        # libraries dir is put on OPENSCADPATH so a BOSL2 drop-in there just works; it need not exist.
+        # Importing the adapter costs nothing heavy; nothing is spawned until a hologram is built.
+        cad = OpenScadCli(
+            path_override=lambda: (self.settings.get("openscad_path") or None),
+            libraries_dir=self.paths.data / "scad_libraries",
+        )
+        # The critic looks at the rendered preview on the FENCED rail-preferring chat — the same
+        # unattended twin the distillers use, so a subscription-only machine gets the look too (see
+        # make_hologram_critic). It abstains only when NO rail can serve: no live subscription and no key.
+        critic = make_hologram_critic(
+            unattended_chat,
+            lambda: self.subscription.active() or bool((_key() or "").strip()),
+            self.store.record_usage,
+        )
+
+        # neural_available reflects a LIVE Tripo key (the backend is always wired), so the reference
+        # path keys off the real thing, not merely "is a backend object present".
         def _build_baker():
             from helix.services.model_baker import ModelBaker
+            # The viewer's three.js is the vendored r128 UMD build under helix/ui/assets (the same file
+            # the orb's shader page reads; build.py ships that folder with --add-data). Resolved from
+            # the package path — the one place that is right both in dev and frozen — and handed over
+            # as a plain Path because a service must not import ui. None if it is somehow missing: the
+            # baker then says so in the page instead of rendering nothing.
+            import helix.ui
+            three_js = Path(helix.ui.__file__).resolve().parent / "assets" / "three.min.js"
             return ModelBaker(
+                cad=cad, three_js=three_js if three_js.is_file() else None, critic=critic,
                 neural_backend=_neural, neural_available=lambda: bool(_tripo_key()),
                 skybox_backend=_skybox, skybox_available=lambda: bool(_blockade_key()),
             )
 
         self.model_baker = _LazyBaker(_build_baker)
+        self.cad = cad
         self.forge = ForgeService(
             self.builds, self.coder, self.bus, self.repo, self.paths.root, guard_files,
             model_baker=self.model_baker, data_dir=self.paths.data,
@@ -428,7 +596,8 @@ class Container:
         # questions ground via web search). Both mirror the profile/lessons pattern and inject a context
         # block each turn; dedicated JSON files, guard-safe like reminders/agents.
         self.user_memory = MemoryService(
-            self.chat, self.store, JsonSettings(self.paths.data / "helix_memory.json"), self.clock
+            unattended_chat, self.store, JsonSettings(self.paths.data / "helix_memory.json"),
+            self.clock,
         )
         self.location = LocationService(JsonSettings(self.paths.data / "helix_locations.json"))
         # Recommend: a local usage ledger (opens/runs per build) that resurfaces the user's most-used and
@@ -453,17 +622,18 @@ class Container:
             tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane, connections=self.connections,
             knowledge=self.knowledge, gmail=self.gmail, reminders=self.reminders, calendar=self.calendar,
             files=self.files, user_memory=self.user_memory, location=self.location,
-            desktop=self.desktop, shopping=self.shopping,
+            desktop=self.desktop, shopping=self.shopping, cad=cad,
         )
         # The orb quietly learns who the user is: a background distiller (same fast chat model) keeps a
         # compact profile in the DB, injected into each Console turn like the time anchor. No knobs.
-        self.profile = ProfileService(self.chat, self.store, self.clock)
+        self.profile = ProfileService(unattended_chat, self.store, self.clock)
         # The learning flywheel: standing behavioral preferences distilled from the user's own
         # corrections/confirmations ("keep it shorter", "yes, that's right"), injected each turn like the
         # profile. A DEDICATED JSON file (guard-safe like reminders/agents), so a correction made while a
         # build runs isn't byte-reverted with the settings file.
         self.lessons = LessonsService(
-            self.chat, self.store, JsonSettings(self.paths.data / "helix_lessons.json"), self.clock
+            unattended_chat, self.store, JsonSettings(self.paths.data / "helix_lessons.json"),
+            self.clock,
         )
         # Reflexes: the growth layer's consolidation store (READ_ME/BRAIN.md). A sleep phrase the
         # cortex judged genuine becomes a fast brainstem reflex next time — dedicated guard-safe JSON
@@ -524,4 +694,4 @@ class Container:
         # Voice identity: registered voice profiles + the per-utterance speaker decision. A DEDICATED
         # file (like agents/reminders): profiles sharpen passively while builds may be running, and the
         # Forge guard byte-reverts helix_settings.json. Embeddings only — never audio.
-        self.voice_id = VoiceIdService(self.paths.data / "helix_voices.json", chat=self.chat)
+        self.voice_id = VoiceIdService(self.paths.data / "helix_voices.json", chat=unattended_chat)

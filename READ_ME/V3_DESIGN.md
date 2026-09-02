@@ -16,7 +16,7 @@ untouched). The rename lives in labels, prompts, UI text, and voice — one sour
 | App                | **App**       | An interactive screen HELIX builds. Kept — no better word exists. |
 | Task / "Flow"      | **Protocol**  | A saved procedure that DOES a thing when run — on command or on a rhythm. JARVIS runs protocols. |
 | Agent              | **Agent**     | An AI mind with a standing goal. Kept — the right word. Scheduled agents are **watchers**. |
-| Model (3D)         | **Hologram**  | The visual channel: an interactive 3D object, scene, or animation the orb conjures. |
+| Model (3D)         | **Hologram**  | A 3D model you design by talking — drafted in OpenSCAD, shown as an engineering-style drawing, exportable for printing (also a 360° scene or an animation). |
 | Knowledge (base)   | **Vault**     | The user's own saved notes, documents, and gathered results — searchable, local, private. |
 
 Umbrella: things HELIX makes are **creations** (internal kind strings remain `app / task / agent /
@@ -55,7 +55,7 @@ in the system prompt, so nothing the user learned in V2 breaks.
 ## 4. New faculty: just-in-time Connections
 
 The rule: **HELIX asks when it needs, never before.** When a capability needs a key (a watcher, a
-built protocol, `call_api`, Tripo holograms), the model calls **`connect_service`** — a masked,
+built protocol, `call_api`, a Tripo reference mesh), the model calls **`connect_service`** — a masked,
 native dialog appears naming the service and why; the user pastes the key there (never in chat, never
 spoken); it lands in the same encrypted-at-rest secrets store V2 used. All V2 injection machinery
 (env for protocols/apps, read-only `call_api`, redirect refusal) is unchanged. Settings keeps only a
@@ -72,6 +72,22 @@ and one line in the Morning Brief ("I drafted a fix for the reminder repeat bug 
 ready."). Approval and rollback are the V2 gates, untouched. The constitution's protections
 (PROTECTED_FILES, SHELL_PREFIX, human-approval lock) are exactly as strong as before — Evolve is a
 *client* of the gate, never a bypass.
+
+## 5a. Holograms redesigned: design by talking
+
+The hologram is V3's design channel, and it is rebuilt around one idea: **the model is a program.**
+"Design me a wall bracket for a 2-inch pipe with two mounting holes", then "make it 100 wide and add
+a gusset" — the coder writes `model.scad` (OpenSCAD, millimetres, a parameter block with ranges, named
+parts, a design-brief header), and every change is an edit to a named parameter in source. HELIX
+compiles it through a `CadEngine` port (the OpenSCAD command line today; a browser compiler tomorrow),
+renders a preview, has the vision critic check the picture against the brief, and feeds compile errors
+and the critique into the Forge's existing one-pass repair. The engine is fetched **just in time**
+like a key: when it is missing, the model offers `install it` (winget) and builds once the user says
+yes — nothing is ever enqueued that cannot compile. The viewer is a technical illustration — flat
+shading with crease lines on slate, a mm grid, dimensions, a section plane, the parameter panel, and
+STL / 3MF / SCAD export — self-contained and `file://`-safe, so it opens in HELIX and in a browser tab
+alike. Tripo is demoted to an explicit "show me what a real X looks like" reference; Blockade 360°
+scenes are unchanged; the primitive-JSON engine and its glossy render rig are retired.
 
 ## 6. Conversation excellence
 

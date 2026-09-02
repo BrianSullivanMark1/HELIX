@@ -395,6 +395,26 @@ class _CamSettings:
         self.d[key] = value
 
 
+class _Frame:
+    """Quacks like a QVideoFrame the driver just handed the sink."""
+
+    def toImage(self):
+        return _frame()
+
+
+def _accepting_start(devs):
+    """A _start_camera that succeeds for every device WITHOUT delivering a frame — exactly what a
+    real QCamera.start() does (it is asynchronous, and a camera held by another app opens fine and
+    then stays silent). Frames are pushed by the test through _on_frame when it wants them."""
+
+    def _start(self, device=None):
+        device = device or devs[0]
+        self._active_device_id = camera_view._device_id(device)
+        return True
+
+    return _start
+
+
 def test_the_picker_lists_cameras_switches_live_and_remembers(monkeypatch, _app):
     devs = [_Dev("Integrated Camera", b"cam-a"), _Dev("USB Camera", b"cam-b")]
     monkeypatch.setattr(camera_view, "_video_inputs", lambda: devs)
@@ -416,9 +436,49 @@ def test_the_picker_lists_cameras_switches_live_and_remembers(monkeypatch, _app)
     assert panel._combo.currentIndex() == 0
     panel._combo.setCurrentIndex(1)  # the user picks the hooked-up camera
     assert started[-1].description() == "USB Camera"
+    panel._on_frame(_Frame())  # the new camera delivers — only now is the choice proven
     # The choice is REMEMBERED — next window (and _resolve_camera) starts on this camera.
     assert settings.d[camera_view.CAMERA_DEVICE_SETTING] == camera_view._device_id(devs[1])
     assert not panel._settled  # switching never settles the request
+
+
+def test_a_pending_capture_does_not_survive_a_camera_switch(monkeypatch, _app):
+    # The word said while camera A sat dark described camera A. If the latch carried over, camera B's
+    # very first frame — taken before the user can see what B is pointed at — would be sent as the
+    # picture and the look would be spent.
+    devs = [_Dev("Integrated Camera", b"cam-a"), _Dev("USB Camera", b"cam-b")]
+    monkeypatch.setattr(camera_view, "_video_inputs", lambda: devs)
+    monkeypatch.setattr(CameraPanel, "_start_camera", _accepting_start(devs))
+    req = CameraRequest()
+    assert req.claim()
+    panel = CameraPanel(None, req, settings=_CamSettings())
+    panel.voice_capture()  # "take the picture" while camera A is still dark
+    assert panel._pending_capture
+    panel._combo.setCurrentIndex(1)  # …nothing happened, so they switch cameras
+    assert not panel._pending_capture
+    panel._on_frame(_Frame())  # B's warm-up frame must NOT be the picture
+    assert not panel._settled and not req.error
+    panel.voice_capture()  # the word said again, now that they can see B's preview, does capture
+    assert req.wait(claim_timeout=1.0, timeout=1.0) is not None
+
+
+def test_a_camera_that_never_delivers_a_frame_is_not_remembered_as_the_choice(monkeypatch, _app):
+    # A camera held by another app still enumerates and still start()s cleanly — it just never sends
+    # a frame. Persisting that id would make EVERY later look resolve to the dead camera, with no
+    # Settings row anywhere to undo it.
+    devs = [_Dev("Integrated Camera", b"cam-a"), _Dev("Busy Camera", b"cam-b")]
+    monkeypatch.setattr(camera_view, "_video_inputs", lambda: devs)
+    monkeypatch.setattr(CameraPanel, "_start_camera", _accepting_start(devs))
+    settings = _CamSettings()
+    req = CameraRequest()
+    assert req.claim()
+    panel = CameraPanel(None, req, settings=settings)
+    panel._combo.setCurrentIndex(1)
+    assert camera_view.CAMERA_DEVICE_SETTING not in settings.d  # nothing proved it works yet
+    panel._started_at -= camera_view.STARTUP_GRACE_S + 1
+    panel._tick()  # the no-frame reap fires
+    assert panel._settled and "never delivered" in req.error
+    assert camera_view.CAMERA_DEVICE_SETTING not in settings.d
 
 
 def test_cancel_and_esc_route_through_the_close_funnel_that_stops_the_camera(monkeypatch, _app):

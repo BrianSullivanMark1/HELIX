@@ -73,6 +73,10 @@ helix/
                        #     ConnectRequested — the model asked to connect a service just in time)
     knowledge.py       #   passage chunking for the vault RAG
     connections.py     #   known connectable services (Slack/GitHub/Alpaca/SAM.gov) + how their key is attached
+    scad.py            #   OpenSCAD as data: the helix.scad helper library (+ its model-facing cheat-sheet), and the
+                       #     pure readers of a hologram's source — parse_params (the customizer block), parse_brief
+                       #     (the design header), friendly_error (compiler stderr → one warm sentence + detail),
+                       #     inspect_source (cheap lints before a compile is even attempted)
 
   ports/               # Protocols only — the seams.
     llm.py             #   ChatModel.chat(turns,*,system,tools)->Reply; blocks: Text/ToolUse/ToolResult/Image; ToolOutput
@@ -81,6 +85,8 @@ helix/
     stores.py          #   SettingsStore, MemoryStore, ConversationStore
     speech.py          #   SpeechIn (STT), SpeechOut (TTS)
     embedder.py        #   Embedder — text→vector (vault RAG) and the speaker-embedding seam
+    cad.py             #   CadEngine — compile a hologram's model.scad (compile_stl/export_3mf/render_png), install()
+                       #     it just in time, install_hint(); every call answers a CadResult, never raises
     clock.py           #   Clock (now()) — no scattered datetime.now()
     events.py          #   EventBus: publish/subscribe
 
@@ -99,7 +105,10 @@ helix/
     voyage_embed.py    #   text embeddings for the vault RAG (optional; keyword fallback otherwise)
     gmail_imap.py      #   read-only Gmail over IMAP
     ical_http.py       #   read-only calendar over a private iCal URL
-    tripo3d.py / blockade_skybox.py  # hosted hologram-asset / skybox backends (optional, key-gated)
+    openscad_cli.py    #   CadEngine via the OpenSCAD command line: finds the binary (settings override, PATH, the
+                       #     usual install dirs; openscad.com over .exe on Windows — the .exe swallows stdout), runs it
+                       #     windowless + time-boxed with cwd at the model, installs it with winget on request
+    tripo3d.py / blockade_skybox.py  # hosted reference-mesh / 360° skybox backends (optional, key-gated)
     watchdog.py        #   process/parent watchdog for auto-restart lifecycles
     system_clock.py · signal_bus.py · restart.py
 
@@ -109,7 +118,9 @@ helix/
     prompts.py         #   the system + coder prompts, in one place
     forge.py · builds.py · build_queue.py · build_status.py · sandbox.py · cancel.py   # the maker + build lifecycle
     selfdev.py · selfdev_lane.py · evolve.py    # improve HELIX itself (gated) + the nightly Evolve drafter
-    model_baker.py · materials.py · render_kit.py                                       # bake declarative holograms → glb + viewer
+    model_baker.py     #   the hologram baker: lints, compiles model.scad through the CadEngine, renders the preview,
+                       #     asks the vision critic once, writes the exports + the self-contained technical viewer
+    render_kit.py      #   the Three.js stage an ANIMATED hologram's hand-authored index.html runs on (embedded JS)
     agents.py · scheduler.py · workflows.py                                             # saved-goal automations + pipelines
     files.py           #   the user's disk: list/read always; write behind a toggle; find_images/view_image for vision
     images.py          #   attached/located images → model-ready vision blocks (Pillow: orient, downscale, base64);
@@ -204,7 +215,7 @@ stacks were deferred to their point of use:
 | Stack | Cost | Deferred to | Needed when |
 | --- | --- | --- | --- |
 | `anthropic` | ~1.55s | `AnthropicChat._client_for_current_key` | the first API-rail call — never, on a subscription-only launch |
-| `trimesh` + `networkx` + `scipy.spatial` | ~955ms | `container._LazyBaker` → `ModelBaker` | a MODEL build finishes and a hologram is baked |
+| `trimesh` + `networkx` + `scipy.spatial` | ~955ms | *gone* — holograms compile through the `CadEngine` (OpenSCAD, a separate program); the baker imports nothing heavy | never; the test keeps the stack forbidden so it cannot creep back |
 
 That took the composition root from ~2.8s to ~0.18s, and `app.bootstrap` from ~2.27s to ~0.28s. Two
 consequences worth remembering:
@@ -214,9 +225,12 @@ consequences worth remembering:
   (`anthropic`, `claude_agent_sdk`) or `--collect-all` (`trimesh`). A missing entry does not fail the
   build — it fails at runtime, in the frozen app, on the first call that needs the package.
 - **Deferring construction is sometimes the only way to defer an import.** Moving the `import` statement
-  is useless if the object is still built during wiring, which is why `ModelBaker` sits behind a proxy
-  (`_LazyBaker`) instead of merely having its import moved. That proxy is wiring, so it lives in
-  `app/container.py` per principle 6.
+  is useless if the object is still built during wiring, which is why `ModelBaker` sat behind a proxy
+  (`_LazyBaker`) instead of merely having its import moved. The baker is light now, but the proxy stays:
+  the Forge only reaches for it from a build worker, so the viewer's page templates are parsed on the
+  first hologram rather than before the first frame. That proxy is wiring, so it lives in
+  `app/container.py` per principle 6. The `OpenScadCli` adapter itself is constructed eagerly — stdlib
+  only, nothing spawned until a hologram is compiled.
 
 Diagnostics obey the same rule: the "which Claude rail is live" check probes whether a `claude.exe` will
 actually launch, so it runs on a daemon thread rather than between launch and the first frame.
@@ -311,6 +325,59 @@ confirmation first.
 Iterating ("make the streak monthly"), renaming, and deleting are the same path on the existing
 workspace — all reachable by conversation.
 
+### 7a. Holograms — a 3D model you design by talking
+
+A **hologram** is a 3D model the user designs by voice — "a wall bracket for a 2-inch pipe with two
+mounting holes", then "make it 100 wide and add a gusset" — drafted in OpenSCAD, shown as an
+engineering-style drawing, exportable for printing. Four ideas carry the whole feature:
+
+1. **The model is a program.** The coder writes `model.scad` — OpenSCAD, millimetres, a customizer
+   parameter block at the top with ranges, named modules per part, a `// Design:` brief header — and may
+   `use <helix.scad>` (the helper library in `domain/scad.py`, written beside the source by the baker).
+   "Make it wider" is an edit to a named parameter in source, not a regeneration; LLMs know OpenSCAD
+   from years of published source, which is what makes verbal design accurate where stacked primitives
+   with raw coordinates were not. The prompt that teaches this lives in `services/prompts.py`.
+2. **HELIX compiles it, behind a port.** `ports/cad.py` (`CadEngine`) is the seam; today's adapter is
+   the OpenSCAD command line (`adapters/openscad_cli.py`), a browser-WASM compiler is the documented
+   future one, tests use fakes. OpenSCAD is not a Python package and is not installed on most machines:
+   the adapter finds it (a settings override, PATH, Program Files, `%LOCALAPPDATA%\Programs`, scoop,
+   the winget default dir; `openscad.com` over `openscad.exe` on Windows, because the .exe is the GUI
+   subsystem and swallows every compiler message) and, when it is missing, the model proposes a
+   **just-in-time install** (`install_openscad` → `winget install --id OpenSCAD.OpenSCAD`) that the user
+   confirms — the same move HELIX makes for an API key. `build_3d_model` **pre-flights** with
+   `available()` and offers the install instead of spending a coder run on a design nothing can compile;
+   the install itself blocks inside the conversation turn — on that turn's worker thread in
+   `ToolRegistry.dispatch`, never the Qt thread and never the build queue — narrated line by line, and is
+   in the `BUILD_TOOLS` fence (an unattended watcher can never install software).
+3. **Compile → preview → critique → repair, inside the one repair pass.** The Forge's pre-finalize check
+   for a MODEL build *is* `ModelBaker.check()`: static lints (`inspect_source`) → compile to
+   `assets/model.stl` → render `assets/preview.png` → one look from the vision critic (wired in the
+   container on the API rail's web-fenced chat; it abstains with no key or on any failure). A compiler
+   error comes back as one warm sentence plus the compiler's `file:line` words, fenced as data; a
+   critique comes back as "Looking at the rendered preview (assets/preview.png): …" — both ride the
+   Forge's existing one-pass `repair_prompt`, which tells the coder to *look* at the picture before
+   touching `model.scad`. A missing engine reads as "not the coder's fault"; `bake()` then writes a
+   friendly install page instead of failing the build.
+4. **The viewer is a technical illustration, not a render.** `bake()` writes `index.html`: flat matcap
+   shading with crease-edge lines on dark slate, a millimetre grid, axes, bounding-box dimensions, a
+   section plane, wireframe and shading toggles, the parameter panel ("say: make <name> <value>"), and
+   STL / 3MF / SCAD export links (plain `<a download>`; inside HELIX, `ui/app_viewer.py` accepts those
+   downloads into the user's Downloads folder and says so in its header — QtWebEngine cancels a
+   download nobody accepts silently, so without that slot the export row is dead in-app). It is
+   **self-contained**: the vendored three.js r128 UMD build
+   (`helix/ui/assets/three.min.js`, handed to the baker as a plain Path by the container) is copied
+   beside it, the STL rides in a `window.HELIX_STL` sidecar, and every other datum is inlined — no CDN,
+   and no `fetch()`/XHR, so the same page opens inside HELIX's `QWebEngineView` **and as a plain
+   `file://` page in a Chrome tab** (Chrome blocks local fetches over `file://`; a `<script src>`
+   sidecar is the one thing it allows). No bloom, no image-based lighting, no exposure boost.
+
+What did not change: a **360° environment** is still a Blockade Labs panorama in a skybox viewer; an
+explicit **reference** ("show me what a real X looks like") is still a Tripo mesh in a small GLB viewer
+— a likeness to look at, never the design; an **animated** hologram is still a hand-authored Three.js
+page on `render_kit.py`. The primitive-JSON engine and its procedural PBR textures (`materials.py`,
+the only scipy user) are retired; a workspace left in that format is asked, in-build, to be redrawn
+as `model.scad`.
+
 ---
 
 ## 8. Self-modification & the Constitution
@@ -357,6 +424,14 @@ first launch of a new build). `build.py` preserves live data across a rebuild.
   memory, distilled profile, learned preferences, saved places (keyed per recognized speaker).
 - `helix_voices.json` — enrolled voice profiles (embeddings only, never audio).
 - `builds/<slug>/` — one git repo per build + a `.helixbuild.json` manifest (name + originating request).
+  A hologram workspace holds the design and what HELIX made of it: `model.scad` (THE design, the only
+  file the coder edits), `helix.scad` (the helper library, refreshed every compile), `assets/model.stl`
+  (the compiled mesh — viewer and printer both eat it), `assets/model.3mf` (slicer export, best effort),
+  `assets/preview.png` (what the critic looked at), `assets/model.stl.js` (the STL as a `file://`-safe
+  `<script>` sidecar), `assets/three.min.js` (the vendored viewer library) and `index.html` (the generated
+  viewer, stamped with a sentinel so a hand-authored animated page is never overwritten).
+- `scad_libraries/` — on `OPENSCADPATH` for every compile; drop BOSL2 (or any library) here and
+  `include <…>` just works. Need not exist.
 - `helix.log` — rotating log.
 
 A fresh install creates the data dir empty. Packaging (`build.py` → PyInstaller `--onedir`) **never**

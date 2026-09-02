@@ -53,12 +53,18 @@ from helix.ui.shader_orb import ShaderOrb
 from helix.ui.theme import CYAN, LINE
 from helix.ui.workers import QtWorker
 
+_LOG = get_logger("ui")
+
 try:  # the in-app web view needs PyQt6-WebEngine; without it, apps open in the system browser
     from helix.ui.app_viewer import AppViewer
-except Exception:  # pragma: no cover - depends on the optional WebEngine dependency
+except Exception as exc:  # pragma: no cover - depends on the optional WebEngine dependency
     AppViewer = None
+    # This degrade used to be completely silent, which made it unexplainable from the outside: a
+    # machine without PyQt6-WebEngine just started throwing every build into the system browser, with
+    # no in-app viewer and not one line in helix.log to say why. Log the reason once, at import, so
+    # "why does it open in Edge on this laptop?" is answerable from the log instead of by guessing.
+    _LOG.info("in-app web view unavailable (%s) — builds will open in the system browser", exc)
 
-_LOG = get_logger("ui")
 _CONSOLE, _MENU, _SETTINGS, _VIEWER = 0, 1, 2, 3
 
 
@@ -94,8 +100,11 @@ class HelixMainWindow(QMainWindow):
         # richer living-circuit render, self-contained since V3 bundles three.js). The GPU layer stays
         # OPT-IN because a transparent QWebEngine background isn't reliable across every GPU — when
         # THAT fails it paints an opaque (white) rectangle behind the overlays, washing the app out,
-        # and the reveal-on-ready sentinel can't detect it (the page itself renders fine). Flip the
-        # setting off if a machine ever washes out.
+        # and the reveal-on-ready sentinel can't detect it (the page itself renders fine). There is
+        # deliberately NO Settings row for this: a one-click path into a render that can white out the
+        # whole app on an unverified GPU isn't a switch to hand a user. It is reached the same way it
+        # is undone — by setting "shader_orb": true (or back to false) in helix_settings.json — so
+        # whoever turned it on always has the way out.
         use_shader = bool(container.settings.get("shader_orb", False))
         self.orb = ShaderOrb() if use_shader else PresenceOrb()
 
@@ -220,7 +229,7 @@ class HelixMainWindow(QMainWindow):
         # The model judged a genuine embedded sleep request (go_to_sleep) → rest the mic quietly;
         # the model's own reply is the goodnight. Only the user's spoken wake word wakes it.
         container.bus.subscribe(SleepRequested, self._sleepRequestSignal.emit)
-        self._sleepRequestSignal.connect(lambda _ev: self.console.sleep_voice())
+        self._sleepRequestSignal.connect(self._on_sleep_requested)
         # Background-build lifecycle → the status board (tiles/legend/orb) + the Console (status line /
         # spoken announcement). Started fires the instant a build begins so the UI shows it at once.
         container.bus.subscribe(BuildStarted, self._buildStartedSignal.emit)
@@ -436,6 +445,12 @@ class HelixMainWindow(QMainWindow):
         dlg = ConnectionsDialog(
             self, f"Connect — {name}", conns,
             self._c.connections.value, self._c.connections.set_value,
+            # Without this the panel cannot tell a key HELIX already manages (the Claude key, Tripo,
+            # Voyage) from one the user genuinely has to paste, so a frozen build asks for a
+            # credential the user does not have a copy of and cannot produce. Handing it the
+            # is_managed lookup is what lights up the "already connected in HELIX — leave it as is"
+            # affordance; the dialog treats it as optional, so it stays the LAST argument.
+            self._c.connections.is_managed,
         )
         if dlg.exec():
             self._refresh_build_ui()  # repaint the Connect button (set vs. still-missing)
@@ -515,10 +530,28 @@ class HelixMainWindow(QMainWindow):
             self.console.end_camera_voice()
 
     def _on_self_change_progress(self, ev: object) -> None:
-        self.console.on_self_change_progress(ev.line)
+        # `unattended` has to travel the whole way here: the console decides the 3-6 AM silence, but it
+        # can only decide it if the shell hands the fact over. Dropping the flag at this bridge is what
+        # made the overnight Evolve pass narrate every coder step aloud into a dark house. getattr with
+        # a False default keeps the bridge tolerant of an older event shape (a replayed/queued event
+        # from a previous build) rather than taking the whole shell down with an AttributeError.
+        self.console.on_self_change_progress(ev.line, getattr(ev, "unattended", False))
+
+    def _on_sleep_requested(self, ev: object) -> None:
+        # Hand the RESULT HOLDER across, not just the nudge. go_to_sleep parks its worker on that
+        # holder waiting to hear whether the ears actually closed; dropping it here left the turn to
+        # burn the whole claim timeout and then tell the user nothing was listening — about a mic that
+        # had just gone quietly to sleep in front of them. A named method rather than a lambda for the
+        # same reason the self-change bridges are named: a bridge nothing can call is a bridge nothing
+        # can pin, and that is exactly how this line stayed broken through a green suite. getattr keeps
+        # it tolerant of a bare SleepRequested() from any other publisher.
+        self.console.sleep_voice(getattr(ev, "request", None))
 
     def _on_self_change_finished(self, ev: object) -> None:
-        self.console.on_self_change_finished(ev.ok, ev.summary, ev.branch, ev.error, ev.stopped)
+        # Same fact, and it matters most here: the FINISHED line is the one that would have announced
+        # "Couldn't draft that change" out loud at 3 AM. Silent overnight, spoken when someone asked.
+        self.console.on_self_change_finished(ev.ok, ev.summary, ev.branch, ev.error, ev.stopped,
+                                             unattended=getattr(ev, "unattended", False))
 
     def _on_build_progress(self, ev: object) -> None:
         self.console.on_build_progress(ev.name, ev.line)
@@ -663,6 +696,11 @@ class HelixMainWindow(QMainWindow):
             (self._viewer.clear if self._viewer is not None else lambda: None),
             self.console.shutdown,
             self.launcher.shutdown,
+            # The Vault view runs its reads and searches on background QThreads exactly like the
+            # console and the launcher do, so it needs the same join: closing HELIX in the middle of
+            # an ingest or a search would otherwise destroy a still-running QThread and take the exit
+            # down with "QThread: Destroyed while thread is still running" instead of quitting.
+            self._knowledge_view.shutdown,
             self._c.store.close,
         ):
             try:

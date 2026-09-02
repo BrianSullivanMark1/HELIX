@@ -63,7 +63,9 @@ class ForgeService:
         # %LOCALAPPDATA%), so the guard's skip set must use the REAL location, not app_root/"data".
         self._data_dir = data_dir or (app_root / "data")
         self._guard_files = list(guard_files or [])
-        self._baker = model_baker  # turns a built model.json into assets/model.glb + a viewer
+        # The hologram baker: compiles a built model.scad (OpenSCAD, through the CadEngine port) into the
+        # mesh + exports + viewer, and judges the work in _verify_workspace's MODEL branch first.
+        self._baker = model_baker
 
     def build(
         self,
@@ -107,6 +109,14 @@ class ForgeService:
             app.created_at = prior.created_at
             app.request = prior.request
         workspace = self._builds.create_workspace(app)
+        # A hologram's bake cycle is OWNED HERE: prepare() runs for every MODEL build — new or iterating,
+        # it is idempotent — once the workspace exists and BEFORE the coder runs. It seeds helix.scad so a
+        # coder that lists the folder finds the one library its prompt names (it used to be written first
+        # by check(), after the coder had already gone looking), and it opens a fresh cycle so the
+        # critic's one look lands on THIS build's first check even when the previous build of the same
+        # hologram never reached bake() (a repair pass that was cancelled, failed, or escaped).
+        if app.is_model and self._baker is not None:
+            self._baker.prepare(workspace)
         self._builds.mark_building(app.slug)  # recoverable if the process is killed mid-build
         # Record what's being built so a mid-run 'stop' can offer to remove/roll back this exact work.
         if cancel is not None:
@@ -148,7 +158,8 @@ class ForgeService:
         hooks_sig = scan_tree(hooks)
 
         # The coder runs at most twice: the build itself, and ONE automatic repair pass if the result
-        # fails the pre-finalize check (a syntax error, a missing entry point). Every pass gets the full
+        # fails the pre-finalize check (a syntax error, a missing entry point, a hologram whose model.scad
+        # won't compile or whose rendered preview contradicts its brief). Every pass gets the full
         # guard treatment — escapes are scanned and reverted UNCONDITIONALLY, before the cancel/failure
         # exits, because a cancelled or failed run drove the same coder with the same hands.
         prompt_text = prompt or self._default_prompt(app, request, iterating)
@@ -204,10 +215,16 @@ class ForgeService:
             self._rollback_failed(app, workspace, iterating)
             raise BuildError(f"the finished build didn't pass its checks ({problem})")
 
-        # A model is delivered as a small model.json the coder wrote; HELIX itself bakes it into a real
-        # mesh + viewer here (in-process — the coder never gets a shell). Runs AFTER the escape check
-        # (the coder's output is validated first) and only writes inside the workspace, which the guard
-        # skips. bake() never raises: a bad spec becomes a friendly in-viewer message.
+        # A hologram is delivered as a PROGRAM the coder wrote (model.scad); HELIX itself compiles it here
+        # through the CadEngine port — an in-process subprocess to the OpenSCAD CLI on THIS worker thread,
+        # never a shell handed to the coder — and wraps the mesh in its own viewer. The baker's three
+        # calls are one cycle, in order: prepare() above before the coder ran, check() after each coder
+        # pass in _verify_workspace, and bake() here once the check is happy — bake() closes the cycle.
+        # Runs AFTER the escape check (the coder's output is validated first) and only writes inside the
+        # workspace, which the guard skips. The compile itself usually already happened in check() (the
+        # baker keys its record by the source's hash, so the same text is never compiled twice); bake()
+        # still never raises — a missing engine or a compile hiccup becomes a friendly in-viewer page, not
+        # a failed build that rolls back work the coder did right.
         if app.is_model and self._baker is not None:
             self._baker.bake(workspace)
 
@@ -278,9 +295,11 @@ class ForgeService:
         return edit_app_prompt(app.name, request) if iterating else build_app_prompt(app.name, request)
 
     def _verify_workspace(self, ws: Path, kind: BuildKind) -> str | None:
-        """The pre-finalize gate: every .py must compile and the build must have a real entry point.
-        Cheap, no execution. Returns a one-line problem description, or None when it passes — so a
-        build that LOOKS finished but can't even parse never lands in the menu as 'ready'."""
+        """The pre-finalize gate: every .py must compile and the build must have a real entry point; a
+        hologram's model.scad must compile and survive one look from the vision critic (the baker does
+        that part). Cheap for apps (no execution); a hologram pays for its compile here, on the worker.
+        Returns a one-line problem description, or None when it passes — so a build that LOOKS finished
+        but can't even parse never lands in the menu as 'ready'."""
         if kind == BuildKind.KNOWLEDGE:
             return None  # ingested data, never a runnable artifact
         vendor = {".git", ".venv", "venv", "site-packages", "node_modules", "__pycache__"}
@@ -299,8 +318,21 @@ class ForgeService:
         if problems:
             return "Python syntax errors — " + "; ".join(problems)
         if kind == BuildKind.MODEL:
-            if not ((ws / "model.json").exists() or (ws / "index.html").exists()):
-                return "no model.json or index.html was produced"
+            # A hologram is judged by the BAKER: it lints and compiles model.scad through the CadEngine,
+            # renders the preview and asks the vision critic for one look, and hands back a problem in
+            # exactly the shape repair_prompt expects (the compiler's file:line words, or "Looking at the
+            # rendered preview (assets/preview.png): …"). Delegating the WHOLE branch — not just the
+            # model.scad case — is what lets the baker ask for model.scad when it finds a model.json from
+            # the retired primitive engine, so "make it wider" on an old hologram migrates the design in
+            # the same build's repair pass instead of leaving it stranded. check() never raises and reads
+            # a missing engine as "not the coder's fault" (None); bake() then shows the install page.
+            if self._baker is not None:
+                return self._baker.check(ws)
+            # No baker wired (a bare Forge in a test): the design file is enough. model.scad is THE
+            # deliverable; model.json (an environment or a reference) and a hand-authored animated
+            # index.html are the other shapes a hologram may take.
+            if not any((ws / f).exists() for f in ("model.scad", "model.json", "index.html")):
+                return "no model.scad was produced"
             return None
         if kind == BuildKind.TASK:
             return None if (ws / "main.py").exists() else "the entry point main.py is missing"

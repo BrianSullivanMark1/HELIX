@@ -21,13 +21,29 @@ Pillow>=10            # decode, orient, downscale, re-encode images for the mode
 # Semantic knowledge search is OPTIONAL and uses the Voyage API over plain HTTP (no extra dependency);
 # it is enabled only when a Voyage key is set, and falls back to keyword search otherwise.
 
-# --- 3D models (required) ---
-# build_3d_model bakes a declarative model.json into a real polygon mesh (assets/model.glb), in-process.
-trimesh>=4.4          # geometry kernel + GLB export (MIT)
-numpy>=1.26           # trimesh's array backend
-manifold3d>=2.5       # robust boolean ops for cutaways / holes (Apache-2.0)
-shapely>=2.0          # 2D polygons for extrude footprints (BSD)
-mapbox-earcut>=1.0    # polygon triangulation used by extrude/revolve (ISC)
+# --- 3D models (holograms) ---
+# A hologram is an OpenSCAD program (model.scad) compiled by the OpenSCAD command line — a separate
+# program HELIX finds on the machine or installs just in time with winget (adapters/openscad_cli.py), NOT a
+# Python package, so nothing here is needed to design one. The mesh stack below belonged to the retired
+# primitive engine (a declarative model.json turned into assets/model.glb in-process); nothing in helix/
+# imports it today. It is kept for now because a Tripo reference GLB and future mesh work may want it —
+# drop it deliberately, not by accident. numpy stays regardless: speaker_embed, ocr and voiceid use it.
+trimesh>=4.4          # geometry kernel + GLB export (MIT) — currently unused by helix/
+numpy>=1.26           # voice-print embeddings, OCR page pixels (and trimesh's array backend)
+manifold3d>=2.5       # robust boolean ops (Apache-2.0) — currently unused by helix/
+shapely>=2.0          # 2D polygons (BSD) — currently unused by helix/
+mapbox-earcut>=1.0    # polygon triangulation (ISC) — currently unused by helix/
+# scipy used to sit here for services/materials.py (procedural PBR textures: gaussian_filter). That module
+# is gone with the primitive engine and nothing in helix/ imports scipy now, so it is not a dependency —
+# tests/test_prompts.py sweeps every module-scope third-party import against this file, and a line for a
+# package nobody imports is exactly the drift that sweep exists to catch.
+
+# --- Optional: in-app viewer + GPU orb ---
+# Without WebEngine the app still runs whole: main_window falls back to the system browser for built apps
+# and holograms, and the orb falls back to its QPainter self. Listed here (like voice) so a fresh install
+# gets the full experience instead of a silently reduced one. Deliberately unpinned — PyQt6-WebEngine must
+# track the PyQt6 minor above it, and pinning a floor here would fight that resolution.
+PyQt6-WebEngine       # the in-app viewer for built apps/holograms (ui/app_viewer.py) + the WebGL orb
 
 # --- Optional: voice ---
 edge-tts>=6.1         # free neural text-to-speech

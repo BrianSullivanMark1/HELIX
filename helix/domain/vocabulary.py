@@ -9,7 +9,8 @@ The V3 words:  App · Protocol · Agent · Hologram · Vault  — made by the Fo
   - App       an interactive screen (unchanged).
   - Protocol  a saved procedure that DOES a thing when run — on command or on a rhythm (was Task/Flow).
   - Agent     an AI mind with a standing goal (unchanged); a scheduled agent is a "watcher".
-  - Hologram  the visual channel: an interactive 3D object, scene, or animation (was Model).
+  - Hologram  the visual channel: a 3D model the user DESIGNS by voice (real CAD in millimetres,
+              shown as an engineering-style drawing), or a scene or an animation (was Model).
   - Vault     the user's own saved notes, documents, and gathered results (was Knowledge).
 
 Also here: friendly, speakable labels for internal tool names. The orb narrates what it's doing as it
@@ -67,7 +68,16 @@ def resolve_kind(word: str) -> str | None:
 _TOOL_PHRASES: dict[str, str] = {
     "build_app": "Building that",
     "build_task": "Building that protocol",
+    # A hologram is now a DESIGN (model.scad, compiled by OpenSCAD) rather than a conjured picture, but
+    # "project" stays its verb: it is the V3 word for the visual channel everywhere the user meets it
+    # (the persona, the menu), and conversation._progress_label carries its own copy of the named verb
+    # ("Projecting Dragon…") for the API rail — a new word here alone would have the two rails narrate
+    # the same build differently.
     "build_3d_model": "Projecting the hologram",
+    # The engine's just-in-time install (install_openscad). Blocking for about a minute, so this line is
+    # what the status bar shows the whole time — it names the thing being installed in the user's word
+    # ("hologram engine"), never the package.
+    "install_openscad": "Installing the hologram engine",
     "create_agent": "Setting up that agent",
     "delete_build": "Removing that",
     "rename_build": "Renaming that",
@@ -80,6 +90,7 @@ _TOOL_PHRASES: dict[str, str] = {
     "approve_self_change": "Applying the change",
     "reject_self_change": "Discarding the change",
     "list_self_changes": "Checking pending changes",
+    "show_self_change": "Reading the change",
     "list_builds": "Checking the work",
     "list_apps": "Looking over what you've built",
     "think_harder": "Thinking it through",
@@ -89,7 +100,10 @@ _TOOL_PHRASES: dict[str, str] = {
     "set_reminder": "Setting that reminder",
     "cancel_reminder": "Cancelling that reminder",
     "list_reminders": "Checking your reminders",
-    "set_agent_enabled": "Updating that agent",
+    # set_agent_enabled pauses/resumes a scheduled AGENT **or WORKFLOW** — one tool, two things the
+    # user names the same way ("pause the morning pipeline"). Saying only "agent" while it quietly
+    # paused a workflow read as HELIX doing something other than what it was asked.
+    "set_agent_enabled": "Updating that agent or workflow",
     "check_email": "Checking your inbox",
     "check_calendar": "Checking your calendar",
     "remember_about_me": "Remembering that",
@@ -117,9 +131,35 @@ _TOOL_PHRASES: dict[str, str] = {
 }
 
 
-def friendly_tool_label(name: str) -> str:
+# Tools whose call CARRIES the thing's name, and the verb that fronts it. "Building Tip Calculator"
+# tells the user which of their builds is moving; "Building that" leaves them guessing when two
+# things are in flight. The verbs are deliberately plainer than the generic phrases above ("Saving",
+# not "Setting up that agent") because the name already says what it is.
+_NAMED_VERBS: dict[str, str] = {
+    "build_app": "Building",
+    "build_task": "Building",
+    "build_3d_model": "Projecting",
+    "create_agent": "Saving",
+    "delete_build": "Removing",
+    "rename_build": "Renaming",
+}
+
+
+def friendly_tool_label(name: str, args: dict | None = None) -> str:
     """A short, speakable phrase for a tool call — never the raw identifier. Strips any MCP-style
     ``server__tool`` prefix and falls back to a neutral "Working…" for anything unmapped, so the voice
-    never reads an underscore-laden name letter-by-letter."""
+    never reads an underscore-laden name letter-by-letter.
+
+    Pass the call's `args` to personalize it where the tool carries a name — both rails then say
+    "Building Tip Calculator" instead of one of them saying "Building that". The personalization
+    happens AFTER the prefix strip on purpose: the subscription rail sees `mcp__helix__build_app`,
+    so a membership test on the raw name would silently never fire and only the API rail would ever
+    speak the name. No trailing ellipsis is added here — the caller decides whether the phrase is a
+    milestone or a still-running progress line (see agent_sdk_chat._tool_progress)."""
     key = (name or "").rsplit("__", 1)[-1].strip().lower()
+    verb = _NAMED_VERBS.get(key)
+    if verb is not None:
+        subject = str((args or {}).get("name") or "").strip()
+        if subject:
+            return f"{verb} {subject}"
     return _TOOL_PHRASES.get(key, "Working…")

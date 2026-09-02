@@ -13,9 +13,11 @@ from pathlib import Path
 
 import pytest
 
+from helix.domain import scad
 from helix.domain.errors import BuildCancelled, BuildError
 from helix.domain.events import BuildDeleted
 from helix.domain.models import App, BuildKind
+from helix.ports.cad import CadResult
 from helix.ports.coder import CoderResult
 from helix.services.builds import BuildService
 from helix.services.cancel import CancelToken
@@ -275,3 +277,243 @@ def test_a_sandbox_escape_during_an_iteration_restores_the_last_good_version(tmp
         rig.forge(escaping).build("Keeper", "change it")
     assert rig.repo.discarded == [rig.builds.workspace(app.slug)]
     assert not rig.builds.is_building(app.slug)
+
+
+# ----- holograms: the MODEL check is the baker's -----
+# A hologram is a PROGRAM (model.scad) the baker lints, compiles through the CadEngine, renders and
+# critiques. The Forge's only job is to ASK the baker in its pre-finalize gate and to carry whatever the
+# baker says into the existing one-pass repair loop. These pin that seam with a fake baker and a coder
+# that records the prompts it was handed — no engine, no model, no git.
+
+class _Baker:
+    """Records the Forge's calls; `verdicts` are what check() answers, in order (None = passes). `log`
+    is an optional shared list every call (and a cooperating coder) appends to, so a test can read the
+    ORDER of the cycle — prepare before the coder, check after it, bake last."""
+
+    def __init__(self, verdicts=(None,), log: list | None = None) -> None:
+        self._verdicts = list(verdicts)
+        self._log = log if log is not None else []
+        self.prepared: list[Path] = []
+        self.checked: list[Path] = []
+        self.baked: list[Path] = []
+
+    def prepare(self, workspace):
+        self.prepared.append(Path(workspace))
+        self._log.append("prepare")
+
+    def check(self, workspace):
+        self.checked.append(Path(workspace))
+        self._log.append("check")
+        return self._verdicts.pop(0) if self._verdicts else None
+
+    def bake(self, workspace):
+        self.baked.append(Path(workspace))
+        self._log.append("bake")
+
+    def engine_missing(self) -> bool:
+        return False
+
+
+# The smallest design that passes the baker's static lints (a units hint, top-level geometry).
+_TINY_SCAD = "// Units: mm\nw = 80;\ncube([w, 10, 5]);\n"
+
+
+class _PromptCoder(_Coder):
+    """A coder that writes model.scad and remembers every prompt, so a test can read the repair pass.
+    `log` (shared with a _Baker) records when it ran; `listings` is what the workspace held at that
+    moment — what a coder that looks around before writing would see."""
+
+    def __init__(self, log: list | None = None) -> None:
+        self.prompts: list[str] = []
+        self.listings: list[list[str]] = []
+        self._log = log if log is not None else []
+
+    def run_task(self, repo_dir, prompt, *, on_progress=None, cancel=None):
+        self.prompts.append(prompt)
+        self._log.append("coder")
+        self.listings.append(sorted(p.name for p in Path(repo_dir).iterdir()))
+        Path(repo_dir).joinpath("model.scad").write_text(_TINY_SCAD, encoding="utf-8")
+        return CoderResult(ok=True, summary="drafted")
+
+
+def _model_forge(rig: _Rig, coder, baker) -> ForgeService:
+    return ForgeService(rig.builds, coder, rig.bus, rig.repo, rig.root, model_baker=baker)
+
+
+def test_a_model_check_is_delegated_to_the_baker_and_a_pass_bakes(tmp_path):
+    # The Forge asks the baker (lint + compile + critique live there), and only on a pass does it bake.
+    rig = _Rig(tmp_path)
+    coder, baker = _PromptCoder(), _Baker(verdicts=(None,))
+    app = _model_forge(rig, coder, baker).build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
+    ws = rig.builds.workspace(app.slug)
+    assert baker.checked == [ws], "the MODEL branch of the pre-finalize gate must ask baker.check(ws)"
+    assert baker.baked == [ws], "a passing check must still be followed by bake()"
+    assert len(coder.prompts) == 1, "a passing hologram must not get a repair pass"
+
+
+def test_the_bakers_problem_reaches_the_repair_pass_verbatim(tmp_path):
+    # A compile error (the warm sentence + the compiler's file:line words) comes back from check() and
+    # must land in the coder's repair prompt unchanged — that text is what lets the coder fix line 12
+    # instead of guessing. The second check passes, so the build finishes and bakes.
+    rig = _Rig(tmp_path)
+    problem = ("The hologram's source couldn't be compiled. OpenSCAD said: ERROR: Parser error in file "
+               "model.scad, line 12: syntax error")
+    coder, baker = _PromptCoder(), _Baker(verdicts=(problem, None))
+    app = _model_forge(rig, coder, baker).build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
+    ws = rig.builds.workspace(app.slug)
+    assert len(coder.prompts) == 2, "a failed check must trigger exactly one repair pass"
+    assert problem in coder.prompts[1], "the baker's problem text must reach the repair prompt"
+    assert baker.checked == [ws, ws], "the repaired work is checked again"
+    assert baker.baked == [ws], "bake() runs once, after the repaired check passes"
+
+
+def test_the_critics_verdict_reaches_the_repair_pass_with_its_preview_pointer(tmp_path):
+    # The critic's problem names the rendered picture; carrying it through intact is what lets the
+    # repair prompt tell the coder to LOOK at assets/preview.png before editing model.scad.
+    rig = _Rig(tmp_path)
+    verdict = ("Looking at the rendered preview (assets/preview.png): the second mounting hole does "
+               "not go through the plate. Fix the model so it matches the brief.")
+    coder, baker = _PromptCoder(), _Baker(verdicts=(verdict, None))
+    _model_forge(rig, coder, baker).build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
+    assert len(coder.prompts) == 2
+    assert verdict in coder.prompts[1]
+    assert "assets/preview.png" in coder.prompts[1]
+
+
+def test_a_hologram_that_fails_both_checks_is_rolled_back_and_never_baked(tmp_path):
+    # Both passes failed: the broken design must not be baked into a viewer or left in the menu.
+    rig = _Rig(tmp_path)
+    coder = _PromptCoder()
+    baker = _Baker(verdicts=("no model.scad was produced", "no model.scad was produced"))
+    with pytest.raises(BuildError, match="no model.scad was produced"):
+        _model_forge(rig, coder, baker).build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
+    assert baker.baked == [], "a design that failed its checks must not be baked"
+    assert not rig.builds.workspace("bracket").exists()
+
+
+def test_without_a_baker_a_model_scad_alone_is_a_finished_hologram(tmp_path):
+    # The no-baker fallback (a bare Forge): model.scad IS the deliverable. The old gate demanded
+    # model.json or index.html and would have failed every design the new prompt produces.
+    rig = _Rig(tmp_path)
+
+    def writes_scad(ws: Path, _cancel) -> CoderResult:
+        ws.joinpath("model.scad").write_text("cube(10);\n", encoding="utf-8")
+        return CoderResult(ok=True, summary="drafted")
+
+    app = rig.forge(writes_scad).build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
+    assert (rig.builds.workspace(app.slug) / "model.scad").exists()
+
+
+def test_without_a_baker_an_empty_model_workspace_fails_its_check(tmp_path):
+    rig = _Rig(tmp_path)
+
+    def writes_nothing(ws: Path, _cancel) -> CoderResult:
+        return CoderResult(ok=True, summary="thought about it")
+
+    with pytest.raises(BuildError, match="no model.scad was produced"):
+        rig.forge(writes_nothing).build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
+
+
+# ----- the bake cycle is the Forge's: prepare() before the coder, check() after, bake() last -----
+
+def test_prepare_opens_the_cycle_before_the_coder_runs_on_new_and_iterating_holograms(tmp_path):
+    # prepare() seeds helix.scad and resets the critic's one look; both only help if they happen BEFORE
+    # the coder goes looking and before the first check counts. It runs for a brand-new hologram AND for
+    # an iteration of it (idempotent), and never for a plain app.
+    rig = _Rig(tmp_path)
+    log: list[str] = []
+    coder, baker = _PromptCoder(log), _Baker(verdicts=(None, None), log=log)
+    forge = _model_forge(rig, coder, baker)
+    app = forge.build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
+    assert log == ["prepare", "coder", "check", "bake"]
+    forge.build("Bracket", "make it wider", kind=BuildKind.MODEL)
+    assert log == ["prepare", "coder", "check", "bake"] * 2
+    ws = rig.builds.workspace(app.slug)
+    assert baker.prepared == [ws, ws]
+    # an app build never touches the baker
+    _model_forge(rig, _Coder(_writes_a_page), baker).build("Notes", "a notes app", kind=BuildKind.APP)
+    assert baker.prepared == [ws, ws] and log == ["prepare", "coder", "check", "bake"] * 2
+
+
+def test_prepare_seeds_helix_scad_so_the_coder_finds_the_library_before_writing(tmp_path):
+    # The prompt tells the coder helix.scad is the ONLY library here. With the real baker, a coder that
+    # lists the fresh workspace must SEE it — it used to be written first by check(), after the coder had
+    # already looked and found only the README and the manifest. No engine is needed for this: a missing
+    # engine reads as a pass at check() and an install page at bake().
+    from helix.services.model_baker import ModelBaker
+
+    rig = _Rig(tmp_path)
+    coder = _PromptCoder()
+    app = _model_forge(rig, coder, ModelBaker(None)).build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
+    assert coder.listings and scad.HELIX_LIB_FILE in coder.listings[0], coder.listings
+    ws = rig.builds.workspace(app.slug)
+    assert (ws / scad.HELIX_LIB_FILE).read_text(encoding="utf-8") == scad.HELIX_LIB
+
+
+class _Cad:
+    """The smallest CadEngine: every compile and render succeeds with a stand-in file, so the real
+    ModelBaker's cycle (critic included) can run under the real Forge loop with no OpenSCAD."""
+
+    def available(self) -> bool:
+        return True
+
+    def version(self):
+        return "2021.01"
+
+    def compile_stl(self, source: Path, out: Path, *, timeout_s: float = 180.0) -> CadResult:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"solid x\nendsolid x\n")
+        return CadResult(True, out, None, None, 0.1)
+
+    def export_3mf(self, source: Path, out: Path, *, timeout_s: float = 180.0) -> CadResult:
+        return CadResult(False, None, "not in a test", None, 0.0)
+
+    def render_png(self, source: Path, out: Path, *, size=(1280, 960), timeout_s: float = 120.0) -> CadResult:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"\x89PNG-FAKE")
+        return CadResult(True, out, None, None, 0.1)
+
+    def install(self, on_progress=None, timeout_s: float = 900.0) -> CadResult:
+        return CadResult(False, None, "not in a test", None, 0.0)
+
+    def install_hint(self) -> str:
+        return "install it"
+
+
+def test_a_repair_pass_that_dies_does_not_starve_the_next_build_of_its_critic(tmp_path):
+    # Build one: the critic speaks on check one, then the REPAIR PASS dies (the coder gives up) — the
+    # build is rolled back and bake() never runs to close the cycle. Build two of the same hologram must
+    # still get its one look: prepare() opens a fresh cycle, so the critic speaks on ITS first check. Before
+    # the Forge owned the cycle, the count stayed at 1 and every later build ran with first=False.
+    from helix.services.model_baker import ModelBaker
+
+    rig = _Rig(tmp_path)
+    critic_calls: list[Path] = []
+
+    def critic(png: Path, brief: str):
+        critic_calls.append(png)
+        return "the bracket is the wrong shape"
+
+    baker = ModelBaker(_Cad(), critic=critic)
+    prompts: list[str] = []
+    calls = {"n": 0}
+
+    def scripted(ws: Path, _cancel) -> CoderResult:
+        calls["n"] += 1
+        if calls["n"] == 2:  # build one's repair pass gives up mid-edit
+            return CoderResult(ok=False, summary="", error="boom")
+        ws.joinpath("model.scad").write_text(_TINY_SCAD, encoding="utf-8")
+        return CoderResult(ok=True, summary="drafted")
+
+    class _RecordingCoder(_Coder):
+        def run_task(self, repo_dir, prompt, *, on_progress=None, cancel=None):
+            prompts.append(prompt)
+            return self._fn(Path(repo_dir), cancel)
+
+    forge = ForgeService(rig.builds, _RecordingCoder(scripted), rig.bus, rig.repo, rig.root, model_baker=baker)
+    with pytest.raises(BuildError, match="boom"):
+        forge.build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
+    assert len(critic_calls) == 1 and len(prompts) == 2
+    forge.build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
+    assert len(critic_calls) == 2, "the second build's first check must get the critic's look"
+    assert len(prompts) == 4 and "wrong shape" in prompts[3], "and its verdict drives THAT build's repair pass"

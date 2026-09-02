@@ -115,6 +115,15 @@ def _cleanup_answer(text: str) -> str:
 
 _MAX_TRANSCRIPT_ROWS = 250  # cap the RENDERED transcript rows on an always-on session (history persists
                             # in the store); the oldest rows scroll off and are freed.
+# One wording for "you asked me to sleep, but nothing is actually listening" — shared by the typed
+# "sleep" path and the model's go_to_sleep handler, so the two can never tell the user different
+# stories about the same refusal.
+_NOTHING_TO_SLEEP = "Voice isn't listening right now, so there's nothing to put to sleep."
+# One wording for "voice is on, but the speech model never loaded this run". The launcher records
+# WHY under main.STT_PREWARM_ERROR, and a restart re-runs the identical failing load — so this state
+# must never be offered the Restart button, and the button, the status line and the toggle must all
+# say the same honest thing instead of sending the user round that loop.
+_VOICE_STALLED = "Voice can't start — the speech model didn't load."
 _VLABEL = int(Qt.AlignmentFlag.AlignVCenter)
 _RLABEL = int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 _HCENTER = int(Qt.AlignmentFlag.AlignHCenter)
@@ -750,6 +759,17 @@ class ConsoleView(QWidget):
         self._forge = forge  # for removing/rolling back work a 'stop' interrupted
         self._queue = build_queue  # background build jobs — cancel/status the running build
         self._selfdev_lane = selfdev_lane  # background self-change drafts — cancel/status
+        # Set when Stop is pressed DURING a protected self-change draft. Growth is never cancelled,
+        # so that press can only mean 'stop talking about it' — and without this the very next
+        # progress line resumed narration with force=True, making the honest 'that one runs to the
+        # end' status line untrue a second after the user read it. A hush belongs to ONE draft:
+        # cleared when that draft ends, and when a new one begins (_selfdev_drafting spots that).
+        self._selfdev_hushed = False
+        self._selfdev_drafting = False
+        # Is the draft currently running one NOBODY asked for (the nightly Evolve pass, or a catch-up
+        # for a night the machine slept through)? It decides two things beyond silence: whether the mic
+        # is taken away, and whether Stop is allowed to actually stop it. See _sync_working.
+        self._selfdev_unattended = False
         self._workers: set[QtWorker] = set()
         self._busy = False  # a CONVERSATIONAL turn is running (now short — builds left the turn)
         self._connect_hint_shown = False  # dedupe the "connect Claude first" hint until auth appears
@@ -933,6 +953,11 @@ class ConsoleView(QWidget):
         self._input.submitted.connect(self._send)
         self._input.imagePasted.connect(self._on_image_pasted)          # paste/drop a screenshot
         self._input.imageFilesPasted.connect(self._on_image_files_pasted)  # paste/drop image files
+        # Documents and folders dragged onto the box. Without this connection ChatInput sees nobody
+        # listening and deliberately falls through to QTextEdit, so a dropped PDF pasted itself as a
+        # literal file:/// path the model can never open. Staged through the same slot the paperclip
+        # menu uses, so the gesture and the menu produce exactly the same attachment.
+        self._input.filesDropped.connect(self._on_files_dropped)   # paste/drop files/folders
         self._paste_temps: set[Path] = set()  # temp PNGs saved from clipboard images, reaped after use
         # Sleep: rest/wake the mic without stopping a build — the intuitive manual control, right by the
         # input. Shown only when hands-free voice is on. (Stopping a build is a separate "stop" action.)
@@ -1121,6 +1146,30 @@ class ConsoleView(QWidget):
         queued_msgs = len(self._pending_msgs)
         self._pending_msgs.clear()
         building = self._queue is not None and self._queue.active_name() is not None
+        if self._selfdev_lane is not None and self._selfdev_lane.busy():
+            # Everything a Stop means for a running draft is decided HERE, above every branch below —
+            # including the cleanup-offer early return, which used to skip it entirely. Which branch
+            # ends up owning the status line says nothing about whether a draft is running.
+            #
+            # HUSH the spoken commentary for the rest of this draft: the honest status line below
+            # otherwise survived only until the next progress line, which overwrites the status AND
+            # restarts narration with force=True.
+            self._selfdev_hushed = True
+            # LATCH the draft here too, because this is the first place the Console has OBSERVED it.
+            # _selfdev_drafting is the "a NEW draft began" flag that lifts a stale hush, and it used to
+            # be written only in _sync_working — whose first call, for a draft with no build running, is
+            # the draft's OWN first progress line. propose() spends multiple seconds on worktree setup
+            # and a CLI cold start before that line arrives, so a Stop pressed in that window set the
+            # hush and then the draft's own opening line read as "a new draft" and wiped it: HELIX
+            # narrated the whole growth run aloud, force=True, through a sleeping mic. Latching the
+            # identity at the moment of observation means a draft can never clear its own hush, while a
+            # genuinely new one still does (an idle-lane _sync_working resets this to False first).
+            self._selfdev_drafting = True
+            if self._selfdev_unattended:
+                # A draft NOBODY asked for is the one draft Stop may genuinely stop. "Runs to the end"
+                # is a fair answer for a change the user requested and is sitting through; it is not a
+                # fair answer for one HELIX started by itself on a machine somebody is trying to use.
+                self._selfdev_lane.cancel()
         if self._cleanups and not building and not self._busy:
             # A "remove the half-built X?" offer is hanging and nothing is running — Esc / "stop" /
             # "never mind" naturally means "no, leave it", not a no-op. Answer the NEWEST (the one just
@@ -1142,6 +1191,18 @@ class ConsoleView(QWidget):
             self.status.setText(f"Cleared {len(dropped)} queued.{msgtail}")
         elif self._busy:
             self.status.setText(f"Stopping…{msgtail}")
+        elif self._selfdev_lane is not None and self._selfdev_lane.busy():
+            # The Stop button (and a tap on the orb) IS offered while a self-change drafts — something
+            # really is running — but a draft the USER asked for is the one job we deliberately never
+            # cancel, per the docstring above. Reporting "Stopped." there was a flat lie: the orb
+            # stayed on the working hue and the next progress line overwrote the status a second
+            # later, with HELIX talking again. The press isn't wasted — the block at the top of this
+            # method hushed the commentary — so say what actually happened, and name the way out.
+            # An unattended draft was already cancelled up there, so it gets the plain, true answer.
+            self.status.setText(
+                f"Stopped.{msgtail}" if self._selfdev_unattended else
+                f"Still improving myself — that one runs to the end. Say “discard it” when it lands.{msgtail}"
+            )
         else:
             self.status.setText(f"Stopped.{msgtail}")
 
@@ -1160,6 +1221,14 @@ class ConsoleView(QWidget):
             self.status.setText("Voice off.")
         elif started:
             self.status.setText(f"Listening — say “{self._wake_word()}”.")
+        elif voice.prewarm_error():
+            # The launcher tried to load the speech model at launch and recorded why it couldn't. A
+            # restart re-runs that identical load, so the Restart button below is deliberately NOT
+            # offered here — it would hand the user a fix that provably isn't one. Say what's true
+            # and point at the thing that does still work.
+            self.status.setText(_VOICE_STALLED)
+            self._add_bubble("helix", "Voice is on, but the speech model didn’t load, so I can’t "
+                                      "listen this run. Type to me and I’ll keep right up.")
         elif voice.restart_required():
             # Honest about the real state: it's saved on, but the speech model only pre-warms at launch,
             # so it isn't actually listening yet. Offer a one-click restart instead of a silent "on".
@@ -1176,10 +1245,7 @@ class ConsoleView(QWidget):
 
     def _on_muted_changed(self, muted: object) -> None:
         self._refresh_voice_ui()
-        self.status.setText(
-            f"Asleep — I'm not listening. Say “{self._wake_word()}” or “wake” (or tap Wake) to bring me back."
-            if muted else "Awake and listening."
-        )
+        self.status.setText(self._asleep_status() if muted else "Awake and listening.")
 
     # ----- voice controls -----
     def _wake_word(self) -> str:
@@ -1195,7 +1261,12 @@ class ConsoleView(QWidget):
             return
         on = voice.enabled()
         listening = on and voice.can_listen()          # actually hearing you right now
-        needs_restart = on and not voice.can_listen()  # saved on, but not pre-warmed this run
+        # Two different reasons the mic isn't live, and only one of them a restart can fix. When the
+        # launcher recorded WHY the speech model failed to load, restarting re-runs that identical
+        # load — so promising 'restart to listen' there is a loop, not a fix. Everything else (voice
+        # simply wasn't on at launch, the device went away) keeps the old, still-true offer.
+        stalled = on and not listening and bool(voice.prewarm_error())
+        needs_restart = on and not listening and not stalled
         # Sleep/wake toggle: only relevant when voice is actually listening (or currently asleep, to wake).
         muted = voice.is_muted()
         self._mute_btn.setVisible(listening or muted)
@@ -1211,8 +1282,11 @@ class ConsoleView(QWidget):
         )
         self._voice_btn.setVisible(True)
         # A near-solid dark pill so the label reads over the bright orb (cyan-on-cyan was invisible).
-        edge = "#3fe0e0" if listening else ("#e0a13f" if needs_restart else "#26323b")
-        txt = "#3fe0e0" if listening else ("#e0a13f" if needs_restart else "#aebcc3")
+        # Amber for BOTH un-live states: each one means 'voice is on but you are not being heard',
+        # which is exactly what the colour is there to catch the eye about.
+        attention = needs_restart or stalled
+        edge = "#3fe0e0" if listening else ("#e0a13f" if attention else "#26323b")
+        txt = "#3fe0e0" if listening else ("#e0a13f" if attention else "#aebcc3")
         self._voice_btn.setStyleSheet(
             f"QPushButton{{background:rgba(8,11,15,0.93);border:1px solid {edge};border-radius:14px;"
             f"color:{txt};padding:8px 18px;}} QPushButton:hover{{border-color:#3fe0e0;}}"
@@ -1221,13 +1295,16 @@ class ConsoleView(QWidget):
         wake = self._wake_word()
         self._voice_btn.setText(
             f"🔊 Voice on — say “{wake}”" if listening
-            else ("🔊 Voice on · restart to listen" if needs_restart else "🔇 Voice off")
+            else ("🔊 Voice on · restart to listen" if needs_restart
+                  else ("🔊 Voice can’t start" if stalled else "🔇 Voice off"))
         )
         self._voice_btn.setToolTip(
             f"Listening for “{wake}”. Tap the orb or press Esc to stop; say “sleep” to rest the mic."
             if listening else
             "Voice is on but needs a restart to start listening (the speech model loads at launch)."
             if needs_restart else
+            _VOICE_STALLED + " Restarting won’t change that one — typing still works normally."
+            if stalled else
             f"Turn on hands-free voice — then just say “{wake}” (or tap the orb)."
         )
         self._talk.setVisible(True)
@@ -1309,6 +1386,14 @@ class ConsoleView(QWidget):
         for p in paths:
             self._add_attachment(Path(p))
 
+    def _on_files_dropped(self, paths: list) -> None:
+        """A document or a folder dropped/pasted onto the input — staged exactly as "Attach files…"
+        stages it. Dragging is the same gesture with fewer clicks, so it must not accept less than
+        the menu: _add_attachment is the single staging path, so a dropped PDF, a dropped folder and
+        a menu-chosen one become the same chip and ride into the turn the same way."""
+        for p in paths:
+            self._add_attachment(Path(p))
+
     def _add_attachment(self, path: Path) -> None:
         if path in self._attachments:
             return
@@ -1335,6 +1420,26 @@ class ConsoleView(QWidget):
         self._attach_host.setVisible(bool(self._attachments))
 
     # ----- conversation -----
+    def _mic_situation(self) -> str:
+        """What the ears are ACTUALLY doing right now, in the model's own words. This bit used to be
+        the bare literal "mic awake", emitted whenever a VoiceController existed — and one always
+        exists, because the speech adapters are built unconditionally. So the single piece of
+        self-state a user is most likely to ask about ("are you listening?") was the one piece that
+        was hard-coded true: with hands-free switched off, or the mic asleep, the cortex was handed a
+        lie about itself and answered wrongly. Read the same live signals the Voice button reads in
+        _refresh_voice_ui, most-specific state first, so the block and the button can never disagree."""
+        v = self._voice
+        try:
+            if not v.enabled():
+                return "hands-free voice is off — nothing is listening"
+            if v.is_muted():
+                return "mic asleep, resting until the wake word"
+            if not v.can_listen():
+                return "hands-free voice is on but the mic isn't listening this run"
+            return "mic awake"
+        except Exception:  # noqa: BLE001 — proprioception is a nicety; it must never break a turn
+            return "mic state unclear"
+
     def _situation(self, *, from_voice: bool) -> str:
         """The LIMBIC self-situation block (interoception — READ_ME/BRAIN.md): HELIX's own live state
         this turn, so the cortex can reason about where it is. Compact, plain, ephemeral — never
@@ -1349,7 +1454,7 @@ class ConsoleView(QWidget):
                 in_session = bool(getattr(self._voice, "_session", False))
             except Exception:  # noqa: BLE001
                 in_session = False
-            bits.append("mic awake" + (", conversation session open" if in_session else ""))
+            bits.append(self._mic_situation() + (", conversation session open" if in_session else ""))
         # A build in flight is part of HELIX's felt state (it's "working").
         try:
             if self._queue is not None and self._queue.active_names():
@@ -1410,7 +1515,7 @@ class ConsoleView(QWidget):
             elif self._voice.can_listen():
                 self._voice.set_muted(True)   # only sleep when the mic is actually live
             else:
-                self._add_bubble("helix", "Voice isn't listening right now, so there's nothing to put to sleep.")
+                self._add_bubble("helix", _NOTHING_TO_SLEEP)
             return
         if is_stop(text):  # "stop" works any time — halts the running build and/or a generating reply
             self._add_bubble("you", text)
@@ -1573,10 +1678,22 @@ class ConsoleView(QWidget):
         """Tell the voice controller whether HELIX is busy on a BACKGROUND build / self-change, so the
         mic goes deaf while it works (ambient speech can't cancel the job). Conversational turns are
         already covered by the controller's thinking/speaking states."""
+        drafting = self._selfdev_lane is not None and self._selfdev_lane.busy()
+        if drafting and not self._selfdev_drafting:
+            # A NEW draft just began. Whatever the user hushed belonged to the previous one, and a
+            # hush that outlived its draft would silence growth narration for the rest of the
+            # session — including the next change they deliberately asked to hear.
+            self._selfdev_hushed = False
+        self._selfdev_drafting = drafting
         if self._voice is not None:
             building = self._queue is not None and self._queue.active_name() is not None
-            drafting = self._selfdev_lane is not None and self._selfdev_lane.busy()
-            self._voice.set_working(bool(building or drafting))
+            # An UNATTENDED draft must never take the ears away. The shield exists so ambient speech
+            # can't derail a job the user deliberately started and is watching. A draft nobody asked
+            # for is the opposite case: the nightly pass, or a catch-up that landed on a machine
+            # somebody is actually using, would go deaf mid-sentence on a user who never started it —
+            # for the several minutes a draft takes. Silence was already decided for these; this is
+            # the other half of "nobody asked, so nothing of yours gets taken".
+            self._voice.set_working(bool(building or (drafting and not self._selfdev_unattended)))
         self._refresh_busy_ui()
 
     def _refresh_busy_ui(self) -> None:
@@ -1621,7 +1738,29 @@ class ConsoleView(QWidget):
 
     def _on_fail(self, err: str) -> None:
         self._add_bubble("helix", f"⚠  {err}")
-        if self._voice is not None:
+        if self._cancelled:
+            # A stop is SHOWN, not spoken — the invariant _on_reply keeps, and a stopped turn very
+            # often lands HERE rather than there: the cancel breaks the reply loop from underneath,
+            # so the turn dies with an exception. Speaking 'Something went wrong on that one' then
+            # answers the user's own halt with a complaint about work they deliberately called off.
+            self._cancelled = False
+            handle = self._cancel.build if self._cancel is not None else None
+            if self._voice is not None:
+                self._voice.idle()
+            self._idle_status()
+            if handle is not None:  # a build was interrupted — offer to remove the half-finished work
+                self._offer_cleanup(handle)
+            return
+        if self._voice is not None and self._voice.enabled():
+            # Hands-free, a dead turn used to be TOTAL SILENCE — nothing spoken, the status line
+            # straight back to "Listening for HELIX…", which is indistinguishable from an unheard wake
+            # word, so the user just says it all again. Say one plain line instead. The raw error stays
+            # on screen only: it carries exception classes and hostnames nobody can act on, and
+            # speakable() strips markdown, not jargon. This is the same sentence conversation.py
+            # persists for a crashed turn, so the transcript and the room hear the same thing, and
+            # speak() settles the orb and the status line itself when it finishes.
+            self._voice.speak("Something went wrong on that one — try me again?")
+        elif self._voice is not None:
             self._voice.idle()
             self._idle_status()
         else:
@@ -1632,11 +1771,36 @@ class ConsoleView(QWidget):
             self.orb.set_state(OrbState.IDLE)
         self._idle_status()
 
+    def _asleep_status(self) -> str:
+        """The one wording for a rested mic, shared by _on_muted_changed and the resting line, so the
+        status line never flips between two different descriptions of the same state."""
+        return (f"Asleep — I'm not listening. Say “{self._wake_word()}” or “wake” (or tap Wake) to "
+                "bring me back.")
+
     def _idle_status(self) -> None:
-        self.status.setText(
-            f"Listening for “{self._wake_word()}”…" if self._voice and self._voice.enabled()
-            else "Ready when you are."
-        )
+        """The resting line under the orb. enabled() is only the SAVED flag: the wake listener can fail
+        to open (the speech model wasn't pre-warmed this run, or the device went away) and _start_wake
+        returns False silently, so this line used to promise “Listening for HELIX…” while the Voice
+        button two inches away honestly said “restart to listen”. It also promised listening while the
+        mic was asleep, since sleeping deliberately keeps the listener alive. Read the live signals in
+        the same order _refresh_voice_ui does — that file's rule is “never say ‘say HELIX’ when it
+        isn't actually listening”, and this line is bound by it too."""
+        v = self._voice
+        if v is None or not v.enabled():
+            self.status.setText("Ready when you are.")
+        elif v.is_muted():
+            self.status.setText(self._asleep_status())
+        elif v.can_listen():
+            self.status.setText(f"Listening for “{self._wake_word()}”…")
+        elif v.prewarm_error():
+            # Checked BEFORE restart_required (which already stands down for this state) so the two
+            # can never both be true and hand the user the restart loop from here instead.
+            self.status.setText(_VOICE_STALLED)
+        elif v.restart_required():
+            # Exactly what toggle_voice already says for this state, so the two never disagree.
+            self.status.setText("Voice needs a restart to start listening.")
+        else:
+            self.status.setText("Ready when you are.")
 
     # ----- build legend + orb status (the at-a-glance board for concurrent builds) -----
     def update_legend(self, entries: "list[LegendEntry]") -> None:
@@ -1760,34 +1924,61 @@ class ConsoleView(QWidget):
                          else f"The {name} build didn't go through.")
         return " ".join(parts)
 
-    def on_self_change_progress(self, line: str) -> None:
+    def on_self_change_progress(self, line: str, unattended: bool = False) -> None:
         """Live commentary while HELIX GROWS (drafts a change to its own code). Distinct from a build:
         the orb goes to the working hue with an 'Improving myself' pill so it's unmistakable that
         something important is happening, the mic is shielded (the draft can't be cancelled by voice),
         and — unlike ordinary progress — the high-level steps are spoken ALOUD even when the mic is
-        asleep, because the user wants to hear HELIX narrate what it's becoming."""
+        asleep, because the user wants to hear HELIX narrate what it's becoming.
+
+        UNATTENDED changes that completely. The Evolve pass reuses this same lane for a draft NOBODY
+        asked for — overnight, or catching up a night the machine slept through, which means it can
+        land at an hour when someone IS in the room. So it stays SILENT: the status line, the orb hue
+        and the chat bubble are the whole record, exactly the "quiet suggestion you read in the
+        morning" the design promises. Silence has to be decided here rather than by softening force=,
+        because force only defeats the mute gate and the mute flag is False for a user who simply went
+        to bed without saying "sleep" — they'd hear every coder step.
+
+        Silence is not the whole of it: because an unattended draft can meet a user, it also must not
+        take the mic away (see _sync_working) and must yield to Stop (see _cancel_active). Nobody
+        asked for it, so nothing of theirs gets taken."""
         text = (line or "").strip()
         self.set_orb_status(OrbStatus.WORKING)          # the whole presence signals work
         self.status.setText(f"Improving myself — {text}" if text else "Improving myself…")
-        self._sync_working()                             # deafen the mic: growth isn't interruptible
-        if self._voice is not None and text:
+        # Record WHOSE draft this is before syncing: _sync_working reads it to decide whether the mic
+        # is shielded at all, and _cancel_active reads it to decide whether Stop may really stop it.
+        self._selfdev_unattended = unattended
+        self._sync_working()          # deafen the mic — but only for a draft the user asked for
+        if self._voice is not None and text and not unattended and not self._selfdev_hushed:
             # force=True → speak even when asleep; growth narration bypasses the quiet-while-muted rule.
+            # _selfdev_hushed is the one thing force= must NOT defeat: the user pressed Stop on this
+            # draft and was told it runs to the end, so it finishes on screen, in silence.
             self._voice.narrate(text, force=True)
 
     def on_self_change_finished(
-        self, ok: bool, summary: str, branch: str, error: str | None, stopped: bool
+        self, ok: bool, summary: str, branch: str, error: str | None, stopped: bool,
+        unattended: bool = False,
     ) -> None:
-        """A background self-change draft ended — announce whether it's ready to apply."""
+        """A background self-change draft ended — announce whether it's ready to apply. An UNATTENDED
+        (overnight Evolve) draft lands silently: speak=False keeps the bubble and the status line as
+        the morning's record without waking the house at 3 AM to hear "Couldn't draft that change"."""
         QTimer.singleShot(0, self._sync_working)  # lift the mic shield once the draft lane is idle
         self._settle_orb_status()                 # drop the working hue back to blue (or yellow if building)
+        # The hush covered the draft the user stopped talking about, and that draft is now over. The
+        # single line below is exactly what the status line promised them (“say ‘discard it’ when it
+        # lands”), so it is still spoken — what they silenced was the running commentary, not the result.
+        self._selfdev_hushed = False
+        self._selfdev_unattended = False  # the next draft declares itself; never inherit this one's
+        speak = not unattended
         if stopped:
-            self._announce("Stopped drafting that change.")
+            self._announce("Stopped drafting that change.", speak=speak)
         elif ok:
             label = (summary or branch or "the change").strip().splitlines()[0][:90]
-            self._announce(f"Drafted {label}. Say “apply it” to ship it, or “discard it” to drop it.")
+            self._announce(f"Drafted {label}. Say “apply it” to ship it, or “discard it” to drop it.",
+                           speak=speak)
         else:
             reason = (error or "").strip().splitlines()[0][:160] if error else ""
-            self._announce(f"Couldn't draft that change. {reason}".strip())
+            self._announce(f"Couldn't draft that change. {reason}".strip(), speak=speak)
 
     # ----- delete confirmation (model proposed a delete; require one real human click) -----
     def offer_delete(self, name: str, on_confirm) -> None:
@@ -1977,12 +2168,23 @@ class ConsoleView(QWidget):
         # A reminder is something the USER asked for ("remind me at five") — always spoken.
         self._announce(f"Reminder: {text}")
 
-    def sleep_voice(self) -> None:
+    def sleep_voice(self, request=None) -> None:
         """Rest the mic at the MODEL's judged request (the go_to_sleep tool) — without the canned
         'Going to sleep.' confirmation, because the model's own reply is the goodnight. Only the
         user's spoken wake word brings the ears back; nothing here can. GROWTH: the utterance that
         triggered this cortical judgment consolidates into a fast reflex, so next time the same phrase
-        rests the mic instantly without a model turn (the cortex teaching the brainstem)."""
+        rests the mic instantly without a model turn (the cortex teaching the brainstem).
+
+        `request` is the tool's holder (domain.events.SleepRequest) when the model asked through
+        go_to_sleep. The tool's worker thread is parked on it, so it MUST be claimed here and settled
+        on every path: an unclaimed holder makes that turn wait two seconds and then tell the user
+        nothing was listening — about a mic that just went quietly to sleep in front of them. It
+        defaults to None so a direct call (the typed 'sleep' path, a test) behaves exactly as before.
+        """
+        if request is not None and not request.claim():
+            # The worker already gave up (the turn was cancelled, or the wait timed out). Resting the
+            # ears now would answer nobody and would surprise a user whose request was reported failed.
+            return
         if self._voice is not None:
             # Consume the triggering utterance atomically (clear as we read), so a concurrent typed
             # follow-up can't leave a stale value and consolidation happens at most once per trigger.
@@ -1990,7 +2192,27 @@ class ConsoleView(QWidget):
             self._last_user_utterance = ""
             if last:
                 self._voice.learn_sleep(last)
+            if not self._voice.can_listen():
+                # Nothing is actually listening, so there is nothing to rest — set_muted would refuse
+                # and return in silence, while the model, told the tool succeeded, goes on to speak a
+                # goodnight about ears that never closed. Put the truth on screen, in the same words
+                # the typed "sleep" path uses, so a keyboard user isn't left believing it worked.
+                # Say it ONCE, though: when the model is holding the request it relays this same
+                # sentence in its own words a round-trip later (tools.py turns the failure into "tell
+                # the user that plainly"), so writing the bubble here as well made HELIX stutter the
+                # refusal twice in a row. The bubble is for the paths where nobody else will speak.
+                if request is None:
+                    self._add_bubble("helix", _NOTHING_TO_SLEEP)
+                else:
+                    request.fail(_NOTHING_TO_SLEEP)  # the model relays this instead of a goodnight
+                return
             self._voice.set_muted(True, announce=False)
+            if request is not None:
+                request.fulfil()  # the ears really did close — the goodnight is now the truth
+        elif request is not None:
+            # No voice stack at all (silent build, a torn-down shell). Settle it anyway, in words the
+            # model can simply say, rather than leaving the turn parked for its whole timeout.
+            request.fail("Voice isn't set up right now, so there was nothing to rest.")
 
     def announce_online(self) -> None:
         """The V3 boot cue — one short spoken line when the presence comes up, so a user on
@@ -2009,12 +2231,14 @@ class ConsoleView(QWidget):
             self._voice.clear_camera_session()
 
     def camera_voice_ready(self) -> bool:
-        """Whether the camera window may honestly promise 'I'm listening': hands-free is on, the
-        voice stack is warm, and the mic isn't asleep. A snapshot at open time — good enough for
-        one window's hint text."""
+        """Whether the camera window may honestly promise 'I'm listening'. Ask the voice layer itself:
+        this used to re-derive the answer here from enabled/can_listen/is_muted and MISSED the focus
+        shield, which the real gate applies to the camera branch too — so asking for a build and then
+        saying "look at this" opened a window that promised listening while the ears were deaf for the
+        build, and "take the picture" did nothing with no explanation. One predicate, one truth."""
         v = self._voice
         try:
-            return bool(v is not None and v.enabled() and v.can_listen() and not v.is_muted())
+            return bool(v is not None and v.camera_ears_live())
         except Exception:
             return False
 

@@ -43,8 +43,9 @@ form, a config file, and three clicks, we've failed the heart of it.
 3. **The Forge & your creations** — the maker. A **creation** comes in five kinds, each conjured,
    changed, and deleted just by talking: an **app** (opens a screen), a **protocol** (a saved procedure
    that does a thing when run — on command or on a rhythm), an **agent** (an AI mind with a standing
-   goal, run on demand or on a schedule), a **hologram** (an interactive 3D object, scene, or
-   animation), and a **vault** (your searchable notes/docs). Each is a self-contained, versioned
+   goal, run on demand or on a schedule), a **hologram** (a 3D model you design by talking — drafted
+   in OpenSCAD, shown as an engineering-style drawing, exportable for printing; also a 360° scene or
+   an animation), and a **vault** (your searchable notes/docs). Each is a self-contained, versioned
    project shown as a card in your menu. The orb understands the old V2 words ("flow", "task",
    "3D model", "knowledge base") forever.
 

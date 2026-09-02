@@ -145,13 +145,19 @@ class KnowledgeService:
             return None
         return self._store(slug, title or _title_from_note(text), text, source="note")
 
-    def add_files(self, slug: str, paths: list) -> list[KnowledgeDoc]:
-        """Ingest the readable text of the chosen files (binaries are skipped). Each becomes one doc."""
-        return self._ingest_paths(slug, paths, source="file")
+    def add_files(self, slug: str, paths: list, *, on_progress=None) -> list[KnowledgeDoc]:
+        """Ingest the readable text of the chosen files (binaries are skipped). Each becomes one doc.
 
-    def add_folder(self, slug: str, folder) -> list[KnowledgeDoc]:
-        """Ingest the readable text files found under a folder (noise dirs + binaries are skipped)."""
-        return self._ingest_paths(slug, [folder], source="folder")
+        `on_progress` is an optional callable given one short line per file, named and counted. The Vault
+        view runs this on a worker thread and shows those lines: since OCR landed, ONE scanned PDF can
+        hold the extractor for its full 30s budget, so an ingest with no commentary is indistinguishable
+        from a hung window."""
+        return self._ingest_paths(slug, paths, source="file", on_progress=on_progress)
+
+    def add_folder(self, slug: str, folder, *, on_progress=None) -> list[KnowledgeDoc]:
+        """Ingest the readable text files found under a folder (noise dirs + binaries are skipped).
+        `on_progress` is reported per file, as in add_files."""
+        return self._ingest_paths(slug, [folder], source="folder", on_progress=on_progress)
 
     def ingest_outbox(self, base_name: str, outbox_dir, *, source: str = "task") -> list[KnowledgeDoc]:
         """Harvest a finished task's output: ingest every file it dropped in its outbox into a base (created
@@ -177,10 +183,18 @@ class KnowledgeService:
                 pass
         return out
 
-    def _ingest_paths(self, slug: str, paths: list, *, source: str) -> list[KnowledgeDoc]:
+    def _ingest_paths(
+        self, slug: str, paths: list, *, source: str, on_progress=None
+    ) -> list[KnowledgeDoc]:
         files = self._collect_files([Path(p) for p in paths])
         out: list[KnowledgeDoc] = []
-        for fp in files:
+        total = len(files)
+        for n, fp in enumerate(files, 1):
+            if on_progress is not None:
+                # Emitted BEFORE the read, deliberately: the read is the slow half (a scanned PDF sits in
+                # OCR, and _store then git-commits), so a line emitted afterwards would only appear once
+                # the wait the user is trying to understand had already finished.
+                on_progress(f"Reading {fp.name} ({n} of {total})…")
             text = self._read_any(fp)
             if text:
                 doc = self._store(slug, fp.name, text, source=source)
@@ -231,7 +245,23 @@ class KnowledgeService:
         """Text for ingestion: extract a rich doc (PDF/Word), read a text file (capped), or "" for a
         binary/unreadable file."""
         if doc_extract.is_rich_doc(path):
-            return doc_extract.extract(path).strip()
+            # PDF/Word are parsed WHOLE — every page is held in memory at once — so the gate has to be on
+            # the FILE, before extraction, which is exactly what the other two document readers already
+            # do (attachments._read_rich and files.read_file, same 25 MB constant, deliberately reused so
+            # there is one number rather than three). Ingestion was the odd one out: unbounded at both
+            # ends, so a 300 MB scan was parsed whole and then written into the vault to be re-read and
+            # chunked on every search. "" is the skip sentinel both callers of _read_any already honour
+            # (_ingest_paths and ingest_outbox each test `if text:`), so nothing above needs to change.
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = -1
+            if size > attachments.MAX_RICH_BYTES:
+                return ""
+            # Cap the RESULT too. A 20 MB PDF slips under the file gate and can still yield megabytes of
+            # text; the plain-text branch below has always been bounded at both ends, and _truncated
+            # applies the same budget and the very same trailing marker _read_text uses.
+            return attachments._truncated(doc_extract.extract(path).strip())
         if attachments._looks_binary(path):
             return ""
         return self._read_text(path)

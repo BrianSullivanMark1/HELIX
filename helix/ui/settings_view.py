@@ -261,14 +261,19 @@ class SettingsView(QWidget):
             self._wake_word,
         ))
         self._narration = _WheelGuardCombo()
+        # TWO options, because there are exactly two behaviours. This used to offer a third, "Speak
+        # every step", but nothing downstream ever read the difference: the console asks one on/off
+        # question of this setting, and the voice layer drops any note that arrives while it is still
+        # speaking the previous one — so everything except "off" comes out as milestones however it is
+        # labelled. Offering a distinction the voice cannot make just quietly disappoints whoever
+        # picks it, and Brian's rule is a real default over a decorative knob.
         self._narration.addItem("Stay quiet while working (recommended)", "off")
-        self._narration.addItem("Speak milestones", "milestones")
-        self._narration.addItem("Speak every step", "spoken")
+        self._narration.addItem("Speak milestones out loud", "milestones")
         form.addWidget(self._labeled(
             "Talk while working", "Talk while working",
             "Whether HELIX narrates its progress out loud while it builds. Quiet keeps progress on the "
             "screen and in the orb's colour (nothing is lost — you still see every step); the other "
-            "options speak it aloud.",
+            "option reads the milestones aloud as it goes.",
             self._narration,
         ))
         self._proactive = QCheckBox("Let background watchers speak up out loud")
@@ -508,15 +513,78 @@ class SettingsView(QWidget):
         return all(str(self._settings.get(key) or "").strip() for key, _lbl, _hint in fields)
 
     def _remove_connection(self, service_id: str) -> None:
-        """Clear every stored value for this service (secrets or Settings) and refresh its row."""
-        _label, store, fields = CONNECTABLE[service_id]
+        """Clear every stored value for this service — in BOTH stores it can live in — and refresh
+        its row.
+
+        A secrets-backed engine key (Tripo, Voyage, Blockade) resolves secrets-first but then falls
+        back to the lower-case spelling an OLDER HELIX wrote into helix_settings.json — the container's
+        key getters read `tripo_api_key` / `voyage_api_key` / `blockade_api_key` right after the
+        secrets store, and V2's Settings page is what put them there. That file is the very one this
+        page writes eight lines down, so the legacy copy was always ours to delete; clearing only the
+        secrets half left the key on the machine, the dot lit, and the user told it "lives outside
+        this page" — an untruth about a credential, told by the page that owns the file holding it.
+        Remove now clears the legacy spelling as well, and only when something is actually there:
+        writing "" unconditionally would sprinkle a blank slack_token/github_token/alpaca_api_key into
+        the settings file for every service that has no legacy copy at all.
+
+        What genuinely stays beyond reach is an environment variable of the same name. Clearing our
+        copy and leaving the dot lit with no word about it is the worst possible ending — the button's
+        own tooltip promises to forget the key, so the user clicks, watches nothing change, and has no
+        idea what is still holding it. Say so instead."""
+        label, store, fields = CONNECTABLE[service_id]
         for key, _lbl, _hint in fields:
             if store == "secrets":
                 if self._connections is not None:
                     self._connections.set_value(key, "")
+                legacy = key.lower()  # TRIPO_API_KEY -> tripo_api_key, the spelling V2's page wrote
+                if str(self._settings.get(legacy) or "").strip():
+                    self._settings.set(legacy, "")
             else:
                 self._settings.set(key, "")
         self._refresh_connection_rows()
+        stuck = self._still_supplied(service_id)
+        if stuck:
+            QMessageBox.information(self, f"{label} is still connected", self._stuck_key_text(label, stuck))
+
+    def _still_supplied(self, service_id: str) -> list[str]:
+        """Credential names this service STILL resolves to after Remove emptied BOTH of our stores —
+        i.e. the ones coming from somewhere this page genuinely cannot write. Normally empty, and now
+        empty for a legacy Settings copy too, because Remove clears that one itself."""
+        _label, store, fields = CONNECTABLE[service_id]
+        if store != "secrets" or self._connections is None:
+            return []
+        left: list[str] = []
+        for key, _lbl, _hint in fields:
+            try:
+                if (self._connections.value(key) or "").strip():
+                    left.append(key)
+            except Exception:  # noqa: BLE001 - a broken getter must not eat the Remove click
+                pass
+        return left
+
+    @staticmethod
+    def _stuck_key_text(label: str, keys: list[str]) -> str:
+        """The one honest line for a key HELIX can't forget — naming WHERE it still lives, because a
+        dead end the user can't act on is the thing this page exists to avoid. Env vars are checked
+        by name (for a secrets-store service the credential name IS the environment variable name),
+        so the message can point at the right place instead of guessing.
+
+        The fall-through wording says only what is still true once Remove has cleared both of our own
+        stores: something outside HELIX is handing it over. It must NEVER name a place HELIX could
+        have cleared itself — the older-HELIX Settings entry used to be described here, and Remove
+        deletes that one now, so claiming a key is out of reach when it is sitting in a file this page
+        writes is exactly the lie this message exists to replace."""
+        import os
+
+        env = [k for k in keys if (os.environ.get(k) or "").strip()]
+        names = ", ".join(env or keys)
+        where = (f"a {names} environment variable is set on this PC — clear it there (and sign out "
+                 f"and back in) to finish removing it."
+                 if env else
+                 f"something on this PC outside HELIX is still handing it {names} — another program "
+                 f"or a system-wide setting. Clearing it there finishes the job.")
+        return (f"HELIX forgot its own saved copy, but {label} is still being supplied from "
+                f"elsewhere: {where}\n\nUntil then, HELIX will keep using it.")
 
     def _refresh_connection_rows(self) -> None:
         for sid, dot, remove in self._conn_rows:
@@ -886,10 +954,30 @@ class SettingsView(QWidget):
             label.setText("● Set" if has else "○ Not set")
             label.setStyleSheet(f"font-size:12px;color:{STATUS_DONE if has else MUTED};")
 
+    def _recent_brain_failure(self) -> str:
+        """What actually went wrong the last time HELIX used the subscription, or "" if nothing has
+        since it last worked.
+
+        active() only answers a STRUCTURAL question — is a token saved, is the SDK here, does the
+        Claude Code engine launch. All three can be perfect while every single turn dies (a command
+        line over the Windows argument ceiling did exactly that), and this is the only signal that
+        knows the difference. Read through getattr: active() is the shape every subscription brain
+        and test double implements, last_failure() is newer, and a brain without it must degrade to
+        the old structural answer rather than take the whole Settings page down with an
+        AttributeError."""
+        recent = getattr(self._subscription, "last_failure", None)
+        if not callable(recent):
+            return ""
+        try:
+            return (recent() or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
     def _refresh_brain_status(self) -> None:
-        """Show which brain the next turn will use, from SAVED settings + real capability. The
-        subscription is preferred but only active when a token is saved AND the local Claude Code app
-        is reachable; otherwise HELIX runs on the API key. Honest about the in-between states."""
+        """Show which brain the next turn will use, from SAVED settings + real capability + whether
+        the rail actually WORKED last time. The subscription is preferred but only active when a token
+        is saved AND the local Claude Code app is reachable; otherwise HELIX runs on the API key.
+        Honest about the in-between states."""
         amber = "#e0a13f"
         token = (self._settings.get("claude_code_oauth_token") or "").strip()
         key = (self._settings.get("claude_api_key") or "").strip()
@@ -897,7 +985,36 @@ class SettingsView(QWidget):
         # Deciding launchability for real means spawning a ~278 MB claude.exe, which must never happen
         # on the GUI thread — the container warms that answer on a daemon thread at startup instead.
         sub_live = self._subscription is not None and self._subscription.active(allow_probe=False)
-        if sub_live:
+        failed = self._recent_brain_failure() if sub_live else ""
+        if sub_live and failed:
+            # This is THE screen someone opens when the brain feels broken, and structure alone is
+            # exactly what lies here: token saved, engine launchable, and every request on the rail
+            # dying anyway. When that happens HELIX quietly falls back to the API key — where it can
+            # still do so safely — and says nothing (conversation.py logs it and moves on), so a green
+            # "off the API meter" line is how a metered bill arrives from the one screen that promised
+            # it wouldn't. The headline still leads with the subscription because the NEXT request will
+            # genuinely try it again — this says what happened, not that the rail is dead. And
+            # "request" rather than "turn" on purpose:
+            # the recorded failure may have come from a watcher or an overnight pass, not the chat.
+            text = "● On your Claude subscription — but a recent request on it didn't go through."
+            color = amber
+            # Both halves of the second line are CONDITIONAL on purpose. All this screen holds is a
+            # bare error string, and that string does not say what happened next: conversation.py only
+            # re-runs the request on the API key when NO tool had been dispatched yet — once a build
+            # was enqueued or a reminder set, re-running would double the side effects, so it returns a
+            # soft partial and the API rail is never touched. Stating "HELIX used your API key for that
+            # one, so it was billed" would therefore invent a charge that may never have existed. What
+            # IS knowable is the standing arrangement — which key covers a fallback when one happens,
+            # or that none is saved — and that is the half the user can actually act on.
+            tip = (f"What went wrong last time: {failed}\n\n"
+                   + ("If a request can't finish on the subscription, HELIX falls back to your API "
+                      "key, and that one is billed to the meter. "
+                      if key else
+                      "If a request can't finish on the subscription, there's nothing to fall back "
+                      "on — no API key is saved. ")
+                   + "Your subscription is still tried first every time. If this keeps happening, "
+                     "close and reopen the Claude desktop app, then try again.")
+        elif sub_live:
             text = "● Running on your Claude subscription — off the API meter."
             color, tip = STATUS_DONE, ("Conversation, watchers, and builds draw on your Claude plan, "
                                        "the same usage pool as Claude Desktop. No restart needed.")
@@ -965,7 +1082,10 @@ class SettingsView(QWidget):
         self._file_write.setChecked(bool(self._settings.get(WRITE_ACCESS_KEY)))
         self._load_text(self._wake_word, self._settings.get("wake_word", "") or "")
         nmode = (self._settings.get("narration_mode") or "off").lower()
-        nidx = self._narration.findData(nmode)
+        # Anything that isn't "off" means speak. A machine that already chose the retired "spoken"
+        # option has HELIX talking today, and an unrecognised value would land on index 0 — silently
+        # muting narration on upgrade, which nobody asked for and nobody would connect to this page.
+        nidx = self._narration.findData("off" if nmode == "off" else "milestones")
         self._narration.setCurrentIndex(nidx if nidx >= 0 else 0)
         self._proactive.setChecked(bool(self._settings.get("proactive_speech", False)))
         self._trust_voice.setChecked(bool(self._settings.get("trust_household_voice", False)))

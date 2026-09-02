@@ -78,6 +78,28 @@ class AnthropicChat:
         self._client: anthropic.Anthropic | None = None
         self._client_key: str | None = None
 
+    def without_web(self) -> "AnthropicChat":
+        """This same chat with Anthropic's server-side web tools shed — the twin an AUTONOMOUS run gets.
+
+        Agents, watchers and the remote ask chew on untrusted content (a Slack message, an email body,
+        a SAM.gov notice), so they must never be handed web_search/web_fetch: a model-authored query or
+        fetch is an outbound channel that goes straight around call_api's host allowlist, redirect
+        refusal and secret scrubbing. The subscription rail has always fenced this at
+        request-construction (run_hermetic's `web`, off by default); this is the API rail's counterpart,
+        which until now simply did not exist — one shared chat, built with web_search=True, served orb
+        turns AND watcher turns alike.
+
+        It has to be a SEPARATE OBJECT rather than a flag flipped per call: one AnthropicChat is shared
+        by the Console thread and every agent thread at once, so a mutable switch would let an orb turn
+        widen the fence out from under a watcher running beside it. Built once at wiring time; a
+        chat that never had web tools is already the twin and hands back itself."""
+        if not self._web_search:
+            return self
+        return AnthropicChat(
+            self._key_provider, model=self._model, max_tokens=self._max_tokens, web_search=False,
+            thinking=self._thinking, effort=self._effort,
+        )
+
     def _client_for_current_key(self) -> anthropic.Anthropic:
         key = (self._key_provider() or "").strip()
         if not key:

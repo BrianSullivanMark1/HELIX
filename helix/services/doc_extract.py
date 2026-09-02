@@ -68,7 +68,9 @@ def _ocr_scanned_pages(path, pages: list[str]) -> list[str]:
     """Fill in near-empty pages from their pixels. Per-page: a typed page keeps its text layer; a page
     with (almost) none is rendered and read by services/ocr. Whichever version says more wins — a
     cover page whose text layer is one heading loses nothing by being looked at twice. Appends a plain
-    note when the page/time caps left scans untranscribed."""
+    note when scans were left untranscribed — by the page/time caps, by a single page erroring, or by
+    OCR failing outright on a document whose other pages were typed. The note names a cap only when
+    the cap can be shown to have applied; otherwise it says what is missing and claims no cause."""
     scan_idxs = [i for i, t in enumerate(pages) if len(t) < _SCAN_TEXT_MIN]
     if not scan_idxs:
         return pages
@@ -84,8 +86,38 @@ def _ocr_scanned_pages(path, pages: list[str]) -> list[str]:
         if len(text) > len(out[i]):
             out[i] = text
     missed = [i for i in scan_idxs if i not in read]
-    if missed and read:  # caps bit into a real scan — say so instead of silently dropping pages
-        out.append(f"… ({len(missed)} more scanned page(s) not transcribed — OCR page/time limit)")
+    if missed and read:  # something bit into a real scan — say so instead of silently dropping pages
+        # Only ONE of the three reasons a page can be absent from `read` is knowable from out here.
+        # The page cap is arithmetic: scan_pdf_pages never looks past the first _OCR_MAX_PAGES
+        # indices, so if we handed it more suspected scans than that, the cap demonstrably bit. The
+        # wall-clock budget and a page that simply ERRORED mid-render (ocr._scan guards every page and
+        # leaves the bad index out) are indistinguishable in the returned dict — and since the
+        # per-page guard landed, the errored case is reachable for the first time. Naming "OCR
+        # page/time limit" for it would tell the user, and the model reading this text, a cause that
+        # is flatly wrong: nothing was rationed, a page was unreadable. So the cap is named only when
+        # it provably applied, and everything else says what is lost without inventing a why.
+        if len(scan_idxs) > _OCR_MAX_PAGES:
+            out.append(f"… ({len(missed)} more scanned page(s) not transcribed — this document is "
+                       "past the page limit for one OCR pass)")
+        else:
+            out.append(f"… ({len(missed)} more scanned page(s) not transcribed — their contents are "
+                       "missing from this text)")
+    elif missed:
+        # Nothing came back at all, and we are past the ocr.available() gate, so OCR was there and
+        # FAILED — a document pdfium won't open, or every page erroring in turn. The `and read` above is
+        # a deliberate corroboration guard and stays: scan_idxs is only a SUSPICION (any page under
+        # _SCAN_TEXT_MIN chars), so it routinely catches short TYPED pages — a cover sheet, a one-line
+        # continuation page — and with no transcribed page to corroborate it we would libel a perfectly
+        # clean typed PDF. A page whose text layer is COMPLETELY empty needs no corroboration, though:
+        # typing produces characters, so zero characters means pixels. On a mixed contract those are
+        # exactly the signature and exhibit pages, and the model must never reason over a contract that
+        # quietly lost them.
+        blank = [i for i in missed if not pages[i]]
+        if blank:
+            out.append(
+                f"… ({len(blank)} scanned page(s) could not be read — their contents are missing "
+                "from this text)"
+            )
     return out
 
 

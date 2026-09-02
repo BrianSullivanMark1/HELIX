@@ -54,6 +54,11 @@ WAKE_WORD_SETTING = "wake_word"   # the spoken name that engages HELIX; "" / "HE
                                   # A household with a baby who says "HELIX/stop/goodbye" all day can pick
                                   # a baby-rare word (e.g. "Athena", "Friday") so the mic stops false-waking.
 AUDIO_INPUT_SETTING = "audio_input_id"    # chosen mic (QAudioDevice id); "" = system default
+STT_PREWARM_ERROR_SETTING = "stt_prewarm_error"  # WRITTEN by the launcher (main.STT_PREWARM_ERROR),
+                                  # read here: why the speech model failed to load at launch, "" when
+                                  # it loaded fine. The key is spelled out rather than imported
+                                  # because main.py is the frozen build's entry SCRIPT — it is not an
+                                  # importable module there — and a test pins the two spellings equal.
 AUDIO_OUTPUT_SETTING = "audio_output_id"  # chosen speaker, for the Settings 'Test' button only — HELIX's
                                           # own voice always follows the Windows DEFAULT output device
 
@@ -593,6 +598,12 @@ class WakeWordListener(QObject):
             self._active = True
             return True
         except Exception:
+            # A mic that refuses to open (device pulled, driver wedged, exclusive-mode capture) used to
+            # vanish without a word anywhere — no log line, no UI change — leaving the user saying the
+            # wake word into a stream that never started. The status line now tells the truth, and this
+            # leaves the actual cause in helix.log for the one time it isn't the ordinary "not
+            # pre-warmed" case.
+            _LOG.warning("mic stream failed to open — hands-free will not hear anything", exc_info=True)
             self._source = None
             self._io = None
             return False
@@ -812,10 +823,27 @@ class VoiceController(QObject):
         """The host has a mic and faster-whisper — voice can work (perhaps after a restart to prewarm)."""
         return self.mic_available() and self._stt.available()
 
+    def prewarm_error(self) -> str:
+        """Why the speech model didn't load at launch — "" when it loaded, or when nothing tried.
+
+        The launcher pre-warms STT before Qt exists and, on failure, records the real reason here
+        (main._record_stt_prewarm) and clears it on the next good launch. Until this was read, that
+        record was write-only and the UI could only see 'the model isn't ready', which it reported as
+        'restart to listen' — so the user was handed a Restart button that re-runs the identical
+        failing load, forever. Best-effort: a settings store that throws must never break voice."""
+        try:
+            return str(self._settings.get(STT_PREWARM_ERROR_SETTING, "") or "")
+        except Exception:  # noqa: BLE001 - a diagnostic must not be able to take the mic down
+            return ""
+
     def restart_required(self) -> bool:
         """Installed and mic-capable, but the model wasn't pre-warmed this run (voice was off at launch).
-        Saving voice on + restarting loads it before Qt, after which hands-free works every launch."""
-        return self.supported() and not self._stt.ready()
+        Saving voice on + restarting loads it before Qt, after which hands-free works every launch.
+
+        False when the launcher recorded a FAILED load: that isn't 'not pre-warmed yet', it's 'pre-warm
+        was tried and broke', and a restart would run the same load to the same end. The Console reads
+        prewarm_error() and says so plainly instead of offering the restart."""
+        return self.supported() and not self._stt.ready() and not self.prewarm_error()
 
     def enabled(self) -> bool:
         return bool(self._settings.get(VOICE_SETTING, False))
@@ -839,11 +867,17 @@ class VoiceController(QObject):
             self._start_wake()
 
     def _start_wake(self) -> bool:
+        """Arm the wake listener. Returns False — silently, to the UI — on every failure, so each exit
+        leaves a line in helix.log: with nothing recorded, a HELIX that simply never listened was
+        indistinguishable from one that wasn't spoken to, and there was nowhere to look."""
         self._stop_wake()
         if not self.can_listen():
+            _LOG.info("hands-free not armed: mic=%s speech model ready=%s",
+                      self.mic_available(), self._stt.ready())
             return False
         self._listener = WakeWordListener(self, self._settings)
         if not self._listener.is_available():
+            _LOG.warning("hands-free not armed: no usable input device")
             self._listener = None
             return False
         self._listener.utterance.connect(self._on_utterance)
@@ -892,6 +926,15 @@ class VoiceController(QObject):
         """The camera window is gone — the focus shield is whole again."""
         self._camera_session = None
         self._apply_listen_gate()
+
+    def camera_ears_live(self) -> bool:
+        """Whether an open camera window may honestly say "I'm listening". This is the hint's mirror of
+        _apply_listen_gate below, kept here so the promise and the gate can't drift apart: hands-free
+        on, the speech stack warm, the mic awake — AND not shielded for a background build, because
+        `not self._working` sits OUTSIDE the camera parenthesis in the gate (and the utterance router
+        repeats it). The Console used to compute this itself and omit the working term, so a window
+        opened while a build ran promised ears that were genuinely deaf."""
+        return self.enabled() and self.can_listen() and not self._muted and not self._working
 
     # ----- state machine -----
     def _apply_listen_gate(self) -> None:
@@ -1462,7 +1505,14 @@ class VoiceController(QObject):
             return
         if self._flow_intercept(text):  # an open registration/recalibration chat owns the mic
             return
-        if is_sleep(text):  # push-to-talk "sleep" rests the mic instead of starting a turn
+        if self._is_sleep_reflex(text):
+            # Push-to-talk "sleep" rests the mic instead of starting a turn — and it consults the
+            # LEARNED reflexes too, exactly like _on_barge_text and _on_wake_text. Holding the button
+            # is if anything MORE addressed than a post-wake command, so a phrase the cortex already
+            # consolidated ("give us some privacy for a minute") must rest the mic here at the
+            # brainstem, not fall through to a billed model turn that reaches the same place a
+            # round-trip later. It also keeps the reflex's recency fresh, so a phrase the user only
+            # ever says over PTT isn't the first one pruned out of the store.
             self.set_muted(True)
             return
         if is_wake(text):  # already awake — don't send 'wake' to the model

@@ -36,6 +36,10 @@ _FALLBACK_STT_MODEL = "base.en"  # if the preferred model can't load (offline / 
 # weights on first use), so we keep it alive once loaded.
 _MODELS: dict[str, object] = {}
 _ACTIVE_MODEL: str | None = None  # the size prewarm actually loaded (preferred, or the fallback)
+# Why the LAST prewarm gave up, in the words of the exception that ended it. prewarm runs before
+# setup_logging has attached any handler (it must beat Qt — see the module docstring), so a log call
+# there would go nowhere; the caller reads this instead and records it somewhere a person can find.
+_LAST_PREWARM_ERROR: str | None = None
 
 
 def stt_importable() -> bool:
@@ -59,20 +63,33 @@ def prewarm(model_size: str = DEFAULT_STT_MODEL, device: str = "cpu") -> bool:
     MUST be called from the desktop entry point BEFORE constructing QApplication (see module docstring):
     building ctranslate2 after Qt is up crashes the process on Windows. Best-effort — returns False if
     faster-whisper isn't installed or the model can't be built, so the caller can keep voice disabled."""
-    global _ACTIVE_MODEL
+    global _ACTIVE_MODEL, _LAST_PREWARM_ERROR
     if not stt_importable():
+        _LAST_PREWARM_ERROR = "faster-whisper isn't installed"
         return False
     # Try the preferred model, then the lighter fallback — so a machine that can't fetch/build small.en
     # still gets working voice on base.en rather than none. Record what actually loaded (active_model()).
+    failures: list[str] = []
     for size in (model_size, _FALLBACK_STT_MODEL):
         try:
             if size not in _MODELS:
                 _MODELS[size] = _build_model(size, device)
             _ACTIVE_MODEL = size
+            _LAST_PREWARM_ERROR = None
             return True
-        except Exception:
-            continue
+        except Exception as exc:  # noqa: BLE001 - prewarm never raises into the launcher
+            # Keep the REASON. When both sizes fail (no disk space, a corrupt HF cache, a proxy
+            # blocking huggingface) the user is otherwise told only "restart to start listening" —
+            # forever, since a restart re-runs this identical load — with nothing anywhere saying why.
+            failures.append(f"{size}: {type(exc).__name__}: {exc}")
+    _LAST_PREWARM_ERROR = "; ".join(failures) or "the speech model could not be loaded"
     return False
+
+
+def last_prewarm_error() -> str | None:
+    """Why the last prewarm() returned False, or None if it succeeded (or never ran). The launcher
+    stores this so the cause of a dead voice lands in helix.log and in settings, instead of nowhere."""
+    return _LAST_PREWARM_ERROR
 
 
 def active_model() -> str:

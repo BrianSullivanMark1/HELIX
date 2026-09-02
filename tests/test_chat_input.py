@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("PyQt6.QtWidgets")
 
-from PyQt6.QtCore import QEvent, Qt  # noqa: E402
+from PyQt6.QtCore import QEvent, QMimeData, Qt, QUrl  # noqa: E402
 from PyQt6.QtGui import QKeyEvent  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
@@ -87,3 +87,53 @@ def test_box_grows_with_lines_then_clamps(_app):
     w.setText("alpha")
     _app.processEvents()
     assert w.height() == one                 # shrinks back to a single line
+
+
+def _drop(widget: ChatInput, *paths: str) -> QMimeData:
+    """Build the mime payload a real drag from Explorer carries (file URLs, which Qt also exposes as
+    text) and hand it to the widget exactly as a drop would."""
+    md = QMimeData()
+    md.setUrls([QUrl.fromLocalFile(p) for p in paths])
+    widget.insertFromMimeData(md)
+    return md
+
+
+def test_dropping_a_document_attaches_it_instead_of_pasting_its_path(_app):
+    # The paperclip reads PDFs; dragging one in used to fail the image filter and paste
+    # 'file:///C:/tmp/report.pdf' into the box, which the model can never open.
+    w = ChatInput("ph")
+    dropped: list[list[str]] = []
+    w.filesDropped.connect(dropped.append)
+    _drop(w, "C:/tmp/report.pdf")
+    assert dropped == [["C:/tmp/report.pdf"]]
+    assert w.text() == ""                    # nothing pasted as text
+
+
+def test_dropping_a_folder_attaches_it_like_the_attach_folder_menu_does(_app):
+    w = ChatInput("ph")
+    dropped: list[list[str]] = []
+    w.filesDropped.connect(dropped.append)
+    _drop(w, "C:/tmp/proposal_docs")         # no suffix at all — still an attachment, not text
+    assert dropped == [["C:/tmp/proposal_docs"]]
+    assert w.text() == ""
+
+
+def test_a_mixed_drop_attaches_both_the_image_and_the_document(_app):
+    # Taking only the first branch would silently lose the other half of the drag.
+    w = ChatInput("ph")
+    images: list[list[str]] = []
+    others: list[list[str]] = []
+    w.imageFilesPasted.connect(images.append)
+    w.filesDropped.connect(others.append)
+    _drop(w, "C:/tmp/pic.png", "C:/tmp/report.pdf")
+    assert images == [["C:/tmp/pic.png"]]
+    assert others == [["C:/tmp/report.pdf"]]
+    assert w.text() == ""
+
+
+def test_a_dropped_file_still_pastes_as_text_where_nothing_is_listening(_app):
+    # The "Edit with AI" bar wires submitted only and has no attachment tray — claiming the drop there
+    # would swallow it with no text and no attachment, which is worse than the visible path.
+    w = ChatInput("ph")
+    _drop(w, "C:/tmp/report.pdf")
+    assert "report.pdf" in w.text()

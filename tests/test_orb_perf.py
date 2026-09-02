@@ -2,10 +2,13 @@
 
 The orb is on screen for the entire life of a permanently-open app, so its draw loop is the one piece
 of UI whose cost is paid continuously rather than per interaction. The QPainter orb has always been
-careful about this (~30fps while something is moving, ~15fps for idle breathing). The WebGL orb — which
-is what runs when `shader_orb` is on, and it is on by default — had a bare `requestAnimationFrame` loop
-with no cap and no visibility gate, so it drew at the display's full refresh (60-165Hz) forever, in a
-separate Chromium process, whether or not anything was moving.
+careful about this (~30fps while something is moving, ~15fps for idle breathing). The WebGL orb — the
+opt-in GPU layer, run only when `shader_orb` is set true in helix_settings.json (main_window defaults
+it to False) — had a bare `requestAnimationFrame` loop with no cap and no visibility gate, so it drew
+at the display's full refresh (60-165Hz) forever, in a separate Chromium process, whether or not
+anything was moving. Opt-in is not a reason to leave it uncapped: whoever turns it on runs it for the
+entire life of the app, and nothing in the app would ever tell them a second process is burning a core
+in the background.
 
 Note what is deliberately NOT pinned here: the painter orb keeps its timer running while the WebGL orb
 covers it, and that is correct. Because the WebGL view is opaque (alpha 255 via setBackgroundColor),

@@ -309,3 +309,124 @@ def test_missing_api_key_still_propagates_as_missing_api_key():
     chat = PreferredChat(_DeadSub("cli broken"), _NoKeyApi())
     with pytest.raises(MissingApiKey):
         chat.chat([Turn(Role.USER, (Text("hi"),))])
+
+
+# ----- the Windows command-line ceiling -----
+#
+# Windows caps a whole command line at 32,767 chars, and the Agent SDK passes the system prompt as an
+# ARGUMENT. HELIX's persona grew to 31 KB; with the flags and ~50 bridged tool names the orb's spawn
+# measured 33,434 chars, so CreateProcess failed with WinError 206 and the SDK reported it as
+# "Claude Code not found at <path>" — a launchable CLI and a valid token both blamed for a string
+# that was simply too long. The persona only ever grows, so this needs a pin, not a memory.
+
+
+def _fake_registry(names):
+    from dataclasses import dataclass
+
+    @dataclass
+    class _Spec:
+        name: str
+        description: str
+        input_schema: dict
+
+    class _Registry:
+        def specs(self):
+            return [_Spec(n, f"the {n} tool", {"type": "object", "properties": {}}) for n in names]
+
+    return _Registry()
+
+
+def test_the_orb_spawn_fits_inside_the_windows_command_line_limit(monkeypatch, tmp_path):
+    """The real persona + the real tool surface must produce a command line Windows will accept."""
+    import subprocess as sp
+
+    pytest.importorskip("claude_agent_sdk")
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    import helix.adapters.agent_sdk_chat as brain_mod
+    from helix.adapters.agent_sdk_chat import SubscriptionBrain
+    from helix.services.prompts import CONSOLE_SYSTEM
+
+    monkeypatch.setattr(brain_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    # 60 plausible tool names — MORE than HELIX ships today, so the pin holds as the surface grows.
+    names = tuple(f"a_helix_tool_number_{i:02d}" for i in range(60))
+    brain = SubscriptionBrain(lambda: "sk-ant-oat01-fake", CONSOLE_SYSTEM,
+                              tools=_fake_registry(names), workdir=str(tmp_path))
+    opts = brain._options(names, "claude-sonnet-4-6", "low", brain._orb_sinks)
+
+    transport = SubprocessCLITransport(prompt="hi", options=opts)
+    transport._cli_path = str(tmp_path / "claude.exe")
+    line = sp.list2cmdline(transport._build_command())
+    assert len(line) < 32767, (
+        f"the orb's command line is {len(line)} chars — over the Windows ceiling, so every turn dies "
+        f"in CreateProcess with WinError 206 and is reported as a missing CLI"
+    )
+    assert CONSOLE_SYSTEM not in line, "the persona must not ride the command line at all"
+
+
+def test_a_long_system_prompt_goes_to_a_file_and_a_short_one_stays_inline(monkeypatch, tmp_path):
+    import helix.adapters.agent_sdk_chat as brain_mod
+
+    monkeypatch.setattr(brain_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    short = "be helpful"
+    assert brain_mod._system_prompt_arg(short) == short, "a short prompt needs no file"
+
+    long = "x" * (brain_mod.SYSTEM_PROMPT_FILE_OVER + 1)
+    arg = brain_mod._system_prompt_arg(long)
+    assert arg["type"] == "file"
+    assert Path(arg["path"]).read_text(encoding="utf-8") == long, "the prompt must survive the trip"
+    # Content-addressed: the same persona reuses one file instead of littering one per turn.
+    assert brain_mod._system_prompt_arg(long)["path"] == arg["path"]
+    assert brain_mod._system_prompt_arg(long + "!")["path"] != arg["path"]
+
+
+def test_an_unwritable_temp_dir_falls_back_to_the_inline_prompt(monkeypatch, tmp_path):
+    """A disk that refuses must cost us the old behaviour, never the turn."""
+    import helix.adapters.agent_sdk_chat as brain_mod
+
+    monkeypatch.setattr(brain_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def _no(*_a, **_kw):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(brain_mod.Path, "mkdir", _no)
+    long = "y" * (brain_mod.SYSTEM_PROMPT_FILE_OVER + 1)
+    assert brain_mod._system_prompt_arg(long) == long
+
+
+class _HealthySubThatFailed:
+    """Token saved, SDK present, CLI launchable — and the turn still blew up. Exactly the shape of
+    the too-long command line: why_inactive() sees nothing wrong because nothing STRUCTURAL is."""
+
+    def active(self):
+        return False
+
+    def why_inactive(self):
+        return None
+
+    def last_failure(self):
+        return "Claude Code not found at: C:\\...\\claude.exe"
+
+
+def test_a_healthy_looking_rail_reports_the_turn_failure_not_the_token():
+    from helix.adapters.agent_sdk_chat import PreferredChat
+
+    chat = PreferredChat(_HealthySubThatFailed(), _NoKeyApi())
+    with pytest.raises(MissingApiKey) as err:
+        chat.chat([Turn(Role.USER, (Text("hi"),))])
+    msg = str(err.value)
+    assert "Claude Code not found" in msg, "the real failure must reach the user"
+    assert "Check your subscription token" not in msg, "must not blame a token that is saved and fine"
+
+
+def test_a_working_turn_clears_the_remembered_failure():
+    """A stale error must never be blamed for a later problem."""
+    from helix.adapters.agent_sdk_chat import SubscriptionBrain
+
+    brain = SubscriptionBrain(lambda: "sk-ant-oat01-fake", "sys", workdir=".")
+    assert brain.last_failure() is None
+    brain._note_failure(RuntimeError("pipe died"))
+    assert brain.last_failure() == "pipe died"
+    assert brain._note_success("hello") == "hello"
+    assert brain.last_failure() is None

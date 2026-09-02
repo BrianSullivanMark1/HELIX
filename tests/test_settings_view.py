@@ -194,6 +194,223 @@ def test_brain_status_flips_to_subscription_after_saving_a_token(_app):
     assert "on your claude subscription" in view._brain_status.text().lower()
 
 
+class _FailingSub(_Sub):
+    """A subscription brain whose STRUCTURE is flawless — token saved, SDK present, engine launchable
+    — and whose last real request died anyway. Exactly the machine active() cannot tell apart from a
+    healthy one, and the machine last_failure() was added for."""
+
+    def __init__(self, settings, failure):
+        super().__init__(settings, capable=True)
+        self.failure = failure
+
+    def last_failure(self):
+        return self.failure
+
+
+def test_a_rail_that_looks_healthy_but_failed_its_last_request_is_not_called_off_the_meter(_app):
+    # The bill-shaped bug: token fine, engine fine, every request dying, HELIX quietly running each
+    # one on the API key — while this screen, the one the user opens to diagnose it, said "off the
+    # API meter" and sent them back to a token that was never wrong.
+    s = _Settings()
+    s.d["claude_code_oauth_token"] = "sk-ant-oat01-tok"
+    s.d["claude_api_key"] = "sk-ant-key"
+    sub = _FailingSub(s, "CreateProcess failed: the command line is too long")
+    view = SettingsView(s, _Conns(), subscription=sub)
+    txt = view._brain_status.text().lower()
+    assert "off the api meter" not in txt
+    assert "didn't go through" in txt
+    tip = view._brain_status.toolTip()
+    assert "command line is too long" in tip       # the real cause, on demand
+    # …and which rail a fallback lands on. It has to be THIS phrase: both halves of the tooltip say
+    # "api key" (the other one says there is none to fall back on), so that substring cannot tell the
+    # two apart, and this fixture saved a key — the billed half is the one that must be rendered.
+    assert "billed to the meter" in tip.lower()
+
+
+@pytest.mark.parametrize("api_key", ["sk-ant-key", ""])
+def test_the_failure_tooltip_never_claims_to_know_what_happened_next(_app, api_key):
+    """A bare error string says a request DIED. It does not say what became of it, and this screen
+    guesses nothing.
+
+    conversation.py only re-runs a failed subscription request on the API key when no tool had been
+    dispatched yet; once a build was enqueued or a reminder set, re-running would double those side
+    effects, so it returns a soft partial and the API rail is never touched. So "HELIX used your API
+    key for that one, so it was billed to the meter" could invent a charge that never happened — and
+    "there was no API key to fall back on, so that one didn't get an answer" could deny an answer the
+    user was actually given. Everything the tooltip says about what follows a failure must therefore
+    be stated as the standing arrangement (conditional), not as this request's history."""
+    s = _Settings()
+    s.d["claude_code_oauth_token"] = "sk-ant-oat01-tok"
+    if api_key:
+        s.d["claude_api_key"] = api_key
+    view = SettingsView(s, _Conns(), subscription=_FailingSub(s, "the engine went away mid-turn"))
+    body = view._brain_status.toolTip().split("\n\n", 1)[1].lower()
+    assert body.startswith("if a request can't finish"), (
+        f"the tooltip states as fact what happened after the failure: {body!r}"
+    )
+    # The actionable half survives the softening: which rail money would land on, or that none exists.
+    assert ("api key" in body) and ("billed to the meter" in body) == bool(api_key)
+
+
+def test_the_off_the_meter_line_comes_back_once_the_rail_works_again(_app):
+    # The recorded failure is cleared by the next success, so a single blip must not brand the panel
+    # amber forever.
+    s = _Settings()
+    s.d["claude_code_oauth_token"] = "sk-ant-oat01-tok"
+    sub = _FailingSub(s, "the engine went away mid-turn")
+    view = SettingsView(s, _Conns(), subscription=sub)
+    assert "off the api meter" not in view._brain_status.text().lower()
+    sub.failure = None
+    view.reload()
+    assert "off the api meter" in view._brain_status.text().lower()
+
+
+def test_a_subscription_brain_without_the_failure_signal_still_reports_normally(_app):
+    # last_failure() is newer than active(); a brain that predates it must degrade to the structural
+    # answer, never take the whole Settings page down with an AttributeError.
+    s = _Settings()
+    s.d["claude_code_oauth_token"] = "sk-ant-oat01-tok"
+    sub = _Sub(s, capable=True)
+    assert not hasattr(sub, "last_failure")
+    view = SettingsView(s, _Conns(), subscription=sub)
+    assert "off the api meter" in view._brain_status.text().lower()
+
+
+def test_talk_while_working_offers_only_the_two_behaviours_that_exist(_app):
+    # The console asks one on/off question of narration_mode and the voice layer drops notes that
+    # arrive mid-sentence, so a third "every step" option was a promise nothing could keep.
+    view = SettingsView(_Settings(), _Conns())
+    data = [view._narration.itemData(i) for i in range(view._narration.count())]
+    assert data == ["off", "milestones"]
+
+
+def test_a_retired_narration_choice_still_reads_as_speaking(_app):
+    # A machine that saved the dropped "spoken" option has HELIX talking today. An unrecognised value
+    # landing on index 0 would silently mute it on upgrade, with nothing to connect that to this page.
+    s, c = _Settings(), _Conns()
+    s.d["narration_mode"] = "spoken"
+    view = SettingsView(s, c)
+    assert view._narration.currentData() == "milestones"
+    view._save()
+    assert s.get("narration_mode") == "milestones"
+
+
+class _ManagedConns(_Conns):
+    """Mirrors the real ConnectionsService for a HELIX-managed key: the secrets store first, then the
+    container's getter, which falls through to a legacy Settings entry and finally the environment.
+
+    Pass the Settings store to get the middle rung too — container.py's _tripo_key/_voyage_key/
+    _blockade_key read the lower-case spelling (`tripo_api_key`) out of helix_settings.json, which is
+    the SAME store this view writes, so a double without it cannot see the copy Remove has to clear."""
+
+    def __init__(self, settings=None):
+        super().__init__()
+        self._settings = settings
+
+    def value(self, env):
+        legacy = str(self._settings.get(env.lower()) or "").strip() if self._settings else ""
+        return (self.v.get(env) or "").strip() or legacy or (os.environ.get(env) or "").strip()
+
+
+def test_remove_says_what_still_holds_a_key_it_cannot_forget(_app, monkeypatch):
+    # Remove can only empty the stores this page owns. For an engine key also exported in the
+    # environment it never can succeed — and clicking a button whose tooltip promises to forget the
+    # key, then watching the dot stay lit with no word, is a dead end.
+    shown = []
+
+    class _Box:
+        @staticmethod
+        def information(_parent, title, body):
+            shown.append((title, body))
+
+    monkeypatch.setattr(sv, "QMessageBox", _Box)
+    monkeypatch.setenv("TRIPO_API_KEY", "tsk-from-the-environment")
+    s, c = _Settings(), _ManagedConns()
+    c.set_value("TRIPO_API_KEY", "tsk-pasted")
+    view = SettingsView(s, c)
+    rows = {sid: (dot, btn) for sid, dot, btn in view._conn_rows}
+    dot, remove = rows["tripo"]
+    assert dot.text() == "●"
+    remove.click()
+    assert c.v["TRIPO_API_KEY"] == ""  # our own saved copy really is gone
+    assert dot.text() == "●"           # …and the row stays honest: the key is still being used
+    assert shown, "Remove silently did nothing about a key it could not forget"
+    body = shown[0][1]
+    assert "TRIPO_API_KEY" in body and "environment variable" in body
+
+
+def test_remove_stays_silent_when_it_actually_worked(_app, monkeypatch):
+    # The explanation is for the dead end only — a normal Remove must not pop a dialog at anyone.
+    shown = []
+
+    class _Box:
+        @staticmethod
+        def information(*args):
+            shown.append(args)
+
+    monkeypatch.setattr(sv, "QMessageBox", _Box)
+    monkeypatch.delenv("TRIPO_API_KEY", raising=False)
+    s, c = _Settings(), _ManagedConns()
+    c.set_value("TRIPO_API_KEY", "tsk-pasted")
+    view = SettingsView(s, c)
+    rows = {sid: (dot, btn) for sid, dot, btn in view._conn_rows}
+    dot, remove = rows["tripo"]
+    remove.click()
+    assert dot.text() == "○" and not shown
+
+
+def test_remove_also_clears_the_legacy_engine_key_this_page_wrote_in_an_older_helix(_app, monkeypatch):
+    """Remove has to actually remove. V2's Settings page saved the Tripo key as `tripo_api_key` in
+    helix_settings.json, and the container still reads it after the secrets store — so clearing only
+    the secrets half left the credential on the machine, the dot lit, and HELIX still using it, while
+    the dialog told the user it lived outside this page. It doesn't: this page owns that file."""
+    shown = []
+
+    class _Box:
+        @staticmethod
+        def information(*args):
+            shown.append(args)
+
+    monkeypatch.setattr(sv, "QMessageBox", _Box)
+    monkeypatch.delenv("TRIPO_API_KEY", raising=False)
+    s = _Settings()
+    c = _ManagedConns(s)
+    c.set_value("TRIPO_API_KEY", "tsk-pasted")
+    s.d["tripo_api_key"] = "tsk-legacy-from-v2"
+    view = SettingsView(s, c)
+    rows = {sid: (dot, btn) for sid, dot, btn in view._conn_rows}
+    dot, remove = rows["tripo"]
+    assert dot.text() == "●"
+    remove.click()
+    assert c.v["TRIPO_API_KEY"] == ""            # our own saved copy
+    assert not s.get("tripo_api_key")            # …and the older HELIX's copy, in this page's file
+    assert not c.value("TRIPO_API_KEY")          # nothing resolves it any more — it is really gone
+    assert dot.text() == "○" and not remove.isVisibleTo(view)
+    assert not shown, f"told the user a key it could have deleted was out of reach: {shown}"
+
+
+def test_remove_leaves_no_blank_settings_entry_for_a_service_with_no_legacy_copy(_app, monkeypatch):
+    # Clearing the legacy spelling unconditionally would write "" for every secrets-store credential
+    # on the machine, littering helix_settings.json with slack_token/github_token/... blanks that were
+    # never there. Only a legacy entry that actually holds something is touched.
+    monkeypatch.setattr(sv, "QMessageBox", type("_B", (), {"information": staticmethod(lambda *a: None)}))
+    s, c = _Settings(), _Conns()
+    c.set_value("SLACK_TOKEN", "xoxp-1")
+    view = SettingsView(s, c)
+    rows = {sid: (dot, btn) for sid, dot, btn in view._conn_rows}
+    rows["slack"][1].click()
+    assert s.d == {}, f"Remove invented Settings entries: {s.d}"
+
+
+def test_the_stuck_key_message_never_blames_a_store_this_page_can_clear(_app, monkeypatch):
+    # The fall-through line is for a credential HELIX genuinely cannot reach. It used to name the
+    # older-HELIX Settings entry — which Remove now deletes itself — and told the user their only
+    # option was to replace it. A message about a credential has to be exactly true.
+    monkeypatch.delenv("TRIPO_API_KEY", raising=False)
+    body = SettingsView._stuck_key_text("Tripo", ["TRIPO_API_KEY"]).lower()
+    assert "older version" not in body and "connect tripo again" not in body
+
+
 def test_file_write_toggle_defaults_off_and_round_trips(_app):
     s, c = _Settings(), _Conns()
     view = SettingsView(s, c)

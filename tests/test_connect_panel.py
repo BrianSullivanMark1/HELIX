@@ -183,3 +183,65 @@ def test_fields_are_masked_hinted_and_the_reason_is_shown(_app, monkeypatch):
     texts = [w.text() for w in panel.findChildren(QLabel)]
     assert "to check your pull requests" in texts
     assert panel.result() == 0  # still open until Connect/Cancel
+
+
+def test_saving_the_build_panel_never_copies_a_helix_managed_key_into_the_secrets_store(_app):
+    # A build that needs AI declares ANTHROPIC_API_KEY, and ConnectionsService.value() serves it from
+    # Settings — so the panel prefills with the user's real Claude key. Writing that back would COPY it
+    # into the secrets store, which value() prefers forever after: rotating the key in Settings would
+    # then never reach this build again. Only what the user CHANGED may be written.
+    secrets: dict[str, str] = {}                       # what the Save actually writes
+    managed = {"ANTHROPIC_API_KEY": "sk-ant-live"}     # lives in Settings, not here
+
+    def get_value(k):
+        return secrets.get(k) or managed.get(k, "")
+
+    dlg = ConnectionsDialog(
+        None, "Connect — Notes App",
+        [Connection("ANTHROPIC_API_KEY", "Claude (AI)"), Connection("SLACK_TOKEN", "Slack token")],
+        get_value=get_value, set_value=secrets.__setitem__,
+        is_managed=lambda k: k in managed,
+    )
+    dlg._fields[1][1].setText("xoxp-typed-now")
+    dlg._save()
+    assert secrets == {"SLACK_TOKEN": "xoxp-typed-now"}  # the managed key was NOT snapshotted
+    assert get_value("ANTHROPIC_API_KEY") == "sk-ant-live"
+    managed["ANTHROPIC_API_KEY"] = "sk-ant-rotated"      # rotating in Settings still reaches the build
+    assert get_value("ANTHROPIC_API_KEY") == "sk-ant-rotated"
+
+
+def test_a_managed_row_says_it_is_already_connected_and_an_override_can_be_cleared(_app):
+    # The user needs to see WHY a filled field wasn't asked for, and an override (including one the
+    # old copy-on-save left behind) must stay visible and clearable — emptying the box is a change, so
+    # it writes "" and the build falls back to HELIX's own key.
+    secrets = {"ANTHROPIC_API_KEY": "sk-ant-stale-override"}
+    dlg = ConnectionsDialog(
+        None, "Connect — Notes App", [Connection("ANTHROPIC_API_KEY", "Claude (AI)", "sk-ant-…")],
+        get_value=lambda k: secrets.get(k, ""), set_value=secrets.__setitem__,
+        is_managed=lambda k: k == "ANTHROPIC_API_KEY",
+    )
+    labels = [w.text() for w in dlg.findChildren(QLabel)]
+    assert any("already connected in HELIX" in t for t in labels)
+    assert not any("sk-ant-…" in t for t in labels)  # the managed note replaces the paste-me hint
+    dlg._fields[0][1].setText("")
+    dlg._save()
+    assert secrets["ANTHROPIC_API_KEY"] == ""  # cleared, so value() goes back to the Settings key
+
+
+@pytest.mark.parametrize("held", ["", "   "])
+def test_a_managed_key_holding_nothing_is_not_announced_as_already_connected(_app, held):
+    """is_managed answers "HELIX would supply this key", not "HELIX has one". The container registers
+    ANTHROPIC/CLAUDE/TRIPO/VOYAGE/BLOCKADE unconditionally, so a subscription-only install — no
+    claude_api_key saved anywhere — hit the managed branch with an EMPTY box and was told to leave it
+    as is, with its own paste-me hint replaced by that advice. The launcher card that opened this
+    panel was lit amber "Connect" off the very same empty value: two surfaces, one credential,
+    opposite claims. The note is a claim of possession, so it must be gated on the value."""
+    dlg = ConnectionsDialog(
+        None, "Connect — Notes App", [Connection("ANTHROPIC_API_KEY", "Claude (AI)", "sk-ant-…")],
+        get_value=lambda k: held, set_value=lambda k, v: None,
+        is_managed=lambda k: True,
+    )
+    labels = [w.text() for w in dlg.findChildren(QLabel)]
+    assert not any("already connected" in t for t in labels), labels
+    assert any("sk-ant-…" in t for t in labels), labels  # the hint that says what to paste survives
+    assert not dlg._fields[0][1].text().strip()          # the box really is blank

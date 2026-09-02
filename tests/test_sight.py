@@ -106,11 +106,24 @@ def test_connect_service_refuses_an_unknown_service():
 def test_go_to_sleep_publishes_the_rest_request_and_stays_off_agents():
     from helix.domain.events import SleepRequested
 
-    bus = _Bus()
+    # The bus must SETTLE the holder, standing in for the console on the GUI thread. A bus that only
+    # records leaves the tool parked for its whole claim timeout and then returns the FAILURE line —
+    # which happens to contain the words "do NOT say goodnight", so a bare `"goodnight" in msg` check
+    # passed while asserting the opposite of what it claimed, and cost 2.5s of real waiting per run.
+    class _SettlingBus(_Bus):
+        def publish(self, ev):
+            super().publish(ev)
+            req = getattr(ev, "request", None)
+            if req is not None and req.claim():
+                req.fulfil()
+
+    bus = _SettlingBus()
     reg = _registry(bus)
     assert "go_to_sleep" in {s.name for s in reg.specs()}
     msg = reg.dispatch("go_to_sleep", {})
     assert [type(e) for e in bus.published] == [SleepRequested]
-    assert "goodnight" in msg.lower()  # the model's reply is the goodnight, not a canned confirm
+    # The model's reply is the goodnight, not a canned confirm — but only once the ears really closed.
+    assert "ears are resting" in msg.lower()
+    assert "goodnight" in msg.lower()
     # An unattended watcher must never be able to deafen HELIX from content it processes.
     assert "go_to_sleep" in BUILD_TOOLS

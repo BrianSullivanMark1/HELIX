@@ -76,8 +76,11 @@ def main(argv: list[str] | None = None) -> int:
     assets = ROOT / "helix" / "ui" / "assets"
     if assets.exists():
         args += ["--add-data", f"{assets}{os.pathsep}helix/ui/assets"]
-    # The 3D baker loads these lazily at runtime (trimesh.boolean -> manifold3d; extrude -> shapely /
-    # mapbox_earcut), so PyInstaller's static scan misses them — collect each in full.
+    # The retired primitive engine loaded these lazily at runtime (trimesh.boolean -> manifold3d;
+    # extrude -> shapely / mapbox_earcut), so PyInstaller's static scan misses them — collect each in
+    # full. Holograms are compiled by the OpenSCAD CLI now (a separate program, found or winget-installed
+    # at runtime — nothing to bundle) and nothing in helix/ imports this stack today; it is still
+    # collected while requirements.txt still lists it, so the frozen app and a pip install agree.
     for pkg in ("trimesh", "shapely", "manifold3d", "mapbox_earcut"):
         args += ["--collect-all", pkg]
     # Knowledge document ingestion: pypdf is pure-python; python-docx (imported as `docx`) ships a default
@@ -104,10 +107,10 @@ def main(argv: list[str] | None = None) -> int:
     # never build an API client). Same reasoning as the Agent SDK above: name it explicitly rather than
     # trust the static scan to follow an import inside a method. Code only — it ships no bulky data.
     args += ["--collect-submodules", "anthropic"]
-    # scipy 1.16 added a compiled helper (scipy._cyutility) that scipy.linalg/ndimage import at startup;
-    # PyInstaller 6.12's bundled scipy hook predates it and skips it, so the frozen app dies importing
-    # materials.py (gaussian_filter -> scipy.ndimage -> scipy.linalg -> _cyutility). Pull it in explicitly.
-    args += ["--hidden-import", "scipy._cyutility"]
+    # (scipy._cyutility used to be named here as a hidden import: the retired services/materials.py
+    # imported scipy.ndimage, whose 1.16 compiled helper PyInstaller 6.12's hook skipped. That module and
+    # the scipy requirement are gone, so there is nothing to pull in — and naming a package that is not
+    # installed would make PyInstaller warn on every build.)
     if icon.exists():
         args += ["--icon", str(icon)]
     if "--with-voice" in argv:

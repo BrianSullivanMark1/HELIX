@@ -313,3 +313,94 @@ def test_detect_entry_prefers_a_backend_main_py(tmp_path):
     (ws2 / "index.html").write_text("<h1>app</h1>", encoding="utf-8")
     kind2, entry2 = BuildService(tmp_path, None, None)._detect_entry(ws2)
     assert kind2 == AppKind.HTML and entry2 == "index.html"
+
+
+def test_a_keyless_install_can_still_read_the_sam_gov_site_search(tmp_path, monkeypatch):
+    # The whole point of shipping the SGS endpoint: sam.gov's own site search answers ANONYMOUSLY, so
+    # the Procurement Watcher must work on a machine that has never pasted a SAM key. Before the fix
+    # the connectivity gate refused every sam.gov URL without a stored key, so that watcher replied
+    # QUIET forever and the orb popped a key panel for a request that needs no key.
+    s = _svc(tmp_path)  # no SAM_API_KEY stored
+    captured = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b'{"_embedded":{"results":[{"title":"RFQ"}]}}'
+
+    import helix.services.connections as mod
+
+    def fake_open(req, timeout=0):
+        captured["url"] = req.full_url
+        captured["accept"] = req.get_header("Accept")
+        return _Resp()
+
+    monkeypatch.setattr(mod._OPENER, "open", fake_open)
+    out = s.call_api(
+        "https://sam.gov/api/prod/sgs/v1/search/?index=opp&q=manufacturing&mode=search"
+    )
+    assert "isn't connected yet" not in out                 # it reached the network, not the gate
+    assert '"title":"RFQ"' in out and "untrusted external CONTENT" in out
+    assert "api_key" not in captured["url"]                 # an unset key never rides as "api_key="
+    assert "q=manufacturing" in captured["url"]             # the real query params survive
+    assert "application/hal+json" in captured["accept"]     # the per-service Accept still applies
+
+
+def test_the_documented_sam_api_host_still_asks_to_be_connected_and_names_the_keyless_path(tmp_path):
+    # api.sam.gov's documented API really does need the key (it 403s anonymously), so it keeps the
+    # friendly connect prompt — the anonymous exemption is per-HOST, never per-service. And because a
+    # keyless path exists, the refusal hands the model the shapes that work so it self-corrects in the
+    # same turn instead of making the user paste a credential they may not need.
+    s = _svc(tmp_path)
+    out = s.call_api("https://api.sam.gov/opportunities/v2/search?limit=5")
+    assert "isn't connected yet" in out and "SAM.gov" in out
+    assert "without a key" in out and "sgs/v1/search" in out
+
+
+def test_an_unset_credential_never_rides_along_as_an_empty_bearer_header(tmp_path, monkeypatch):
+    # Dropping an unfilled auth template is what lets the anonymous path stay clean. Slack still has a
+    # REQUIRED credential, so it never gets here — but a service whose key is optional for the host in
+    # hand must send NO Authorization at all rather than a literal "Bearer " with nothing after it.
+    import helix.services.connections as mod
+
+    s = _svc(tmp_path)
+    assert s._unfilled("Bearer {SLACK_TOKEN}") is True   # nothing stored -> drop the header
+    s.set_value("SLACK_TOKEN", "tok-123")
+    assert s._unfilled("Bearer {SLACK_TOKEN}") is False  # stored -> attach it as before
+    assert s._unfilled("application/hal+json") is False  # a template with no placeholder is not auth
+
+    captured = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b'{"ok":true}'
+
+    def fake_open(req, timeout=0):
+        captured["auth"] = req.get_header("Authorization")
+        return _Resp()
+
+    monkeypatch.setattr(mod._OPENER, "open", fake_open)
+    s.call_api("https://slack.com/api/auth.test")
+    assert captured["auth"] == "Bearer tok-123"          # the normal path is untouched
+
+
+def test_an_unconnected_service_without_a_keyless_path_still_just_asks_to_connect(tmp_path):
+    # The exemption must not leak to anything else: Slack and GitHub have no anonymous host, so a
+    # missing token still gets the connect prompt (and never a request with a blank credential).
+    s = _svc(tmp_path)
+    for url, label in (("https://slack.com/api/auth.test", "Slack"),
+                       ("https://api.github.com/user/repos", "GitHub")):
+        out = s.call_api(url)
+        assert "isn't connected yet" in out and label in out
+        assert "without a key" not in out

@@ -11,9 +11,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Mirrors the two "Optional:" blocks in requirements.txt. Both features degrade rather than break:
+# without voice HELIX is text-only, without WebEngine built apps and holograms open in the system
+# browser and the orb falls back to QPainter. PyQt6-WebEngine is left unpinned on purpose — it has to
+# track the PyQt6 minor resolved above it, so a floor here would fight that.
 voice = [
     "edge-tts>=6.1",
     "faster-whisper>=1.0",
+]
+viewer = [
+    "PyQt6-WebEngine",
 ]
 dev = [
     "pytest>=8.0",

@@ -69,9 +69,10 @@ def _helix_repo() -> Path:
     return repo
 
 
-def _selfdev(repo: Path, fn, *, smoke=lambda p: (True, ""), seed=None) -> SelfDevService:
+def _selfdev(repo: Path, fn, *, smoke=lambda p: (True, ""), seed=None,
+             repo_impl=None) -> SelfDevService:
     return SelfDevService(
-        _Coder(fn), GIT, _Settings(seed), CLOCK, repo,
+        _Coder(fn), repo_impl or GIT, _Settings(seed), CLOCK, repo,
         worktrees_dir=repo.parent / "wt", smoke_check=smoke,
         guard_files=[repo / "data" / "s.json"], data_dir=repo / "data",
     )
@@ -97,6 +98,48 @@ def test_propose_refuses_a_live_source_escape():
     assert not GIT.list_branches(repo, "selfdev/")  # the draft branch was cleaned up
     assert (repo / "helix/ui/orb.py").read_text(encoding="utf-8") == "# orb"  # live file reverted to base
     assert GIT.is_clean(repo)
+
+
+def test_reverting_an_escape_touches_only_the_paths_that_escaped():
+    """Containment must not cost more than the thing it contains. Reverting a coder escape used to be
+    `git reset --hard` PLUS `git clean -fd` across HELIX's live root — a whole-tree wipe fired to undo
+    a known, enumerated list of stray writes. Anything the detector never named (a gitignored working
+    file, anything reset --hard would have rolled back beyond the escape) went with it. The revert is
+    now scoped to the escape list itself.
+
+    Note what this deliberately does NOT claim: the escape detector cannot tell a coder's stray write
+    from an edit the USER made in the live tree during the draft, so a concurrent edit is still caught
+    and reverted as an escape. That is the guard working as designed — the fix here is the blast
+    radius, not the classifier."""
+    repo = _helix_repo()
+
+    class _Watched:
+        """The real GitRepo, recording which revert verb the guard reached for."""
+
+        def __init__(self, inner):
+            self._inner, self.discarded, self.restored = inner, 0, []
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def discard_changes(self, repo_dir):
+            self.discarded += 1
+            return self._inner.discard_changes(repo_dir)
+
+        def restore_paths(self, repo_dir, paths):
+            self.restored.append(list(paths))
+            return self._inner.restore_paths(repo_dir, paths)
+
+    git = _Watched(GIT)
+    svc = _selfdev(repo, lambda wt: _w(repo / "helix/ui/orb.py", "# escaped via absolute path"),
+                   repo_impl=git)
+
+    with pytest.raises(ConstitutionViolation):
+        svc.propose("write into the live tree")
+
+    assert git.discarded == 0, "the whole live tree was wiped to undo one named escape"
+    assert git.restored and all("orb.py" in p for p in git.restored[0]), git.restored
+    assert (repo / "helix/ui/orb.py").read_text(encoding="utf-8") == "# orb"  # the escape IS reverted
 
 
 def test_recover_interrupted_sweeps_phantom_branches_but_keeps_real_ones():
