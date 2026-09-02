@@ -328,11 +328,12 @@ class ForgeService:
             # a missing engine as "not the coder's fault" (None); bake() then shows the install page.
             if self._baker is not None:
                 return self._baker.check(ws)
-            # No baker wired (a bare Forge in a test): the design file is enough. model.scad is THE
-            # deliverable; model.json (an environment or a reference) and a hand-authored animated
-            # index.html are the other shapes a hologram may take.
-            if not any((ws / f).exists() for f in ("model.scad", "model.json", "index.html")):
-                return "no model.scad was produced"
+            # No baker wired (a bare Forge in a test): the design file is enough. model.py is THE
+            # deliverable; model.scad is the retired engine's legacy shape, and model.json (an
+            # environment or a reference) and a hand-authored animated index.html are the other
+            # shapes a hologram may take.
+            if not any((ws / f).exists() for f in ("model.py", "model.scad", "model.json", "index.html")):
+                return "no model.py was produced"
             return None
         if kind == BuildKind.TASK:
             return None if (ws / "main.py").exists() else "the entry point main.py is missing"

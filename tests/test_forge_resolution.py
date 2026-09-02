@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from helix.domain import scad
+from helix.domain import cadpy as scad
 from helix.domain.errors import BuildCancelled, BuildError
 from helix.domain.events import BuildDeleted
 from helix.domain.models import App, BuildKind
@@ -280,7 +280,7 @@ def test_a_sandbox_escape_during_an_iteration_restores_the_last_good_version(tmp
 
 
 # ----- holograms: the MODEL check is the baker's -----
-# A hologram is a PROGRAM (model.scad) the baker lints, compiles through the CadEngine, renders and
+# A hologram is a PROGRAM (model.py) the baker lints, compiles through the CadEngine, renders and
 # critiques. The Forge's only job is to ASK the baker in its pre-finalize gate and to carry whatever the
 # baker says into the existing one-pass repair loop. These pin that seam with a fake baker and a coder
 # that records the prompts it was handed — no engine, no model, no git.
@@ -314,12 +314,20 @@ class _Baker:
         return False
 
 
-# The smallest design that passes the baker's static lints (a units hint, top-level geometry).
-_TINY_SCAD = "// Units: mm\nw = 80;\ncube([w, 10, 5]);\n"
+# The smallest design that passes the baker's static lints (brief, params block, build()).
+_TINY_PY = (
+    '"""Design: Bracket - a tiny test part."""\n'
+    "from helix_parts import *\n\n"
+    "# --- Parameters ---\n"
+    "w = 80.0  # [40..160] width, mm\n"
+    "# --- End Parameters ---\n\n\n"
+    "def build():\n"
+    "    return Box(w, 10, 5)\n"
+)
 
 
 class _PromptCoder(_Coder):
-    """A coder that writes model.scad and remembers every prompt, so a test can read the repair pass.
+    """A coder that writes model.py and remembers every prompt, so a test can read the repair pass.
     `log` (shared with a _Baker) records when it ran; `listings` is what the workspace held at that
     moment — what a coder that looks around before writing would see."""
 
@@ -332,7 +340,7 @@ class _PromptCoder(_Coder):
         self.prompts.append(prompt)
         self._log.append("coder")
         self.listings.append(sorted(p.name for p in Path(repo_dir).iterdir()))
-        Path(repo_dir).joinpath("model.scad").write_text(_TINY_SCAD, encoding="utf-8")
+        Path(repo_dir).joinpath("model.py").write_text(_TINY_PY, encoding="utf-8")
         return CoderResult(ok=True, summary="drafted")
 
 
@@ -356,8 +364,8 @@ def test_the_bakers_problem_reaches_the_repair_pass_verbatim(tmp_path):
     # must land in the coder's repair prompt unchanged — that text is what lets the coder fix line 12
     # instead of guessing. The second check passes, so the build finishes and bakes.
     rig = _Rig(tmp_path)
-    problem = ("The hologram's source couldn't be compiled. OpenSCAD said: ERROR: Parser error in file "
-               "model.scad, line 12: syntax error")
+    problem = ("The hologram's source couldn't be compiled. The engine said: NameError in "
+               "model.py, line 12: name 'wdth' is not defined")
     coder, baker = _PromptCoder(), _Baker(verdicts=(problem, None))
     app = _model_forge(rig, coder, baker).build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
     ws = rig.builds.workspace(app.slug)
@@ -384,8 +392,8 @@ def test_a_hologram_that_fails_both_checks_is_rolled_back_and_never_baked(tmp_pa
     # Both passes failed: the broken design must not be baked into a viewer or left in the menu.
     rig = _Rig(tmp_path)
     coder = _PromptCoder()
-    baker = _Baker(verdicts=("no model.scad was produced", "no model.scad was produced"))
-    with pytest.raises(BuildError, match="no model.scad was produced"):
+    baker = _Baker(verdicts=("no model.py was produced", "no model.py was produced"))
+    with pytest.raises(BuildError, match="no model.py was produced"):
         _model_forge(rig, coder, baker).build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
     assert baker.baked == [], "a design that failed its checks must not be baked"
     assert not rig.builds.workspace("bracket").exists()
@@ -410,14 +418,14 @@ def test_without_a_baker_an_empty_model_workspace_fails_its_check(tmp_path):
     def writes_nothing(ws: Path, _cancel) -> CoderResult:
         return CoderResult(ok=True, summary="thought about it")
 
-    with pytest.raises(BuildError, match="no model.scad was produced"):
+    with pytest.raises(BuildError, match="no model.py was produced"):
         rig.forge(writes_nothing).build("Bracket", "a wall bracket", kind=BuildKind.MODEL)
 
 
 # ----- the bake cycle is the Forge's: prepare() before the coder, check() after, bake() last -----
 
 def test_prepare_opens_the_cycle_before_the_coder_runs_on_new_and_iterating_holograms(tmp_path):
-    # prepare() seeds helix.scad and resets the critic's one look; both only help if they happen BEFORE
+    # prepare() seeds helix_parts.py and resets the critic's one look; both only help if they happen BEFORE
     # the coder goes looking and before the first check counts. It runs for a brand-new hologram AND for
     # an iteration of it (idempotent), and never for a plain app.
     rig = _Rig(tmp_path)
@@ -435,8 +443,8 @@ def test_prepare_opens_the_cycle_before_the_coder_runs_on_new_and_iterating_holo
     assert baker.prepared == [ws, ws] and log == ["prepare", "coder", "check", "bake"] * 2
 
 
-def test_prepare_seeds_helix_scad_so_the_coder_finds_the_library_before_writing(tmp_path):
-    # The prompt tells the coder helix.scad is the ONLY library here. With the real baker, a coder that
+def test_prepare_seeds_helix_parts_so_the_coder_finds_the_library_before_writing(tmp_path):
+    # The prompt tells the coder helix_parts is the ONLY library here. With the real baker, a coder that
     # lists the fresh workspace must SEE it — it used to be written first by check(), after the coder had
     # already looked and found only the README and the manifest. No engine is needed for this: a missing
     # engine reads as a pass at check() and an install page at bake().
@@ -452,7 +460,7 @@ def test_prepare_seeds_helix_scad_so_the_coder_finds_the_library_before_writing(
 
 class _Cad:
     """The smallest CadEngine: every compile and render succeeds with a stand-in file, so the real
-    ModelBaker's cycle (critic included) can run under the real Forge loop with no OpenSCAD."""
+    ModelBaker's cycle (critic included) can run under the real Forge loop with no real engine."""
 
     def available(self) -> bool:
         return True
@@ -502,7 +510,7 @@ def test_a_repair_pass_that_dies_does_not_starve_the_next_build_of_its_critic(tm
         calls["n"] += 1
         if calls["n"] == 2:  # build one's repair pass gives up mid-edit
             return CoderResult(ok=False, summary="", error="boom")
-        ws.joinpath("model.scad").write_text(_TINY_SCAD, encoding="utf-8")
+        ws.joinpath("model.py").write_text(_TINY_PY, encoding="utf-8")
         return CoderResult(ok=True, summary="drafted")
 
     class _RecordingCoder(_Coder):

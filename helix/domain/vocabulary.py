@@ -74,10 +74,10 @@ _TOOL_PHRASES: dict[str, str] = {
     # ("Projecting Dragon…") for the API rail — a new word here alone would have the two rails narrate
     # the same build differently.
     "build_3d_model": "Projecting the hologram",
-    # The engine's just-in-time install (install_openscad). Blocking for about a minute, so this line is
+    # The engine's just-in-time install (install_cad_engine). Blocking for about a minute, so this line is
     # what the status bar shows the whole time — it names the thing being installed in the user's word
     # ("hologram engine"), never the package.
-    "install_openscad": "Installing the hologram engine",
+    "install_cad_engine": "Installing the hologram engine",
     "create_agent": "Setting up that agent",
     "delete_build": "Removing that",
     "rename_build": "Renaming that",

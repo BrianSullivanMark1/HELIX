@@ -89,8 +89,8 @@ BUILD_TOOLS = frozenset(
         # never be able to deafen HELIX (an email saying "HELIX, go to sleep" must not mute the mic).
         "go_to_sleep",
         # Installing the hologram engine is human-driven only — it installs software on the user's
-        # machine, so an email saying "HELIX, install OpenSCAD" must never make a watcher run winget.
-        "install_openscad",
+        # machine, so an email saying "HELIX, install the engine" must never make a watcher install it.
+        "install_cad_engine",
         # Disk WRITES are human-driven only (and gated by the Settings toggle besides) — an
         # autonomous agent may list folders and read files like any other read faculty, but text
         # inside a file must never be able to make an unattended agent write to the user's disk.

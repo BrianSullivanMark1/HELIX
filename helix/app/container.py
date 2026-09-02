@@ -20,7 +20,7 @@ from helix.adapters.coder_select import FallbackCoder
 from helix.adapters.git_repo import GitRepo
 from helix.adapters.json_settings import JsonSettings
 from helix.adapters.model_select import GrowthModelResolver
-from helix.adapters.openscad_cli import OpenScadCli
+from helix.adapters.build123d_cad import Build123dCad
 from helix.adapters.restart import Restarter
 from helix.adapters.signal_bus import SignalBus
 from helix.adapters.speech import EdgeSpeechOut, OsSpeechOut, WhisperSpeechIn, active_model
@@ -487,19 +487,15 @@ class Container:
                 _blockade_key, style_provider=lambda: self.settings.get("skybox_style_id")
             ).generate(prompt)
 
-        # THE HOLOGRAM ENGINE: a hologram is an OpenSCAD program the coder writes and HELIX compiles, and
-        # this is the ONE CadEngine instance — the OpenSCAD command line, found on PATH / in the usual
-        # install dirs / at a path the user typed into settings, or installed just in time with winget
-        # when the user says "install it". Constructed once (discovery is cached and re-probed after a
-        # failed run or an install) and shared by the baker, which compiles with it on the build worker,
-        # and by the tool registry, which pre-flights build_3d_model with it and offers the install —
-        # two instances would let the registry's "installed" and the baker's "missing" disagree. The
-        # libraries dir is put on OPENSCADPATH so a BOSL2 drop-in there just works; it need not exist.
+        # THE HOLOGRAM ENGINE: a hologram is a build123d program (model.py) the coder writes and HELIX
+        # compiles, and this is the ONE CadEngine instance — the B-rep kernel behind a worker
+        # subprocess (helix.cad.runner), so the heavy OCCT import never touches the app process. One
+        # worker run writes the whole artifact set (STL + STEP + 3MF + preview + meta). Constructed
+        # once and shared by the baker, which compiles with it on the build worker, and by the tool
+        # registry, which pre-flights build_3d_model with it and offers the pip install just in time —
+        # two instances would let the registry's "installed" and the baker's "missing" disagree.
         # Importing the adapter costs nothing heavy; nothing is spawned until a hologram is built.
-        cad = OpenScadCli(
-            path_override=lambda: (self.settings.get("openscad_path") or None),
-            libraries_dir=self.paths.data / "scad_libraries",
-        )
+        cad = Build123dCad(app_root=self.paths.root)
         # The critic looks at the rendered preview on the FENCED rail-preferring chat — the same
         # unattended twin the distillers use, so a subscription-only machine gets the look too (see
         # make_hologram_critic). It abstains only when NO rail can serve: no live subscription and no key.

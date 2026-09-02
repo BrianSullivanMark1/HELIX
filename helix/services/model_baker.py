@@ -1,12 +1,14 @@
-"""ModelBaker — compile a hologram's model.scad into a mesh and wrap it in a technical-illustration viewer.
+"""ModelBaker — compile a hologram's model.py into a mesh and wrap it in a technical-illustration viewer.
 
-A hologram is a PROGRAM. The coder writes `model.scad` (OpenSCAD, millimetres, a customizer parameter
-block at the top, named modules per part, a design-brief header) and HELIX does the rest here: the
-static lints, the compile through the CadEngine port, the render the vision critic looks at, the STL /
-3MF / SCAD exports, and the single fixed viewer page (`index.html`). The coder never touches geometry
-coordinates or the viewer — "make it 100 wide" is an edit to a named parameter in source, which is what
-makes verbal design accurate. LLMs know OpenSCAD very well; they are bad at raw [x,y,z] primitives, which
-is why the old declarative model.json primitive engine (and its procedural PBR textures) is gone.
+A hologram is a PROGRAM. The coder writes `model.py` (build123d — a real B-rep CAD kernel, in Python,
+millimetres, a `# --- Parameters ---` block at the top, a design-brief docstring, geometry inside
+build()) and HELIX does the rest here: the static lints + safety gate, the compile through the
+CadEngine port (a worker subprocess writes STL + STEP + 3MF + the preview in ONE run), the render the
+vision critic looks at, and the single fixed viewer page (`index.html`). The coder never touches the
+viewer — "make it 100 wide" is an edit to a named parameter in source, which is what makes verbal
+design accurate. Python is the language LLMs write best, and the helix_parts library carries real
+hardware footprints (Arduino/ESP32/Pi/relays), which is what makes an enclosure come out FITTING.
+model.scad (the retired OpenSCAD engine) is migrated on the next edit, like the primitive engine was.
 
 Three entry points, all called by the Forge on a worker thread and all NEVER raising — together they are
 one BAKE CYCLE, and the Forge owns it:
@@ -48,7 +50,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from helix.domain import scad
+from helix.domain import cadpy as scad  # the design-language module (aliased: same surface names)
 from helix.logging_setup import get_logger
 from helix.ports.cad import CadEngine
 from helix.services import render_kit
@@ -64,10 +66,12 @@ SkyboxBackend = Callable[[str], bytes]
 Critic = Callable[[Path, str], str | None]
 
 SPEC_FILE = "model.json"                 # environments, references, and the retired primitive engine
-SOURCE_FILE = "model.scad"               # THE design
+SOURCE_FILE = "model.py"                 # THE design (build123d)
+LEGACY_SOURCE = "model.scad"             # the retired OpenSCAD design — migrated on the next edit
 STL_REL = "assets/model.stl"             # compiled mesh — the viewer's and the printer's food
 STL_JS_REL = "assets/model.stl.js"       # the same STL as `window.HELIX_STL = "<base64>"` (file:// safe)
 MF_REL = "assets/model.3mf"              # slicer-friendly export, best effort
+STEP_REL = "assets/model.step"           # the B-rep export — Bambu Studio / Fusion eat this natively
 PREVIEW_REL = "assets/preview.png"       # what the vision critic looks at
 THREE_REL = "assets/three.min.js"        # the vendored three.js r128 UMD build, copied beside the page
 GLB_REL = "assets/model.glb"             # a Tripo reference mesh
@@ -97,8 +101,8 @@ _MF_BUDGET_S = 20.0
 _PREVIEW_BUDGET_S = 90.0
 
 _NO_ENGINE_HINT = (
-    "Holograms are compiled by OpenSCAD — free, open source, about a minute to install — and it isn't "
-    "set up on this machine yet; ask HELIX to install it."
+    "Holograms are computed by the build123d CAD kernel — free, about a minute to install — and it "
+    "isn't set up in this environment yet; ask HELIX to install it."
 )
 
 
@@ -240,24 +244,29 @@ class ModelBaker:
         first = rec.checks == 1
         src = ws / SOURCE_FILE
         if not src.is_file():
+            if (ws / LEGACY_SOURCE).is_file():
+                # The retired OpenSCAD engine. Asking for model.py here lets the Forge's repair pass
+                # MIGRATE the design in the same build ("make it wider" on an old hologram just
+                # works); if that pass fails too, the Forge rolls back and the old page keeps working.
+                return (
+                    "model.scad is the retired OpenSCAD format — redraw the design as model.py "
+                    "(build123d, millimetres, geometry inside build()); the old model.scad is ignored."
+                )
             spec = self._read_spec(ws)
             if spec is None:
                 if (ws / SPEC_FILE).is_file():
-                    return ("model.json is not valid JSON — write the design as model.scad instead "
-                            "(a hologram is an OpenSCAD program).")
+                    return ("model.json is not valid JSON — write the design as model.py instead "
+                            "(a hologram is a build123d program).")
                 viewer = ws / VIEWER_FILE
                 if viewer.is_file() and not self._is_generated_viewer(viewer):
                     return None  # a hand-authored ANIMATED page: the Forge's HTML/py gate covers it
-                return "no model.scad was produced"
+                return "no model.py was produced"
             if str(spec.get("engine", "")).lower() in ("environment", "neural"):
                 return None  # a 360° scene or a Tripo reference: nothing to compile
             # Anything else is the retired primitive format (a 'parts' list, engine 'auto'/'parametric').
-            # Asking for model.scad here lets the Forge's repair pass MIGRATE the design in the same build
-            # ("make it wider" on an old hologram just works); if that pass fails too, the Forge rolls
-            # back and the old page keeps working as it was.
             return (
                 "model.json with a 'parts' list is the retired primitive format — write the design as "
-                "model.scad (OpenSCAD, millimetres) instead; the old model.json is ignored."
+                "model.py (build123d, millimetres) instead; the old model.json is ignored."
             )
         source = src.read_text(encoding="utf-8", errors="replace")
         lints = scad.inspect_source(source)
@@ -302,7 +311,7 @@ class ModelBaker:
         fenced as DATA (the coder needs file:line to fix it; the user only ever hears the sentence)."""
         problem = (res.problem or "The hologram's source couldn't be compiled.").strip()
         detail = (res.detail or "").strip()
-        return f"{problem} OpenSCAD said: {detail}" if detail else problem
+        return f"{problem} The engine said: {detail}" if detail else problem
 
     def _render_preview(self, ws: Path, src: Path, rec: _Record) -> Path | None:
         """assets/preview.png for THIS source, or None. Best effort: a failed render is not a problem, and
@@ -386,7 +395,7 @@ class ModelBaker:
             # it imports); otherwise explain. Our OWN leftover page (the sentinel) is not a result — a
             # stale viewer of an older design must not be shown as if the build had made it.
             if not viewer.exists() or self._is_generated_viewer(viewer):
-                self._write_error(ws, "The hologram build produced no model.scad and no page of its own.")
+                self._write_error(ws, "The hologram build produced no model.py and no page of its own.")
             else:
                 self._write_render_kit(ws)
             return
@@ -413,7 +422,7 @@ class ModelBaker:
                 self._write_legacy_page(ws, spec)  # the retired primitive engine
             else:
                 raise SpecError(
-                    "The hologram has no model.scad — the design is an OpenSCAD program, and none was written."
+                    "The hologram has no model.py — the design is a build123d program, and none was written."
                 )
         except SpecError as exc:
             self._write_error(ws, str(exc))
@@ -452,6 +461,7 @@ class ModelBaker:
             rec.stl_ok, rec.stl_seconds = True, float(res.seconds or 0.0)
         has_3mf = self._export_3mf(ws, src, rec)
         has_preview = self._render_preview(ws, src, rec) is not None
+        has_step = (ws / STEP_REL).is_file()  # written by the engine's one-run artifact set
         stl_bytes = stl.read_bytes()
         assets = ws / "assets"
         assets.mkdir(parents=True, exist_ok=True)
@@ -468,6 +478,7 @@ class ModelBaker:
             "parts": list(brief.get("parts") or []),
             "params": [dataclasses.asdict(p) for p in params],
             "files": {"stl": STL_REL, "mf": MF_REL if has_3mf else "", "scad": SOURCE_FILE,
+                      "step": STEP_REL if has_step else "",
                       "preview": PREVIEW_REL if has_preview else ""},
             "engine": self._engine_version(),
             "source": source,
@@ -649,9 +660,9 @@ class ModelBaker:
         source_block = ""
         if source:
             source_block = (
-                '<details class="src"><summary>Source — model.scad</summary>'
+                '<details class="src"><summary>Source — model.py</summary>'
                 f'<pre>{_esc(source)}</pre>'
-                f'<p class="links"><a href="{SOURCE_FILE}" download>Download model.scad</a></p></details>'
+                f'<p class="links"><a href="{SOURCE_FILE}" download>Download model.py</a></p></details>'
             )
         parts_block = ""
         if parts:
@@ -848,7 +859,7 @@ _VIEWER_HTML = """<!doctype html>
     <h2>Export</h2>
     <div class="row" id="exports"></div>
     <h2>Source</h2>
-    <details class="src"><summary>model.scad</summary><pre id="source"></pre></details>
+    <details class="src"><summary>model.py</summary><pre id="source"></pre></details>
   </div>
   <div id="hint">drag to orbit · right-drag or shift-drag to pan · wheel to zoom</div>
   <div id="msg"></div>
@@ -869,7 +880,7 @@ _VIEWER_HTML = """<!doctype html>
     // ---- The chrome that needs no WebGL: brief, parameters, exports, source. Filled first so a page
     // whose 3D view cannot start (no WebGL, a missing sidecar) still shows the whole design. ----
     $("summary").textContent = D.summary || "";
-    $("engine").textContent = D.engine ? "OpenSCAD " + D.engine : "";
+    $("engine").textContent = D.engine ? "build123d " + D.engine : "";
     var ul = $("params");
     (D.params || []).forEach(function (p) {
       var li = document.createElement("li");
@@ -890,7 +901,7 @@ _VIEWER_HTML = """<!doctype html>
     if (!(D.params || []).length) { var none = document.createElement("li"); none.className = "d";
       none.textContent = "No adjustable parameters — say what to change and HELIX edits the design."; ul.appendChild(none); }
     var ex = $("exports"); var F = D.files || {};
-    [["STL", F.stl], ["3MF", F.mf], ["SCAD", F.scad], ["Preview", F.preview]].forEach(function (pair) {
+    [["STL", F.stl], ["STEP", F.step], ["3MF", F.mf], ["PY", F.scad], ["Preview", F.preview]].forEach(function (pair) {
       if (!pair[1]) return;
       var a = document.createElement("a"); a.href = pair[1]; a.setAttribute("download", ""); a.textContent = pair[0]; ex.appendChild(a);
     });

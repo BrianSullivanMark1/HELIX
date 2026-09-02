@@ -1,8 +1,8 @@
-"""ModelBaker tests — model.scad is compiled through the CadEngine port into a mesh + a technical viewer.
+"""ModelBaker tests — model.py is compiled through the CadEngine port into a mesh + a technical viewer.
 
-The engine is a FAKE implementing the port (the real OpenSCAD binary is absent on most machines,
-including the one these were written on); one test at the bottom runs against the real CLI when it is
-installed and is skipped honestly otherwise. Nothing here needs the network: the viewer is self-contained
+The engine is a FAKE implementing the port (the real build123d kernel costs seconds per compile);
+one test at the bottom runs against the real kernel when it is installed and is skipped honestly
+otherwise. Nothing here needs the network: the viewer is self-contained
 (vendored three.js) and is only read as text."""
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from helix.domain import scad
+from helix.domain import cadpy as scad
 from helix.ports.cad import CadResult
 from helix.services import model_baker as mb
 from helix.services.model_baker import (
@@ -33,23 +33,25 @@ from helix.services.model_baker import (
     ModelBaker,
 )
 
-# A design that passes every static lint: a brief header, a units hint, a customizer block with ranges,
-# choices and a description, the helper library, a module, and top-level geometry inside helix_quality.
-GOOD_SOURCE = """\
-// Design: Pipe wall bracket — a saddle bracket for 2-inch pipe with two M6 mounting holes
-// Units: mm
-// Parts: base plate, saddle, gusset
-// width of the base plate
-w = 80; // [40:200]
-// plate thickness
-t = 5; // [3:0.5:12]
-// bolt size
-bolt = "M6"; // [M4, M5, M6]
-gusset = true;
-use <helix.scad>;
-module bracket() { cube([w, 50, t], center=true); }
-helix_quality("normal") { bracket(); }
-"""
+# A design that passes every static lint: a brief docstring, a parameter block with ranges, choices
+# and descriptions, the library import, and geometry inside build().
+GOOD_SOURCE = (
+    '"""Design: Pipe wall bracket - a saddle bracket for 2-inch pipe with two M6 mounting holes\n'
+    "Parts:\n"
+    "- base plate\n"
+    "- saddle\n"
+    "- gusset\n"
+    '"""\n'
+    "from helix_parts import *\n\n"
+    "# --- Parameters ---\n"
+    "w = 80.0       # [40..200] width of the base plate, mm\n"
+    "t = 5.0        # [3..12..0.5] plate thickness\n"
+    'bolt = "M6"    # [M4, M5, M6] bolt size\n'
+    "gusset = True  # stiffening gusset\n"
+    "# --- End Parameters ---\n\n\n"
+    "def build():\n"
+    "    return Box(w, 50, t)\n"
+)
 
 # Four triangles with known coordinates — the same solid as ASCII and as binary STL.
 _TRIS = [
@@ -105,7 +107,7 @@ class _FakeCad:
         if self._raise:
             raise RuntimeError("engine exploded")
         if self._compile_detail is not None:
-            return CadResult(False, None, "The hologram's source has a slip OpenSCAD couldn't read past.",
+            return CadResult(False, None, "The hologram's source has a slip the engine couldn't read past.",
                              self._compile_detail, 0.1)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(self._stl)
@@ -132,7 +134,7 @@ class _FakeCad:
         return CadResult(False, None, "not in a test", None, 0.0)
 
     def install_hint(self) -> str:
-        return "Holograms are compiled by OpenSCAD — just say “install it” and HELIX will set it up."
+        return "Holograms are computed by build123d — just say “install it” and HELIX will set it up."
 
     def count(self, name: str) -> int:
         return sum(1 for c in self.calls if c[0] == name)
@@ -177,17 +179,18 @@ def test_check_writes_the_library_beside_the_source_and_compiles(tmp_path):
 
 def test_lint_short_circuits_before_any_compile(tmp_path):
     cad = _FakeCad()
-    ws = _ws(tmp_path, GOOD_SOURCE.replace("module bracket() {", "module bracket() {{"))  # unbalanced
+    ws = _ws(tmp_path, GOOD_SOURCE.replace("from helix_parts import *",
+                                           "import os\nfrom helix_parts import *"))
     problem = ModelBaker(cad).check(ws)
-    assert problem and "Unbalanced braces" in problem
+    assert problem and "imports 'os'" in problem
     assert cad.calls == []  # a compile costs seconds; a text-visible defect is reported from the text
 
 
 def test_compile_failure_carries_the_warm_sentence_and_the_compiler_detail(tmp_path):
-    cad = _FakeCad(compile_detail="ERROR: Parser error in file model.scad, line 13: syntax error")
+    cad = _FakeCad(compile_detail="NameError in model.py, line 13: name 'wdth' is not defined")
     problem = ModelBaker(cad).check(_ws(tmp_path))
     assert problem.startswith("The hologram's source has a slip")
-    assert "OpenSCAD said: ERROR: Parser error in file model.scad, line 13: syntax error" in problem
+    assert "The engine said: NameError in model.py, line 13" in problem
 
 
 def test_critic_speaks_once_per_cycle_and_its_verdict_is_the_problem(tmp_path):
@@ -208,7 +211,7 @@ def test_critic_speaks_once_per_cycle_and_its_verdict_is_the_problem(tmp_path):
     assert png == ws / PREVIEW_REL and png.is_file()
     # the critic judges against the brief + the parameter block, not the raw source
     assert "Design: Pipe wall bracket" in brief and "Parts: base plate, saddle, gusset" in brief
-    assert "w = 80 [40..200] — width of the base plate" in brief and "bolt = \"M6\" [M4, M5, M6]" in brief
+    assert "w = 80.0 [40..200] — width of the base plate, mm" in brief and "bolt = M6 [M4, M5, M6]" in brief
     # the Forge's repair pass re-checks: a picky critic must NOT be able to fail a design that compiles
     (ws / SOURCE_FILE).write_text(GOOD_SOURCE.replace("w = 80", "w = 90"), encoding="utf-8")
     assert baker.check(ws) is None
@@ -220,8 +223,9 @@ def test_critic_is_silent_when_the_first_check_already_failed(tmp_path):
     # roll back a design that compiles. The critic only ever speaks on the first check of a cycle.
     seen = []
     baker = ModelBaker(_FakeCad(), critic=lambda png, brief: seen.append(1) or "too small")
-    ws = _ws(tmp_path, GOOD_SOURCE.replace("// Units: mm", ""))  # no units hint → lint
-    assert "units" in baker.check(ws).lower()
+    ws = _ws(tmp_path, GOOD_SOURCE.replace("from helix_parts import *",
+                                           "import os" + chr(10) + "from helix_parts import *"))
+    assert "imports 'os'" in baker.check(ws)
     (ws / SOURCE_FILE).write_text(GOOD_SOURCE, encoding="utf-8")
     assert baker.check(ws) is None
     assert seen == []
@@ -245,16 +249,16 @@ def test_a_rolled_back_cycle_does_not_starve_the_next_build_of_its_critic(tmp_pa
     baker = ModelBaker(_FakeCad(), critic=lambda png, brief: (seen.append(1), "wrong shape")[1])
     ws = _ws(tmp_path)
     assert "wrong shape" in baker.check(ws)           # check 1: critic
-    (ws / SOURCE_FILE).write_text(GOOD_SOURCE + "\n// v2\n", encoding="utf-8")
+    (ws / SOURCE_FILE).write_text(GOOD_SOURCE + "\n# v2\n", encoding="utf-8")
     assert baker.check(ws) is None                    # check 2: silent
-    (ws / SOURCE_FILE).write_text(GOOD_SOURCE + "\n// v3\n", encoding="utf-8")
+    (ws / SOURCE_FILE).write_text(GOOD_SOURCE + "\n# v3\n", encoding="utf-8")
     assert "wrong shape" in baker.check(ws)           # next build's check 1: critic again
     assert seen == [1, 1]
 
 
 def test_a_first_check_that_found_no_source_still_counts_toward_the_cycle(tmp_path):
     # Check one found a retired model.json (or nothing at all) and said so; the coder then wrote
-    # model.scad in the REPAIR pass. That second check is the last pass — the critic must not speak on
+    # model.py in the REPAIR pass. That second check is the last pass — the critic must not speak on
     # it, or a design that compiles is rolled back. The counter used to sit after these early returns,
     # so check two was taken for check one and the critic spoke.
     seen = []
@@ -265,7 +269,7 @@ def test_a_first_check_that_found_no_source_still_counts_toward_the_cycle(tmp_pa
     (ws / SOURCE_FILE).write_text(GOOD_SOURCE, encoding="utf-8")
     assert baker.check(ws) is None and seen == []
     ws2 = _ws(tmp_path / "empty", None)
-    assert baker.check(ws2) == "no model.scad was produced"
+    assert baker.check(ws2) == "no model.py was produced"
     (ws2 / SOURCE_FILE).write_text(GOOD_SOURCE, encoding="utf-8")
     assert baker.check(ws2) is None and seen == []
     ws3 = _ws(tmp_path / "badjson", None)
@@ -276,14 +280,14 @@ def test_a_first_check_that_found_no_source_still_counts_toward_the_cycle(tmp_pa
 
 
 def test_prepare_seeds_the_library_and_opens_a_fresh_cycle(tmp_path):
-    # The Forge calls prepare() before the coder runs. It must (a) put helix.scad in the workspace — the
+    # The Forge calls prepare() before the coder runs. It must (a) put helix_parts.py in the workspace — the
     # coder's prompt names it as the only library here, and a coder that lists a fresh folder must find
     # it — and (b) reset the critic's one look, so a cycle that never reached bake() (the repair pass was
     # cancelled, died, or escaped) cannot leave the next build of the same hologram running with
     # first=False forever. Idempotent, and an already-current library is not rewritten.
     seen = []
     baker = ModelBaker(_FakeCad(), critic=lambda png, brief: (seen.append(1), "wrong shape")[1])
-    ws = _ws(tmp_path, None)  # the fresh workspace: manifest only, no model.scad yet
+    ws = _ws(tmp_path, None)  # the fresh workspace: manifest only, no model.py yet
     baker.prepare(ws)
     assert (ws / scad.HELIX_LIB_FILE).read_text(encoding="utf-8") == scad.HELIX_LIB
     (ws / SOURCE_FILE).write_text(GOOD_SOURCE, encoding="utf-8")
@@ -302,7 +306,7 @@ def test_every_bake_path_closes_the_cycle(tmp_path, three_js):
     # bake() closes the cycle however it ends — not only after a successful SCAD bake. Closing it from
     # inside _bake_scad alone left the engine-missing notice, a bake-time compile failure, a bake that
     # raised, and the environment/reference/legacy pages with the count still standing, so the first
-    # build after OpenSCAD was installed was taken for "check 2" and never heard the critic.
+    # build after the engine was installed was taken for "check 2" and never heard the critic.
     def fresh(name, **cad_kw):
         seen = []
         cad = _FakeCad(**cad_kw)
@@ -321,7 +325,7 @@ def test_every_bake_path_closes_the_cycle(tmp_path, three_js):
 
     # a compile that failed at bake time
     cad, baker, seen, ws = fresh("compilefail", compile_detail="ERROR: CGAL error")
-    assert "OpenSCAD said" in baker.check(ws)
+    assert "The engine said" in baker.check(ws)
     baker.bake(ws)
     assert "didn't compile" in _html(ws)
     cad._compile_detail = None
@@ -382,9 +386,9 @@ def test_engine_missing_check_passes_without_compiling(tmp_path):
     assert ModelBaker(None).engine_missing()  # no engine wired at all reads the same
 
 
-def test_check_without_model_scad(tmp_path):
+def test_check_without_model_py(tmp_path):
     baker = ModelBaker(_FakeCad())
-    assert baker.check(_ws(tmp_path, None)) == "no model.scad was produced"
+    assert baker.check(_ws(tmp_path, None)) == "no model.py was produced"
     # a hand-authored ANIMATED page is a legitimate result — the Forge's html/py gate covers it
     ws = _ws(tmp_path / "anim", None)
     (ws / VIEWER_FILE).write_text("<html><body><script>/* animated three.js */</script></body></html>")
@@ -397,7 +401,7 @@ def test_check_without_model_scad(tmp_path):
     ws = _ws(tmp_path / "old", None)
     (ws / SPEC_FILE).write_text(json.dumps({"parts": [{"shape": "box"}]}))
     problem = baker.check(ws)
-    assert "retired" in problem and "model.scad" in problem
+    assert "retired" in problem and "model.py" in problem
 
 
 def test_check_never_raises(tmp_path):
@@ -434,10 +438,11 @@ def test_bake_writes_every_artefact(tmp_path, three_js):
     assert data["parts"] == ["base plate", "saddle", "gusset"]
     assert data["engine"] == "2021.01"
     assert data["source"] == GOOD_SOURCE
-    assert data["files"] == {"stl": STL_REL, "mf": MF_REL, "scad": SOURCE_FILE, "preview": PREVIEW_REL}
+    assert data["files"] == {"stl": STL_REL, "mf": MF_REL, "scad": SOURCE_FILE, "step": "",
+                             "preview": PREVIEW_REL}
     names = {p["name"]: p for p in data["params"]}
     assert names["w"]["minimum"] == 40 and names["w"]["maximum"] == 200
-    assert names["w"]["description"] == "width of the base plate"
+    assert names["w"]["description"] == "width of the base plate, mm"
     assert names["bolt"]["choices"] == ["M4", "M5", "M6"] and names["gusset"]["kind"] == "bool"
     assert "<title>Pipe wall bracket</title>" in html
 
@@ -501,7 +506,7 @@ def test_engine_missing_bake_writes_the_install_page_with_hint_and_source(tmp_pa
     assert VIEWER_SENTINEL in html
     assert "engine isn't installed yet" in html
     assert cad.install_hint() in html
-    assert "cube([w, 50, t], center=true)" in html  # the design itself is shown
+    assert "return Box(w, 50, t)" in html  # the design itself is shown
     assert "Pipe wall bracket" in html
     # no dead controls: no 3D chrome, no script, no export of files that do not exist
     for dead in ("<script", 'id="wire"', 'id="section"', STL_REL, "<canvas"):
@@ -514,14 +519,14 @@ def test_no_engine_wired_at_all_is_the_same_friendly_page(tmp_path):
     ws = _ws(tmp_path)
     ModelBaker(None).bake(ws)
     html = _html(ws)
-    assert "engine isn't installed yet" in html and "OpenSCAD" in html and GOOD_SOURCE.splitlines()[0][3:] in html
+    assert "engine isn't installed yet" in html and "build123d" in html and "Pipe wall bracket" in html
 
 
 def test_compile_failure_at_bake_is_a_friendly_page_not_a_crash(tmp_path, three_js):
     ws = _ws(tmp_path)
     ModelBaker(_FakeCad(compile_detail="ERROR: CGAL error"), three_js=three_js).bake(ws)
     html = _html(ws)
-    assert "didn't compile" in html and "slip OpenSCAD couldn't read past" in html
+    assert "didn't compile" in html and "slip the engine couldn't read past" in html
     assert "CGAL" not in html  # the compiler's words are for the coder, never the user
     assert "<script" not in html
 
@@ -555,7 +560,7 @@ def test_title_prefers_the_brief_then_model_json_then_the_build_name(tmp_path, t
     ws = _ws(tmp_path, name="Build Name")
     ModelBaker(_FakeCad(), three_js=three_js).bake(ws)
     assert "<title>Pipe wall bracket</title>" in _html(ws)
-    ws2 = _ws(tmp_path / "b", GOOD_SOURCE.replace("// Design: Pipe wall bracket — ", "// "), name="Build Name")
+    ws2 = _ws(tmp_path / "b", GOOD_SOURCE.replace("Design: Pipe wall bracket - ", ""), name="Build Name")
     ModelBaker(_FakeCad(), three_js=three_js).bake(ws2)
     assert "<title>Build Name</title>" in _html(ws2)
     ws3 = _ws(tmp_path / "c", None, name="Build Name")
@@ -640,7 +645,7 @@ def test_animated_index_html_is_left_alone_and_gets_the_render_kit(tmp_path):
 
 
 def test_the_sentinel_tells_our_own_viewer_from_a_hand_authored_page(tmp_path, three_js):
-    # With no model.scad and no model.json, index.html is either the coder's own ANIMATED page (a real
+    # With no model.py and no model.json, index.html is either the coder's own ANIMATED page (a real
     # result: check passes, bake leaves it alone) or a leftover HELIX viewer — the sentinel — which is
     # NOT a result: check reports nothing produced, and bake writes the error page rather than showing a
     # stale design as if the build had made it. With a model.json beside it, the same tell decides
@@ -654,7 +659,7 @@ def test_the_sentinel_tells_our_own_viewer_from_a_hand_authored_page(tmp_path, t
     assert _html(ws) == hand
     ours = _ws(tmp_path / "ours", None)
     (ours / VIEWER_FILE).write_text(hand.replace("<html>", VIEWER_SENTINEL + "<html>"), encoding="utf-8")
-    assert baker.check(ours) == "no model.scad was produced"
+    assert baker.check(ours) == "no model.py was produced"
     baker.bake(ours)
     assert "didn't build" in _html(ours) and "animated three.js" not in _html(ours)
     # a generated viewer beside a model.json is re-baked (the spec stays); a hand page beside one converts
@@ -732,7 +737,7 @@ def test_neural_reference_without_a_key_is_friendly(tmp_path):
     assert "didn't build" in _html(ws)
 
 
-def test_model_scad_wins_over_a_model_json_beside_it(tmp_path, three_js):
+def test_model_py_wins_over_a_model_json_beside_it(tmp_path, three_js):
     calls = []
     ws = _ws(tmp_path)
     (ws / SPEC_FILE).write_text(json.dumps({"engine": "neural", "prompt": "x"}))
@@ -760,14 +765,14 @@ def test_malformed_or_empty_spec_and_nothing_at_all_are_friendly(tmp_path):
     assert "didn't build" in _html(ws)
     (ws / SPEC_FILE).write_text(json.dumps({"title": "nothing"}))
     ModelBaker(_FakeCad()).bake(ws)
-    assert "didn't build" in _html(ws) and "model.scad" in _html(ws)
+    assert "didn't build" in _html(ws) and "model.py" in _html(ws)
     ws2 = _ws(tmp_path / "empty", None)
     ModelBaker(_FakeCad()).bake(ws2)
-    assert "produced no model.scad" in _html(ws2)
+    assert "produced no model.py" in _html(ws2)
 
 
 def test_the_baker_no_longer_needs_the_mesh_stack():
-    # The STL comes from OpenSCAD now; trimesh/numpy/scipy were the primitive engine's and are gone from
+    # The STL comes from the CAD worker now; trimesh/numpy/scipy were the primitive engine's and are gone from
     # this module (materials.py with them) — importing the baker must not drag them back in.
     import sys
     src = Path(mb.__file__).read_text(encoding="utf-8")
@@ -782,12 +787,15 @@ def test_the_baker_no_longer_needs_the_mesh_stack():
 # ----------------------------------------------------------------------------------------------------
 
 def _real_engine():
-    from helix.adapters.openscad_cli import OpenScadCli
-    return OpenScadCli()
+    from helix.adapters.build123d_cad import Build123dCad
+    return Build123dCad()
 
 
-@pytest.mark.skipif(not _real_engine().available(), reason="OpenSCAD is not installed on this machine")
-def test_real_openscad_compiles_the_good_source_end_to_end(tmp_path, three_js):
+@pytest.mark.skipif(not _real_engine().available(),
+                    reason="build123d is not installed in this environment")
+def test_real_engine_compiles_the_good_source_end_to_end(tmp_path, three_js):
+    # The one live pin: GOOD_SOURCE through the REAL kernel (worker subprocess and all) — the whole
+    # artifact set lands, the viewer wraps it, and the STEP export (the Bambu-native format) exists.
     cad = _real_engine()
     baker = ModelBaker(cad, three_js=three_js)
     ws = _ws(tmp_path)
@@ -795,6 +803,7 @@ def test_real_openscad_compiles_the_good_source_end_to_end(tmp_path, three_js):
     baker.bake(ws)
     stl = (ws / STL_REL).read_bytes()
     assert len(stl) > 100 and (stl.startswith(b"solid") or 84 + struct.unpack("<I", stl[80:84])[0] * 50 == len(stl))
+    assert (ws / mb.STEP_REL).is_file(), "the one-run artifact set must include STEP"
     html = _html(ws)
     assert VIEWER_SENTINEL in html and "MeshMatcapMaterial" in html
     assert base64.b64decode(re.search(r'window\.HELIX_STL="([^"]+)"', (ws / STL_JS_REL).read_text()).group(1)) == stl

@@ -11,14 +11,20 @@ def main(argv: list[str] | None = None) -> int:
         prog="helix", description="HELIX — a local-first desktop app-builder you talk to."
     )
     parser.add_argument(
-        "command", nargs="?", default="ui", choices=["ui", "watchdog"],
+        "command", nargs="?", default="ui", choices=["ui", "watchdog", "cadworker"],
         help="what to run (default: ui)",
     )
+    parser.add_argument("job", nargs="?", help="(cadworker) the job file, or --serve")
     parser.add_argument("--pid", type=int, help="(watchdog) the HELIX process to guard")
     parser.add_argument("--data", help="(watchdog) the data directory")
     parser.add_argument("--entry", help="(watchdog) the entry script to relaunch")
     parser.add_argument("--root", help="(watchdog) the app root / working directory")
     args = parser.parse_args(argv)
+
+    if args.command == "cadworker":  # the hologram compile worker — no Qt, no singleton, no STT
+        from helix.cad import runner
+
+        return runner.main([args.job] if args.job else [])
 
     if args.command == "watchdog":
         if args.pid is None or not args.data or not args.entry or not args.root:

@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import secrets
 
-from helix.domain import constitution, scad
+from helix.domain import cadpy as scad  # the hologram design language (aliased: doc + lib names)
+from helix.domain import constitution
 
 
 def _fenced(request: str) -> tuple[str, str, str]:
@@ -144,10 +145,13 @@ How you work:
   two M6 holes at sixty centres") and invite the follow-up — "make it wider", "add a gusset", "make the
   holes M8": call build_3d_model again with the SAME name and the change, and HELIX edits the parameter
   or the part in place rather than starting over. Every hologram exports as STL or 3MF for printing or
-  machining, straight from its page, along with the design file itself. The hologram engine is OpenSCAD
-  — free and open source, about a minute to install — and if it's missing HELIX tells you so when you
-  try to build: offer to install it (install_openscad, only after the user says yes — it installs
-  software) and build once it lands; never spend a build on a model nothing can compile. A photoreal
+  machining, straight from its page, along with the design file itself — plus STEP, the format Bambu
+  Studio and real CAD programs eat natively. Holograms are computed by the build123d CAD kernel — free,
+  about a minute to install — and if it's missing HELIX tells you so when you try to build: offer to
+  install it (install_cad_engine, only after the user says yes — it installs software) and build once
+  it lands; never spend a build on a model nothing can compile. Enclosures are the specialty: HELIX
+  knows real board footprints (Arduino, ESP32, Raspberry Pi, relay modules), so a case for a named
+  board comes out actually fitting it. A photoreal
   look at a REAL thing ("show me what a real Iron Man suit looks like") is a separate REFERENCE HELIX
   can fetch on request through a hosted service (Tripo, which needs its key connected) — offer it when
   they want to see a thing rather than design one, and never pass it off as a design. A hologram can
@@ -539,12 +543,12 @@ def repair_prompt(name: str, problem: str) -> str:
     look = ""
     if "preview.png" in problem:
         # The hologram critic judged the RENDERED picture, so the fix starts by looking at it: a coder
-        # that only re-reads model.scad guesses at what "a hole that doesn't go through" means and
-        # rewrites the wrong module. The preview sits in the workspace, so Read works on it.
+        # that only re-reads model.py guesses at what "a hole that doesn't go through" means and
+        # rewrites the wrong function. The preview sits in the workspace, so Read works on it.
         look = (
             "This is about the rendered PREVIEW: open assets/preview.png (Read it) and LOOK before you "
-            "change anything, then fix what is actually wrong in model.scad — usually one parameter or one "
-            "module — and keep the brief header current.\n"
+            "change anything, then fix what is actually wrong in model.py — usually one parameter or one "
+            "part function — and keep the brief docstring current.\n"
         )
     return f"""\
 The build "{name}" you just wrote failed its automatic check:
@@ -558,12 +562,12 @@ Do not start over, do not rename files, do not run git. Narrate one short friend
 def build_3d_model_prompt(name: str, request: str) -> str:
     """Instruction handed to the coder to build (or iterate) a HOLOGRAM into a workspace.
 
-    HELIX's design channel. A THING is authored as a PROGRAM — model.scad, OpenSCAD in millimetres with a
-    customizer parameter block — that HELIX compiles, renders and wraps in its own technical-illustration
-    viewer. The coder writes named parameters and named parts, not coordinates: an LLM asked for stacked
-    primitives with raw [x, y, z] positions produces inaccurate, unrepeatable geometry, while the same
-    model knows OpenSCAD from years of published source, so "a bracket for a 60.3 mm pipe with two M6
-    holes at 60 centres" comes out at those numbers and "make it wider" is an edit to ONE parameter. A
+    HELIX's design channel. A THING is authored as a PROGRAM — model.py, Python on the build123d B-rep
+    kernel, millimetres, a parameter block — that HELIX compiles in a sandboxed worker, renders and wraps
+    in its own technical-illustration viewer. The coder writes named parameters and named part functions,
+    not coordinates: Python is the language LLMs write most accurately, the helix_parts library carries
+    real hardware footprints (Arduino/ESP32/Pi/relays), so "a case for an Arduino Uno with a USB opening"
+    comes out FITTING and "make it wider" is an edit to ONE parameter. A
     PROCESS is still a hand-authored Three.js index.html on the render kit; a PLACE is a Blockade 360°
     environment; a photoreal REFERENCE of a real thing is the demoted Tripo path, only on explicit request.
     The same workspace is re-used on every change, so the coder edits in place when files already exist."""
@@ -595,59 +599,61 @@ FIRST decide the KIND from the INTENT (not from keywords):
 - A REFERENCE — ONLY when the user explicitly asks to SEE what a real-world thing LOOKS like ("show me what
   a real Iron Man suit looks like") rather than to design one → REFERENCE. Never use it for a design.
 
-══════════ DESIGN (a thing) → write ONLY model.scad ══════════
-Write ONE file, model.scad — OpenSCAD source, in MILLIMETRES. Do NOT write index.html, model.json, JavaScript
-or any other file: HELIX compiles the source, renders a preview picture, generates the interactive viewer
-(grid, dimensions, parameter panel, section plane) and the STL / 3MF exports itself.
+══════════ DESIGN (a thing) → write ONLY model.py ══════════
+Write ONE file, model.py — Python on the build123d CAD kernel, in MILLIMETRES. Do NOT write index.html,
+model.json, or any other file: HELIX compiles the source in its own worker, renders a preview picture,
+generates the interactive viewer (grid, dimensions, live parameter sliders, section plane) and the
+STL / STEP / 3MF exports itself. You never run anything.
 
 THE FILE, top to bottom — write it in THIS order (brief, then parameters, then geometry):
-1. THE BRIEF — a header comment HELIX reads as data, exactly this shape:
-     // Design: <title> — <one-line summary of what it is and what it fits>
-     // Units: mm
-     // Parts: <part>, <part>, <part>
-     // <the key dimensions in words, e.g. "80 x 40 base, 5 thick; saddle for 60.3 mm pipe; two M6 holes at 60 centres">
-   then ONE BLANK LINE (so the header is never read as the first parameter's description).
-2. THE CUSTOMIZER BLOCK — every dimension the user might want to change, as a top-level assignment with a
-   range comment and a one-line description DIRECTLY above it. Real-world numbers, never placeholders:
-     // overall width of the base plate
-     width = 80;          // [40:200]
-     // base plate thickness
-     thickness = 5;       // [3:0.5:12]
-     // pipe outside diameter (2-inch schedule 40 = 60.3)
-     pipe_od = 60.3;      // [20:120]
-     // mounting bolt size
-     bolt = "M6";         // [M4, M5, M6, M8]
-     // stiffening gusset under the saddle
-     gusset = true;
-   Scalars — a number, true/false, a quoted choice — are what the parameter panel shows and what voice
-   edits change ("make width 100"), so every real design decision goes here as a scalar, and the geometry
-   below uses ONLY these names (plus values derived from them). A /* [Tab] */ group line is fine. No
-   geometry and no module above or inside this block.
-3. THE LIBRARY — the line `use <helix.scad>;`. helix.scad is HELIX's helper library and the ONLY library
-   that exists here: BOSL2, MCAD and every other library are NOT installed, and a use/include of anything
-   else is a compile error. These are ALL of its helpers — use them instead of reinventing them:
-{scad.HELIX_LIB_DOC}
-4. THE GEOMETRY — ONE MODULE PER PART, named for the part (base_plate(), saddle(), gusset()), each built
-   from the named parameters; then an ASSEMBLY module that positions the parts ONLY through named
-   parameters and values derived from them (no magic numbers); then ONE top-level call, wrapped in
-   helix_quality, and nothing else at the top level:
-     helix_quality("normal") {{ bracket(); }}
+1. THE BRIEF — the module docstring, exactly this shape:
+     \"\"\"Design: <title> — <one line: what it is and what it fits>
+     Parts:
+     - <part>
+     - <part>
+     \"\"\"
+2. THE IMPORT — exactly `from helix_parts import *`. helix_parts is HELIX's library and the ONLY import
+   that exists here (it re-exports all of build123d); `math` is also allowed. os, pathlib, requests and
+   every other module are BLOCKED — a design computes geometry and does nothing else.
+3. THE PARAMETER BLOCK — every dimension the user might want to change, between EXACTLY these markers:
+     # --- Parameters ---
+     wall = 2.0          # [1.2..4] wall thickness, mm
+     inner_h = 32.0      # [20..80] inner height, mm
+     vent_rows = 3       # [0..6] rows of vent slots
+     lid_style = "snap"  # [snap, screw] how the lid attaches
+     with_gusset = True  # stiffening gusset under the saddle
+     # --- End Parameters ---
+   Literals only — a number, True/False, a quoted choice. The bracket annotation gives a number its
+   slider range `[min..max]` and a string its choices `[a, b, c]`; the rest of the comment is the label.
+   These names are what the studio's LIVE SLIDERS drive and what voice edits change ("make wall 3"), so
+   every real design decision goes here, and build() uses ONLY these names (plus derived values).
+4. THE GEOMETRY — one small function per part, then `def build():` assembling them and returning the
+   result. Return ONE shape, or a dict of named parts — `return {{"body": body, "lid": lid}}` — and HELIX
+   lays them out side by side for printing. NO code at the top level (HELIX applies parameter overrides
+   between import and build(), so top-level geometry would ignore the sliders).
 
-GEOMETRY RULES (what makes it compile, and print):
-- Solid, manifold, watertight: no zero-thickness walls, no two solids meeting on exactly the same face —
-  overlap unions by at least helix_eps(), and let every cut overshoot both faces by that epsilon (the
-  helix hole tools already do: countersunk_hole, counterbore_hole, slot and hex_pocket run from just below
-  0 to just above h with the head at the top, so subtract them from a part whose top face sits at z=h).
-- Clearance comes from the helpers: m_clearance("M6") for a bolt to pass, m_tap("M6") for a thread,
-  m_head_d / m_csk_d for heads, m_nut_af for a nut trap. A pipe, rod or board gets 0.3–0.5 mm clearance.
-- Rounding: hull() of cylinders or spheres, or offset(r = ...) on a 2D profile then linear_extrude. Never
-  minkowski() on anything but the tiniest part — it turns a compile into minutes.
-- Curves follow $fa/$fs through helix_quality(...): never set a global $fn (a top-level $fn above 120 makes
-  a plate with a few holes take minutes to compile).
-- Every solid stands on Z=0 with its footprint centred on X/Y (the helpers do), so the part sits on the
-  grid the way it sits on a table; orient it the way it is printed or mounted.
-- Keep it real: printed walls 2–3 mm (more under load), minimum feature 1 mm, a fillet or gusset where a
-  load meets a wall. This geometry exists to be made, not to look busy.
+THE LIBRARY — these are ALL of helix_parts' helpers; use them instead of reinventing them:
+{scad.HELIX_LIB_DOC}
+
+GEOMETRY RULES (what makes it compute, and print):
+- build123d algebra: combine with + and -, intersect with &; move with Pos(x,y,z) * part and
+  Rot(x,y,z) * part. Booleans need REAL overlap — two solids meeting exactly on a face is a kernel
+  error, so sink one 0.01 into the other and let every cut overshoot both faces.
+- ENCLOSURES ARE THE HOME GAME. "A case/box/enclosure for <board>" is: look the board up in the catalog
+  (`b = board("arduino_uno")`), size the cavity from it (`inner = b.length + 2*clearance`), then
+  shell_box + standoffs_for (or side_rails for hole-less boards like the ESP32 DevKitC) + usb_cutout on
+  the wall the connector leaves (+ vent_slots, + cable_gland_boss for field wiring) + lid_for. Boards
+  marked approx=True in the doc get an extra 0.5 mm of room. Wire clearance above the tallest component
+  (board .height) before the lid.
+- Fillets are what make it look engineered: fillet(part.edges().filter_by(Axis.Z), r) rounds the
+  verticals; a small chamfer on the top rim reads as quality. Radius must be smaller than the faces it
+  touches or the kernel refuses — when in doubt, r=1.5.
+- Printability: walls 2–3 mm, minimum feature 1 mm, holes print 0.2–0.4 undersize so add it (the
+  library's insert/pilot constants already do), no overhang steeper than 45° without a chamfer under it.
+- Every part sits on Z=0 the way it prints. Keep it real: this geometry exists to be made.
+
+HARD LIMITS: no os / sys / subprocess / open() / network — the compile is sandboxed and any of these
+fails the build. No loops generating hundreds of features (a compile budget exists). No top-level code.
 
 HARDWARE CHEAT-SHEET (real sizes, millimetres — use these, don't guess):
 - Bolts: clearance M3 3.4 / M4 4.5 / M5 5.5 / M6 6.6 / M8 9.0; tap M3 2.5 / M4 3.3 / M5 4.2 / M6 5.0;
@@ -657,10 +663,10 @@ HARDWARE CHEAT-SHEET (real sizes, millimetres — use these, don't guess):
   EMT conduit 1/2" 17.9, 3/4" 23.4. Copper tube 1/2" 15.9, 3/4" 22.2.
 - Aluminium extrusion: 2020 is 20 mm square (6 mm slot, M5 T-nuts); 3030 is 30 mm (8 mm slot, M6).
   DIN rail 35 mm wide, 7.5 deep.
-- Electronics: PCB 1.6 thick; USB-C cutout 9.0 × 3.4; micro-USB 8 × 3; Raspberry Pi 4 board 85 × 56 with
-  M2.5 holes at 58 × 49; Arduino Uno 68.6 × 53.3; 18650 cell Ø 18.5 × 65.2; header pitch 2.54; NEMA 17 motor
-  42.3 square, 31 mm hole square, M3, 22 mm boss, 5 mm shaft; 608 bearing 22 OD × 7 wide × 8 bore;
-  625 bearing 16 × 5 × 5.
+- Electronics: PCB 1.6 thick; header pitch 2.54; 18650 cell Ø 18.5 × 65.2; NEMA 17 motor 42.3 square,
+  31 mm hole square, M3, 22 mm boss, 5 mm shaft; 608 bearing 22 OD × 7 wide × 8 bore; 625 bearing
+  16 × 5 × 5. BOARD footprints (Arduino, ESP32, Pi, relays, buck converters) come from the helix_parts
+  catalog above — use board(key), never guessed numbers.
 - Human scale: a hand grip Ø 25–35; a finger hole Ø 20–25; a phone about 72 × 150 × 8; a tablet about
   180 × 250 × 7; a drinking glass Ø 60–80; a mug Ø 80, 95 tall.
 - Printing fits: holes print 0.2–0.4 undersize, so add it; press fit −0.1, slide fit +0.3, loose fit +0.5.
@@ -671,7 +677,7 @@ never file names or code):
 1. Write the brief (the header): decide what it is, what it fits, and which parts it has.
 2. Write the parameters, with real numbers from the request and the cheat-sheet.
 3. Write the geometry: a module per part, the assembly, the single top-level call.
-4. Stop. HELIX compiles model.scad itself — you do not run anything.
+4. Stop. HELIX compiles model.py itself in a sandboxed worker — you do not run anything.
 REPAIR PASSES: if HELIX comes back with a COMPILER message, it carries the file and line — fix only that
 line's problem (a missing semicolon, an unknown name, an unbalanced brace); do not rewrite the file. If it
 comes back about the rendered PREVIEW (assets/preview.png), LOOK at the image — Read it — and fix what is
@@ -679,12 +685,15 @@ actually wrong in the model (a part floating off the base, a hole that doesn't g
 brief promised that the model lacks, a proportion that is plainly off); do not start over.
 
 ══════════ CHANGES to an existing design ("make it wider", "add a gusset", "holes M8") ══════════
-If the folder already contains model.scad, this is an EDIT: read it, then change the LEAST that genuinely
-satisfies the request — usually ONE parameter value, sometimes one module (a new part, an adjusted
-feature). Keep every other parameter, module and the file's order exactly as they are; keep the header
-brief current (a new part goes on the Parts line); never regenerate from scratch. HELIX recompiles, and
-the viewer's parameter panel updates by itself. An index.html or an assets/ folder sitting next to
-model.scad is HELIX-GENERATED — never read or edit those; only model.scad is yours.
+If the folder already contains model.py, this is an EDIT: read it, then change the LEAST that genuinely
+satisfies the request — usually ONE parameter value in the block, sometimes one part function (a new
+part, an adjusted feature). Keep every other parameter, function and the file's order exactly as they
+are; keep the docstring brief current (a new part goes on the Parts list);
+never regenerate from scratch. HELIX recompiles, and the studio's sliders update by themselves. An index.html or an assets/
+folder sitting next to model.py is HELIX-GENERATED — never read or edit those; only model.py is yours.
+If the folder contains only a model.scad (the retired OpenSCAD engine), MIGRATE: write a fresh model.py
+that reproduces that design faithfully (same dimensions, same parts, same parameter names where
+sensible) and then apply the requested change; leave the old model.scad file alone.
 
 ══════════ REFERENCE (a look at a real thing, NOT a design) → write ONLY model.json ══════════
 ONLY when the user explicitly asks to SEE what a real-world thing looks like rather than to design one:
@@ -693,7 +702,7 @@ description of the thing: its form, materials, colours, style>"}} — and nothin
 (Tripo) sculpts a textured reference mesh from the prompt and HELIX shows it in a viewer. (It needs a
 Tripo key connected; without one HELIX shows the user a friendly note and they can connect it in
 conversation.) This is never a fallback for a design — a design that is hard is still a design, and is
-written as model.scad.
+written as model.py.
 
 ══════════ ENVIRONMENT (a place) → write ONE file: model.json with engine "environment" ══════════
 Write ONLY model.json: {{"title": "<short title>", "engine": "environment", "prompt": "<a vivid one-
@@ -737,15 +746,16 @@ Build REAL geometry, well proportioned, in believable units — the stage's flat
 make clean geometry read like a drawing; there is no bloom, no image-based lighting and no exposure boost,
 so do not add lights, post-processing or glow to compensate. CONNECTED MOTION: derive every dependent part
 from that single `t` and one sign convention, and check 3–4 key frames so joints stay coincident and nothing
-penetrates or overshoots. Do NOT write a model.scad or a model.json for an animated model, and do NOT
+penetrates or overshoots. Do NOT write a model.py or a model.json for an animated model, and do NOT
 re-implement the renderer / lights / controls / timeline — the kit owns those.
 
 ══════════ EDITING — which file is yours ══════════
-- model.scad present → a DESIGN edit (the CHANGES rules above).
+- model.py present → a DESIGN edit (the CHANGES rules above).
+- model.scad present (and no model.py) → MIGRATE to model.py (the CHANGES rules above).
 - model.json present → edit its "prompt" (a reference or an environment); never add geometry to it.
-- index.html present and NO model.scad / model.json → an animated model; edit that index.html in place.
+- index.html present and NO model.py / model.scad / model.json → an animated model; edit it in place.
 - CONVERTING a design to ANIMATED (the request now asks to make it MOVE / show how it works): DELETE
-  model.scad (and any model.json) and write a new animated index.html (the ANIMATED format above). HELIX
+  model.py (and any model.json) and write a new animated index.html (the ANIMATED format above). HELIX
   detects the hand-authored page and stops recompiling the old design.
 
 Rules:

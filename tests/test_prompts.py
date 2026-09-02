@@ -199,32 +199,32 @@ def _design_prompt() -> str:
     return build_3d_model_prompt("Pipe Wall Bracket", "a wall bracket for a 2 inch pipe with two holes")
 
 
-def test_the_design_prompt_asks_for_one_openscad_program_in_millimetres():
+def test_the_design_prompt_asks_for_one_python_design_in_millimetres():
     p = _design_prompt()
-    assert "model.scad" in p
+    assert "model.py" in p
     assert "MILLIMETRES" in p or "millimetres" in p
-    assert "CUSTOMIZER BLOCK" in p
-    # the header shape domain.scad.parse_brief reads — taught verbatim, so the critic's brief and the
-    # viewer's title come from a line the coder was actually told to write
-    assert "// Design: <title>" in p and "// Units: mm" in p and "// Parts:" in p
+    assert "PARAMETER BLOCK" in p
+    assert "def build():" in p
+    assert "Do NOT write index.html" in p
+    assert "sandboxed worker" in p and "you do not run anything" in p
 
 
 def test_the_design_prompt_shows_the_coder_the_whole_helper_library():
-    from helix.domain import scad
+    from helix.domain import cadpy
 
     p = _design_prompt()
-    assert "use <helix.scad>" in p
+    assert "from helix_parts import *" in p
     # the WHOLE cheat-sheet is interpolated (a helper the coder is not shown is a helper it reinvents,
     # badly) — and a few named helpers are visible in the prompt text itself
-    assert scad.HELIX_LIB_DOC in p
-    for helper in ("countersunk_hole", "rounded_plate", "m_clearance", "helix_quality"):
+    assert cadpy.HELIX_LIB_DOC in p
+    for helper in ("shell_box", "standoffs_for", "usb_cutout", "side_rails", "lid_for"):
         assert helper in p, helper
-    assert "BOSL2" in p  # the one library people reach for is named as NOT installed
+    assert "BLOCKED" in p  # the import gate is stated, not implied
 
 
 def test_the_design_prompt_carries_the_hardware_cheat_sheet():
     p = _design_prompt()
-    for fact in ("60.3", "48.3", "33.4", "2020", "DIN rail 35", "NEMA 17", "USB-C", "608 bearing", "PCB 1.6"):
+    for fact in ("60.3", "48.3", "33.4", "2020", "DIN rail 35", "NEMA 17", "usb_c", "608 bearing", "PCB 1.6"):
         assert fact in p, fact
 
 
@@ -254,45 +254,44 @@ def test_the_animated_path_is_a_technical_illustration_too():
 
 
 def test_the_header_shape_the_prompt_teaches_round_trips_through_parse_brief():
-    """The prompt and domain.scad.parse_brief must stay in LOCKSTEP: the coder writes the header in the
-    shape taught here, and the critic judges the preview against what parse_brief reads back. The
-    prompt puts "the key dimensions in words" on the line AFTER Parts; a reader that stopped at Parts
-    handed the critic a brief with no numbers in it. So: lift the taught shape out of the rendered
-    prompt, fill its placeholders, and read it back — the numbers must survive the trip."""
-    import re
-
-    from helix.domain.scad import parse_brief, parse_params
+    """The prompt and domain.cadpy must stay in LOCKSTEP: the coder writes the brief docstring and the
+    parameter block in the shape taught here, and the critic/studio read them back with parse_brief /
+    parse_params. Fill the taught shape with a real design and read it back — the numbers must survive."""
+    from helix.domain.cadpy import PARAM_END, PARAM_START, parse_brief, parse_params
 
     p = _design_prompt()
-    lines = p.splitlines()
-    start = next(i for i, ln in enumerate(lines) if "THE BRIEF" in ln) + 1
-    taught = []
-    for ln in lines[start:]:
-        if not ln.strip().startswith("//"):
-            break
-        taught.append(ln.strip())
-    assert len(taught) == 4, taught                     # Design / Units / Parts / key dimensions
-    assert "ONE BLANK LINE" in lines[start + len(taught)]
-    fills = iter([
-        "Pipe wall bracket", "a saddle bracket for 2-inch pipe that mounts to a wall",
-        "base plate", "saddle", "gusset",
-        "80 x 40 base, 5 thick; saddle for 60.3 mm pipe; two M6 holes at 60 centres",
-    ])
-    filled = [re.sub(r"<[^>]*>", lambda _m: next(fills), ln) for ln in taught]
-    src = "\n".join(filled) + "\n\n// overall width of the base plate\nwidth = 80;  // [40:200]\n"
+    # the taught markers are the exact ones the parser looks for
+    assert 'Design: <title>' in p and "Parts:" in p
+    assert PARAM_START in p and PARAM_END in p
+    src = (
+        '"""Design: Pipe wall bracket - a saddle bracket for 2-inch pipe that mounts to a wall\n'
+        "Parts:\n"
+        "- base plate\n"
+        "- saddle\n"
+        "- gusset\n"
+        '"""\n'
+        "from helix_parts import *\n\n"
+        "# --- Parameters ---\n"
+        "width = 80.0     # [40..200] overall width of the base plate, mm\n"
+        "pipe_od = 60.3   # [20..120] pipe outside diameter (2-inch schedule 40)\n"
+        'bolt = "M6"      # [M4, M5, M6, M8] mounting bolt size\n'
+        "gusset = True    # stiffening gusset under the saddle\n"
+        "# --- End Parameters ---\n\n\n"
+        "def build():\n"
+        "    return Box(width, 40, 5)\n"
+    )
+
     b = parse_brief(src)
     assert b["title"] == "Pipe wall bracket"
     assert b["parts"] == ["base plate", "saddle", "gusset"]
-    assert "60.3 mm pipe" in b["summary"] and "two M6 holes at 60 centres" in b["summary"]
     assert "a saddle bracket for 2-inch pipe" in b["summary"]
-    assert "overall width" not in b["summary"]
-    # and the header's FIELD lines, with the blank line the prompt asks for forgotten, still never
-    # become the first parameter's description in the panel ("Units: mm" beside `width`). The free
-    # key-dimensions line is the one the two readers hand to the parameter by the customizer rule
-    # (the comment directly above an assignment is its description) — which is exactly why the
-    # prompt insists on the blank line, and why the blank-line instruction is pinned above.
-    forgot = "\n".join(filled[:3]) + "\nwidth = 80;\n"
-    assert parse_params(forgot)[0].description == ""
+    params = parse_params(src)
+    names = {q.name: q for q in params}
+    assert names["width"].minimum == 40.0 and names["width"].maximum == 200.0
+    assert "overall width" in names["width"].description
+    assert names["bolt"].kind == "string" and names["bolt"].choices == ("M4", "M5", "M6", "M8")
+    assert names["gusset"].kind == "bool"
+    assert names["pipe_od"].value == "60.3"
 
 
 def test_the_repair_prompt_keeps_compiler_line_numbers_and_points_at_the_preview():
@@ -301,7 +300,7 @@ def test_the_repair_prompt_keeps_compiler_line_numbers_and_points_at_the_preview
     preview picture when the critic was the one complaining."""
     from helix.services.prompts import repair_prompt
 
-    detail = "ERROR: Parser error in file model.scad, line 41: syntax error " + "x" * 700 + " END-OF-DETAIL"
+    detail = "NameError in model.py, line 41: name 'wdth' is not defined " + "x" * 700 + " END-OF-DETAIL"
     p = repair_prompt("Pipe Wall Bracket", "The hologram's source didn't parse. " + detail)
     assert "line 41" in p and "END-OF-DETAIL" in p
     assert "preview.png" not in p  # no picture was judged, so no picture is pointed at
@@ -316,11 +315,11 @@ def test_the_repair_prompt_keeps_compiler_line_numbers_and_points_at_the_preview
 def test_the_persona_teaches_holograms_as_designs_with_dimensions_and_exports():
     bullet = _bullet("DESIGN 3D MODELS BY VOICE")
     assert "build_3d_model" in bullet
-    for word in ("millimetres", "dimensions", "parameters", "STL", "3MF"):
+    for word in ("millimetres", "dimensions", "parameters", "STL", "3MF", "STEP"):
         assert word in bullet, word
     assert "make it wider" in bullet                      # the follow-up it invites
     assert "NOT a photoreal render" in bullet             # what a hologram is and is not
-    assert "install_openscad" in bullet and "OpenSCAD" in bullet and "open source" in bullet
+    assert "install_cad_engine" in bullet and "build123d" in bullet and "free" in bullet
     assert "confirm" in bullet                            # it spends Claude time
     assert "Tripo" in bullet and "REFERENCE" in bullet    # the photoreal reference is separate, on request
 

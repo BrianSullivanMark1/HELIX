@@ -79,6 +79,10 @@ def _run() -> int:
         from helix.app.cli import main
 
         return main()
+    if argv[:1] == ["cadworker"]:  # the hologram compile worker: no singleton, no STT, no Qt —
+        from helix.cad import runner  # spawned by the Build123dCad adapter, never run by hand
+
+        return runner.main(argv[1:])
 
     # Single instance BEFORE the voice pre-warm and before any PyQt6 import (see module docstring).
     from helix.app.single_instance import become_primary_or_signal

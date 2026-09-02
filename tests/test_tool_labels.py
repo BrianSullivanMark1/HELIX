@@ -136,12 +136,12 @@ def test_a_nameless_or_unnamed_call_keeps_the_generic_phrase():
 
 
 def test_installing_the_hologram_engine_is_narrated_in_the_users_word():
-    # install_openscad blocks for about a minute, so its phrase is what the status bar shows the whole
+    # install_cad_engine blocks for about a minute, so its phrase is what the status bar shows the whole
     # time — in the user's word for the thing ("hologram engine"), never the package or the tool name.
-    label = friendly_tool_label("install_openscad")
+    label = friendly_tool_label("install_cad_engine")
     assert label == "Installing the hologram engine"
-    assert friendly_tool_label("mcp__helix__install_openscad") == label  # both rails, same words
-    assert "openscad" not in label.lower() and "winget" not in label.lower()
+    assert friendly_tool_label("mcp__helix__install_cad_engine") == label  # both rails, same words
+    assert "build123d" not in label.lower() and "pip" not in label.lower()
 
 
 def test_a_hologram_build_is_still_projected_on_both_rails():

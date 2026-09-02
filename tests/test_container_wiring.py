@@ -288,10 +288,10 @@ def test_teardown_waits_on_the_vault_views_threads():
 # ---------------------------------------------------------------------------------------------
 
 def test_the_baker_and_the_tool_registry_share_one_cad_engine(container):
-    from helix.adapters.openscad_cli import OpenScadCli
+    from helix.adapters.build123d_cad import Build123dCad
     from helix.services.model_baker import ModelBaker
 
-    assert isinstance(container.cad, OpenScadCli), "the container must construct the OpenSCAD adapter"
+    assert isinstance(container.cad, Build123dCad), "the container must construct the OpenSCAD adapter"
     assert container.tools._cad is container.cad, (
         "ToolRegistry was built without cad= — the pre-flight and install_openscad are never offered"
     )

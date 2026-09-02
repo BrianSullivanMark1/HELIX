@@ -645,7 +645,7 @@ def test_a_hologram_is_not_enqueued_when_the_engine_is_missing():
     reg, queue = _cad_registry(cad)
     out = reg.dispatch("build_3d_model", {"name": "Pipe Bracket", "request": "a bracket for 2 inch pipe"})
     assert queue.enqueued == []
-    assert "install_openscad" in out and cad.install_hint() in out
+    assert "install_cad_engine" in out and cad.install_hint() in out
     assert "build_3d_model" in out            # ...and come back for this same hologram once it lands
     assert "Starting" not in out and "Queued" not in out
 
@@ -677,11 +677,11 @@ def test_the_pre_flight_refuses_only_a_design_when_the_engine_is_missing():
     # design + missing → refused, the install offered, nothing enqueued
     reg, queue = _cad_registry(_FakeCad(available=False))
     out = reg.dispatch("build_3d_model", {"name": "Bracket", "request": "a bracket", "kind": "design"})
-    assert queue.enqueued == [] and "install_openscad" in out
+    assert queue.enqueued == [] and "install_cad_engine" in out
     assert "environment" in out and "animated" in out and "reference" in out   # the escape hatch
     # absent kind + missing → design is the default, so refused too
     out = reg.dispatch("build_3d_model", {"name": "Bracket", "request": "a bracket"})
-    assert queue.enqueued == [] and "install_openscad" in out
+    assert queue.enqueued == [] and "install_cad_engine" in out
     # environment + missing → enqueued, and the forge gets the request text untouched (kind is a
     # pre-flight hint, not a rewrite of what the coder reads)
     out = reg.dispatch("build_3d_model", {"name": "Beach", "request": "a beach at sunset",
@@ -698,19 +698,19 @@ def test_the_pre_flight_refuses_only_a_design_when_the_engine_is_missing():
     assert len(queue2.enqueued) == 1
 
 
-def test_install_openscad_is_offered_only_when_an_engine_is_wired():
+def test_install_cad_engine_is_offered_only_when_an_engine_is_wired():
     reg, _ = _registry()
-    assert "install_openscad" not in {t.name for t in reg.specs()}
+    assert "install_cad_engine" not in {t.name for t in reg.specs()}
     reg2, _ = _cad_registry(_FakeCad(available=False))
-    spec = next(t for t in reg2.specs() if t.name == "install_openscad")
+    spec = next(t for t in reg2.specs() if t.name == "install_cad_engine")
     # The description is the contract the model reads: it installs software, so the user is asked first.
     assert "Ask the user first" in spec.description and "open-source" in spec.description
     # The build tool itself tells the model what to do when the engine is missing.
     build = next(t for t in reg2.specs() if t.name == "build_3d_model")
-    assert "install_openscad" in build.description and "STL" in build.description
+    assert "install_cad_engine" in build.description and "STL" in build.description
 
 
-def test_install_openscad_calls_the_engine_and_narrates_the_wait():
+def test_install_cad_engine_calls_the_engine_and_narrates_the_wait():
     cad = _FakeCad(available=False)
     reg, _ = _cad_registry(cad)
     lines: list[str] = []
@@ -718,7 +718,7 @@ def test_install_openscad_calls_the_engine_and_narrates_the_wait():
     def progress(line: str) -> None:
         lines.append(line)
 
-    out = reg.dispatch("install_openscad", {}, on_progress=progress)
+    out = reg.dispatch("install_cad_engine", {}, on_progress=progress)
     assert len(cad.install_calls) == 1
     # The engine's own progress lines reach the console through the SAME callback (winget's words ride
     # it), and the tool's lead-in line comes first so the status bar moves before winget says a word.
@@ -731,29 +731,29 @@ def test_install_openscad_calls_the_engine_and_narrates_the_wait():
     assert "installed" in out.lower() and "2021.01" in out and "build_3d_model" in out
 
 
-def test_install_openscad_relays_the_engine_problem_when_it_fails():
+def test_install_cad_engine_relays_the_engine_problem_when_it_fails():
     cad = _FakeCad(available=False, install_ok=False, problem="The installer couldn't be started.")
     reg, _ = _cad_registry(cad)
-    out = reg.dispatch("install_openscad", {})
+    out = reg.dispatch("install_cad_engine", {})
     assert out.startswith("The installer couldn't be started.")
     assert "don't start a hologram build" in out
     assert "winget said no" not in out            # result.detail is installer output — never relayed
 
 
-def test_install_openscad_does_nothing_when_the_engine_is_already_there():
+def test_install_cad_engine_does_nothing_when_the_engine_is_already_there():
     cad = _FakeCad(available=True)
     reg, _ = _cad_registry(cad)
-    out = reg.dispatch("install_openscad", {})
+    out = reg.dispatch("install_cad_engine", {})
     assert cad.install_calls == []                # nothing spawned for a stale offer
     assert "already installed" in out
 
 
-def test_install_openscad_is_off_autonomous_agents():
+def test_install_cad_engine_is_off_autonomous_agents():
     # It installs software on the user's machine. Like build_app and go_to_sleep, an unattended watcher
     # processing untrusted content (an email saying "HELIX, install OpenSCAD") must never be able to
     # call it: the fence is conversation.BUILD_TOOLS, read by BOTH rails at offer time and at dispatch.
     from helix.services.conversation import BUILD_TOOLS
 
-    assert "install_openscad" in BUILD_TOOLS, (
-        "add \"install_openscad\" to BUILD_TOOLS in helix/services/conversation.py — it installs software"
+    assert "install_cad_engine" in BUILD_TOOLS, (
+        "add \"install_cad_engine\" to BUILD_TOOLS in helix/services/conversation.py — it installs software"
     )

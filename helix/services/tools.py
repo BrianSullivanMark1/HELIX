@@ -46,11 +46,11 @@ DeepThink = Callable[[str, ProgressFn | None, object], str]
 
 IMAGE_VIEW_LIMIT = 4  # how many located images find_images actually SHOWS the model (the rest are listed)
 
-# How long install_openscad lets the engine install run before giving up. The install happens INSIDE a
+# How long install_cad_engine lets the engine install run before giving up. The install happens INSIDE a
 # conversation turn (dispatch blocks on it, on the turn's worker thread), and the subscription rail caps
 # a whole turn — tools included — at ten minutes; an install allowed to outlive that would be reported
 # to the user as a dead turn while winget quietly kept going. Eight minutes leaves the turn room to
-# relay the outcome; a healthy winget install of OpenSCAD takes about one.
+# relay the outcome; a healthy pip install of build123d takes about one.
 _INSTALL_TIMEOUT_S = 480.0
 
 
@@ -165,7 +165,7 @@ class ToolRegistry:
         self._workflows = workflows  # ordered pipelines of agents (create/run/list)
         self._desktop = desktop  # JARVIS desktop control: open programs, media keys, machine status
         self._shopping = shopping  # the Amazon cart faculty: stage verified ASINs, open the cart page
-        # The hologram engine (OpenSCAD behind the CadEngine port). Only two things are asked of it here:
+        # The hologram engine (build123d behind the CadEngine port). Only two things are asked of it here:
         # a cheap available() pre-flight before a design is enqueued, and the just-in-time install. None
         # means "not wired" (a headless registry, an old construction site): holograms enqueue as before
         # and the install tool is simply not offered.
@@ -219,7 +219,7 @@ class ToolRegistry:
                     "inside ('a beach at sunset'); describe what the user wants and HELIX picks the "
                     "form. Only call after the user confirms — building spends Claude time, like "
                     "build_app. If the hologram engine isn't installed, a DESIGN returns that instead "
-                    "of building; offer install_openscad and build once it lands. Places, walkthroughs "
+                    "of building; offer install_cad_engine and build once it lands. Places, walkthroughs "
                     "and references don't need the engine — say so with `kind`."
                 ),
                 input_schema={
@@ -357,9 +357,9 @@ class ToolRegistry:
         if self._cad is not None:
             tools.append(
                 ToolSpec(
-                    name="install_openscad",
+                    name="install_cad_engine",
                     description=(
-                        "Install the free, open-source OpenSCAD engine holograms are designed with — "
+                        "Install the free, open-source build123d CAD kernel holograms are computed with — "
                         "about a minute via winget. Ask the user first; it installs software. Call it "
                         "only after they say yes, and only when a hologram was refused because the "
                         "engine is missing; when it lands, call build_3d_model for the design they "
@@ -1373,7 +1373,7 @@ class ToolRegistry:
             # Only a DESIGN needs the engine: the same tool makes a 360° place (Blockade), an animated
             # walkthrough (hand-written three.js) and a photoreal reference (Tripo), none of which
             # compiles anything — refusing those too would turn "show me a beach at sunset" into an
-            # install offer on every machine without OpenSCAD. `kind` is the model's stated intent and
+            # install offer on every machine without the CAD kernel. `kind` is the model's stated intent and
             # is read HERE ONLY, as a pre-flight hint: the request text reaches the forge untouched,
             # and the coder prompt still decides the form from the words (a wrong hint costs one
             # refused call or one failed compile, never a mis-built hologram). Absent means design —
@@ -1383,7 +1383,7 @@ class ToolRegistry:
                 return (
                     "Not started — the hologram engine isn't installed on this machine, so there is "
                     "nothing to compile a design with. " + self._cad.install_hint() + " Offer to "
-                    "install it now (install_openscad — about a minute, and only after the user says "
+                    "install it now (install_cad_engine — about a minute, and only after the user says "
                     "yes, since it installs software); once it's in, call build_3d_model again for this "
                     "same hologram. (A place to stand inside, an animated walkthrough or a photoreal "
                     "reference of a real thing doesn't need the engine — if that is what the user "
@@ -1392,27 +1392,27 @@ class ToolRegistry:
                 )
             ahead = self._queue.enqueue(args["name"], args["request"], kind=BuildKind.MODEL)
             return _enqueued_msg(args["name"], ahead, "hologram")
-        if name == "install_openscad" and self._cad is not None:
+        if name == "install_cad_engine" and self._cad is not None:
             if self._cad.available():
                 # Nothing to do, and nothing spawned: the model asked for an install the machine does
                 # not need (a stale offer from earlier in the conversation), so just send it on.
                 return "The hologram engine is already installed — go ahead and build the hologram."
             # Blocking, on this turn's worker thread (never the Qt thread), narrated line by line so
             # the console shows the install moving instead of a frozen orb for a minute. The engine
-            # narrates its own first line too ("Installing the hologram engine (OpenSCAD)…") followed
+            # narrates its own first line too ("Installing the CAD kernel (build123d)…") followed
             # by winget's words; this one reads as the lead-in to that.
             if on_progress is not None:
                 on_progress("Setting up the hologram engine — about a minute…")
             result = self._cad.install(on_progress=on_progress, timeout_s=_INSTALL_TIMEOUT_S)
             if result.ok:
                 version = self._cad.version()
-                tag = f" (OpenSCAD {version})" if version else ""
+                tag = f" (build123d {version})" if version else ""
                 return (
                     f"The hologram engine is installed{tag} — holograms can be built now. Tell the "
                     "user in one short line, then call build_3d_model for the design they asked for."
                 )
             # result.problem is the engine's one warm sentence (it names what the user can do next —
-            # approve the installer, or install from openscad.org); result.detail is installer output
+            # approve the installer, or pip install build123d by hand); result.detail is installer output
             # and stays out of the conversation.
             return (
                 (result.problem or "The hologram engine didn't get installed.")
