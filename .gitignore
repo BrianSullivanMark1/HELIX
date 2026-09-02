@@ -21,3 +21,4 @@ venv/
 
 # Claude Code local (machine-specific settings — shared config stays tracked)
 .claude/settings.local.json
+*.stackdump
