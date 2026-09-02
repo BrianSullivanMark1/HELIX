@@ -1,0 +1,131 @@
+@import "tailwindcss";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/orbitron/500.css";
+@import "@fontsource/orbitron/700.css";
+
+/* HELIX design tokens — ported from ui/theme.py, then given the web's full reach. */
+:root {
+  --bg: #080b0f;
+  --panel: #0d141b;
+  --panel-hi: #121b24;
+  --cyan: #3fe0e0;
+  --cyan-dim: #1d6b6b;
+  --amber: #f5a623;
+  --gold: #ffc857;
+  --text: #e2edf1;
+  --muted: #7a8a93;
+  --line: #1b2730;
+  --working: #ffcf45;
+  --done: #3fe07a;
+  --error: #ff5d62;
+  --blue: #2a8cff;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+.font-display {
+  font-family: "Orbitron", "Inter", sans-serif;
+  letter-spacing: 3px;
+}
+
+/* Glass panels — the HUD look. */
+.glass {
+  background: color-mix(in srgb, var(--panel) 78%, transparent);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.glass-hi {
+  background: color-mix(in srgb, var(--panel-hi) 85%, transparent);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(14px);
+}
+
+.text-glow-cyan { text-shadow: 0 0 18px color-mix(in srgb, var(--cyan) 55%, transparent); }
+
+/* Scrollbars in the HUD's voice. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3a4d5c transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: #3a4d5c; border-radius: 7px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+button { cursor: pointer; }
+input, textarea, select {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 10px 14px;
+  outline: none;
+  font: inherit;
+}
+input:focus, textarea:focus, select:focus { border-color: var(--cyan-dim); }
+input::placeholder, textarea::placeholder { color: var(--muted); }
+
+.btn {
+  background: var(--panel-hi);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 9px 16px;
+  font: inherit;
+  transition: border-color 0.15s, color 0.15s, background 0.15s, transform 0.1s;
+}
+.btn:hover { border-color: var(--cyan-dim); }
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: transparent; border-color: var(--cyan-dim); color: var(--cyan); }
+.btn-primary:hover { border-color: var(--cyan); box-shadow: 0 0 16px color-mix(in srgb, var(--cyan) 25%, transparent); }
+.btn-nav { background: transparent; border: none; color: var(--muted); padding: 8px 12px; }
+.btn-nav:hover { color: var(--cyan); }
+.btn-danger { background: transparent; border-color: #5c2a2e; color: var(--error); }
+.btn-danger:hover { border-color: var(--error); }
+
+.card {
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  backdrop-filter: blur(10px);
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
+}
+.card:hover {
+  border-color: var(--cyan-dim);
+  box-shadow: 0 6px 30px rgba(0, 0, 0, 0.35), 0 0 24px color-mix(in srgb, var(--cyan) 8%, transparent);
+  transform: translateY(-1px);
+}
+
+.section-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--cyan);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 6px;
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-up { animation: fadeUp 0.26s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes pulseSoft {
+  0%, 100% { opacity: 0.85; }
+  50% { opacity: 1; }
+}
+
+/* Elide anywhere flex would otherwise stretch the page (the Qt width-discipline rule). */
+.elide { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

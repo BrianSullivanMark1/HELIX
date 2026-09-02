@@ -1,0 +1,368 @@
+// The Console — the orb's home. Transparent over the orb; the transcript, the status pill, the
+// voice button, attachments, and the input row. All the ordering rules live server-side in the
+// ShellSession; this page renders events and sends gestures.
+import { useCallback, useEffect, useRef, useState } from "react";
+import VisualBlock from "../components/Chart";
+import { api } from "../lib/api";
+import { useHelix, type Attachment, type Bubble } from "../lib/store";
+
+const STATE_LINES: Record<string, string> = {
+  listening: "Listening…",
+  transcribing: "Listening…",
+  thinking: "Thinking…",
+  speaking: "Speaking…",
+};
+
+function BubbleView({ b }: { b: Bubble }) {
+  const useAction = useHelix((s) => s.useAction);
+  const isUser = b.role === "user";
+  const isSystem = b.role === "system";
+  const fire = (id: string, label: string) => {
+    useAction(b.id, label);
+    void api.post("/api/shell/action", { id }).catch(() => undefined);
+  };
+  const copy = () => void navigator.clipboard.writeText(b.text);
+  return (
+    <div className={`w-full flex ${isUser ? "justify-end" : "justify-start"} fade-up`}>
+      <div
+        className="group relative max-w-[560px] rounded-2xl px-4 py-2.5 text-[14px] leading-relaxed"
+        style={{
+          background: isUser ? "rgba(18,27,36,0.82)" : "rgba(13,20,27,0.82)",
+          border: `1px solid ${isUser ? "var(--line)" : isSystem ? "var(--line)" : "var(--cyan-dim)"}`,
+          color: isSystem ? "var(--muted)" : "var(--text)",
+          backdropFilter: "blur(10px)",
+        }}
+      >
+        {b.text && <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{b.text}</div>}
+        {b.images.length > 0 && (
+          <div className="flex gap-2 mt-2">
+            {b.images.map((_, i) => (
+              <span key={i} className="text-xs px-2 py-1 rounded-md"
+                style={{ background: "var(--panel-hi)", color: "var(--muted)" }}>
+                🖼 image {b.images.length > 1 ? i + 1 : ""}
+              </span>
+            ))}
+          </div>
+        )}
+        {b.visuals.map((v, i) => (
+          <div key={i} className="mt-2">
+            <VisualBlock spec={v} />
+          </div>
+        ))}
+        {b.sources.map((s, i) => (
+          <div key={i} className="mt-1.5 text-xs" style={{ color: "var(--muted)" }}>
+            {s.line}
+          </div>
+        ))}
+        {b.actions.length > 0 && (
+          <div className="flex gap-2 mt-2.5">
+            {b.actions.map((a) => (
+              <button
+                key={a.id}
+                className={a.style === "danger" ? "btn btn-danger text-xs" : "btn btn-primary text-xs"}
+                onClick={() => fire(a.id, a.label)}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {b.used && (
+          <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>✓ {b.used}</div>
+        )}
+        <button
+          className="absolute -top-2 -right-2 hidden group-hover:block text-xs rounded-md px-1.5 py-0.5"
+          style={{ background: "var(--panel-hi)", border: "1px solid var(--line)", color: "var(--muted)" }}
+          onClick={copy}
+          title="Copy"
+        >
+          ⧉
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export default function Console() {
+  const bubbles = useHelix((s) => s.bubbles);
+  const status = useHelix((s) => s.status);
+  const idleLine = useHelix((s) => s.idleLine);
+  const busy = useHelix((s) => s.busy);
+  const orb = useHelix((s) => s.orb);
+  const legend = useHelix((s) => s.legend);
+  const voice = useHelix((s) => s.voice);
+  const suggestion = useHelix((s) => s.suggestion);
+  const attachments = useHelix((s) => s.attachments);
+  const setAttachments = useHelix((s) => s.setAttachments);
+  const keepInput = useHelix((s) => s.keepInput);
+
+  const [text, setText] = useState("");
+  const scroller = useRef<HTMLDivElement>(null);
+  const follow = useRef(true);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [ptt, setPtt] = useState(false);
+
+  useEffect(() => {
+    if (keepInput) {
+      setText(keepInput);
+      useHelix.getState().set({ keepInput: "" });
+    }
+  }, [keepInput]);
+
+  useEffect(() => {
+    const el = scroller.current;
+    if (el && follow.current) el.scrollTop = el.scrollHeight;
+  }, [bubbles]);
+
+  const onScroll = () => {
+    const el = scroller.current;
+    if (el) follow.current = el.scrollTop >= el.scrollHeight - el.clientHeight - 40;
+  };
+
+  const send = useCallback(() => {
+    const t = text.trim();
+    if (!t && attachments.length === 0) return;
+    follow.current = true;
+    void api.post("/api/shell/submit", { text: t, attachments: attachments.map((a) => a.id) });
+    setText("");
+    setAttachments([]);
+  }, [text, attachments, setAttachments]);
+
+  const stop = () => void api.post("/api/shell/stop");
+
+  const attach = async (files: FileList | File[]) => {
+    const added: Attachment[] = [];
+    for (const f of Array.from(files)) {
+      try {
+        const res = await api.upload(f);
+        const preview = res.image ? URL.createObjectURL(f) : undefined;
+        added.push({ ...res, preview });
+      } catch {
+        /* one bad file doesn't sink the rest */
+      }
+    }
+    setAttachments([...attachments, ...added]);
+  };
+
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (document.activeElement === inputRef.current) return;
+      const files = Array.from(e.clipboardData?.files || []);
+      if (files.length) {
+        e.preventDefault();
+        void attach(files);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") stop();
+    };
+    window.addEventListener("paste", onPaste);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("paste", onPaste);
+      window.removeEventListener("keydown", onKey);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attachments]);
+
+  const statusLine = busy
+    ? status
+    : STATE_LINES[orb] ?? (status || idleLine);
+
+  const voiceTone =
+    voice?.tone === "on" ? "var(--cyan)" : voice?.tone === "warn" ? "#e0a13f" : "#aebcc3";
+
+  return (
+    <div className="h-full flex flex-col items-center pt-12 pb-5 px-6" style={{ pointerEvents: "none" }}>
+      {/* legend strip */}
+      {legend.length > 0 && (
+        <div className="w-full max-w-[900px] overflow-x-auto flex gap-2 pb-1"
+          style={{ pointerEvents: "auto" }}>
+          {legend.map((item) => (
+            <button
+              key={item.slug}
+              className="glass rounded-full px-3 py-1 text-xs elide max-w-[220px] shrink-0"
+              style={{
+                color: item.state === "building" ? "var(--working)"
+                  : item.state === "done" ? "var(--done)" : "var(--error)",
+              }}
+              title={`${item.name} — ${item.state === "building" ? "in progress" : item.state}. Click to open it.`}
+              onClick={() => window.dispatchEvent(new CustomEvent("helix-open-build", {
+                detail: { slug: item.slug, name: item.name },
+              }))}
+            >
+              ● {item.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* transcript */}
+      <div
+        ref={scroller}
+        onScroll={onScroll}
+        className="flex-1 w-full max-w-[820px] overflow-y-auto flex flex-col gap-3 py-4 px-2"
+        style={{ pointerEvents: "auto" }}
+      >
+        {bubbles.map((b) => (
+          <BubbleView key={b.id} b={b} />
+        ))}
+      </div>
+
+      {/* status pill */}
+      <div
+        className="rounded-full px-5 py-1.5 text-[13px] elide max-w-[760px] mb-3"
+        style={{
+          background: "rgba(8,11,15,0.92)",
+          border: "1px solid var(--cyan-dim)",
+          color: "var(--muted)",
+          pointerEvents: "auto",
+        }}
+        title={statusLine.length > 40 ? statusLine : undefined}
+      >
+        {statusLine}
+      </div>
+
+      {/* voice button */}
+      {voice?.supported && (
+        <button
+          className="btn mb-3 text-[13px]"
+          style={{ borderColor: voiceTone, color: voiceTone, pointerEvents: "auto" }}
+          onClick={() => void api.post("/api/shell/voice", { op: "toggle" })}
+        >
+          {voice.label}
+        </button>
+      )}
+
+      {/* suggestion chip */}
+      {suggestion && (
+        <div className="glass rounded-xl px-4 py-2 mb-3 flex items-center gap-3 text-[13px]"
+          style={{ pointerEvents: "auto" }}>
+          <span>💡 {suggestion.text}</span>
+          {suggestion.slug && (
+            <button className="btn-nav" style={{ color: "var(--cyan)" }}
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent("helix-open-build", {
+                  detail: { slug: suggestion.slug, name: suggestion.text },
+                }));
+                void api.post("/api/shell/suggest_dismiss", { id: suggestion.id });
+              }}>
+              Open
+            </button>
+          )}
+          <button className="btn-nav"
+            onClick={() => void api.post("/api/shell/suggest_dismiss", { id: suggestion.id })}>
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* attachment chips */}
+      {attachments.length > 0 && (
+        <div className="flex gap-2 mb-2 flex-wrap max-w-[820px]" style={{ pointerEvents: "auto" }}>
+          {attachments.map((a) => (
+            <span key={a.id} className="glass rounded-lg px-2.5 py-1 text-xs flex items-center gap-2">
+              {a.preview ? (
+                <img src={a.preview} alt="" className="w-[26px] h-[26px] object-cover rounded" />
+              ) : (
+                <span>📄</span>
+              )}
+              <span className="elide max-w-[160px]">{a.name}</span>
+              <button className="btn-nav px-1"
+                onClick={() => setAttachments(attachments.filter((x) => x.id !== a.id))}>
+                ✕
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* input row */}
+      <div className="w-full max-w-[820px] flex items-end gap-2" style={{ pointerEvents: "auto" }}>
+        {voice?.supported && voice.listening && (
+          <button
+            className="btn text-[13px] shrink-0"
+            style={ptt ? { borderColor: "var(--cyan)", color: "var(--cyan)" } : undefined}
+            onMouseDown={() => {
+              setPtt(true);
+              void api.post("/api/shell/voice", { op: "ptt_start" });
+            }}
+            onMouseUp={() => {
+              setPtt(false);
+              void api.post("/api/shell/voice", { op: "ptt_stop" });
+            }}
+            onMouseLeave={() => {
+              if (ptt) {
+                setPtt(false);
+                void api.post("/api/shell/voice", { op: "ptt_stop" });
+              }
+            }}
+            disabled={busy}
+          >
+            🎤 Hold to Talk
+          </button>
+        )}
+        <label className="btn shrink-0 text-[13px]" title="Attach files">
+          📎
+          <input
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files) void attach(e.target.files);
+              e.target.value = "";
+            }}
+          />
+        </label>
+        <textarea
+          ref={inputRef}
+          value={text}
+          rows={Math.min(6, Math.max(1, text.split("\n").length))}
+          placeholder="Talk to HELIX…"
+          className="flex-1 resize-none"
+          style={{ background: "rgba(13,20,27,0.85)" }}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey) {
+              e.preventDefault();
+              send();
+            }
+          }}
+          onPaste={(e) => {
+            const files = Array.from(e.clipboardData.files);
+            if (files.length) {
+              e.preventDefault();
+              void attach(files);
+            }
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (e.dataTransfer.files.length) void attach(e.dataTransfer.files);
+          }}
+          onDragOver={(e) => e.preventDefault()}
+        />
+        {busy && (
+          <button className="btn shrink-0" style={{ borderColor: "#e0663f", color: "#e0663f" }}
+            onClick={stop}>
+            ■ Stop
+          </button>
+        )}
+        {voice?.enabled && voice.listening && !voice.muted && (
+          <button className="btn shrink-0 text-[13px]"
+            onClick={() => void api.post("/api/shell/voice", { op: "sleep" })}>
+            😴 Sleep
+          </button>
+        )}
+        {voice?.enabled && voice.muted && (
+          <button className="btn shrink-0 text-[13px]"
+            onClick={() => void api.post("/api/shell/voice", { op: "wake" })}>
+            ▶ Wake
+          </button>
+        )}
+        <button className="btn btn-primary shrink-0" onClick={send}>
+          Send
+        </button>
+      </div>
+    </div>
+  );
+}

@@ -61,6 +61,8 @@ class Build123dCad:
         self._available: bool | None = None
         # source path (resolved str) -> {"sha": str, "outputs": {...}, "seconds": float}
         self._runs: dict[str, dict] = {}
+        self._warm: subprocess.Popen | None = None   # the resident --serve worker (sliders)
+        self._warm_io = threading.Lock()             # one job on its pipe at a time
 
     # ----- availability -----
     def available(self) -> bool:
@@ -117,14 +119,115 @@ class Build123dCad:
     ) -> CadResult:
         """Recompile with parameter OVERRIDES into a scratch dir — the studio's slider path. Writes
         model.stl + model.meta.json under out_dir; the design file itself is untouched (committing a
-        parameter change is a separate, deliberate act through domain.cadpy.set_params)."""
+        parameter change is a separate, deliberate act through domain.cadpy.set_params).
+
+        Runs on the WARM worker (`--serve`: the kernel imports once and stays resident), so a slider
+        drag recomputes in about a second instead of paying the ~3s kernel import every time. Falls
+        back to a one-shot worker if the warm one is unavailable or wedged."""
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
+        outputs = {"stl": out_dir / "model.stl", "meta": out_dir / META_NAME}
+        res = self._warm_job(Path(source), outputs, dict(overrides or {}), timeout_s)
+        if res is not None:
+            return res
         return self._run_job(
-            Path(source),
-            outputs={"stl": out_dir / "model.stl", "meta": out_dir / META_NAME},
+            Path(source), outputs=outputs,
             overrides=dict(overrides or {}), timeout_s=timeout_s, cache=False,
         )
+
+    def _warm_worker(self):
+        """The resident --serve worker, started on first use. Returns the Popen or None."""
+        with self._lock:
+            proc = self._warm
+            if proc is not None and proc.poll() is None:
+                return proc
+            self._warm = None
+        if not self.available():
+            return None
+        env = dict(os.environ)
+        if not getattr(sys, "frozen", False):
+            env["PYTHONPATH"] = str(self._app_root) + os.pathsep + env.get("PYTHONPATH", "")
+        cmd = ([sys.executable, "cadworker", "--serve"] if getattr(sys, "frozen", False)
+               else [sys.executable, "-m", "helix.cad.runner", "--serve"])
+        try:
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, creationflags=_CREATE_NO_WINDOW, env=env,
+            )
+            ready = proc.stdout.readline().strip()  # "ready" once the kernel import lands
+            if ready != "ready":
+                proc.kill()
+                return None
+        except Exception:  # noqa: BLE001
+            _LOG.warning("warm cad worker failed to start", exc_info=True)
+            return None
+        with self._lock:
+            self._warm = proc
+        return proc
+
+    def _warm_job(self, source: Path, outputs: dict[str, Path], overrides: dict,
+                  timeout_s: float) -> CadResult | None:
+        """One job through the warm worker; None means 'use the one-shot fallback'."""
+        proc = self._warm_worker()
+        if proc is None:
+            return None
+        t0 = time.time()
+        scratch = Path(tempfile.gettempdir()) / "helix-cad"
+        scratch.mkdir(parents=True, exist_ok=True)
+        job_path = scratch / f"job-{uuid.uuid4().hex}.json"
+        result_path = scratch / f"result-{uuid.uuid4().hex}.json"
+        job_path.write_text(json.dumps({
+            "source": str(source), "workspace": str(source.parent), "overrides": overrides,
+            "outputs": {k: str(v) for k, v in outputs.items()}, "result": str(result_path),
+        }), encoding="utf-8")
+        done: list[str] = []
+
+        def read_done() -> None:
+            try:
+                done.append(proc.stdout.readline())
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            with self._warm_io:
+                proc.stdin.write(str(job_path) + "\n")
+                proc.stdin.flush()
+                reader = threading.Thread(target=read_done, daemon=True)
+                reader.start()
+                reader.join(timeout_s)
+                if reader.is_alive():  # wedged mid-job: kill it; the next call restarts warm
+                    proc.kill()
+                    with self._lock:
+                        self._warm = None
+                    return CadResult(False, None,
+                                     "The design took too long to compute — it's probably heavier "
+                                     "than it needs to be.", f"warm worker timeout {timeout_s:.0f}s",
+                                     time.time() - t0)
+        except Exception:  # noqa: BLE001
+            with self._lock:
+                self._warm = None
+            return None
+        finally:
+            try:
+                job_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None  # the warm worker died or wrote nothing — fall back one-shot
+        finally:
+            try:
+                result_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        seconds = float(payload.get("seconds") or (time.time() - t0))
+        if not payload.get("ok"):
+            return CadResult(False, None,
+                             payload.get("problem") or "The design couldn't be computed.",
+                             payload.get("detail"), seconds)
+        stl = (payload.get("outputs") or {}).get("stl")
+        return CadResult(True, Path(stl) if stl else None, None, None, seconds)
 
     def meta_for(self, source: Path) -> dict | None:
         """The last run's meta report for this source (bbox, volume, parts), or None."""
