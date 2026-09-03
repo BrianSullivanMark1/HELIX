@@ -152,6 +152,12 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
     # ----- shell actions -----
     @app.get("/api/snapshot")
     def snapshot():
+        # 503 the moment a quit is accepted: the icon click's liveness probe (cli.backend_alive) must
+        # read a TEARING-DOWN instance as dead, or a click right after "Quit HELIX" probes the last
+        # seconds of the dying server, gets a 200, opens a tab on it — and then nothing is running.
+        # The real teardown takes several seconds after the quit route answers; this flag doesn't.
+        if getattr(app.state, "quitting", False):
+            return JSONResponse({"error": "shutting down"}, status_code=503)
         return shell.snapshot()
 
     @app.post("/api/shell/submit")
@@ -190,6 +196,10 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         do_quit = getattr(app.state, "quit", None)
         if do_quit is None:
             return JSONResponse({"error": "no quit hook"}, status_code=501)
+        # Mark the instance dying BEFORE the teardown starts: from this moment the snapshot probe
+        # answers 503, so an icon click during the (seconds-long) teardown waits for the lock and
+        # boots in our place instead of pointing a tab at a corpse.
+        app.state.quitting = True
         threading.Timer(0.4, do_quit).start()  # let this response reach the page first
         return {"ok": True}
 

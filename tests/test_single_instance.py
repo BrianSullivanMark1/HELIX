@@ -243,6 +243,12 @@ def test_backend_alive_proves_life_and_death():
         srv.shutdown()
     # the port is closed now: a dead backend must read as dead, fast, with no exception
     assert backend_alive(srv.server_address[1], "tok", tries=1, timeout=0.3) is False
+    # a TEARING-DOWN backend answers 503 (the quit route flips it) — that is dead too, not alive
+    dying = _fake_backend(status=503)
+    try:
+        assert backend_alive(dying.server_address[1], "tok", tries=1) is False
+    finally:
+        dying.shutdown()
 
 
 def test_open_running_face_opens_only_a_live_backend(tmp_path, monkeypatch):
