@@ -104,19 +104,28 @@ def _run() -> int:
         return runner.main(argv[1:])
 
     # Single instance BEFORE the voice pre-warm and before any PyQt6 import (see module docstring).
-    from helix.app.single_instance import become_primary_or_signal
+    # The Qt activation ping only exists in the legacy shell, so a web-mode duplicate must not spend
+    # 20s dialing a server nobody started (signal only when 'qt' was asked for).
+    from helix.app.single_instance import become_primary_after_quit, become_primary_or_signal
     from helix.config import AppPaths
 
     is_relaunch = "--relaunch" in argv
-    if not become_primary_or_signal(AppPaths.resolve().data, is_relaunch=is_relaunch):
+    if not become_primary_or_signal(AppPaths.resolve().data, is_relaunch=is_relaunch,
+                                    signal="qt" in argv):
         # Another instance owns this data dir. In the browser-tab world a repeat icon click means
-        # "show me HELIX" — open a tab on the running backend before stepping aside (a no-op for
-        # the qt/headless modes, whose surfacing is the activation ping above).
-        if not any(a in ("qt", "watchdog", "cadworker", "--headless") for a in argv):
-            from helix.app.cli import open_running_face  # no Qt on this path
+        # "show me HELIX" — open a tab on the running backend and step aside. But PROVE it is alive
+        # first: during a quit the dying process still holds the lock while its server is already
+        # gone, and blindly opening a tab there showed a connection error AND left HELIX dead. When
+        # the probe fails, wait for the outgoing instance to release the lock and boot in its place —
+        # the icon click that used to bounce off a teardown now IS the restart.
+        if any(a in ("qt", "watchdog", "cadworker", "--headless") for a in argv):
+            return 0
+        from helix.app.cli import open_running_face  # no Qt on this path
 
-            open_running_face()
-        return 0
+        if open_running_face():
+            return 0
+        if not become_primary_after_quit(AppPaths.resolve().data):
+            return 0  # a healthy primary really holds the lock; don't boot a rival for its port
 
     _prewarm_voice_if_enabled()
     from helix.app.cli import main  # imported after prewarm — Qt loads lazily inside

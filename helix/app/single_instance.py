@@ -199,9 +199,16 @@ def _signal_existing_instance(data_dir: Path | str) -> None:
         time.sleep(0.1)
 
 
-def become_primary_or_signal(data_dir: Path | str, *, is_relaunch: bool) -> bool:
+def become_primary_or_signal(data_dir: Path | str, *, is_relaunch: bool, signal: bool = True) -> bool:
     """The single entry-point decision. Returns True if we hold the singleton (proceed to launch). Returns
-    False after asking the already-running instance to come to the front (the caller should exit).
+    False when another instance does — after asking it to come to the front IF ``signal`` is set (the
+    caller should then exit).
+
+    ``signal=False`` is the WEB-shell path: the activation QLocalServer only exists in the legacy Qt
+    shell, so signalling from a web-mode duplicate is a 20-second connect-retry spin at a server that
+    was never started — the icon re-click felt dead for exactly that long, and a click during a quit
+    spun right past the moment the lock freed. A web duplicate raises HELIX by opening a browser tab
+    (cli.open_running_face), which needs no Qt and no server.
 
     Idempotent per-process: once we are the primary a second call is a no-op returning True — so the
     main.py gate and the cli.main backstop can both call it without fighting."""
@@ -224,7 +231,26 @@ def become_primary_or_signal(data_dir: Path | str, *, is_relaunch: bool) -> bool
         _PRIMARY_GUARD = guard
         guard.acquire_in_background()
         return True
-    _signal_existing_instance(data_dir)
+    if signal:
+        _signal_existing_instance(data_dir)
+    return False
+
+
+def become_primary_after_quit(data_dir: Path | str, *, wait_seconds: float = 25.0) -> bool:
+    """The icon was clicked while the previous instance was still tearing down: the lock is held but the
+    backend answers nothing (the probe in cli.open_running_face failed). Wait for the dying instance to
+    release the lock and take over — but WITHOUT the relaunch path's force-proceed: if a healthy primary
+    actually holds the lock (the probe failed for some other reason), booting a rival that fights it for
+    the port would be worse than stepping aside. Returns True when we now hold the singleton."""
+    global _PRIMARY_GUARD
+    if _PRIMARY_GUARD is not None:
+        return True
+    guard = InstanceGuard(data_dir)
+    if guard.acquire(wait_seconds=max(0.0, wait_seconds)):
+        _PRIMARY_GUARD = guard
+        _LOG.info("took over the singleton after the outgoing instance released it")
+        return True
+    _LOG.warning("lock still held after %.0fs and the backend never answered — stepping aside", wait_seconds)
     return False
 
 

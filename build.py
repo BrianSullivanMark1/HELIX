@@ -173,14 +173,29 @@ def main(argv: list[str] | None = None) -> int:
     # installed would make PyInstaller warn on every build.)
     if icon.exists():
         args += ["--icon", str(icon)]
-    if "--with-voice" in argv:
-        # Collect faster-whisper AND its native deps (ctranslate2; onnxruntime drives the VAD) — without
-        # them the frozen app imports faster_whisper but crashes loading the model.
-        for pkg in ("faster_whisper", "ctranslate2", "onnxruntime", "edge_tts"):
-            args += ["--collect-all", pkg]
-    else:  # lean build — local STT off (the OS voice still works), keeps it small + fast
-        args += ["--exclude-module", "faster_whisper", "--exclude-module", "edge_tts",
-                 "--exclude-module", "torch"]
+    # VOICE IS PART OF THE PRODUCT and ships BY DEFAULT. The old polarity (--with-voice opt-in) is how
+    # the 2026-09-03 rebuild silently shipped a mute HELIX: a plain `python build.py` excluded
+    # faster_whisper and edge_tts, every utterance logged "No module named 'faster_whisper'", and the
+    # neural TTS fell back to the OS voice. `--no-voice` is the explicit opt-out for a lean build.
+    if "--no-voice" in argv:
+        args += ["--exclude-module", "faster_whisper", "--exclude-module", "edge_tts"]
+    else:
+        import importlib.util as _ilu
+
+        # faster-whisper AND its full runtime surface: ctranslate2 (the native engine), onnxruntime
+        # (the VAD), tokenizers + huggingface_hub (model load/download), av (its audio decoder import).
+        # Collect ONLY what is installed — collect-all on a missing package fails the whole build (the
+        # vtkmodules lesson), and a machine without a piece should build lean-er, not not-at-all.
+        for pkg in ("faster_whisper", "ctranslate2", "onnxruntime", "tokenizers",
+                    "huggingface_hub", "av", "edge_tts"):
+            if _ilu.find_spec(pkg) is not None:
+                args += ["--collect-all", pkg]
+            else:
+                print(f"NOTE: voice dep '{pkg}' not installed — building without it")
+    # torch is excluded in EVERY profile: nothing on the voice path needs it (faster-whisper runs on
+    # ctranslate2), only the neural speaker-id would reach for it and that has a documented DSP
+    # fallback — while collecting it would add gigabytes.
+    args += ["--exclude-module", "torch"]
     args.append(str(ROOT / "main.py"))
 
     # LIVE user data (keys, history, built apps) may still sit at dist/<name>/data from an older install

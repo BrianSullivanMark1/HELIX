@@ -6,11 +6,36 @@ import argparse
 from pathlib import Path
 
 
-def open_running_face() -> None:
+def backend_alive(port: int, token: str, *, tries: int = 3, timeout: float = 1.2) -> bool:
+    """Is a HELIX backend actually answering on this port with this token? A cheap authenticated GET of
+    /api/snapshot — urllib only, no Qt, no new dependency. A couple of retries ride out a momentarily
+    busy server; a dead or dying one fails fast. Never raises."""
+    import time
+    import urllib.request
+
+    for attempt in range(max(1, tries)):
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/snapshot", headers={"X-Helix-Token": token})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:  # noqa: BLE001 — refused/timeout/reset all mean the same thing here
+            pass
+        if attempt + 1 < tries:
+            time.sleep(0.4)
+    return False
+
+
+def open_running_face() -> bool:
     """HELIX is already running — the icon click means "show me HELIX", so open (another) browser
     tab on the running backend and step aside. Port + token live in settings, written by the running
-    instance at its own startup. Best-effort: the hard guarantee stays the single-instance lock.
-    Called from BOTH gates (main.py's, and this module's backstop for the console-script entry)."""
+    instance at its own startup.
+
+    Returns True only when the backend PROVED it is alive first and the tab was pointed at it. The
+    probe is the fix for the quit-then-click race: the singleton lock is held until the dying process
+    exits, and blindly opening a tab there handed the user a connection error AND left nothing
+    running. On False the caller (main.py's gate) waits for the lock instead and boots in its place."""
     try:
         import webbrowser
 
@@ -21,10 +46,12 @@ def open_running_face() -> None:
         settings = JsonSettings(AppPaths.resolve().settings_file)
         token = (settings.get(TOKEN_SETTING) or "").strip()
         port = int(settings.get(PORT_SETTING) or DEFAULT_PORT)
-        if token:
-            webbrowser.open(f"http://127.0.0.1:{port}/?t={token}")
+        if not token or not backend_alive(port, token):
+            return False
+        webbrowser.open(f"http://127.0.0.1:{port}/?t={token}")
+        return True
     except Exception:  # noqa: BLE001
-        pass
+        return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,13 +90,20 @@ def main(argv: list[str] | None = None) -> int:
     # Backstop single-instance guard for the `helix` console-script entry, which reaches here WITHOUT
     # going through main.py's gate. Idempotent: on the normal main.py path we already hold the lock, so
     # this is a no-op. (This path skips the voice pre-warm anyway, so guarding here costs nothing extra.)
-    from helix.app.single_instance import become_primary_or_signal
+    # Only the Qt shell gets the QLocalServer activation ping; a web duplicate raises HELIX by opening
+    # a tab — and if the backend is actually dead (a quit mid-teardown holds the lock), it WAITS for
+    # the lock and boots in the outgoing instance's place instead of leaving nothing running.
+    from helix.app.single_instance import become_primary_after_quit, become_primary_or_signal
     from helix.config import AppPaths
 
-    if not become_primary_or_signal(AppPaths.resolve().data, is_relaunch=False):
-        if args.command in ("ui", "web") and not args.headless:
-            open_running_face()
-        return 0
+    if not become_primary_or_signal(AppPaths.resolve().data, is_relaunch=False,
+                                    signal=(args.command == "qt")):
+        if args.command == "qt" or args.headless:
+            return 0
+        if open_running_face():
+            return 0  # live HELIX — the click opened (another) tab on it
+        if not become_primary_after_quit(AppPaths.resolve().data):
+            return 0  # someone healthy really does hold the lock; don't boot a rival
 
     if args.command in ("ui", "web"):  # the web shell IS the default face now
         from helix.app.webboot import run_web  # no Qt on this path

@@ -157,6 +157,48 @@ def test_acquire_in_background_reclaims_once_the_lock_frees(tmp_path, monkeypatc
     assert backend.calls >= 2  # it kept trying and took the lock once it came free
 
 
+def test_web_mode_duplicate_never_dials_the_qt_activation_server(tmp_path, monkeypatch):
+    """The web shell never starts the QLocalServer, so a duplicate signalling it spins its full 20s
+    connect-retry loop at nothing — the icon re-click 'felt dead' for exactly that long, and a click
+    during a quit outwaited the very lock release it needed. signal=False (the web path) must skip it."""
+    signalled = []
+    monkeypatch.setattr(si, "_signal_existing_instance", lambda d: signalled.append(d))
+
+    class _AlwaysTaken:
+        def try_acquire(self):
+            return False
+
+    monkeypatch.setattr(si, "_make_primary_backend", lambda d, n: _AlwaysTaken())
+    assert si.become_primary_or_signal(tmp_path, is_relaunch=False, signal=False) is False
+    assert signalled == []  # no Qt, no 20-second spin — the caller opens a browser tab instead
+
+
+def test_after_quit_takeover_waits_for_the_lock_then_boots(tmp_path, monkeypatch):
+    """The quit-then-click race: the dying instance holds the lock for a few seconds after its server
+    stopped answering. The click must WAIT for the release and become primary — that click IS the
+    restart the user asked for."""
+    monkeypatch.setattr(si.time, "sleep", lambda _s: None)
+    backend = _CountingBackend(flip_after=3)  # the outgoing instance releases on the 4th poll
+    monkeypatch.setattr(si, "_make_primary_backend", lambda d, n: backend)
+    assert si.become_primary_after_quit(tmp_path, wait_seconds=5) is True
+    assert si._PRIMARY_GUARD is not None
+    assert backend.calls == 4
+
+
+def test_after_quit_takeover_never_boots_a_rival_against_a_healthy_primary(tmp_path, monkeypatch):
+    """If the probe failed but the lock never frees, a HEALTHY primary holds it — force-booting a rival
+    would fight it for the port. Unlike --relaunch, this path steps aside."""
+    monkeypatch.setattr(si.time, "sleep", lambda _s: None)
+
+    class _NeverFrees:
+        def try_acquire(self):
+            return False
+
+    monkeypatch.setattr(si, "_make_primary_backend", lambda d, n: _NeverFrees())
+    assert si.become_primary_after_quit(tmp_path, wait_seconds=0.05) is False
+    assert si._PRIMARY_GUARD is None  # not primary, and no background force-reclaim either
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows named-mutex backend")
 def test_real_windows_mutex_excludes_a_second_guard(tmp_path):
     first = si.InstanceGuard(tmp_path)  # real _WindowsMutexBackend
@@ -164,3 +206,65 @@ def test_real_windows_mutex_excludes_a_second_guard(tmp_path):
     second = si.InstanceGuard(tmp_path)
     assert second.acquire(wait_seconds=0) is False
     assert first is not None  # keep the mutex handle alive for the duration of the assertions
+
+
+# ---------------------------------------------------------------------------------------------
+# The other half of the restart story: the icon click's backend probe (cli.backend_alive /
+# open_running_face). A tab must only ever be opened at a backend that PROVED it is alive; a dead
+# one returns False so the gate waits for the lock instead of leaving the user a connection error.
+# ---------------------------------------------------------------------------------------------
+
+def _fake_backend(status: int = 200):
+    """A minimal live 'HELIX backend': answers /api/snapshot on an ephemeral localhost port."""
+    import http.server
+    import threading
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server's contract
+            self.send_response(status if self.path == "/api/snapshot" else 404)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *a):  # keep the test output quiet
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_backend_alive_proves_life_and_death():
+    from helix.app.cli import backend_alive
+
+    srv = _fake_backend()
+    try:
+        assert backend_alive(srv.server_address[1], "tok") is True
+    finally:
+        srv.shutdown()
+    # the port is closed now: a dead backend must read as dead, fast, with no exception
+    assert backend_alive(srv.server_address[1], "tok", tries=1, timeout=0.3) is False
+
+
+def test_open_running_face_opens_only_a_live_backend(tmp_path, monkeypatch):
+    import json
+
+    opened: list[str] = []
+    monkeypatch.setenv("HELIX_DATA_DIR", str(tmp_path))
+    import webbrowser
+
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url) or True)
+    from helix.app import cli
+
+    srv = _fake_backend()
+    port = srv.server_address[1]
+    (tmp_path / "helix_settings.json").write_text(
+        json.dumps({"web_token": "tok-abc", "web_port": port}), encoding="utf-8")
+    try:
+        assert cli.open_running_face() is True
+        assert opened and f":{port}/?t=tok-abc" in opened[0]
+    finally:
+        srv.shutdown()
+    # same settings, dead backend: no tab, False — the caller takes over the lock instead
+    opened.clear()
+    assert cli.open_running_face() is False
+    assert opened == []
