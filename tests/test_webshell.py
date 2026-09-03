@@ -95,6 +95,92 @@ def test_a_typed_sleep_with_no_ears_answers_honestly_and_never_runs_a_turn(rig):
     assert container.conversation.turns == []
 
 
+class _SleepyVoice:
+    """Recording ears for the sleep-holder chain — the exact surface _on_sleep_requested and
+    voice_state touch, nothing lazy: a missing method here should fail loudly, not stub silently."""
+
+    def __init__(self, ears: bool = True):
+        self._ears = ears
+        self._muted = False
+        self.muted_calls: list[tuple] = []
+        self.learned: list[str] = []
+
+    def supported(self):
+        return self._ears
+
+    def enabled(self):
+        return self._ears
+
+    def can_listen(self):
+        return self._ears
+
+    def prewarm_error(self):
+        return ""
+
+    def is_muted(self):
+        return self._muted
+
+    def set_muted(self, on, announce=True):
+        self._muted = bool(on)
+        self.muted_calls.append((bool(on), announce))
+
+    def learn_sleep(self, command):
+        self.learned.append(command)
+
+    def shutdown(self):
+        pass
+
+
+def test_the_sleep_tool_holder_is_fulfilled_and_the_phrase_learned():
+    """The go_to_sleep chain, end to end at the shell: the tool's holder is claimed, the SPOKEN
+    phrase that led here is consolidated into a reflex (next time no model turn), the mute is quiet
+    (the model's goodnight IS the announce), the holder settles True, and the UI hears the new
+    voice state. Every link — a chain with one dead link reports sleep that never happened."""
+    from helix.domain.events import SleepRequest, SleepRequested
+
+    container = _Container()
+    events: list[dict] = []
+    voice = _SleepyVoice()
+    sh = ShellSession(container, events.append, voice=voice)
+    try:
+        sh._last_user_utterance = "wind down for the night"  # what submit(from_voice=True) records
+        req = SleepRequest()
+        container.bus.publish(SleepRequested(request=req))
+        assert req.wait(timeout=2.0) is True, req.error
+        assert voice.muted_calls == [(True, False)]
+        assert voice.learned == ["wind down for the night"]
+        assert any(e.get("t") == "voice" and e.get("muted") for e in events)
+    finally:
+        sh.shutdown()
+
+
+def test_the_sleep_holder_fails_honestly_with_no_ears(rig):
+    from helix.domain.events import SleepRequest, SleepRequested
+
+    container, events, sh = rig  # the rig's shell has voice=None
+    req = SleepRequest()
+    container.bus.publish(SleepRequested(request=req))
+    assert req.wait(timeout=2.0) is False
+    assert "nothing" in (req.error or "").lower()  # the model relays this instead of a goodnight
+
+
+def test_an_abandoned_sleep_holder_never_mutes():
+    """The worker gave up (cancel/timeout) before the shell got there: claiming fails and the ears
+    must be left exactly as they were — a late mute would close the mic with nobody told."""
+    from helix.domain.events import SleepRequest, SleepRequested
+
+    container = _Container()
+    voice = _SleepyVoice()
+    sh = ShellSession(container, lambda e: None, voice=voice)
+    try:
+        req = SleepRequest()
+        req.abandon()
+        container.bus.publish(SleepRequested(request=req))
+        assert voice.muted_calls == []
+    finally:
+        sh.shutdown()
+
+
 def test_a_typed_stop_never_becomes_a_turn(rig):
     container, events, sh = rig
     sh.submit("stop")
