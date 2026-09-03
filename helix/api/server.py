@@ -183,6 +183,16 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         body = await request.json()
         return shell.voice_op(str(body.get("op") or ""))
 
+    @app.post("/api/shell/quit")
+    def quit_helix():
+        """The polite off switch (Settings → Power). webboot wires the actual shutdown; without it
+        (tests) the route reports it can't."""
+        do_quit = getattr(app.state, "quit", None)
+        if do_quit is None:
+            return JSONResponse({"error": "no quit hook"}, status_code=501)
+        threading.Timer(0.4, do_quit).start()  # let this response reach the page first
+        return {"ok": True}
+
     @app.post("/api/shell/suggest_dismiss")
     async def suggest_dismiss(request: Request):
         body = await request.json()

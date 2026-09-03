@@ -9,6 +9,7 @@ This module is under helix/app/ and therefore PROTECTED — the self-coder may n
 """
 from __future__ import annotations
 
+import os
 import threading
 import webbrowser
 from pathlib import Path
@@ -68,6 +69,24 @@ def run_web(open_mode: str = "window") -> int:
         voice.on_muted = lambda _m: shell.push({"t": "voice", **shell.voice_state()})
 
     app = build_app(container, shell, hub, _web_dist(container.paths.root))
+
+    def graceful_quit() -> None:
+        """Settings → Quit HELIX: the same teardown the finally block runs, then end the process
+        (uvicorn's thread would otherwise keep it alive forever in browser mode)."""
+        _LOG.info("quit requested from the face")
+        try:
+            shell.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        for fn in (container.build_queue.shutdown, container.selfdev_lane.shutdown,
+                   container.subscription.shutdown, container.store.close):
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                pass
+        os._exit(0)
+
+    app.state.quit = graceful_quit
     port = int(container.settings.get(PORT_SETTING) or DEFAULT_PORT)
     token = app.state.token
     url = f"http://127.0.0.1:{port}/?t={token}"

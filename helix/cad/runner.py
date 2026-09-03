@@ -88,7 +88,10 @@ def _read_stl_tris(stl_path: Path):
 # only at real support-job area — while a hung interior (tens of cm²) or a lifted floor still shouts.
 _OVERHANG_NZ = -0.72          # unit face normal z below this ≈ steeper than 45° downward
 _WARN_MIN_Z_MM = 1.2          # ceilings at/below this are near-plate cosmetic recesses — bridged fine
-_WARN_AREA_CM2 = 3.0          # report overhang past this much area
+_WARN_AREA_CM2 = 4.0          # report overhang past this much area. Calibrated on the IronEye
+                              # joint: a fully-jointed two-half shell carries ~3 cm² of benign
+                              # micro-bridges (0.5 mm chamfer residue on the lip, port ceilings)
+                              # that print clean — real support jobs measure far past this.
 _ISLAND_GAP_MM = 0.6          # a solid whose lowest point is above this floats entirely
 
 

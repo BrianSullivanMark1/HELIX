@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import Orb from "./components/Orb";
 import CameraModal from "./components/CameraModal";
 import ConnectModal from "./components/ConnectModal";
+import StateColor from "./components/StateColor";
 import Console from "./pages/Console";
 import Menu from "./pages/Menu";
 import Settings from "./pages/Settings";
@@ -78,16 +79,9 @@ export default function App() {
 
   return (
     <div className="h-full w-full relative overflow-hidden">
-      <div
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          background:
-            "radial-gradient(1200px 700px at 50% 30%, rgba(42,140,255,0.05), transparent 60%)," +
-            "radial-gradient(900px 500px at 50% 90%, rgba(63,224,224,0.04), transparent 70%)",
-          zIndex: 1,
-        }}
-      />
+      <div className="atmosphere" style={{ zIndex: 1 }} />
       {onConsole && <Orb />}
+      <StateColor />
 
       {/* reveal strip */}
       <div

@@ -13,17 +13,19 @@ const STATE_LINES: Record<string, string> = {
   speaking: "Speaking…",
 };
 
-function BubbleView({ b }: { b: Bubble }) {
+function BubbleView({ b, idx }: { b: Bubble; idx: number }) {
   const useAction = useHelix((s) => s.useAction);
   const isUser = b.role === "user";
   const isSystem = b.role === "system";
+  // eslint-disable-next-line react-hooks/rules-of-hooks
   const fire = (id: string, label: string) => {
     useAction(b.id, label);
     void api.post("/api/shell/action", { id }).catch(() => undefined);
   };
   const copy = () => void navigator.clipboard.writeText(b.text);
   return (
-    <div className={`w-full flex ${isUser ? "justify-end" : "justify-start"} fade-up`}>
+    <div className={`w-full flex ${isUser ? "justify-end" : "justify-start"} materialize`}
+      style={{ "--i": idx % 4 } as React.CSSProperties}>
       <div
         className="group relative max-w-[560px] rounded-2xl px-4 py-2.5 text-[14px] leading-relaxed"
         style={{
@@ -100,7 +102,20 @@ export default function Console() {
   const scroller = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const pttRef = useRef<HTMLButtonElement>(null);
   const [ptt, setPtt] = useState(false);
+
+  // While Hold-to-Talk is held, the mic level fills the gauge ring (scoped to the button).
+  useEffect(() => {
+    if (!ptt) return;
+    let raf = 0;
+    const tick = () => {
+      pttRef.current?.style.setProperty("--level", String(useHelix.getState().level));
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [ptt]);
 
   useEffect(() => {
     if (keepInput) {
@@ -204,17 +219,16 @@ export default function Console() {
         className="flex-1 w-full max-w-[820px] overflow-y-auto flex flex-col gap-3 py-4 px-2"
         style={{ pointerEvents: "auto" }}
       >
-        {bubbles.map((b) => (
-          <BubbleView key={b.id} b={b} />
+        {bubbles.map((b, i) => (
+          <BubbleView key={b.id} b={b} idx={i} />
         ))}
       </div>
 
-      {/* status pill */}
+      {/* status pill — a plasma conduit carrying the star's color; the busy arc IS the spinner */}
       <div
-        className="rounded-full px-5 py-1.5 text-[13px] elide max-w-[760px] mb-3"
+        className={`pill-conduit ${busy ? "busy" : ""} rounded-full px-5 py-1.5 text-[13px] elide max-w-[760px] mb-3`}
         style={{
           background: "rgba(8,11,15,0.92)",
-          border: "1px solid var(--cyan-dim)",
           color: "var(--muted)",
           pointerEvents: "auto",
         }}
@@ -281,8 +295,8 @@ export default function Console() {
       <div className="w-full max-w-[820px] flex items-end gap-2" style={{ pointerEvents: "auto" }}>
         {voice?.supported && voice.listening && (
           <button
-            className="btn text-[13px] shrink-0"
-            style={ptt ? { borderColor: "var(--cyan)", color: "var(--cyan)" } : undefined}
+            ref={pttRef}
+            className={`btn text-[13px] shrink-0 ptt-gauge ${ptt ? "held" : ""}`}
             onMouseDown={() => {
               setPtt(true);
               void api.post("/api/shell/voice", { op: "ptt_start" });

@@ -661,6 +661,33 @@ GEOMETRY RULES (what makes it compute, and print):
   * Strap/band/belt loops are flat TABS in the part's plane with a slot cut through — never rings
     protruding off a face (a protruding ring floats the whole part on its rim).
   * Holes through vertical walls are fine (small bridged tops); keep bridges under ~12 mm.
+- ASSEMBLY IS PART OF THE DESIGN — parts that mate must actually JOIN and actually FIT:
+  * TWO-HALF SHELLS: rims that merely touch fall apart in the hand. ONE half gets lip_ring(...) on
+    its rim (same inner dims / wall / corner r as both halves; it seats into the other half's
+    cavity with SNAP_CLEAR built in). lip_h must be at most the RECEIVING half's depth minus its
+    wall minus 0.5 — put the lip on whichever half makes that true (usually the deeper half,
+    seating into the shallower lid). Anything worn, carried, or holding electronics ALSO gets 2+
+    screws: screw_boss() towers in one half, csk_hole() through the other half's floor. TOWER
+    HEIGHT has a formula — from the tower half's inner floor:
+      tower_h = (own_depth - own_wall) + (other_depth - other_wall) - 0.5
+    so the insert sits 0.5 mm shy of the other half's inner floor and a short screw engages it.
+    Screws are COUNTERSUNK (DIN 965) heads — say so in the assembly note; the size PAIRS are
+    fixed: M3 insert ↔ csk_hole(3.4, 6.3) [the defaults], M2 ↔ csk_hole(2.4, 4.4),
+    M2.5 ↔ csk_hole(2.9, 5.5).
+  * MIRRORED MATING: both halves print plate-face-out, so one is FLIPPED about Y when assembled —
+    a feature at (+x, y) in one half meets (-x, y) in the other. VERIFY it mechanically: every
+    tower position (tx, ty) must equal some hole position (-hx, hy), pair by pair, written out.
+  * COLLISION-CHECK BOTH FRAMES: within each half, towers, standoffs, shelves, grilles, grooves
+    and bays keep 2 mm of air between each other. THEN check the ASSEMBLED frame: map the other
+    half's interior through (x -> -x, z -> total_depth - z) and keep 2 mm of air against anything
+    of yours that crosses the rim plane (towers, the lip, tall shelves). Compute every position
+    from the same named parameters so a slider move cannot silently recreate an overlap, and clamp
+    derived positions so the extremes of every declared range still fit inside the cavity.
+  * CLEARANCE wherever something inserts: FIT (0.30) per side for slides and boards, SNAP_CLEAR
+    (0.15) for lips. A pocket's INNER dims are the part + 2*FIT — mind which dimension a helper
+    takes (a rim/frame built from OUTER dims must add its own wall on top of the clearance).
+  * SAY how it assembles in the docstring Parts list ("front shell — lip ring + 2x M2x8
+    countersunk into tower inserts"), so the owner knows without asking.
 - Every part sits on Z=0 the way it prints. Keep it real: this geometry exists to be made.
 
 HARD LIMITS: no os / sys / subprocess / open() / network — the compile is sandboxed and any of these

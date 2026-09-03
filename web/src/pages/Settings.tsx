@@ -212,6 +212,21 @@ export default function Settings() {
           </div>
         </section>
 
+        <section className="glass rounded-2xl p-5">
+          <div className="section-title mb-4">Power</div>
+          <div className="flex items-center gap-4">
+            <button className="btn btn-danger" onClick={() => {
+              if (!window.confirm("Quit HELIX? Watchers, reminders and voice stop until you launch it again.")) return;
+              void api.post("/api/shell/quit").catch(() => undefined);
+              setNote("HELIX is shutting down — this tab can be closed.");
+            }}>⏻ Quit HELIX</button>
+            <span className="text-xs" style={{ color: "var(--muted)" }}>
+              Closing the browser tab does not stop HELIX — it keeps working in the background.
+              This button shuts it down fully; the desktop icon starts it again.
+            </span>
+          </div>
+        </section>
+
         {note && <div className="text-[13px]" style={{ color: "var(--cyan)" }}>{note}</div>}
       </div>
 

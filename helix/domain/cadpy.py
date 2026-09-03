@@ -365,7 +365,7 @@ from dataclasses import dataclass, field
 
 from build123d import *  # noqa: F401,F403 — the design language rides on build123d's names
 from build123d import (
-    Align, Axis, Box, BuildPart, Compound, Cylinder, Location, Part, Plane, Pos, Rot,
+    Align, Axis, Box, BuildPart, Compound, Cone, Cylinder, Location, Part, Plane, Pos, Rot,
     chamfer, extrude, fillet,
 )
 
@@ -574,12 +574,91 @@ def screw_boss(height: float, insert_d: float = INSERT_M3) -> Part:
     return standoff(height, insert_d, od=insert_d + 4.4)
 
 
+def lip_ring(inner_l: float, inner_w: float, wall: float = 2.0, r: float = 3.0,
+             lip_h: float = 4.0, lip_t: float | None = None, clear: float = SNAP_CLEAR) -> Part:
+    """THE JOINT between two shell halves: an L-profile seating lip ADDed to one half's rim that
+    inserts into the other half's cavity. Two shell_box halves that merely meet rim-to-rim fall
+    apart — every two-half enclosure needs this (plus screws when it is worn or handled).
+
+    Give it the SAME inner_l/inner_w/wall/r as both halves. The L-profile matters: a BASE FLANGE
+    overlaps the rim wall top (so the ring prints ON the rim, never floating over the cavity), and
+    the inset lip rises from it with the mating clearance; the flange's inboard underside is
+    chamfered 45° so it self-supports. Which half gets it: whichever RECEIVING half satisfies
+    lip_h <= (receiver depth - receiver wall - 0.5) — usually the lip goes on the deeper half,
+    seating into the shallower lid. Position it at the lip half's rim plane, where for a shell_box
+    half of height `depth` the rim plane is simply z = depth:
+
+        shell = shell + Pos(0, 0, depth - 0.01) * lip_ring(inner_l, inner_w, wall, r)
+    """
+    t = lip_t if lip_t is not None else max(1.2, wall * 0.6)
+    base_h = 2.0
+    over = max(0.8, wall - 1.0)                    # how far the flange overlaps the rim wall top
+    ol, ow = inner_l - 2 * clear, inner_w - 2 * clear
+    # Base flange: from the rim-wall overlap down to the lip's inner bore — SITS ON THE RIM.
+    base = rbox(inner_l + 2 * over, inner_w + 2 * over, base_h, r)
+    base = base - (Pos(0, 0, -1) * rbox(ol - 2 * t, ow - 2 * t, base_h + 2,
+                                        max(r - wall - t, 0.5)))
+    # The rising lip that seats into the other cavity.
+    lip = rbox(ol, ow, base_h + lip_h, max(r - wall, 0.8))
+    lip = lip - (Pos(0, 0, -1) * rbox(ol - 2 * t, ow - 2 * t, base_h + lip_h + 2,
+                                      max(r - wall - t, 0.5)))
+    ring = base + lip
+    # Chamfer the bottom edges so the flange underside self-supports at ~45°. The size must cover
+    # the FULL inboard overhang (t + clear — the part hanging over the cavity void), capped by the
+    # base height and never allowed to fail-and-vanish (a swallowed failure here once shipped a
+    # 5.8 cm² floating underside; an undersized chamfer shipped a 2.6 cm² ring).
+    # A single try/except here once swallowed a failing chamfer and shipped the flat underside it
+    # exists to prevent — so this is a RETRY LADDER: shrink until the kernel accepts one. The last
+    # rungs are small enough to succeed on any corner combination this ring can produce.
+    want = max(0.3, min(t + clear - 0.05, base_h - 0.05))
+    for cham in (want, want * 0.7, want * 0.5, 0.45, 0.3):
+        try:
+            bottom = ring.edges().group_by(Axis.Z)[0]
+            ring = chamfer(bottom, cham)
+            break
+        except Exception:  # noqa: BLE001 — try the next rung
+            continue
+    return ring
+
+
+def lip_rebate(inner_l: float, inner_w: float, wall: float = 2.0, r: float = 3.0,
+               clear: float = SNAP_CLEAR) -> Part:
+    """The RECEIVING half's counterpart to lip_ring: a rebate (rabbet) CUTTER that widens the
+    cavity mouth so the lip's base flange nests INSIDE the rim and the two rims still meet flush
+    outside it. Without this, the flange lands ON the receiving rim and holds the halves ~2 mm
+    apart (measured by assembled boolean intersection — that is how this helper was born).
+    Subtract at the receiving half's rim, matching dims:
+
+        lid = lid - (Pos(0, 0, depth - 2.2) * lip_rebate(inner_l, inner_w, wall, r))
+    """
+    over = max(0.8, wall - 1.0)
+    depth_cut = 2.0 + clear + 0.05                 # the flange's base_h plus seating clearance
+    ol, ow = inner_l + 2 * (over + clear), inner_w + 2 * (over + clear)
+    ring = rbox(ol, ow, depth_cut + 2, r)
+    bore = Pos(0, 0, -1) * rbox(inner_l - 2, inner_w - 2, depth_cut + 4, max(r - wall, 0.5))
+    return ring - bore
+
+
+def csk_hole(screw_d: float = 3.4, head_d: float = 6.3, depth: float = 12.0) -> Part:
+    """A countersunk through-hole CUTTER for a COUNTERSUNK (DIN 965) screw entering through the
+    printed plate face: subtract it at the hole position, cone opening toward Z=0 (the outside
+    face), head flush. THE PAIRING (defaults match screw_boss's INSERT_M3 default): M3 → clearance
+    3.4, csk head 6.3. Other sizes: M2 → csk_hole(2.4, 4.4); M2.5 → csk_hole(2.9, 5.5). Specify
+    countersunk-head screws in the assembly note — a pan head stands proud of the face."""
+    shank = Pos(0, 0, -1) * Cylinder(screw_d / 2, depth + 2, align=(Align.CENTER, Align.CENTER, Align.MIN))
+    csk_h = (head_d - screw_d) / 2  # a 90-degree countersink
+    cone = Pos(0, 0, -0.01) * Cone(head_d / 2, screw_d / 2, csk_h + 0.01,
+                                   align=(Align.CENTER, Align.CENTER, Align.MIN))
+    return shank + cone
+
+
 def strap_tab(slot_w: float, slot_h: float = 6.0, thickness: float = 3.0,
               margin: float = 4.0) -> Part:
     """A PRINTABLE strap/band anchor: a flat tab with the slot cut through it, lying in the XY
     plane on Z=0 — thread the elastic through the slot. Use this instead of a ring protruding off
-    a face (a protruding ring floats the part on its rim and the slicer refuses it). Center the tab
-    beyond the part's edge and union it flush with the part's plate face."""
+    a face (a protruding ring floats the part on its rim and the slicer refuses it). OVERLAP the
+    tab 5+ mm INTO the body (never merely touching the edge face — that is the coincident-face
+    union the boolean rule forbids) and keep the slot fully outside the wall."""
     tab = rbox(slot_w + 2 * margin, slot_h + 2 * margin, thickness, r=margin * 0.8)
     slot = Pos(0, 0, -1) * rbox(slot_w, slot_h, thickness + 2, r=min(2.0, slot_h / 2 - 0.1))
     return tab - slot
@@ -619,7 +698,16 @@ Helpers (all sit on Z=0, centered X/Y; enclosure sizes are INNER/cavity mm):
   vent_slots(span,depth,rows)        louvres to SUBTRACT (Rot/Pos onto the face)
   usb_cutout(wall,kind)              subtract; kinds usb_c, micro_usb, usb_a, barrel_5_5, rj45
   cable_gland_boss(wall,thread_d)    -> (boss, hole): add boss, subtract hole
-  screw_boss(h,insert_d)             lid screw boss
+  screw_boss(h,insert_d)             lid screw boss / screw TOWER (full-height for two-half shells)
+  lip_ring(l,w,wall,r,lip_h,clear)   THE joint between two shell halves — an L-profile that SITS ON
+                                     one rim and seats into the other cavity (same l/w/wall/r);
+                                     lip_h <= receiver depth - receiver wall - 0.5. ALWAYS pair with
+                                     lip_rebate() cut into the RECEIVING rim, or the flange holds
+                                     the halves apart:
+  lip_rebate(l,w,wall,r,clear)       subtract at the receiving rim: Pos(0,0,depth-2.2)*lip_rebate(...)
+  csk_hole(screw_d,head_d,depth)     countersunk (DIN 965) through-hole cutter, cone toward the
+                                     plate face. PAIRS: M3 defaults ↔ screw_boss INSERT_M3 default;
+                                     M2 = csk_hole(2.4, 4.4); M2.5 = csk_hole(2.9, 5.5)
   strap_tab(slot_w,slot_h,t,margin)  flat slotted band anchor ON the plate — never a protruding ring
   arrange(*parts,gap)                print-plate layout, or return {"body": b, "lid": l}
 build123d in 6 lines (algebra mode): parts combine with + - &; move with Pos(x,y,z)*p and

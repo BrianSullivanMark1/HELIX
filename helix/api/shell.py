@@ -883,16 +883,18 @@ class ShellSession:
     def _run_scheduled(self) -> None:
         if self._agent_running:
             return
+        # due_now() hands back the OBJECTS (Agent/Workflow), not names — run and announce by .name
+        # (the raw repr in the status pill was this bug, caught by looking at the live UI).
         wdue = self.c.workflow_scheduler.due_now()
         runner, name = None, None
         if wdue:
-            name = wdue[0]
+            name = getattr(wdue[0], "name", str(wdue[0]))
             self.c.workflow_scheduler.mark_ran(name)
             runner = lambda: self.c.workflows.run(name)  # noqa: E731
         else:
             due = self.c.scheduler.due_now()
             if due:
-                name = due[0]
+                name = getattr(due[0], "name", str(due[0]))
                 self.c.scheduler.mark_ran(name)
                 runner = lambda: self.c.agents.run(name)  # noqa: E731
         if runner is None:

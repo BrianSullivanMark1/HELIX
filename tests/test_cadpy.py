@@ -164,7 +164,8 @@ def test_the_parts_library_parses_and_carries_the_catalog():
     for key in ("arduino_uno", "esp32_devkitc", "pi_pico", "relay_2ch", "buck_lm2596"):
         assert f'"{key}"' in HELIX_LIB, key
     for helper in ("def shell_box", "def lid_for", "def standoffs_for", "def side_rails",
-                   "def vent_slots", "def usb_cutout", "def cable_gland_boss", "def arrange"):
+                   "def vent_slots", "def usb_cutout", "def cable_gland_boss", "def arrange",
+                   "def lip_ring", "def csk_hole", "def strap_tab"):
         assert helper in HELIX_LIB, helper
     # the doc the prompt embeds names every catalog board the library defines
     for key in ("arduino_uno", "esp32_devkitc", "relay_1ch"):
