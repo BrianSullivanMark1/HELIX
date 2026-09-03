@@ -132,15 +132,21 @@ class AgentService:
         self._changed()
         return target
 
-    def mark_ran(self, name: str, at: datetime) -> None:
+    def mark_ran(self, name: str, at: datetime) -> bool:
         """Stamp a run so the scheduler doesn't fire the same slot twice. No AgentsChanged: a run is
-        not a menu-shape change, and refreshing the launcher every fire would churn for nothing."""
+        not a menu-shape change, and refreshing the launcher every fire would churn for nothing.
+        Returns whether a matching agent was found — the scheduler uses this to notice a stamp that
+        never lands (a corrupted or stale name) so it can stop retrying instead of firing every tick."""
         with self._lock:  # atomic vs a concurrent create/rename/set_enabled — no lost stamps
             agents = self.list()
+            found = False
             for a in agents:
                 if a.name == name:
                     a.last_run = at.isoformat()
-            self._save(agents)
+                    found = True
+            if found:
+                self._save(agents)
+            return found
 
     def run(self, name: str, *, on_progress: ProgressFn | None = None, context: str | None = None) -> str:
         agent = next((a for a in self.list() if a.name == name), None)

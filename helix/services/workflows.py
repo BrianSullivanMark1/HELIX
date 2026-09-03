@@ -20,7 +20,7 @@ from helix.ports.coder import ProgressFn
 from helix.ports.events import EventBus
 from helix.ports.stores import SettingsStore
 from helix.services.agents import AgentService
-from helix.services.scheduler import infer_schedule
+from helix.services.scheduler import agent_name, infer_schedule
 
 _KEY = "workflows"
 
@@ -54,7 +54,9 @@ class WorkflowService:
     def list(self) -> list[Workflow]:
         out: list[Workflow] = []
         for w in (self._settings.get(_KEY) or []):
-            steps = [str(s).strip() for s in (w.get("steps") or []) if str(s).strip()]
+            # A step is an agent NAME. Normalize on read so a step ever saved as a stringified Agent
+            # ("Agent(name='X', goal=...)") heals to just "X" — otherwise its lookup misses every run.
+            steps = [n for s in (w.get("steps") or []) if (n := agent_name(s))]
             out.append(Workflow(
                 name=w.get("name", ""), steps=steps, enabled=w.get("enabled", True),
                 schedule=w.get("schedule") or None, last_run=w.get("last_run") or None,
@@ -72,7 +74,9 @@ class WorkflowService:
     def add(self, name: str, steps: list[str], schedule_hint: str | None = None) -> Workflow:
         """Save (or update) a workflow. Unknown step names are kept as-is (validated at run time); the
         schedule is inferred from the hint, mirroring AgentService."""
-        steps = [str(s).strip() for s in (steps or []) if str(s).strip()]
+        # Store each step by the agent's plain name — an Agent object handed in becomes its `.name`,
+        # never str(Agent(...)). (See agent_name; this is where the corrupted-name bug started.)
+        steps = [n for s in (steps or []) if (n := agent_name(s))]
         schedule = infer_schedule(schedule_hint or "")
         now = self._now()
         wf = Workflow(name=name.strip(), steps=steps, schedule=schedule,
@@ -123,13 +127,19 @@ class WorkflowService:
         self._changed()
         return target
 
-    def mark_ran(self, name: str, at: datetime) -> None:
+    def mark_ran(self, name: str, at: datetime) -> bool:
+        """Stamp a run. Returns whether a matching workflow was found, so the scheduler can tell a
+        stamp that never lands (a stale name) from a normal one and stop retrying it every tick."""
         with self._lock:  # the scheduler stamps this from the heartbeat — atomic vs a concurrent edit
             wfs = self.list()
+            found = False
             for w in wfs:
                 if w.name == name:
                     w.last_run = at.isoformat()
-            self._save(wfs)
+                    found = True
+            if found:
+                self._save(wfs)
+            return found
 
     def run(self, name: str, *, on_progress: ProgressFn | None = None) -> str:
         """Run every step in order, feeding each step the prior step's result as untrusted data. Returns

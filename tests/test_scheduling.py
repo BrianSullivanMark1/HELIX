@@ -7,10 +7,17 @@ from __future__ import annotations
 from datetime import datetime
 
 from helix.adapters.ical_http import CalEvent, occurrences, parse_events
-from helix.services.agents import AgentService
+from helix.services.agents import Agent, AgentService
 from helix.services.calendar import CalendarService
 from helix.services.reminders import ReminderService
-from helix.services.scheduler import AgentScheduler, describe, infer_schedule, is_due
+from helix.services.scheduler import (
+    AgentScheduler,
+    agent_name,
+    describe,
+    infer_schedule,
+    is_due,
+)
+from helix.services.workflows import WorkflowService
 
 
 class _Settings:
@@ -173,6 +180,91 @@ def test_scheduler_respects_enabled_and_marks_ran():
     assert sched.due_now() == []  # paused agents don't fire
     svc.set_enabled("Brief", True)
     assert [a.name for a in sched.due_now()] == ["Brief"]
+
+
+# ---------- name normalization + lookup-failure backoff ----------
+
+from dataclasses import dataclass  # noqa: E402
+
+
+def test_agent_name_normalizes_object_repr_and_plain_string():
+    @dataclass
+    class _A:
+        name: str
+
+    # the plain name string passes straight through, trimmed
+    assert agent_name("Slack All Channels Watcher") == "Slack All Channels Watcher"
+    assert agent_name("  Brief  ") == "Brief"
+    # an object hands back its .name, never its str()
+    assert agent_name(_A(name="Morning Brief")) == "Morning Brief"
+    # the overnight bug: a whole stringified Agent, name pulled back out
+    assert agent_name("Agent(name='Slack All Channels Watcher', goal='watch it')") \
+        == "Slack All Channels Watcher"
+    assert agent_name('Workflow(name="Nightly Report", steps=[])') == "Nightly Report"
+    assert agent_name(None) == ""
+
+
+def test_mark_ran_normalizes_a_stringified_agent_so_the_slot_clears():
+    # Regression: handing mark_ran the whole Agent (or its repr) used to miss the lookup, so last_run
+    # never stamped and the job re-fired on every 15s heartbeat all night. Now the name is normalized.
+    settings = _Settings()
+    clock = _Clock(datetime(2026, 7, 2, 8, 5))
+    svc = AgentService(settings, _NoConversation(), clock=_Clock(_WED_3PM))
+    svc.add("Brief", "every morning at 8, brief me")  # created Wed 3pm → due Thu 8am
+    sched = AgentScheduler(svc, clock)
+    due = sched.due_now()
+    assert [a.name for a in due] == ["Brief"]
+    sched.mark_ran(due[0])            # hand it the OBJECT, as a careless caller might
+    assert sched.due_now() == []      # the stamp still landed → the slot cleared, no re-fire
+
+
+class _AlwaysMissService:
+    """A service whose scheduled job can never be stamped (its agent is gone) — models a stale name."""
+
+    def __init__(self) -> None:
+        self.disabled: list[str] = []
+
+    def list(self):
+        return [Agent(name="Ghost", goal="g", schedule={"kind": "interval", "minutes": 5})]
+
+    def mark_ran(self, name, at):
+        return False  # never found
+
+    def set_enabled(self, name, on):
+        if not on:
+            self.disabled.append(name)
+
+
+def test_repeated_lookup_failure_backs_off_disables_and_logs_once(caplog):
+    svc = _AlwaysMissService()
+    clock = _Clock(datetime(2026, 7, 2, 8, 5))
+    sched = AgentScheduler(svc, clock)
+    with caplog.at_level("WARNING"):
+        for _ in range(6):  # six heartbeats worth of a job that can never be stamped
+            due = sched.due_now()
+            for job in due:
+                sched.mark_ran(job.name)
+    # after the miss threshold the job is disabled once and never returned again
+    assert svc.disabled == ["Ghost"]                      # disabled exactly once
+    assert sched.due_now() == []                          # backed off — no longer offered to run
+    disable_logs = [r for r in caplog.records if "no longer retrying" in r.getMessage()]
+    assert len(disable_logs) == 1                         # logged ONCE, not every 15 seconds
+
+
+def test_workflow_steps_store_plain_names_not_stringified_agents():
+    svc = WorkflowService(_Settings(), AgentService(_Settings(), _NoConversation()))
+    a = Agent(name="Slack All Channels Watcher", goal="watch")
+    wf = svc.add("Nightly Report", [a, "  Digest Builder  "])
+    assert wf.steps == ["Slack All Channels Watcher", "Digest Builder"]  # .name, not str(Agent(...))
+
+
+def test_workflow_heals_a_previously_corrupted_step_on_read():
+    settings = _Settings()
+    settings.set("workflows", [{"name": "Nightly Report",
+                                "steps": ["Agent(name='Slack All Channels Watcher', goal='x')"],
+                                "enabled": True, "schedule": None, "last_run": None}])
+    svc = WorkflowService(settings, AgentService(_Settings(), _NoConversation()))
+    assert svc.find("Nightly Report").steps == ["Slack All Channels Watcher"]
 
 
 # ---------- reminders ----------
