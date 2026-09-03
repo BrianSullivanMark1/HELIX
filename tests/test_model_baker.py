@@ -177,6 +177,54 @@ def test_check_writes_the_library_beside_the_source_and_compiles(tmp_path):
     assert (ws / STL_REL).read_bytes() == ASCII_STL
 
 
+class _MeteredCad(_FakeCad):
+    """A FakeCad whose one-run meta carries a print analysis — the P1S review path."""
+
+    def __init__(self, warnings, **kw):
+        super().__init__(**kw)
+        self._warnings = list(warnings)
+
+    def meta_for(self, source):
+        return {"bbox_mm": [100, 40, 30], "volume_cm3": 12.3, "print_warnings": self._warnings}
+
+
+def test_a_measured_warning_goes_to_the_repair_pass_once(tmp_path):
+    # THE SELF-REVIEW PASS: any measured print problem fails the FIRST check (the coder gets one
+    # shot at fixing it against real numbers)…
+    cad = _MeteredCad(["OVERHANG: ≈6.0 cm² of faces steeper than 45° downward (lowest at 4.0 mm)"])
+    baker = ModelBaker(cad)
+    ws = _ws(tmp_path)
+    baker.prepare(ws)
+    problem = baker.check(ws)
+    assert problem and "P1S" in problem and "OVERHANG" in problem
+    # …but the SAME warning on the repair pass's check must NOT fail the build: a benign residual
+    # warning stays a studio warning, never a rollback of a design that compiles.
+    assert baker.check(ws) is None
+
+
+def test_floating_still_blocks_the_repair_pass_too(tmp_path):
+    cad = _MeteredCad(["FLOATING: a piece of 'body' starts 5.0 mm above the plate — nothing below it."])
+    baker = ModelBaker(cad)
+    ws = _ws(tmp_path)
+    baker.prepare(ws)
+    assert "mid-air" in (baker.check(ws) or "")
+    assert "mid-air" in (baker.check(ws) or "")  # always wrong — the slicer would refuse it
+
+
+def test_the_critic_hears_the_measurements(tmp_path):
+    seen: dict = {}
+
+    def critic(png, brief):
+        seen["brief"] = brief
+        return None
+
+    baker = ModelBaker(_MeteredCad([]), critic=critic)
+    ws = _ws(tmp_path)
+    baker.prepare(ws)
+    assert baker.check(ws) is None
+    assert "Measured off the compiled model" in seen["brief"] and "100" in seen["brief"]
+
+
 def test_lint_short_circuits_before_any_compile(tmp_path):
     cad = _FakeCad()
     ws = _ws(tmp_path, GOOD_SOURCE.replace("from helix_parts import *",

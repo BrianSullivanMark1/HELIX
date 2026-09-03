@@ -53,9 +53,14 @@ class ForgeService:
         guard_files: list[Path] | None = None,
         model_baker: "ModelBaker | None" = None,
         data_dir: Path | None = None,
+        model_coder: CoderAgent | None = None,
     ) -> None:
         self._builds = builds
         self._coder = coder
+        # An optional STRONGER coder used only for MODEL builds (holograms). Authoring CAD — mirror-mated
+        # halves, assembled-frame collision maps, print orientation — is the hardest thing the forge asks
+        # a model to do, so the container hands the growth coder here; apps and tasks stay on the default.
+        self._model_coder = model_coder
         self._bus = bus
         self._repo = repo
         self._app_root = app_root
@@ -163,9 +168,12 @@ class ForgeService:
         # guard treatment — escapes are scanned and reverted UNCONDITIONALLY, before the cancel/failure
         # exits, because a cancelled or failed run drove the same coder with the same hands.
         prompt_text = prompt or self._default_prompt(app, request, iterating)
+        # A hologram drafts on the stronger model when one is wired (both passes — the repair pass is
+        # where the hardest fixes happen); every other kind keeps the default coder.
+        coder = self._model_coder if (app.is_model and self._model_coder is not None) else self._coder
         problem: str | None = None
         for attempt in range(2):
-            result = self._coder.run_task(
+            result = coder.run_task(
                 workspace, prompt_text, on_progress=on_progress, cancel=cancel,
             )
             restore_if_changed(guard)

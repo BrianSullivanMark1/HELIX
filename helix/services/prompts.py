@@ -541,7 +541,18 @@ def repair_prompt(name: str, problem: str) -> str:
     here, not assumed from the build prompt."""
     problem = " ".join((problem or "").split())[:_REPAIR_PROBLEM_CHARS]
     look = ""
-    if "preview.png" in problem:
+    if any(tag in problem for tag in ("FLOATING", "OVERHANG", "TOO BIG", "SMALL CONTACT")):
+        # A measured printability failure: the numbers come from HELIX's geometric analysis of the
+        # COMPILED model (real triangle areas and bounding boxes), sized for the Bambu Lab P1S.
+        # The fix is geometry — orientation or a dimension — not wording; arguing with the numbers
+        # or re-running anything is wasted (the coder can't run the analysis itself).
+        look = (
+            "The numbers above were MEASURED off the compiled geometry (they are real, sized for the "
+            "Bambu Lab P1S printer). Fix the geometry they name: re-author the offending part in its "
+            "print orientation (largest flat face on Z=0, interior features rising, deboss on the "
+            "plate face) or change the one dimension called out.\n"
+        )
+    elif "preview.png" in problem:
         # The hologram critic judged the RENDERED picture, so the fix starts by looking at it: a coder
         # that only re-reads model.py guesses at what "a hole that doesn't go through" means and
         # rewrites the wrong function. The preview sits in the workspace, so Read works on it.
@@ -689,6 +700,22 @@ GEOMETRY RULES (what makes it compute, and print):
   * SAY how it assembles in the docstring Parts list ("front shell — lip ring + 2x M2x8
     countersunk into tower inserts"), so the owner knows without asking.
 - Every part sits on Z=0 the way it prints. Keep it real: this geometry exists to be made.
+- THE PRINTER IS A BAMBU LAB P1S: 256 × 256 × 256 mm build volume — keep every SINGLE part under
+  250 mm on each axis (the laid-out set may be wider; parts print one plate at a time). 0.4 mm
+  nozzle, 0.2 mm layers: features under 1 mm vanish, walls under 1.2 mm print as a single fragile
+  perimeter pass.
+
+REVIEW YOUR OWN WORK — before you finish, re-read model.py as an INSPECTOR and verify, item by item:
+1. Every part rests flat on Z=0; no solid begins mid-air; interior features RISE from the floor.
+2. The plate face carries only debossed (cut-in) text/recesses — nothing raised, and mirrored text
+   is mirrored about Plane.YZ so it reads from outside.
+3. Walls ≥ 2 mm, bridges under ~12 mm, each part under 250 mm per axis.
+4. Mating parts: clearances applied (FIT per side for slides/boards, SNAP_CLEAR for lips), the
+   tower-height formula holds, and the mirrored tower↔hole pairing is written out and checked.
+5. Slide every parameter to its declared extremes IN YOUR HEAD: derived positions are clamped so
+   nothing escapes the cavity or collides.
+HELIX then MEASURES the compiled result (floating pieces, overhang area, plate contact, part size
+vs the P1S bed) and sends back anything that fails — a clean self-review means no round trip.
 
 HARD LIMITS: no os / sys / subprocess / open() / network — the compile is sandboxed and any of these
 fails the build. No loops generating hundreds of features (a compile budget exists). No top-level code.

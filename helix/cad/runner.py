@@ -93,6 +93,10 @@ _WARN_AREA_CM2 = 4.0          # report overhang past this much area. Calibrated 
                               # micro-bridges (0.5 mm chamfer residue on the lip, port ceilings)
                               # that print clean — real support jobs measure far past this.
 _ISLAND_GAP_MM = 0.6          # a solid whose lowest point is above this floats entirely
+_BED_MM = 256.0               # the Bambu P1S build volume — 256 mm on every axis
+_BED_MARGIN_MM = 6.0          # parts should stay this far inside it (purge line, brim, edge adhesion)
+_CONTACT_MIN_CM2 = 2.0        # a print with less first-layer contact than this, and taller than…
+_CONTACT_MIN_H_MM = 20.0      # …this, is a tip-over/detach risk — say so before the printer does
 
 
 def overhang_report(v) -> dict:
@@ -117,11 +121,31 @@ def overhang_report(v) -> dict:
     return {"overhang_cm2": round(total_cm2, 2), "lowest_mm": round(lowest, 2) if lowest else None}
 
 
+def plate_contact_cm2(v) -> float:
+    """First-layer contact: the area of downward faces lying ON the plate (all vertices within
+    0.3 mm of Z=0). What actually glues the print to the bed — a tall part with a sliver of it
+    detaches mid-print. Pure numpy, same input as overhang_report."""
+    import numpy as np
+
+    if v is None or len(v) == 0:
+        return 0.0
+    e1 = v[:, 1] - v[:, 0]
+    e2 = v[:, 2] - v[:, 0]
+    fn = np.cross(e1, e2)
+    ln = np.linalg.norm(fn, axis=1)
+    ok = ln > 1e-12
+    v, fn, ln = v[ok], fn[ok], ln[ok]
+    nz = fn[:, 2] / ln
+    on_plate = (v[:, :, 2].max(axis=1) <= 0.3) & (nz < -0.9)
+    return round(float((ln[on_plate] / 2.0).sum() / 100.0), 2)
+
+
 def _print_warnings(parts, stl_path: Path) -> list[str]:
     """The printability verdicts for meta.json — what the studio shows and the baker's repair loop
-    reads. Two classes: a FLOATING solid (always wrong — a piece of a part begins mid-air, the
-    slicer's 'floating regions' warning), and steep OVERHANG area (needs supports, or a redesign
-    with the flat face down). Never raises; an analysis hiccup just reports nothing."""
+    reads. Four classes, all sized for the Bambu P1S: a FLOATING solid (always wrong — a piece of a
+    part begins mid-air, the slicer's 'floating regions' warning), a part TOO BIG for the bed, steep
+    OVERHANG area (needs supports, or a redesign with the flat face down), and SMALL CONTACT (a tall
+    print glued to the bed by a sliver). Never raises; an analysis hiccup just reports nothing."""
     warnings: list[str] = []
     try:
         for name, shape in parts:
@@ -137,13 +161,38 @@ def _print_warnings(parts, stl_path: Path) -> list[str]:
     except Exception:  # noqa: BLE001
         pass
     try:
-        report = overhang_report(_read_stl_tris(stl_path))
+        # Each part alone must fit the printer (parts are sliced one plate at a time; the laid-out
+        # set as a whole may exceed the bed and that is fine).
+        limit = _BED_MM - _BED_MARGIN_MM
+        for name, shape in parts:
+            bb = shape.bounding_box()
+            dims = (float(bb.size.X), float(bb.size.Y), float(bb.size.Z))
+            if any(d > limit for d in dims):
+                warnings.append(
+                    f"TOO BIG: '{name}' measures {dims[0]:.0f} × {dims[1]:.0f} × {dims[2]:.0f} mm — "
+                    f"the Bambu P1S bed is {_BED_MM:.0f} mm each way (keep parts under {limit:.0f}). "
+                    f"Shrink it or split it into joined sections."
+                )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        tris = _read_stl_tris(stl_path)
+        report = overhang_report(tris)
         if report["overhang_cm2"] >= _WARN_AREA_CM2:
             warnings.append(
                 f"OVERHANG: ≈{report['overhang_cm2']:.1f} cm² of faces steeper than 45° downward "
                 f"(lowest at {report['lowest_mm']} mm) — the slicer will want supports. Prefer the "
                 f"flat face on the plate, deboss instead of emboss, chamfer undersides."
             )
+        if tris is not None and len(tris):
+            height = float(tris[:, :, 2].max())
+            contact = plate_contact_cm2(tris)
+            if height > _CONTACT_MIN_H_MM and contact < _CONTACT_MIN_CM2:
+                warnings.append(
+                    f"SMALL CONTACT: only ≈{contact:.1f} cm² of the design touches the plate for a "
+                    f"print {height:.0f} mm tall — it can tip or detach mid-print. Author the part "
+                    f"with its largest flat face down, or widen the base."
+                )
     except Exception:  # noqa: BLE001
         pass
     return warnings

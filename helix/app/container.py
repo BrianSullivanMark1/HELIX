@@ -213,11 +213,13 @@ class _LazyBaker:
 # is not, and a picky critic would spend the ONE repair pass on taste. "exactly OK" gives the parser a
 # fixed token to look for, so a good design is never sent back for a sentence of praise.
 _CRITIC_SYSTEM = (
-    "You are checking a 3D design HELIX just compiled. Here is the design brief and parameters, and the "
-    "rendered preview. Reply with ONE short sentence naming the single most important visible problem "
-    "that contradicts the brief (a floating/disconnected part, a hole that does not go through, a "
-    "feature in the brief that is missing, grossly wrong proportion) — or exactly OK if it looks right. "
-    "Be strict about contradictions and lenient about style."
+    "You are checking a 3D design HELIX just compiled for 3D printing on a Bambu Lab P1S. Here is the "
+    "design brief and parameters, measurements HELIX took off the compiled model (overall size, volume, "
+    "printability analysis), and the rendered preview. Reply with ONE short sentence naming the single "
+    "most important problem that contradicts the brief (a floating/disconnected part, a hole that does "
+    "not go through, a feature in the brief that is missing, grossly wrong proportion, a measured size "
+    "that cannot fit what the brief says it holds) — or exactly OK if it looks right. Be strict about "
+    "contradictions and lenient about style."
 )
 _CRITIC_MAX_CHARS = 200
 
@@ -427,8 +429,9 @@ class Container:
         # model by DEFAULT (Fable 5 today, auto-upscaling) — but Evolve's proposal can size it PER TASK
         # via the EFFORT tier, dropping to the Opus 4.8 work floor for a small mechanical change or
         # holding at Fable 5 for a deep one (see GrowthModelResolver.work_model). Same CLI/subscription
-        # path (the OAuth token is preferred over the API key inside ClaudeCodeCli). Builds keep using
-        # self.coder; only self-dev reaches for the top brain.
+        # path (the OAuth token is preferred over the API key inside ClaudeCodeCli). App and task builds
+        # keep using self.coder; self-dev AND holograms reach for the top brain — the Forge routes MODEL
+        # builds here (model_coder below) because CAD authoring is the hardest coding HELIX commissions.
         _growth_model = self.growth_model.resolve()
         growth_coder_chat = AnthropicChat(_key, model=_growth_model, max_tokens=8000)
         self.growth_coder = FallbackCoder(
@@ -527,6 +530,7 @@ class Container:
         self.forge = ForgeService(
             self.builds, self.coder, self.bus, self.repo, self.paths.root, guard_files,
             model_baker=self.model_baker, data_dir=self.paths.data,
+            model_coder=self.growth_coder,  # holograms draft on the growth model (Fable 5 today)
         )
         # Builds run as background jobs so the orb keeps talking while it works — a small pool runs a few
         # at once (the Forge's escape guard skips all build workspaces, so concurrent builds don't trip

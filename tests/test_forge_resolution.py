@@ -161,6 +161,29 @@ def _fails(ws: Path, _cancel) -> CoderResult:
     return CoderResult(ok=False, summary="", error="boom")
 
 
+def test_holograms_draft_on_the_model_coder_when_wired(tmp_path):
+    # The Fable rail: a MODEL build routes to the stronger model_coder (both passes); every other
+    # kind keeps the default coder. No model_coder wired → models fall back to the default.
+    rig = _Rig(tmp_path)
+    ran: list[str] = []
+
+    def app_fn(ws: Path, _c) -> CoderResult:
+        ran.append("app")
+        ws.joinpath("index.html").write_text("<h1>app</h1>", encoding="utf-8")
+        return CoderResult(ok=True, summary="built")
+
+    def model_fn(ws: Path, _c) -> CoderResult:
+        ran.append("model")
+        ws.joinpath("model.py").write_text("# design", encoding="utf-8")
+        return CoderResult(ok=True, summary="built")
+
+    forge = ForgeService(rig.builds, _Coder(app_fn), rig.bus, rig.repo, rig.root,
+                         model_coder=_Coder(model_fn))
+    forge.build("Bracket Cam", "a camera bracket", kind=BuildKind.MODEL)
+    forge.build("Notes App", "a notes app", kind=BuildKind.APP)
+    assert ran == ["model", "app"]
+
+
 def test_a_stopped_build_keeps_its_marker_until_the_user_answers(tmp_path):
     # A stop does NOT settle a build: the user still has to answer "remove it or keep it?". The
     # .building marker has to survive until that answer, because the routine way a build gets cancelled

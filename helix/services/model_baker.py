@@ -316,13 +316,26 @@ class ModelBaker:
                   "cavity opening UPWARD with interior standoffs rising (never hanging from a "
                   "ceiling), labels DEBOSSED into the plate face, strap loops as flat slotted tabs."
             )
+        if warns and first:
+            # THE SELF-REVIEW PASS: on the FIRST check, ANY measured print problem — a support-job
+            # overhang, a part too big for the P1S bed, a tall print on a sliver of contact — is
+            # handed back for the one repair pass, so the coder reviews its own work against real
+            # measurements instead of shipping with a warning the user only sees in the studio. On
+            # the second check the same message must NOT fail the build (only floating/severe still
+            # gate above): a residual benign warning stays a warning, never a rollback.
+            return (
+                "HELIX measured the compiled design against the Bambu Lab P1S printer and found "
+                "print problems: " + " ".join(warns)
+                + " Review the design and fix what the measurements name — usually the part's print "
+                  "orientation (largest flat face on Z=0) or one dimension — with the smallest change."
+            )
         # The preview is best effort — a render hiccup is NOT the coder's problem — and the critic, when
         # wired, gets ONE look per bake cycle. A second check (after the repair pass) never re-critiques.
         png = self._render_preview(ws, src, rec)
         if self._critic is None or not first or png is None:
             return None
         try:
-            verdict = self._critic(png, self._brief_text(source))
+            verdict = self._critic(png, self._brief_text(source) + self._measured_text(meta))
         except Exception:  # noqa: BLE001 — a failing critic must never fail a build
             _LOG.warning("hologram critic raised", exc_info=True)
             return None
@@ -359,6 +372,22 @@ class ModelBaker:
         if not rec.preview_ok:
             _unlink(png)
         return png if rec.preview_ok else None
+
+    @staticmethod
+    def _measured_text(meta: dict | None) -> str:
+        """What HELIX measured off the COMPILED model, appended to the critic's brief — so the look can
+        also catch a size that contradicts the brief (a box 'for a 40 mm board' measuring 20 mm), not
+        just shape mistakes. Empty when the engine carries no meta (fakes, older engines)."""
+        if not isinstance(meta, dict):
+            return ""
+        lines: list[str] = []
+        bb = meta.get("bbox_mm")
+        if isinstance(bb, (list, tuple)) and len(bb) == 3:
+            lines.append(f"overall size {bb[0]} × {bb[1]} × {bb[2]} mm")
+        if meta.get("volume_cm3") is not None:
+            lines.append(f"material volume {meta['volume_cm3']} cm³")
+        lines.extend(str(w) for w in (meta.get("print_warnings") or []))
+        return "\nMeasured off the compiled model:\n- " + "\n- ".join(lines) if lines else ""
 
     @staticmethod
     def _brief_text(source: str) -> str:

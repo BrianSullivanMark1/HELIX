@@ -58,6 +58,14 @@ def test_container_composes_every_service(container):
     assert not missing, f"container no longer wires: {missing}"
 
 
+def test_holograms_route_to_the_growth_coder(container):
+    """The Fable rail for CAD: the Forge must hold the growth coder as its model_coder, or hologram
+    builds silently fall back to the work-floor model and this wiring is dead everywhere but here."""
+    assert container.forge._model_coder is container.growth_coder, (
+        "the Forge was built without model_coder=growth_coder — holograms draft on the default coder"
+    )
+
+
 def test_container_exposes_a_tool_surface(container):
     specs = container.tools.specs()
     assert len(specs) > 20, f"only {len(specs)} tools registered — the registry lost most of its surface"
