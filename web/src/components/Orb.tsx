@@ -1,11 +1,20 @@
-// The Presence Orb — "The Contained Star". HELIX as a captive star: turbulent plasma filaments
-// swimming visibly BEHIND a glass shell (a 4-tap parallax march through domain-warped fbm — real
-// perceived depth, no volumetrics), stacked-fresnel glass with limb darkening, a corona of wisps
-// licking outward that LEAN TOWARD YOU while HELIX listens, spectral flares wrapping the equator
-// as it speaks (the 16 TTS/mic bands mapped to longitude via a DataTexture), and one clean
-// shockwave from core to limb when a build lands or fails. Temperature carries state — blue-cyan
-// attention, amber computation, green resolution, red fault (frequency up, never brightness) —
-// and a Reinhard fold keeps the additive stack from ever blowing out to white.
+// The Presence Orb — "The Contained Star", now A CAGED STORM. HELIX as a captive star: turbulent
+// plasma filaments swimming visibly BEHIND a glass shell (a 4-tap parallax march through
+// domain-warped fbm — real perceived depth, no volumetrics), stacked-fresnel glass with limb
+// darkening, a corona of wisps licking outward that LEAN TOWARD YOU while HELIX listens, spectral
+// flares wrapping the equator as it speaks (the 16 TTS/mic bands mapped to longitude via a
+// DataTexture), and one clean shockwave from core to limb when a build lands or fails.
+//
+// THE ELECTRICITY (the storm layer): thin ridged-noise TENDRILS arc through the interior — the
+// multiplied creases of two ridged octaves read as branching filaments, not fog — gated by uVolt
+// (state-driven voltage: lazy at idle, reaching toward you while listening, hard and fast while
+// thinking, pulsing with the voice while speaking). Rare STRIKES (uStrike, a ~150 ms envelope the
+// CPU decays) crack an arc to near-white with a violet rim flash, crawl a brief Lichtenberg web
+// across the inside of the glass, jump the core scale a hair, and shudder one thin ring through
+// the corona. Discontinuity is the point: nothing, nothing, CRACK — peace is continuous, voltage
+// is not. Temperature still carries state (blue-cyan attention, amber computation, green
+// resolution, red fault — frequency up, never brightness), and the Reinhard fold keeps the whole
+// additive stack from ever blowing out to white.
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
@@ -73,6 +82,11 @@ const CORE_FRAG = /* glsl */ `
   uniform float uEnergy;
   uniform float uWarp;
   uniform float uJitter;
+  uniform float uVolt;
+  uniform float uStrike;
+  uniform float uStrikeSeed;
+  uniform float uAttend;
+  uniform vec3 uCamLocal;
   uniform sampler2D uBandTex;
   ${NOISE_GLSL}
 
@@ -83,7 +97,12 @@ const CORE_FRAG = /* glsl */ `
     float chord = -2.0 * dot(ro, rd);
     vec3 drift = vec3(0.0, uTime * 0.22 * (0.5 + uSpeed), 0.0)
                + vec3(0.0, sin(uTime * 23.0) * 0.15 * uJitter, 0.0);  // error: frequency, not brightness
-    float glowAcc = 0.0, haze = 0.0;
+    // Arcs move on their OWN clock, much faster than the plasma — lightning is not weather.
+    vec3 arcDrift = vec3(uStrikeSeed, uTime * (1.2 + 2.6 * uVolt), uStrikeSeed * 0.7);
+    // Household flicker: the tendrils breathe at mains-hum speed even between strikes.
+    float flick = 0.72 + 0.28 * sin(uTime * 21.0 + sin(uTime * 47.0));
+    vec3 camDir = normalize(uCamLocal);
+    float glowAcc = 0.0, haze = 0.0, arcAcc = 0.0;
     for (int i = 0; i < MARCH; i++) {
       float t = chord * (float(i) + 0.5) / float(MARCH);
       vec3 p = ro + rd * t;
@@ -93,8 +112,21 @@ const CORE_FRAG = /* glsl */ `
       float depthFade = exp(-t * 1.3);
       haze    += w * depthFade * 0.21;
       glowAcc += fil * fil * depthFade * 0.78;
+      // ---- TENDRILS: two ridged octaves multiplied — their crease intersections are thin
+      // branching filaments in 3D, not sheets. pow sharpens them to wire thickness. ----
+      float r1 = 1.0 - abs(2.0 * vnoise(p * 3.3 + arcDrift) - 1.0);
+      float r2 = 1.0 - abs(2.0 * vnoise(p * 6.1 - arcDrift.zyx + 4.7) - 1.0);
+      float arc = pow(max(r1 * r2 - 0.14, 0.0) * 1.5, 2.6);
+      // While listening the arcs REACH toward the viewer, same lean as the corona's wisps.
+      arc *= 1.0 + uAttend * max(0.0, dot(normalize(p), camDir)) * 1.2;
+      arcAcc += arc * depthFade;
     }
-    vec3 interior = uColor * haze * 1.15 + mix(uColor, vec3(1.0), 0.55) * glowAcc * (0.7 + uGlow);
+    // Voltage gates the whole storm; a strike overdrives it for ~150 ms.
+    arcAcc *= uVolt * flick * 2.4 + uStrike * 3.4;
+    // Arc color: violet-blue fringe folding to near-white at the hot core of each filament.
+    vec3 arcCol = mix(vec3(0.45, 0.55, 1.0), vec3(1.0), clamp(arcAcc * 1.4, 0.0, 1.0));
+    vec3 interior = uColor * haze * 1.15 + mix(uColor, vec3(1.0), 0.55) * glowAcc * (0.7 + uGlow)
+                  + arcCol * arcAcc;
 
     // ---- stacked-fresnel glass + limb darkening (the volume read) ----
     float ndv = clamp(dot(normalize(vNormal), normalize(vView)), 0.0, 1.0);
@@ -106,6 +138,16 @@ const CORE_FRAG = /* glsl */ `
       + uColor * 0.10 * shellA
       + mix(uColor, vec3(1.0), 0.35) * 0.50 * shellB * uGlow
       + vec3(1.0) * 0.90 * shellC * uGlow;
+
+    // ---- STRIKE on the glass: a brief Lichtenberg web crawling the inside of the shell where
+    // the arc landed, plus a violet flash on the rim — the shell is BARELY containing this. ----
+    if (uStrike > 0.01) {
+      vec3 sn = normalize(vLocal);
+      float web = 1.0 - abs(2.0 * vnoise(sn * 7.0 + uStrikeSeed) - 1.0);
+      web *= 1.0 - abs(2.0 * vnoise(sn * 13.0 - uStrikeSeed * 1.3) - 1.0);
+      col += vec3(0.8, 0.85, 1.0) * pow(web, 5.0) * uStrike * 2.4 * (0.4 + shellA);
+      col += vec3(0.62, 0.4, 1.0) * shellB * uStrike * 1.1;  // the violet rim flash
+    }
 
     // ---- spectral flares wrap the equator: speech is weather ----
     vec3 n = normalize(vLocal);
@@ -133,6 +175,8 @@ const CORONA_FRAG = /* glsl */ `
   uniform float uEnergy;
   uniform float uPulse;
   uniform float uAttend;
+  uniform float uVolt;
+  uniform float uStrike;
   uniform vec3 uCamDir;
   ${NOISE_GLSL}
 
@@ -144,10 +188,14 @@ const CORONA_FRAG = /* glsl */ `
     reach *= 1.0 + 0.7 * uAttend * max(0.0, dot(n, uCamDir));  // eye contact while listening
     float crawl = fbm(n * 5.0 - vec3(0.0, 0.0, uTime * 0.5));
     float wisp = smoothstep(0.35, 0.75, reach * crawl + rim * 0.35) * rim;
-    float alpha = min(wisp * (0.35 + uGlow * 0.5 + uEnergy * 0.6), 0.8);
+    float alpha = min(wisp * (0.35 + uGlow * 0.5 + uEnergy * 0.6 + uVolt * 0.25), 0.8);
     vec3 cor = mix(uColor, vec3(1.0), 0.25) * alpha;
     float ring = smoothstep(0.06, 0.0, abs((1.0 - cndv) - (1.0 - uPulse) * 0.9));
     cor += uColor * ring * uPulse * 2.0;
+    // The strike's shudder: one THIN cold ring racing outward on the strike envelope — faster
+    // and sharper than the build pulse above, gone in a blink.
+    float shudder = smoothstep(0.028, 0.0, abs((1.0 - cndv) - (1.0 - uStrike) * 0.85));
+    cor += vec3(0.7, 0.75, 1.0) * shudder * uStrike * 1.6;
     gl_FragColor = vec4(cor, alpha);
   }
 `;
@@ -175,6 +223,9 @@ function OrbScene() {
   const sparks = useRef<THREE.Points>(null!);
   const halo = useRef<THREE.Sprite>(null!);
   const phase = useRef(0);
+  // The storm's own state: eased voltage, the strike envelope, and the countdown to the next
+  // strike (wall-ish time, compressed by voltage — a thinking orb cracks far more often).
+  const storm = useRef({ volt: 0.25, strike: 0, next: 3 + Math.random() * 8, seed: 1 });
   const prevHue = useRef("none");
   const easedBands = useRef(new Float32Array(16));
   const frameProbe = useRef({ n: 0, total: 0, degraded: false });
@@ -198,6 +249,9 @@ function OrbScene() {
       uEnergy: { value: 0 },
       uPulse: { value: 0 },
       uAttend: { value: 0 },
+      uVolt: { value: 0.25 },
+      uStrike: { value: 0 },
+      uStrikeSeed: { value: 1.0 },
     }),
     [],
   );
@@ -289,9 +343,32 @@ function OrbScene() {
     coreUniforms.uWarp.value += ((churn ? 2.1 : 1.6) - coreUniforms.uWarp.value) * 0.05;
     coreUniforms.uJitter.value += ((err ? 1 : 0) - coreUniforms.uJitter.value) * 0.1;
 
+    // ---- VOLTAGE: how charged the storm is, by state. Idle is a lazy simmer; listening leans
+    // in; thinking runs hot; speaking rides the live voice energy; a fault maxes it out. ----
+    const V = storm.current;
+    const voltTarget = err ? 1.0
+      : churn ? 0.9
+      : s.orb === "transcribing" ? 0.8
+      : s.orb === "speaking" ? 0.45 + L.energy * 0.55
+      : s.orb === "listening" ? 0.55
+      : 0.28;
+    V.volt += (voltTarget - V.volt) * 0.07;
+    // ---- STRIKES: nothing, nothing, CRACK. Voltage compresses the wait (idle ≈ every 6-16 s,
+    // thinking ≈ every 2-5 s); the envelope decays in ~150 ms and the core jumps with it. ----
+    V.next -= dt * (0.4 + V.volt * 2.3);
+    if (V.next <= 0) {
+      V.strike = 1;
+      V.seed = 1 + Math.random() * 59;
+      V.next = 2.5 + Math.random() * 4.5;
+    }
+    V.strike *= Math.exp(-dt * 7.0);
+    shared.uVolt.value = V.volt;
+    shared.uStrike.value = V.strike;
+    shared.uStrikeSeed.value = V.seed;
+
     // Motion.
     phase.current += dt * 1.6;
-    const scale = 1 + 0.035 * Math.sin(phase.current) + L.energy * 0.1;
+    const scale = 1 + 0.035 * Math.sin(phase.current) + L.energy * 0.1 + V.strike * 0.045;
     core.current.scale.setScalar(scale);
     core.current.rotation.y += dt * 0.1 * (1 + L.speed * 0.6);
     gyro.current.rotation.y += dt * 0.132 * (1 + L.speed * 0.5);
@@ -308,7 +385,7 @@ function OrbScene() {
     // Dressing.
     const low = (e[0] + e[1] + e[2] + e[3]) / 4;
     halo.current.material.color.copy(L.color);
-    halo.current.material.opacity = 0.14 + L.glow * 0.26 + low * 0.25;
+    halo.current.material.opacity = 0.14 + L.glow * 0.26 + low * 0.25 + V.strike * 0.22;
     halo.current.scale.setScalar(3.1 + low * 0.9);
     const sparkMat = sparks.current.material as THREE.PointsMaterial;
     sparkMat.color.copy(L.color);
