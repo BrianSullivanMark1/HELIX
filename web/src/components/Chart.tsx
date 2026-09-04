@@ -168,8 +168,12 @@ function TableViz({ spec }: { spec: Visual }) {
   const cols = ((spec.columns as unknown[]) || []).map(String);
   const rows = ((spec.rows as unknown[][]) || []).map((r) => (r || []).map(String));
   const numeric = (v: string) => /^-?[\d,.%$]+$/.test(v.trim());
+  // TAB-delimited, not pipe: pasting into Slack (and Excel/Sheets) then lands each cell in its own
+  // column instead of one pipe-run of text. Cells are cleaned of stray tabs/newlines so the row/
+  // column grid can't be broken by content.
   const copy = () => {
-    const text = [cols.join(" | "), ...rows.map((r) => r.join(" | "))].join("\n");
+    const clean = (v: string) => v.replace(/[\t\r\n]+/g, " ").trim();
+    const text = [cols, ...rows].map((r) => r.map(clean).join("\t")).join("\n");
     void navigator.clipboard.writeText(text);
   };
   return (

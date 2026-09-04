@@ -69,6 +69,7 @@ interface CameraModal {
   id: string;
   prompt: string;
   ears: boolean;
+  manual: boolean;
 }
 
 interface HelixStore {
@@ -208,6 +209,7 @@ export function applyEvent(ev: Record<string, unknown>): void {
           id: ev.id as string,
           prompt: (ev.prompt as string) || "",
           ears: Boolean(ev.ears),
+          manual: Boolean(ev.manual),
         },
       });
       break;

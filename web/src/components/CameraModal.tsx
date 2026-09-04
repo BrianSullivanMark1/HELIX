@@ -6,7 +6,11 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { useHelix } from "../lib/store";
 
-export default function CameraModal({ modal }: { modal: { id: string; prompt: string; ears: boolean } }) {
+export default function CameraModal({
+  modal,
+}: {
+  modal: { id: string; prompt: string; ears: boolean; manual?: boolean };
+}) {
   const shutter = useHelix((s) => s.cameraShutter);
   const video = useRef<HTMLVideoElement>(null);
   const stream = useRef<MediaStream | null>(null);
@@ -17,14 +21,35 @@ export default function CameraModal({ modal }: { modal: { id: string; prompt: st
   const pendingCapture = useRef(false);
   const lastShutter = useRef(shutter);
 
-  const open = async (id: string) => {
+  // Fully release the previous stream BEFORE asking for a new one. The webcam is a single-holder
+  // device: on a quick close→reopen the browser can still consider it busy for a beat, so we stop
+  // every track, detach the <video>, and retry getUserMedia a couple of times before giving up —
+  // this is what made "open it again" fail after the first session.
+  const releaseStream = () => {
     stream.current?.getTracks().forEach((t) => t.stop());
+    stream.current = null;
+    if (video.current) video.current.srcObject = null;
+  };
+
+  const getStream = async (id: string): Promise<MediaStream> => {
+    const constraints = { video: id ? { deviceId: { exact: id } } : true, audio: false };
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 250)); // let the device settle, then retry
+      }
+    }
+    throw lastErr;
+  };
+
+  const open = async (id: string) => {
+    releaseStream();
     setHaveFrame(false);
     try {
-      const s = await navigator.mediaDevices.getUserMedia({
-        video: id ? { deviceId: { exact: id } } : true,
-        audio: false,
-      });
+      const s = await getStream(id);
       stream.current = s;
       if (video.current) {
         video.current.srcObject = s;
@@ -46,7 +71,7 @@ export default function CameraModal({ modal }: { modal: { id: string; prompt: st
 
   useEffect(() => {
     void open(deviceId);
-    return () => stream.current?.getTracks().forEach((t) => t.stop());
+    return () => releaseStream();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

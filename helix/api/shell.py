@@ -13,6 +13,7 @@ same guards — so the web face inherits every hard-won behavior rather than re-
 """
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
 import uuid
@@ -779,13 +780,22 @@ class ShellSession:
             req.fulfil()
 
     # ----- camera -----
-    def _on_camera_requested(self, ev: CameraRequested) -> None:
-        req = ev.request
-        if self._camera is not None:  # a stale window — close it; one camera at a time
+    # The default framing for a manually-opened camera: HELIX is mostly used to photograph
+    # electronics (an ESP32, a sensor, a breakout), so the picture should land on a turn primed to
+    # IDENTIFY the part and open a conversation about it, not just "what's in this image".
+    _MANUAL_CAMERA_PROMPT = (
+        "This is a photo I just took, usually of an electronic component or board — often an ESP32, "
+        "an Arduino, a sensor, or a breakout. Identify the part as precisely as you can from any "
+        "markings, the form factor, and the pin layout, then tell me what it is in a sentence and "
+        "invite me to dig in (wiring, pinout, how it fits my projects). If you truly can't tell, say "
+        "what you can see and ask me to turn it or get the label in frame."
+    )
+
+    def _open_camera(self, cam: dict, prompt: str, *, announce: str) -> None:
+        """Shared open path (model-driven and manual): retire any stale window, register the new
+        session, wire voice capture, and tell the face to raise the modal. One camera at a time."""
+        if self._camera is not None:  # a stale window — close it first; never two at once
             self._cancel_camera(self._camera, quiet=True)
-        if not req.claim():
-            return
-        cam = {"id": uuid.uuid4().hex[:10], "request": req}
         self._camera = cam
         ears = self.voice.camera_ears_live() if self.voice is not None else False
         if self.voice is not None:
@@ -793,10 +803,29 @@ class ShellSession:
                 lambda: self.push({"t": "camera.capture", "id": cam["id"]}),
                 lambda: self._cancel_camera(cam),
             )
-        prompt = getattr(req, "prompt", "") or "Hold it up to the camera — take your time."
-        self.push({"t": "camera", "id": cam["id"], "prompt": prompt, "ears": ears})
+        self.push({"t": "camera", "id": cam["id"], "prompt": prompt, "ears": ears,
+                   "manual": bool(cam.get("manual"))})
         self._status(f"Camera's open — {prompt}")
-        self._narrate("Camera's open — ready when you are.")
+        self._narrate(announce)
+
+    def _on_camera_requested(self, ev: CameraRequested) -> None:
+        req = ev.request
+        # The claim must come BEFORE we retire any stale window inside _open_camera — a worker that
+        # already gave up (cancel/timeout) must not tear down a live window on its way out.
+        if req.abandoned or not req.claim():
+            return
+        prompt = getattr(req, "prompt", "") or "Hold it up to the camera — take your time."
+        self._open_camera({"id": uuid.uuid4().hex[:10], "request": req}, prompt,
+                          announce="Camera's open — ready when you are.")
+
+    def camera_open(self) -> dict:
+        """MANUAL open — the camera button by the chat line. Always succeeds in raising a FRESH
+        window (any stale one is retired), so re-opening can never 'stick': the deterministic path
+        that a model that simply chose not to call view_camera used to leave the user without."""
+        cam = {"id": uuid.uuid4().hex[:10], "manual": True}
+        self._open_camera(cam, "Show me the part — I'll identify it and we can talk it through.",
+                          announce="Camera's open — show me the part.")
+        return {"ok": True, "id": cam["id"]}
 
     def camera_frame(self, cam_id: str, png: bytes) -> bool:
         cam = self._camera
@@ -805,9 +834,31 @@ class ShellSession:
         self._camera = None
         if self.voice is not None:
             self.voice.clear_camera_session()
-        cam["request"].fulfil(png)
         self.push({"t": "camera.close", "id": cam_id})
+        if cam.get("manual"):
+            # No tool call is parked on a manual shot — turn the picture straight into a turn primed
+            # to identify the component and open a conversation about it.
+            self._submit_manual_photo(png)
+        else:
+            cam["request"].fulfil(png)
         return True
+
+    def _submit_manual_photo(self, png: bytes) -> None:
+        """A manually-captured frame becomes a normal turn carrying the image + the component brief.
+        Written to a temp file the image loader reads, exactly like an attached photo; the turn runs
+        on the shared busy path so it queues politely behind anything already in flight."""
+        try:
+            path = Path(tempfile.gettempdir()) / f"helix-cam-{uuid.uuid4().hex[:10]}.png"
+            path.write_bytes(png)
+        except OSError:
+            self._bubble("helix", "I couldn't save that picture — try the camera again?")
+            return
+        self._bubble("user", "📷 (photo)", images=[str(path)])
+        with self._lock:
+            if self._busy:
+                self._pending.append((self._MANUAL_CAMERA_PROMPT, False, [path], None))
+                return
+        self._start_turn(self._MANUAL_CAMERA_PROMPT, False, [path], None)
 
     def camera_cancel(self, cam_id: str, reason: str = "") -> None:
         cam = self._camera
@@ -820,8 +871,11 @@ class ShellSession:
             self._camera = None
             if self.voice is not None:
                 self.voice.clear_camera_session()
-        cam["request"].fail(
-            reason or "The user closed the camera window before a picture was taken.")
+        # A manual session has no parked tool call to settle — only a model-driven one carries a
+        # request. Fail it so the waiting view_camera turn relays the reason instead of hanging.
+        req = cam.get("request")
+        if req is not None:
+            req.fail(reason or "The user closed the camera window before a picture was taken.")
         if not quiet:
             self.push({"t": "camera.close", "id": cam["id"]})
 

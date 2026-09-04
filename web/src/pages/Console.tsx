@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import VisualBlock from "../components/Chart";
 import { api } from "../lib/api";
 import { useHelix, type Attachment, type Bubble } from "../lib/store";
+import { tablesToTabs } from "../lib/table";
 
 const STATE_LINES: Record<string, string> = {
   listening: "Listening…",
@@ -22,7 +23,9 @@ function BubbleView({ b, idx }: { b: Bubble; idx: number }) {
     useAction(b.id, label);
     void api.post("/api/shell/action", { id }).catch(() => undefined);
   };
-  const copy = () => void navigator.clipboard.writeText(b.text);
+  // Copy the bubble as-is, except any markdown TABLE becomes tab-delimited so it pastes into Slack
+  // as columns (prose is untouched — see lib/table.ts).
+  const copy = () => void navigator.clipboard.writeText(tablesToTabs(b.text));
   return (
     <div className={`w-full flex ${isUser ? "justify-end" : "justify-start"} materialize`}
       style={{ "--i": idx % 4 } as React.CSSProperties}>
@@ -328,6 +331,13 @@ export default function Console() {
             }}
           />
         </label>
+        <button
+          className="btn shrink-0 text-[13px]"
+          title="Open the camera — snap a part and I'll identify it"
+          onClick={() => void api.post("/api/camera/open")}
+        >
+          📷
+        </button>
         <textarea
           ref={inputRef}
           value={text}

@@ -133,7 +133,9 @@ export default function App() {
         )}
       </main>
 
-      {cameraModal && <CameraModal modal={cameraModal} />}
+      {/* key by session id: a re-open (new id) always remounts, so the camera can never 'stick'
+          on a stale stream from the previous session. */}
+      {cameraModal && <CameraModal key={cameraModal.id} modal={cameraModal} />}
       {connectModal && <ConnectModal modal={connectModal} />}
     </div>
   );

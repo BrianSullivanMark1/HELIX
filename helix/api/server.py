@@ -225,6 +225,10 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         data = await file.read()
         return shell.add_attachment(file.filename or "file", data)
 
+    @app.post("/api/camera/open")
+    def camera_open():
+        return shell.camera_open()
+
     @app.post("/api/camera/{cam_id}/frame")
     async def camera_frame(cam_id: str, request: Request):
         data = await request.body()
