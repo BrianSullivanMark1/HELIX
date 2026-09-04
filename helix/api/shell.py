@@ -31,6 +31,7 @@ from helix.domain.events import (
     BuildProgress,
     BuildRenamed,
     BuildStarted,
+    CameraCommandRequested,
     CameraRequested,
     ConnectRequested,
     SelfChangeFinished,
@@ -116,7 +117,14 @@ class ShellSession:
         self._offers: list[dict] = []            # cleanup offers, newest last
         self._actions: dict[str, Callable] = {}  # bubble-button action id -> callable
         self._attachments: dict[str, Path] = {}  # uploaded attachment id -> temp path
-        self._camera: dict | None = None         # {"id", "request"}
+        self._attachment_frames: dict[str, str] = {}  # attachment id -> camera frame id (live view)
+        # The camera panel session — ONE at a time. {"id", "manual", "live", "label", "prompt",
+        # "request" (a parked CameraRequest or None), "rid" (that request's capture id),
+        # "opened_for_request" (the panel came up FOR a look, so a spoken cancel folds it)}.
+        self._camera: dict | None = None
+        self._camera_watchdog: threading.Timer | None = None
+        self._last_frame_id = ""                 # the frame the model saw last (AR callouts anchor to it)
+        self._images: dict[str, Path] = {}       # served transcript images: id -> temp file
         self._last_status = ""
         self._suggest_last = 0.0
         self._suggest_dismissed: set[str] = set()
@@ -146,6 +154,7 @@ class ShellSession:
             (BuildOpenRequested, self._on_open_requested),
             (ConnectRequested, self._on_connect_requested),
             (CameraRequested, self._on_camera_requested),
+            (CameraCommandRequested, self._on_camera_command),
             (SleepRequested, self._on_sleep_requested),
             (SelfChangeProgress, self._on_selfdev_progress),
             (SelfChangeFinished, self._on_selfdev_finished),
@@ -171,11 +180,46 @@ class ShellSession:
 
     def _bubble(self, role: str, text: str, *, visuals=None, sources=None, actions=None,
                 images=None) -> None:
+        # Images ride as SERVED URLS (/api/images/<id>) so the transcript can show the photo the
+        # user took or attached, not a placeholder chip; a bare path is registered on the way out.
+        urls = [self._serve_image(p) for p in (images or [])]
         self.push({
             "t": "msg", "id": uuid.uuid4().hex[:10], "role": role, "text": text,
             "visuals": visuals or [], "sources": sources or [], "actions": actions or [],
-            "images": images or [],
+            "images": [u for u in urls if u],
         })
+
+    # ----- served images (transcript thumbnails) -----
+    _IMAGES_KEPT = 60
+
+    def _serve_image(self, path) -> str:
+        """Register a local image so the face can fetch it, returning its URL. Already-served URLs
+        pass straight through. The oldest registrations retire (and their temp files go) so a long
+        session can never pile pictures up on disk."""
+        text = str(path or "")
+        if not text:
+            return ""
+        if text.startswith("/api/images/"):
+            return text
+        iid = uuid.uuid4().hex[:12]
+        self._images[iid] = Path(text)
+        while len(self._images) > self._IMAGES_KEPT:
+            old_id = next(iter(self._images))
+            self._forget_image(old_id)
+        return f"/api/images/{iid}"
+
+    def _forget_image(self, iid: str) -> None:
+        old = self._images.pop(iid, None)
+        if old is not None and old.name.startswith(("helix-cam-", "helix-look-")):
+            try:
+                old.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def served_image(self, iid: str) -> Path | None:
+        """The file behind /api/images/<id>, or None — only what the shell itself registered."""
+        path = self._images.get(iid)
+        return path if path is not None and path.is_file() else None
 
     def _action_row(self, text: str, buttons: list[tuple[str, Callable, str]]) -> None:
         actions = []
@@ -248,6 +292,9 @@ class ShellSession:
             "t": "snapshot", "authed": auth, "legend": self.board.legend(),
             "voice": self.voice_state(), "busy": self._busy, "hue": self._hue,
             "status": self._last_status or self.voice_state()["idle_line"],
+            # A reloaded page re-raises the open camera panel (same id, so a parked look still
+            # finds its panel) instead of leaving the backend believing in a panel nobody shows.
+            "camera": self._camera_event(self._camera) if self._camera is not None else None,
         }
         if not self._greeted:
             self._greeted = True
@@ -273,6 +320,12 @@ class ShellSession:
                from_voice: bool = False, speaker: str | None = None) -> None:
         text = (text or "").strip()
         paths = [self._attachments.pop(a) for a in (attachment_ids or []) if a in self._attachments]
+        # A live camera frame attached to a typed message is a look too: AR callouts the model
+        # draws in reply anchor to THAT frame.
+        for a in (attachment_ids or []):
+            fid = self._attachment_frames.pop(a, "")
+            if fid:
+                self._last_frame_id = fid
         if not text and not paths:
             return
         self._last_user_utterance = text if from_voice else ""
@@ -515,7 +568,7 @@ class ShellSession:
                 _LOG.exception("bubble action failed")
 
     # ----- attachments -----
-    def add_attachment(self, filename: str, data: bytes) -> dict:
+    def add_attachment(self, filename: str, data: bytes, *, frame_id: str = "") -> dict:
         safe = Path(filename or "file").name or "file"
         aid = uuid.uuid4().hex[:12]
         import tempfile
@@ -525,9 +578,12 @@ class ShellSession:
         path = folder / f"{aid}-{safe}"
         path.write_bytes(data)
         self._attachments[aid] = path
+        if frame_id:
+            self._attachment_frames[aid] = str(frame_id)[:40]
         return {"id": aid, "name": safe, "image": imagesvc.is_image(path)}
 
     def drop_attachment(self, aid: str) -> None:
+        self._attachment_frames.pop(aid, None)
         path = self._attachments.pop(aid, None)
         if path is not None:
             try:
@@ -780,9 +836,15 @@ class ShellSession:
             req.fulfil()
 
     # ----- camera -----
-    # The default framing for a manually-opened camera: HELIX is mostly used to photograph
-    # electronics (an ESP32, a sensor, a breakout), so the picture should land on a turn primed to
-    # IDENTIFY the part and open a conversation about it, not just "what's in this image".
+    # The camera is a PANEL, not a modal: it stays open beside the conversation, the user snaps
+    # stills and clips from it (with a question typed alongside, or not), and the model looks
+    # through it whenever the conversation needs eyes — instantly, when the panel is live; by
+    # raising it and waiting for the user's word when it isn't. AR callouts and holograms are
+    # drawn over the live view and anchor to the frame the model last saw.
+    #
+    # The default framing for a manual shot: HELIX is mostly used to photograph electronics (an
+    # ESP32, a sensor, a breakout), so a bare picture lands on a turn primed to IDENTIFY the part
+    # and open a conversation about it, not just "what's in this image".
     _MANUAL_CAMERA_PROMPT = (
         "This is a photo I just took, usually of an electronic component or board — often an ESP32, "
         "an Arduino, a sensor, or a breakout. Identify the part as precisely as you can from any "
@@ -790,94 +852,404 @@ class ShellSession:
         "invite me to dig in (wiring, pinout, how it fits my projects). If you truly can't tell, say "
         "what you can see and ask me to turn it or get the label in frame."
     )
+    _PHOTO_CONTEXT = (
+        "Context: this picture was just taken with my camera — usually of an electronic board, "
+        "component, or wiring job. Answer my question from what you actually see in it; read "
+        "markings and part numbers when they matter. If you'd like to point at something, draw it "
+        "on the camera view with annotate_camera."
+    )
+    _CLIP_PROMPT = (
+        "These are {n} frames from a short clip I just recorded with my camera over about {s:g} "
+        "seconds, in time order — usually me showing an electronic board or part from several "
+        "angles, plugging something in, or a light or display changing. Treat them as ONE look at "
+        "one thing: identify what it is, note what changes between the frames, and answer what I "
+        "asked. If I asked nothing, tell me what you see and what changed, briefly."
+    )
+    _DEFAULT_ASK = "Hold it up to the camera — take your time."
+    _MANUAL_ASK = "Show me the part — I'll identify it and we can talk it through."
+    # How long a LIVE panel gets to answer a no-wait look before the shell decides the panel is
+    # gone (a reloaded page, a closed tab) and raises a fresh one for the user instead.
+    _CAPTURE_WATCHDOG_S = 8.0
+
+    # -- events to the face --
+    def _camera_event(self, cam: dict) -> dict:
+        """The `camera` event (also the snapshot's `camera`): everything the panel needs to mount."""
+        req = cam.get("request")
+        ears = self.voice.camera_ears_live() if (self.voice is not None and req is not None) else False
+        ask = None
+        if req is not None:
+            ask = {"rid": cam.get("rid"), "prompt": cam.get("prompt") or self._DEFAULT_ASK,
+                   "hold": bool(req.hold), "frames": req.frames, "seconds": req.seconds}
+        return {"t": "camera", "id": cam["id"], "prompt": cam.get("prompt") or "", "ears": ears,
+                "manual": bool(cam.get("manual")), "ask": ask, "wake": self._wake_word()}
+
+    def _wake_word(self) -> str:
+        return (self.c.settings.get(WAKE_WORD_SETTING) or DEFAULT_WAKE_WORD).strip() or DEFAULT_WAKE_WORD
 
     def _open_camera(self, cam: dict, prompt: str, *, announce: str) -> None:
-        """Shared open path (model-driven and manual): retire any stale window, register the new
-        session, wire voice capture, and tell the face to raise the modal. One camera at a time."""
-        if self._camera is not None:  # a stale window — close it first; never two at once
+        """Shared open path (model-driven and manual): retire any stale panel, register the new
+        session, arm voice capture when a look is parked on it, and tell the face to raise the
+        panel. One panel at a time."""
+        if self._camera is not None:  # a stale panel — close it first; never two at once
             self._cancel_camera(self._camera, quiet=True)
+        cam.setdefault("live", False)
+        cam.setdefault("label", "")
+        cam["prompt"] = prompt
         self._camera = cam
-        ears = self.voice.camera_ears_live() if self.voice is not None else False
-        if self.voice is not None:
-            self.voice.set_camera_session(
-                lambda: self.push({"t": "camera.capture", "id": cam["id"]}),
-                lambda: self._cancel_camera(cam),
-            )
-        self.push({"t": "camera", "id": cam["id"], "prompt": prompt, "ears": ears,
-                   "manual": bool(cam.get("manual"))})
+        if cam.get("request") is not None:
+            self._arm_voice(cam)
+        self.push(self._camera_event(cam))
         self._status(f"Camera's open — {prompt}")
         self._narrate(announce)
 
+    def _arm_voice(self, cam: dict) -> None:
+        """While a look waits for the user's word, the tiny camera grammar owns the mic: 'take the
+        picture' snaps, 'cancel' settles the look without one."""
+        req, rid = cam.get("request"), cam.get("rid")
+        if self.voice is None or req is None:
+            return
+        self.voice.set_camera_session(
+            lambda: self.push({"t": "camera.capture", "id": cam["id"], "rid": rid,
+                               "frames": req.frames, "seconds": req.seconds}),
+            lambda: self._voice_cancel(cam, rid),
+        )
+
+    def _disarm_voice(self) -> None:
+        if self.voice is not None:
+            self.voice.clear_camera_session()
+
+    def _voice_cancel(self, cam: dict, rid: str | None) -> None:
+        """A spoken 'cancel' while a look waits: the look settles without a picture. The panel
+        folds too when it was raised FOR that look; a panel the user opened themselves stays."""
+        if self._camera is not cam or cam.get("rid") != rid:
+            return
+        if cam.get("opened_for_request"):
+            self._cancel_camera(cam, reason="The user cancelled the picture.")
+        else:
+            self._settle_request(cam, fail="The user cancelled the picture.")
+
+    # -- the model asks to look --
     def _on_camera_requested(self, ev: CameraRequested) -> None:
         req = ev.request
         # The claim must come BEFORE we retire any stale window inside _open_camera — a worker that
         # already gave up (cancel/timeout) must not tear down a live window on its way out.
         if req.abandoned or not req.claim():
             return
-        prompt = getattr(req, "prompt", "") or "Hold it up to the camera — take your time."
-        self._open_camera({"id": uuid.uuid4().hex[:10], "request": req}, prompt,
-                          announce="Camera's open — ready when you are.")
+        cam = self._camera
+        if cam is not None and cam.get("request") is not None:
+            # One look at a time: a newer look supersedes an older one still parked on the panel.
+            self._settle_request(cam, fail="A newer camera look replaced this one.")
+        if cam is not None and cam.get("live"):
+            rid = uuid.uuid4().hex[:10]
+            cam["request"], cam["rid"] = req, rid
+            cam["opened_for_request"] = False
+            prompt = req.prompt or self._DEFAULT_ASK
+            if req.hold:
+                # They were asked to show/turn/hold something — wait for their word or click.
+                cam["prompt"] = prompt
+                self._arm_voice(cam)
+                self.push({"t": "camera.ask", "id": cam["id"], "rid": rid, "prompt": prompt,
+                           "hold": True, "frames": req.frames, "seconds": req.seconds,
+                           "ears": self.voice.camera_ears_live() if self.voice is not None else False})
+                self._status(f"Camera — {prompt}")
+                self._narrate("Ready when you are.")
+            else:
+                # The panel is live: grab what it sees right now, no button press needed.
+                self.push({"t": "camera.capture", "id": cam["id"], "rid": rid,
+                           "frames": req.frames, "seconds": req.seconds})
+                self._watch_capture(cam, req)
+            return
+        # No live panel: raise one for this look and wait for the user in it.
+        prompt = req.prompt or self._DEFAULT_ASK
+        fresh = {"id": uuid.uuid4().hex[:10], "manual": False, "request": req,
+                 "rid": uuid.uuid4().hex[:10], "opened_for_request": True}
+        self._open_camera(fresh, prompt, announce="Camera's open — ready when you are.")
 
+    def _watch_capture(self, cam: dict, req) -> None:
+        """A live panel that never answers a no-wait look is a panel that isn't there any more (the
+        page reloaded, the tab closed). After the grace period, raise a fresh panel for the SAME
+        look so the user can take the picture, instead of letting the turn idle to its ceiling."""
+        self._cancel_watchdog()
+        timer = threading.Timer(self._CAPTURE_WATCHDOG_S, self._capture_overdue, args=(cam, req))
+        timer.daemon = True
+        self._camera_watchdog = timer
+        timer.start()
+
+    def _cancel_watchdog(self) -> None:
+        if self._camera_watchdog is not None:
+            self._camera_watchdog.cancel()
+            self._camera_watchdog = None
+
+    def _capture_overdue(self, cam: dict, req) -> None:
+        with self._lock:
+            stale = (self._camera is cam and cam.get("request") is req
+                     and not req.settled and not req.abandoned)
+            if not stale:
+                return
+            cam["request"], cam["rid"], cam["live"] = None, None, False  # detach before retiring
+        prompt = req.prompt or self._DEFAULT_ASK
+        fresh = {"id": uuid.uuid4().hex[:10], "manual": False, "request": req,
+                 "rid": uuid.uuid4().hex[:10], "opened_for_request": True}
+        self._open_camera(fresh, prompt, announce="Camera's open — ready when you are.")
+
+    # -- the face's calls --
     def camera_open(self) -> dict:
-        """MANUAL open — the camera button by the chat line. Always succeeds in raising a FRESH
-        window (any stale one is retired), so re-opening can never 'stick': the deterministic path
-        that a model that simply chose not to call view_camera used to leave the user without."""
-        cam = {"id": uuid.uuid4().hex[:10], "manual": True}
-        self._open_camera(cam, "Show me the part — I'll identify it and we can talk it through.",
-                          announce="Camera's open — show me the part.")
+        """MANUAL open — the camera button by the chat line (or camera_panel 'open'). Always
+        succeeds in raising a FRESH panel (any stale one is retired), so re-opening can never
+        'stick': the deterministic path that a model that simply chose not to call view_camera
+        used to leave the user without."""
+        cam = {"id": uuid.uuid4().hex[:10], "manual": True, "request": None, "rid": None,
+               "opened_for_request": False}
+        self._open_camera(cam, self._MANUAL_ASK, announce="Camera's open — show me the part.")
         return {"ok": True, "id": cam["id"]}
 
-    def camera_frame(self, cam_id: str, png: bytes) -> bool:
+    def camera_live(self, cam_id: str, on: bool, label: str = "") -> bool:
+        """The panel reports its stream state (and which camera). A LIVE panel is what makes the
+        model's no-wait looks instant; a panel that lost its stream goes back to asking."""
         cam = self._camera
         if cam is None or cam["id"] != cam_id:
             return False
-        self._camera = None
-        if self.voice is not None:
-            self.voice.clear_camera_session()
-        self.push({"t": "camera.close", "id": cam_id})
-        if cam.get("manual"):
-            # No tool call is parked on a manual shot — turn the picture straight into a turn primed
-            # to identify the component and open a conversation about it.
-            self._submit_manual_photo(png)
-        else:
-            cam["request"].fulfil(png)
+        cam["live"] = bool(on)
+        cam["label"] = " ".join(str(label or "").split())[:80]
         return True
 
-    def _submit_manual_photo(self, png: bytes) -> None:
-        """A manually-captured frame becomes a normal turn carrying the image + the component brief.
-        Written to a temp file the image loader reads, exactly like an attached photo; the turn runs
-        on the shared busy path so it queues politely behind anything already in flight."""
-        try:
-            path = Path(tempfile.gettempdir()) / f"helix-cam-{uuid.uuid4().hex[:10]}.png"
-            path.write_bytes(png)
-        except OSError:
-            self._bubble("helix", "I couldn't save that picture — try the camera again?")
-            return
-        self._bubble("user", "📷 (photo)", images=[str(path)])
-        with self._lock:
-            if self._busy:
-                self._pending.append((self._MANUAL_CAMERA_PROMPT, False, [path], None))
-                return
-        self._start_turn(self._MANUAL_CAMERA_PROMPT, False, [path], None)
+    def camera_frame(self, cam_id: str, png: bytes) -> bool:
+        """One raw frame, no metadata — the original contract, kept for the voice shutter and for
+        anything that still posts a bare PNG."""
+        return self.camera_frames(cam_id, [png])
 
-    def camera_cancel(self, cam_id: str, reason: str = "") -> None:
+    def camera_frames(self, cam_id: str, frames: list[bytes], *, rid: str | None = None,
+                      caption: str = "", mode: str = "still", seconds: float = 0.0,
+                      frame_id: str = "") -> bool:
+        """Frames from the panel — a still or a clip. With a capture id (or with a look parked and
+        no id, the voice shutter's case) they settle the model's look; otherwise they are the
+        user's own shot and become a turn. The panel STAYS open either way."""
         cam = self._camera
         if cam is None or cam["id"] != cam_id:
+            return False
+        frames = [f for f in (frames or []) if f]
+        if not frames:
+            return False
+        req = cam.get("request")
+        if req is not None and (rid is None or rid == cam.get("rid")):
+            self._settle_request(cam, frames=frames, frame_id=frame_id)
+            return True
+        if rid is not None:
+            return False  # a stale capture id: the look it answers is gone — drop it, don't turn it
+        self._submit_camera_shot(frames, caption=caption, mode=mode, seconds=seconds,
+                                 frame_id=frame_id)
+        return True
+
+    def _settle_request(self, cam: dict, *, frames: list[bytes] | None = None, fail: str = "",
+                        frame_id: str = "") -> None:
+        """Settle the look parked on this panel (a picture, or a plain reason) and put the panel
+        back to plain live — the voice grammar lets go, the prompt banner clears."""
+        req = cam.get("request")
+        cam["request"], cam["rid"] = None, None
+        cam["opened_for_request"] = False
+        self._cancel_watchdog()
+        self._disarm_voice()
+        if req is None:
+            return
+        self.push({"t": "camera.ask.clear", "id": cam["id"]})
+        if frames:
+            if frame_id:
+                self._last_frame_id = frame_id
+            req.fulfil_frames(frames)
+            self._trace_look(frames)
+        else:
+            req.fail(fail or "The user closed the camera panel before a picture was taken.")
+
+    def _trace_look(self, frames: list[bytes]) -> None:
+        """The transcript shows what HELIX looked at (a small thumbnail on a system line), so a
+        look is never invisible — the user can see the frame the answer came from."""
+        path = self._stash_frame(frames[0], prefix="helix-look-")
+        if path is None:
+            return
+        how = "a clip" if len(frames) > 1 else "the camera"
+        self._bubble("system", f"📷 Looked through {how}", images=[str(path)])
+
+    def _stash_frame(self, data: bytes, *, prefix: str = "helix-cam-") -> Path | None:
+        try:
+            path = Path(tempfile.gettempdir()) / f"{prefix}{uuid.uuid4().hex[:10]}.png"
+            path.write_bytes(data)
+            return path
+        except OSError:
+            return None
+
+    def _submit_camera_shot(self, frames: list[bytes], *, caption: str = "", mode: str = "still",
+                            seconds: float = 0.0, frame_id: str = "") -> None:
+        """A shot the user took becomes a normal turn carrying the picture(s) — with their question
+        when they typed one, else the identify-the-part brief (a clip gets the clip brief). Written
+        to temp files the image loader reads, exactly like attached photos; the turn runs on the
+        shared busy path so it queues politely behind anything already in flight."""
+        paths = [p for p in (self._stash_frame(f) for f in frames) if p is not None]
+        if not paths:
+            self._bubble("helix", "I couldn't save that picture — try the camera again?")
+            return
+        if frame_id:
+            self._last_frame_id = frame_id
+        caption = " ".join((caption or "").split())
+        clip = len(paths) > 1 or mode == "clip"
+        if clip:
+            brief = self._CLIP_PROMPT.format(n=len(paths), s=max(0.5, float(seconds or 0.0)))
+            shown = caption or f"🎞 (clip — {len(paths)} frames)"
+        else:
+            brief = self._MANUAL_CAMERA_PROMPT
+            shown = caption or "📷 (photo)"
+        if caption:
+            prompt = f"{caption}\n\n[{brief if clip else self._PHOTO_CONTEXT}]"
+        else:
+            prompt = brief
+        self._bubble("user", shown, images=[str(p) for p in paths[:4]])
+        with self._lock:
+            if self._busy:
+                self._pending.append((prompt, False, paths, None))
+                return
+        self._start_turn(prompt, False, paths, None)
+
+    def camera_cancel(self, cam_id: str, reason: str = "", *, keep_open: bool = False) -> None:
+        """Close the panel (the ✕ / Esc while nothing is parked) — or, with keep_open, just settle
+        the look parked on it (Esc on the prompt banner) and leave the panel live."""
+        cam = self._camera
+        if cam is None or cam["id"] != cam_id:
+            return
+        if keep_open:
+            self._settle_request(cam, fail=reason or "The user cancelled the picture.")
             return
         self._cancel_camera(cam, reason=reason)
 
     def _cancel_camera(self, cam: dict, *, reason: str = "", quiet: bool = False) -> None:
         if self._camera is cam:
             self._camera = None
-            if self.voice is not None:
-                self.voice.clear_camera_session()
+            self._cancel_watchdog()
+            self._disarm_voice()
         # A manual session has no parked tool call to settle — only a model-driven one carries a
         # request. Fail it so the waiting view_camera turn relays the reason instead of hanging.
         req = cam.get("request")
+        cam["request"], cam["rid"] = None, None
         if req is not None:
-            req.fail(reason or "The user closed the camera window before a picture was taken.")
+            req.fail(reason or "The user closed the camera panel before a picture was taken.")
         if not quiet:
             self.push({"t": "camera.close", "id": cam["id"]})
+
+    # -- AR commands from the model --
+    _OVERLAY_KINDS = frozenset({"box", "circle", "arrow", "label", "pin", "wire"})
+    _OVERLAY_NUMS = ("x", "y", "w", "h", "r", "x2", "y2")
+
+    @classmethod
+    def _clean_overlay(cls, items) -> list[dict]:
+        """Model-written drawing instructions → a bounded, typed list the face can trust: known
+        kinds only, numbers clamped near the frame, short plain text, capped counts."""
+        out: list[dict] = []
+        for raw in list(items or [])[:40]:
+            if not isinstance(raw, dict):
+                continue
+            kind = str(raw.get("kind") or "").strip().lower()
+            if kind not in cls._OVERLAY_KINDS:
+                continue
+            item: dict = {"kind": kind}
+            for key in cls._OVERLAY_NUMS:
+                if key in raw:
+                    try:
+                        item[key] = max(-0.5, min(1.5, float(raw[key])))
+                    except (TypeError, ValueError):
+                        pass
+            pts = []
+            for pair in list(raw.get("points") or [])[:30]:
+                try:
+                    px, py = float(pair[0]), float(pair[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                pts.append([max(-0.5, min(1.5, px)), max(-0.5, min(1.5, py))])
+            if pts:
+                item["points"] = pts
+            text = " ".join(str(raw.get("text") or "").split())[:60]
+            if text:
+                item["text"] = text
+            color = str(raw.get("color") or "").strip()[:20]
+            if color:
+                item["color"] = color
+            out.append(item)
+        return out
+
+    def _on_camera_command(self, ev: CameraCommandRequested) -> None:
+        cmd = ev.request
+        cam = self._camera
+        payload = cmd.payload
+        not_open = ("The camera panel isn't open — ask the user to open it with the camera button "
+                    "(or call camera_panel 'open'), then try again.")
+        try:
+            if cmd.command == "panel":
+                action = payload.get("action", "open")
+                if action == "open":
+                    if cam is None:
+                        self.camera_open()
+                        cmd.settle("Camera panel's open — look, draw, or project whenever you like.")
+                    else:
+                        cmd.settle("The camera panel is already open.")
+                elif action == "close":
+                    if cam is None:
+                        cmd.settle("The camera panel isn't open.")
+                    else:
+                        self._cancel_camera(cam, reason="The camera panel was closed.")
+                        self._status("Camera's closed.")
+                        cmd.settle("Closed the camera panel.")
+                elif action in ("expand", "dock"):
+                    if cam is None:
+                        cmd.settle(not_open)
+                    else:
+                        layout = "full" if action == "expand" else "dock"
+                        self.push({"t": "camera.layout", "id": cam["id"], "layout": layout})
+                        cmd.settle("The camera panel is full-screen now." if action == "expand"
+                                   else "The camera panel is docked beside the conversation.")
+                else:  # clear
+                    if cam is None:
+                        cmd.settle(not_open)
+                    else:
+                        self.push({"t": "camera.overlay", "id": cam["id"], "clear": True,
+                                   "items": [], "title": "", "frame": ""})
+                        cmd.settle("Cleared the callouts from the camera view.")
+            elif cmd.command == "overlay":
+                if cam is None:
+                    cmd.settle(not_open)
+                    return
+                items = self._clean_overlay(payload.get("items"))
+                if not items:
+                    cmd.settle("None of those callouts were drawable — use the documented kinds "
+                               "with normalized coordinates.")
+                    return
+                self.push({"t": "camera.overlay", "id": cam["id"], "frame": self._last_frame_id,
+                           "title": str(payload.get("title") or "")[:80], "items": items,
+                           "clear": bool(payload.get("clear", True))})
+                n = len(items)
+                cmd.settle(f"Drawn {n} callout{'s' if n != 1 else ''} on the camera view; they "
+                           "track the object as it moves.")
+            elif cmd.command == "hologram":
+                if cam is None:
+                    cmd.settle(not_open)
+                    return
+                if payload.get("remove"):
+                    self.push({"t": "camera.hologram", "id": cam["id"], "remove": True})
+                    cmd.settle("Took the hologram off the camera view.")
+                    return
+                slug, name = str(payload.get("slug") or ""), str(payload.get("name") or slug)
+                mesh = self.c.builds.workspace(slug) / "assets" / "model.stl" if slug else None
+                if mesh is None or not mesh.is_file():
+                    cmd.settle(f"'{name}' has no mesh to project yet — open it in the Studio once "
+                               "so it bakes, or ask me to rebuild it.")
+                    return
+                self.push({"t": "camera.hologram", "id": cam["id"], "slug": slug, "name": name,
+                           "stl": f"/builds/{slug}/assets/model.stl"})
+                self._status(f"Projecting {name} onto the camera view")
+                cmd.settle(f"Projected {name} onto the camera view — the user can drag it into "
+                           "place, scroll to scale it, and shift-drag to tilt it; it then tracks "
+                           "the board.")
+            else:
+                cmd.settle(f"Unknown camera command '{cmd.command}'.")
+        except Exception as exc:  # noqa: BLE001 — never leave the worker parked on a crash
+            _LOG.exception("camera command failed")
+            cmd.settle(f"That didn't work: {exc}")
 
     # ----- suggestions + heartbeat -----
     def suggestion_dismiss(self, sid: str) -> None:
@@ -1021,8 +1393,10 @@ class ShellSession:
             self._heartbeat.cancel()
         except Exception:  # noqa: BLE001
             pass
-        for timer in (self._done_timer, self._hue_timer):
+        for timer in (self._done_timer, self._hue_timer, self._camera_watchdog):
             if timer is not None:
                 timer.cancel()
+        for iid in list(self._images):  # the transcript's temp pictures leave with the session
+            self._forget_image(iid)
         if self.voice is not None:
             self.voice.shutdown()

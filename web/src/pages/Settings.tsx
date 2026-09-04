@@ -31,6 +31,7 @@ export default function Settings() {
   const [gmailPw, setGmailPw] = useState("");
   const [calUrl, setCalUrl] = useState("");
   const [note, setNote] = useState("");
+  const [cameras, setCameras] = useState<string[]>([]);
 
   const load = useCallback(() => {
     void api.get<SettingsData>("/api/settings").then((d) => {
@@ -39,6 +40,11 @@ export default function Settings() {
       setSecretEdits({});
       setGmailAddr(d.gmail.address || "");
     });
+    // Camera names are only readable once the camera has been allowed; until then the list is
+    // empty and the hint says so.
+    void navigator.mediaDevices?.enumerateDevices?.()
+      .then((all) => setCameras(all.filter((x) => x.kind === "videoinput" && x.label).map((x) => x.label)))
+      .catch(() => undefined);
   }, []);
   useEffect(load, [load]);
 
@@ -208,6 +214,49 @@ export default function Settings() {
               <input type="range" min={0.8} max={2.0} step={0.1} className="accent-[#3fe0e0]"
                 value={Number(val("tts_rate") ?? 1)}
                 onChange={(e) => setVal("tts_rate", Number(e.target.value))} />
+            </div>
+          </div>
+        </section>
+
+        <section className="glass rounded-2xl p-5">
+          <div className="section-title mb-4">Camera</div>
+          <div className="space-y-3 text-[13px]">
+            <div className="flex items-center gap-3">
+              <span className="w-44">Preferred camera</span>
+              <select value={String(val("camera_device") ?? "")}
+                onChange={(e) => setVal("camera_device", e.target.value)}>
+                <option value="">Any camera (the panel remembers your last pick)</option>
+                {cameras.map((c) => <option key={c} value={c}>{c}</option>)}
+                {Boolean(val("camera_device")) && !cameras.includes(String(val("camera_device"))) && (
+                  <option value={String(val("camera_device"))}>{String(val("camera_device"))}</option>
+                )}
+              </select>
+              {cameras.length === 0 && (
+                <span className="text-xs" style={{ color: "var(--muted)" }}>
+                  Open the camera once on the Console to list them by name.
+                </span>
+              )}
+            </div>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={Boolean(val("camera_mirror"))}
+                onChange={(e) => setVal("camera_mirror", e.target.checked)} />
+              Mirror the preview (selfie style — off keeps board markings readable)
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={Boolean(val("camera_attach_view") ?? true)}
+                onChange={(e) => setVal("camera_attach_view", e.target.checked)} />
+              While the camera is open, typed messages carry the current view
+            </label>
+            <div className="flex items-center gap-3">
+              <span className="w-44">Clip length — {Number(val("camera_clip_seconds") ?? 6)}s</span>
+              <input type="range" min={2} max={15} step={1} className="accent-[#3fe0e0]"
+                value={Number(val("camera_clip_seconds") ?? 6)}
+                onChange={(e) => setVal("camera_clip_seconds", Number(e.target.value))} />
+            </div>
+            <div className="text-xs" style={{ color: "var(--muted)" }}>
+              The 📷 button by the chat line opens the panel; ⇄ in the panel cycles cameras. HELIX
+              looks through it on its own once it's open, draws callouts over what it sees, and
+              can project your holograms onto the real board.
             </div>
           </div>
         </section>

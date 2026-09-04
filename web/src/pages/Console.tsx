@@ -1,9 +1,11 @@
 // The Console — the orb's home. Transparent over the orb; the transcript, the status pill, the
 // voice button, attachments, and the input row. All the ordering rules live server-side in the
-// ShellSession; this page renders events and sends gestures.
+// ShellSession; this page renders events and sends gestures. The camera panel docks beside it (the
+// transcript makes room) or takes the window over for AR work (the transcript steps aside; the
+// input row stays so you can keep talking to what you're looking at).
 import { useCallback, useEffect, useRef, useState } from "react";
 import VisualBlock from "../components/Chart";
-import { api } from "../lib/api";
+import { api, tokenUrl } from "../lib/api";
 import { useHelix, type Attachment, type Bubble } from "../lib/store";
 import { tablesToTabs } from "../lib/table";
 
@@ -40,13 +42,25 @@ function BubbleView({ b, idx }: { b: Bubble; idx: number }) {
       >
         {b.text && <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{b.text}</div>}
         {b.images.length > 0 && (
-          <div className="flex gap-2 mt-2">
-            {b.images.map((_, i) => (
-              <span key={i} className="text-xs px-2 py-1 rounded-md"
-                style={{ background: "var(--panel-hi)", color: "var(--muted)" }}>
-                🖼 image {b.images.length > 1 ? i + 1 : ""}
-              </span>
-            ))}
+          <div className="flex gap-2 mt-2 flex-wrap">
+            {b.images.map((url, i) =>
+              url.startsWith("/api/images/") ? (
+                <img
+                  key={i}
+                  src={tokenUrl(url)}
+                  alt=""
+                  className="rounded-lg"
+                  style={{ height: isSystem ? 64 : 110, maxWidth: 220, objectFit: "cover", cursor: "zoom-in", border: "1px solid var(--line)" }}
+                  onClick={() => useHelix.getState().set({ lightbox: url })}
+                  title="Open"
+                />
+              ) : (
+                <span key={i} className="text-xs px-2 py-1 rounded-md"
+                  style={{ background: "var(--panel-hi)", color: "var(--muted)" }}>
+                  🖼 image {b.images.length > 1 ? i + 1 : ""}
+                </span>
+              ),
+            )}
           </div>
         )}
         {b.visuals.map((v, i) => (
@@ -100,6 +114,10 @@ export default function Console() {
   const attachments = useHelix((s) => s.attachments);
   const setAttachments = useHelix((s) => s.setAttachments);
   const keepInput = useHelix((s) => s.keepInput);
+  const camera = useHelix((s) => s.camera);
+  const cameraLayout = useHelix((s) => s.cameraLayout);
+  const attachView = useHelix((s) => s.attachView);
+  const cameraCapture = useHelix((s) => s.cameraCapture);
 
   const [text, setText] = useState("");
   const scroller = useRef<HTMLDivElement>(null);
@@ -107,6 +125,8 @@ export default function Console() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const pttRef = useRef<HTMLButtonElement>(null);
   const [ptt, setPtt] = useState(false);
+  const docked = Boolean(camera) && cameraLayout === "dock";
+  const arFull = Boolean(camera) && cameraLayout === "full";
 
   // While Hold-to-Talk is held, the mic level fills the gauge ring (scoped to the button).
   useEffect(() => {
@@ -130,21 +150,34 @@ export default function Console() {
   useEffect(() => {
     const el = scroller.current;
     if (el && follow.current) el.scrollTop = el.scrollHeight;
-  }, [bubbles]);
+  }, [bubbles, arFull]);
 
   const onScroll = () => {
     const el = scroller.current;
     if (el) follow.current = el.scrollTop >= el.scrollHeight - el.clientHeight - 40;
   };
 
-  const send = useCallback(() => {
+  const send = useCallback(async () => {
     const t = text.trim();
     if (!t && attachments.length === 0) return;
     follow.current = true;
-    void api.post("/api/shell/submit", { text: t, attachments: attachments.map((a) => a.id) });
     setText("");
     setAttachments([]);
-  }, [text, attachments, setAttachments]);
+    const ids = attachments.map((a) => a.id);
+    // The camera is open and the view rides along: what you type is about what it sees.
+    if (t && camera && attachView && cameraCapture) {
+      try {
+        const shot = await cameraCapture();
+        if (shot) {
+          const up = await api.upload(shot.blobs[0], "camera-view.jpg", shot.frame);
+          ids.push(up.id);
+        }
+      } catch {
+        /* the message still goes, just without the picture */
+      }
+    }
+    void api.post("/api/shell/submit", { text: t, attachments: ids });
+  }, [text, attachments, setAttachments, camera, attachView, cameraCapture]);
 
   const stop = () => void api.post("/api/shell/stop");
 
@@ -183,6 +216,11 @@ export default function Console() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attachments]);
 
+  const toggleCamera = () => {
+    if (camera) void api.post(`/api/camera/${camera.id}/cancel`).catch(() => undefined);
+    else void api.post("/api/camera/open").catch(() => undefined);
+  };
+
   const statusLine = busy
     ? status
     : STATE_LINES[orb] ?? (status || idleLine);
@@ -191,9 +229,12 @@ export default function Console() {
     voice?.tone === "on" ? "var(--cyan)" : voice?.tone === "warn" ? "#e0a13f" : "#aebcc3";
 
   return (
-    <div className="h-full flex flex-col items-center pt-12 pb-5 px-6" style={{ pointerEvents: "none" }}>
+    <div
+      className={`h-full flex flex-col items-center pt-12 pb-5 px-6 ${docked ? "console-docked" : ""}`}
+      style={{ pointerEvents: "none", justifyContent: arFull ? "flex-end" : undefined }}
+    >
       {/* legend strip */}
-      {legend.length > 0 && (
+      {legend.length > 0 && !arFull && (
         <div className="w-full max-w-[900px] overflow-x-auto flex gap-2 pb-1"
           style={{ pointerEvents: "auto" }}>
           {legend.map((item) => (
@@ -215,17 +256,19 @@ export default function Console() {
         </div>
       )}
 
-      {/* transcript */}
-      <div
-        ref={scroller}
-        onScroll={onScroll}
-        className="flex-1 w-full max-w-[820px] overflow-y-auto flex flex-col gap-3 py-4 px-2"
-        style={{ pointerEvents: "auto" }}
-      >
-        {bubbles.map((b, i) => (
-          <BubbleView key={b.id} b={b} idx={i} />
-        ))}
-      </div>
+      {/* transcript — steps aside while the camera fills the window */}
+      {!arFull && (
+        <div
+          ref={scroller}
+          onScroll={onScroll}
+          className="flex-1 w-full max-w-[820px] overflow-y-auto flex flex-col gap-3 py-4 px-2"
+          style={{ pointerEvents: "auto" }}
+        >
+          {bubbles.map((b, i) => (
+            <BubbleView key={b.id} b={b} idx={i} />
+          ))}
+        </div>
+      )}
 
       {/* status pill — a plasma conduit carrying the star's color; the busy arc IS the spinner */}
       <div
@@ -237,11 +280,13 @@ export default function Console() {
         }}
         title={statusLine.length > 40 ? statusLine : undefined}
       >
-        {statusLine}
+        {arFull && bubbles.length > 0 && bubbles[bubbles.length - 1].role === "helix"
+          ? `${bubbles[bubbles.length - 1].text.slice(0, 160)}${bubbles[bubbles.length - 1].text.length > 160 ? "…" : ""}`
+          : statusLine}
       </div>
 
       {/* voice button */}
-      {voice?.supported && (
+      {voice?.supported && !arFull && (
         <button
           className="btn mb-3 text-[13px]"
           style={{ borderColor: voiceTone, color: voiceTone, pointerEvents: "auto" }}
@@ -252,7 +297,7 @@ export default function Console() {
       )}
 
       {/* suggestion chip */}
-      {suggestion && (
+      {suggestion && !arFull && (
         <div className="glass rounded-xl px-4 py-2 mb-3 flex items-center gap-3 text-[13px]"
           style={{ pointerEvents: "auto" }}>
           <span>💡 {suggestion.text}</span>
@@ -333,8 +378,9 @@ export default function Console() {
         </label>
         <button
           className="btn shrink-0 text-[13px]"
-          title="Open the camera — snap a part and I'll identify it"
-          onClick={() => void api.post("/api/camera/open")}
+          title={camera ? "Close the camera" : "Open the camera — show me a part, a board, a wiring job"}
+          style={camera ? { borderColor: "var(--cyan)", color: "var(--cyan)" } : undefined}
+          onClick={toggleCamera}
         >
           📷
         </button>
@@ -342,14 +388,14 @@ export default function Console() {
           ref={inputRef}
           value={text}
           rows={Math.min(6, Math.max(1, text.split("\n").length))}
-          placeholder="Talk to HELIX…"
+          placeholder={camera && attachView && cameraCapture ? "Ask about what the camera sees…" : "Talk to HELIX…"}
           className="flex-1 resize-none"
           style={{ background: "rgba(13,20,27,0.85)" }}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey) {
               e.preventDefault();
-              send();
+              void send();
             }
           }}
           onPaste={(e) => {
@@ -383,7 +429,7 @@ export default function Console() {
             ▶ Wake
           </button>
         )}
-        <button className="btn btn-primary shrink-0" onClick={send}>
+        <button className="btn btn-primary shrink-0" onClick={() => void send()}>
           Send
         </button>
       </div>

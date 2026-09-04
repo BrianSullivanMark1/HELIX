@@ -79,6 +79,10 @@ BUILD_TOOLS = frozenset(
         # agent processing untrusted content must never open the webcam and photograph the room —
         # or the person — behind the machine.
         "view_camera",
+        # The camera panel's AR commands draw on, project onto, or raise/close a panel on the
+        # user's SCREEN — a watcher chewing on an email must never be able to scribble over the
+        # user's view or pop the camera panel up. Human-driven only, like the look itself.
+        "annotate_camera", "project_hologram", "camera_panel",
         # Desktop control is human-driven only — text a watcher processes must never launch a
         # program or press the user's keys. (system_status stays readable: it's one status line.)
         "open_program", "media_control",

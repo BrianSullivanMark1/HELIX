@@ -141,7 +141,7 @@ def test_view_camera_dispatch_hands_the_model_the_frame():
     bus = _AnsweringBus(_png_bytes())
     out = _registry(bus).dispatch("view_camera", {"prompt": "Hold the label up close"})
     assert isinstance(out, ToolOutput) and len(out.images) == 1
-    assert "showing me" in out.text.lower()
+    assert "camera sees" in out.text.lower()
     assert [type(e) for e in bus.published] == [CameraRequested]
     assert bus.published[0].request.prompt == "Hold the label up close"
     # The frame rode the SAME pipeline as every other image: long edge capped, sane media type.

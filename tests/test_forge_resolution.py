@@ -252,6 +252,33 @@ def test_keeping_a_stopped_iteration_survives_the_next_launch(tmp_path):
     assert ws.exists()
 
 
+def test_a_build_survives_an_app_root_that_is_not_a_git_repo(tmp_path):
+    # THE 2026-09-04 IRONEYE SNAG: the escape tripwire asks git for the app root's hooks folder,
+    # and the packaged app's root (dist\HELIX) is no repository — on Brian's machine git walked up
+    # into HELIX_V3's dangling worktree pointer and every build died before the coder ran. A
+    # consumer install has no repo above it at all. Git refusing must skip the hooks scan, not
+    # kill the build; the tree scan still guards the app root.
+    from helix.adapters.git_repo import GitError
+
+    rig = _Rig(tmp_path)
+
+    def no_repo(_repo_dir):
+        raise GitError("git rev-parse --git-common-dir failed: fatal: not a git repository")
+
+    rig.repo.hooks_dir = no_repo
+    app = rig.forge(_writes_a_page).build("Iron Eye", "v1")
+    ws = rig.builds.workspace(app.slug)
+    assert (ws / "index.html").exists() and not rig.builds.is_building(app.slug)
+    # …and the tripwire proper is still armed: a coder that writes outside the workspace is caught.
+    def escapes(ws_: Path, _c) -> CoderResult:
+        ws_.joinpath("index.html").write_text("<h1>v2</h1>", encoding="utf-8")
+        (rig.root / "src" / "planted.py").write_text("# escaped", encoding="utf-8")
+        return CoderResult(ok=True, summary="built")
+
+    with pytest.raises(BuildError):
+        rig.forge(escapes).build("Iron Eye", "v2")
+
+
 def test_coder_failure_removes_a_never_finalized_new_build(tmp_path):
     rig = _Rig(tmp_path)
     with pytest.raises(BuildError, match="boom"):

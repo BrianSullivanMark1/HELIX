@@ -21,7 +21,7 @@ import socket
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Form, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -44,6 +44,10 @@ _SETTING_KEYS = (
     "wake_word", "narration_mode", "proactive_speech", "trust_household_voice",
     "file_write_access", "evolve_enabled", "model_detail", "tts_voice", "tts_rate",
     "voice_input_on", "remote_enabled", "remote_lan", "auto_deep_turns",
+    # The camera panel's preferences: which camera (by its label — browser device ids are
+    # per-origin and change), a mirrored preview, clip length, and whether a typed message
+    # while the panel is live carries the current view along with it.
+    "camera_device", "camera_mirror", "camera_clip_seconds", "camera_attach_view",
 )
 _SECRET_SETTINGS = ("claude_api_key", "claude_code_oauth_token")
 
@@ -221,13 +225,31 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         return {"ok": True}
 
     @app.post("/api/attachments")
-    async def upload(file: UploadFile):
+    async def upload(file: UploadFile, frame: str = Form("")):
         data = await file.read()
-        return shell.add_attachment(file.filename or "file", data)
+        # `frame`: the camera panel's frame id when this attachment IS the live view (the
+        # "attach the view" chip) — AR callouts drawn in reply anchor to it.
+        return shell.add_attachment(file.filename or "file", data, frame_id=frame)
 
+    @app.get("/api/images/{iid}")
+    def served_image(iid: str):
+        """A transcript picture (a shot, a look, an attached image) — only what the shell itself
+        registered, never an arbitrary path."""
+        path = shell.served_image(iid)
+        if path is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(str(path), headers={"Cache-Control": "private, max-age=3600"})
+
+    # ----- the camera panel -----
     @app.post("/api/camera/open")
     def camera_open():
         return shell.camera_open()
+
+    @app.post("/api/camera/{cam_id}/live")
+    async def camera_live(cam_id: str, request: Request):
+        body = await request.json()
+        ok = shell.camera_live(cam_id, bool(body.get("on")), str(body.get("label") or ""))
+        return {"ok": ok}
 
     @app.post("/api/camera/{cam_id}/frame")
     async def camera_frame(cam_id: str, request: Request):
@@ -235,10 +257,40 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         ok = shell.camera_frame(cam_id, data)
         return {"ok": ok}
 
+    @app.post("/api/camera/{cam_id}/frames")
+    async def camera_frames(cam_id: str, frames: list[UploadFile], rid: str = Form(""),
+                            caption: str = Form(""), mode: str = Form("still"),
+                            seconds: float = Form(0.0), frame: str = Form("")):
+        """A still or a clip from the panel: `frames` in time order; `rid` answers a parked look
+        (empty = the user's own shot, which becomes a turn with `caption` as its question)."""
+        blobs = [await f.read() for f in frames]
+        ok = shell.camera_frames(cam_id, blobs, rid=rid or None, caption=caption, mode=mode,
+                                 seconds=seconds, frame_id=frame)
+        return {"ok": ok}
+
     @app.post("/api/camera/{cam_id}/cancel")
-    def camera_cancel(cam_id: str):
-        shell.camera_cancel(cam_id)
+    async def camera_cancel(cam_id: str, request: Request):
+        keep_open = False
+        try:
+            body = await request.json()
+            keep_open = bool(body.get("keep_open"))
+        except Exception:  # noqa: BLE001 — a bare POST closes the panel
+            pass
+        shell.camera_cancel(cam_id, keep_open=keep_open)
         return {"ok": True}
+
+    @app.get("/api/camera/holograms")
+    def camera_holograms():
+        """The holograms the panel can project: MODEL builds that have a baked mesh."""
+        rows = []
+        for a in c.builds.list():
+            if a.build_kind != BuildKind.MODEL:
+                continue
+            mesh = c.builds.workspace(a.slug) / "assets" / "model.stl"
+            if mesh.is_file():
+                rows.append({"slug": a.slug, "name": a.name,
+                             "stl": f"/builds/{a.slug}/assets/model.stl"})
+        return {"holograms": rows}
 
     @app.post("/api/connect/{service_id}")
     async def connect(service_id: str, request: Request):
@@ -532,6 +584,18 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
     def get_settings():
         values = {k: c.settings.get(k) for k in _SETTING_KEYS}
         values["tts_rate"] = float(values.get("tts_rate") or 1.0)
+        # Camera defaults (unset = the panel's own): an un-mirrored preview (markings on a board
+        # read correctly), 6-second clips, and the live view rides along with typed messages
+        # while the panel is open.
+        if values.get("camera_mirror") is None:
+            values["camera_mirror"] = False
+        if values.get("camera_attach_view") is None:
+            values["camera_attach_view"] = True
+        try:
+            values["camera_clip_seconds"] = max(1, min(15, int(values.get("camera_clip_seconds") or 6)))
+        except (TypeError, ValueError):
+            values["camera_clip_seconds"] = 6
+        values["camera_device"] = str(values.get("camera_device") or "")
         secretset = {k: bool((c.settings.get(k) or "").strip()) for k in _SECRET_SETTINGS}
         conns = {}
         for sid, (label, _store, fields) in CONNECTABLE.items():

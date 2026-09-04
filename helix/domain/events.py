@@ -131,6 +131,19 @@ class CameraRequested(Event):
     request: object
 
 
+@dataclass(frozen=True)
+class CameraCommandRequested(Event):
+    """The model sent the LIVE camera panel an AR command — draw callouts over the view
+    (annotate_camera), project a hologram onto it (project_hologram), or open/close the panel
+    (camera_panel). The shell answers through the holder with one plain line ("Drawn 3 callouts",
+    "The camera panel isn't open") so the tool relays the truth instead of assuming a panel heard.
+
+    request: a helix.services.camera.CameraCommand (command + payload + the settle/wait pair),
+    typed loosely so the domain layer stays free of service imports."""
+
+    request: object
+
+
 # How long the parked tool waits for a UI to CLAIM a sleep request. No claim means there is nothing
 # on the other side of the bus that could have rested any ears (headless, tests, a torn-down shell) —
 # give up fast and say so, rather than hanging the turn on a listener that does not exist.

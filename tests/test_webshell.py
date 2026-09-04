@@ -119,8 +119,9 @@ def test_a_manual_frame_becomes_a_component_turn(rig, monkeypatch):
     monkeypatch.setattr(sh, "_start_turn", lambda *a, **k: started.append(a))
     cid = sh.camera_open()["id"]
     assert sh.camera_frame(cid, b"\x89PNG-fake") is True
-    assert sh._camera is None                          # session cleared
-    assert any(e.get("t") == "camera.close" for e in events)
+    # The panel is persistent now: a shot does NOT fold it — the user keeps working with it.
+    assert sh._camera is not None and sh._camera["id"] == cid
+    assert not any(e.get("t") == "camera.close" for e in events)
     assert len(started) == 1                           # a turn was kicked off…
     assert "electronic component" in started[0][0]     # …with the identify-the-part brief
     assert started[0][2] and str(started[0][2][0]).endswith(".png")  # carrying the saved photo

@@ -1,7 +1,7 @@
-// The shell: the orb behind everything, a reveal nav, one routed page, and the global modals.
+// The shell: the orb behind everything, a reveal nav, one routed page, and the global panels.
 import { useEffect, useRef, useState } from "react";
 import Orb from "./components/Orb";
-import CameraModal from "./components/CameraModal";
+import CameraDock from "./components/CameraDock";
 import ConnectModal from "./components/ConnectModal";
 import StateColor from "./components/StateColor";
 import Console from "./pages/Console";
@@ -10,8 +10,8 @@ import Settings from "./pages/Settings";
 import Studio from "./pages/Studio";
 import Vault from "./pages/Vault";
 import Viewer from "./pages/Viewer";
-import { api, connectEvents } from "./lib/api";
-import { applyEvent, useHelix, type Page } from "./lib/store";
+import { api, connectEvents, tokenUrl } from "./lib/api";
+import { applyEvent, cameraFromEvent, useHelix, type Page } from "./lib/store";
 
 interface Snapshot {
   authed: boolean;
@@ -21,13 +21,15 @@ interface Snapshot {
   hue: never;
   status: string;
   greeting?: string;
+  camera?: Record<string, unknown> | null;
 }
 
 export default function App() {
   const page = useHelix((s) => s.page);
   const navigate = useHelix((s) => s.navigate);
-  const cameraModal = useHelix((s) => s.cameraModal);
+  const camera = useHelix((s) => s.camera);
   const connectModal = useHelix((s) => s.connectModal);
+  const lightbox = useHelix((s) => s.lightbox);
   const [navShown, setNavShown] = useState(true);
   const navTimer = useRef<number>(0);
 
@@ -44,6 +46,13 @@ export default function App() {
           status: snap.status,
           idleLine: (snap.voice as { idle_line?: string })?.idle_line ?? "Ready when you are.",
         });
+        // A camera panel the backend still holds (this page reloaded, or reconnected) comes back
+        // up with the same id, so a look parked on it still finds its panel.
+        if (snap.camera && snap.camera.id) {
+          if (s.camera?.id !== snap.camera.id) s.set({ camera: cameraFromEvent(snap.camera), overlays: [], hologram: null });
+        } else if (s.camera) {
+          s.set({ camera: null, captureOrder: null, overlays: [], hologram: null, cameraCapture: null });
+        }
         if (snap.greeting) {
           s.addBubble({
             id: "greeting", role: "helix", text: snap.greeting,
@@ -133,10 +142,22 @@ export default function App() {
         )}
       </main>
 
-      {/* key by session id: a re-open (new id) always remounts, so the camera can never 'stick'
-          on a stale stream from the previous session. */}
-      {cameraModal && <CameraModal key={cameraModal.id} modal={cameraModal} />}
+      {/* The camera panel stays MOUNTED across pages (its stream and tracker keep running while
+          you glance at the Menu or Settings) and simply hides off the Console, where the AR
+          surface belongs. Keyed by session id so a re-open (new id) always remounts and can
+          never 'stick' on a stale stream. */}
+      {camera && <CameraDock key={camera.id} session={camera} hidden={!onConsole} />}
       {connectModal && <ConnectModal modal={connectModal} />}
+
+      {lightbox && (
+        <div
+          className="fixed inset-0 flex items-center justify-center"
+          style={{ zIndex: 60, background: "rgba(3,6,9,0.85)", cursor: "zoom-out" }}
+          onClick={() => useHelix.getState().set({ lightbox: "" })}
+        >
+          <img src={tokenUrl(lightbox)} alt="" style={{ maxWidth: "92vw", maxHeight: "92vh", borderRadius: 12, border: "1px solid var(--line)" }} />
+        </div>
+      )}
     </div>
   );
 }

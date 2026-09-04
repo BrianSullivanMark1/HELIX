@@ -121,6 +121,97 @@ def capture_screen() -> Image | None:
         return None
 
 
+GRID_COLS = 10
+GRID_ROWS = 10
+# What the model is told when a camera picture carries the reference grid — the coordinate
+# vocabulary annotate_camera speaks (normalized, origin top-left, one cell = one tenth).
+GRID_LEGEND = (
+    "The picture carries a labelled reference grid: columns A–J run left→right, rows 1–10 run "
+    "top→bottom, and every cell is 0.1 wide and 0.1 tall in normalized coordinates (x and y from "
+    "0.0 at the top-left to 1.0 at the bottom-right — cell C4 spans x 0.20–0.30, y 0.30–0.40). "
+    "Read positions off it when you place annotate_camera callouts."
+)
+
+
+def with_grid(data: bytes, cols: int = GRID_COLS, rows: int = GRID_ROWS) -> bytes:
+    """Burn a thin, labelled reference grid onto encoded image bytes (PNG out). The grid is for the
+    MODEL's eyes — it turns "the chip near the middle" into "cell E5", so the callouts it draws land
+    where it meant them. Thin lines + small labels so the parts underneath stay readable. Returns the
+    original bytes untouched when Pillow can't draw (never breaks a look)."""
+    try:
+        from PIL import Image as PILImage, ImageDraw, ImageOps
+    except Exception:  # noqa: BLE001 — no Pillow: the plain picture still goes through
+        return data
+    try:
+        im = PILImage.open(io.BytesIO(data))
+        im = (ImageOps.exif_transpose(im) or im).convert("RGB")
+        w, h = im.size
+        if w < 40 or h < 40:
+            return data
+        draw = ImageDraw.Draw(im, "RGBA")
+        line = (63, 224, 224, 150)
+        shadow = (0, 0, 0, 170)
+        for cidx in range(1, cols):
+            x = round(w * cidx / cols)
+            draw.line([(x, 0), (x, h)], fill=line, width=1)
+        for ridx in range(1, rows):
+            y = round(h * ridx / rows)
+            draw.line([(0, y), (w, y)], fill=line, width=1)
+        # Labels: letters across the top edge, numbers down the left edge, one per cell.
+        pad = max(2, w // 400)
+        for cidx in range(cols):
+            label = chr(ord("A") + cidx)
+            x = round(w * (cidx + 0.5) / cols)
+            _label(draw, (x, pad), label, shadow, w)
+        for ridx in range(rows):
+            y = round(h * (ridx + 0.5) / rows)
+            _label(draw, (pad, y), str(ridx + 1), shadow, w, left=True)
+        buf = io.BytesIO()
+        im.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+    except Exception as exc:  # noqa: BLE001 — a corrupt frame: hand back what came in
+        _LOG.warning("could not draw the reference grid: %s", exc)
+        return data
+
+
+def _label(draw, at, text: str, shadow, width: int, left: bool = False) -> None:
+    """A small high-contrast label: a dark pill behind bright text, sized to the picture."""
+    try:
+        from PIL import ImageFont
+        size = max(11, width // 70)
+        try:
+            font = ImageFont.truetype("arial.ttf", size)
+        except Exception:  # noqa: BLE001 — no TrueType on this box: the bitmap default
+            font = ImageFont.load_default()
+    except Exception:  # noqa: BLE001
+        font = None
+    try:
+        box = draw.textbbox((0, 0), text, font=font)
+    except Exception:  # noqa: BLE001
+        box = (0, 0, 8 * len(text), 12)
+    tw, th = box[2] - box[0], box[3] - box[1]
+    x, y = at
+    if left:
+        x0, y0 = x, y - th // 2 - 2
+    else:
+        x0, y0 = x - tw // 2, y
+    draw.rectangle([x0 - 3, y0 - 1, x0 + tw + 3, y0 + th + 3], fill=shadow)
+    draw.text((x0, y0), text, fill=(63, 224, 224, 255), font=font)
+
+
+def encode_frames(frames, *, grid: bool = False, max_images: int = MAX_IMAGES) -> list[Image]:
+    """A clip's raw frames (encoded bytes, in time order) → model-ready blocks, optionally gridded.
+    Unreadable frames drop out; the count is capped like an attachment set."""
+    out: list[Image] = []
+    for raw in frames or ():
+        if len(out) >= max_images:
+            break
+        block = encode_image_bytes(with_grid(raw) if grid else raw)
+        if block is not None:
+            out.append(block)
+    return out
+
+
 def load_images(paths, max_images: int = MAX_IMAGES) -> list[Image]:
     """Load up to `max_images` attached image files into model-ready blocks; unreadable ones drop out."""
     out: list[Image] = []

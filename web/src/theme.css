@@ -216,5 +216,15 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
   50% { opacity: 1; }
 }
 
+/* The camera panel docks on the right; the Console makes room for it on wide windows and lets it
+   float over on narrow ones. */
+.console-docked { padding-right: 476px; }
+@media (max-width: 1040px) {
+  .console-docked { padding-right: 24px; }
+}
+.camera-dock select { font-size: 12px; padding: 5px 8px; border-radius: 8px; }
+.camera-dock input[type="text"], .camera-dock input:not([type]) { border-radius: 8px; }
+.camera-dock video { background: #05080b; }
+
 /* Elide anywhere flex would otherwise stretch the page (the Qt width-discipline rule). */
 .elide { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

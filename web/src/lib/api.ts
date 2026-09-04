@@ -19,6 +19,11 @@ export function getToken(): string {
   return token;
 }
 
+/** A URL the browser can fetch WITHOUT headers (an <img>, a download): the token rides as ?t=. */
+export function tokenUrl(path: string): string {
+  return `${path}${path.includes("?") ? "&" : "?"}t=${encodeURIComponent(token)}`;
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
@@ -41,15 +46,25 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return (await res.json()) as T;
 }
 
+export interface FramesMeta {
+  rid?: string; // answers the model's look with this capture id
+  caption?: string; // the user's question typed alongside their own shot
+  mode?: "still" | "clip";
+  seconds?: number;
+  frame?: string; // the panel's frame id (AR callouts anchor to it)
+}
+
 export const api = {
   get: <T>(path: string) => request<T>("GET", path),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
   put: <T>(path: string, body?: unknown) => request<T>("PUT", path, body),
   del: <T>(path: string) => request<T>("DELETE", path),
 
-  async upload(file: File): Promise<{ id: string; name: string; image: boolean }> {
+  /** Attach a file (or a blob with a name). `frame`: set when the blob IS the live camera view. */
+  async upload(file: Blob, name?: string, frame?: string): Promise<{ id: string; name: string; image: boolean }> {
     const form = new FormData();
-    form.append("file", file, file.name);
+    form.append("file", file, name || (file instanceof File ? file.name : "image.png"));
+    if (frame) form.append("frame", frame);
     const res = await fetch("/api/attachments", {
       method: "POST",
       headers: { "X-Helix-Token": token },
@@ -71,12 +86,23 @@ export const api = {
     return res.json();
   },
 
-  async sendFrame(camId: string, blob: Blob): Promise<void> {
-    await fetch(`/api/camera/${camId}/frame`, {
+  /** Frames from the camera panel — a still (one blob) or a clip (several, in time order). */
+  async sendFrames(camId: string, blobs: Blob[], meta: FramesMeta = {}): Promise<boolean> {
+    const form = new FormData();
+    blobs.forEach((b, i) => form.append("frames", b, `frame-${i + 1}.jpg`));
+    if (meta.rid) form.append("rid", meta.rid);
+    if (meta.caption) form.append("caption", meta.caption);
+    form.append("mode", meta.mode || (blobs.length > 1 ? "clip" : "still"));
+    form.append("seconds", String(meta.seconds ?? 0));
+    if (meta.frame) form.append("frame", meta.frame);
+    const res = await fetch(`/api/camera/${camId}/frames`, {
       method: "POST",
-      headers: { "X-Helix-Token": token, "Content-Type": "image/png" },
-      body: blob,
+      headers: { "X-Helix-Token": token },
+      body: form,
     });
+    if (!res.ok) return false;
+    const data = (await res.json()) as { ok?: boolean };
+    return Boolean(data.ok);
   },
 };
 

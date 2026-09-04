@@ -159,8 +159,8 @@ class ForgeService:
             *self._guard_files,
         )
         tree_sig = scan_tree(self._app_root, skip=skip)
-        hooks = self._repo.hooks_dir(self._app_root)
-        hooks_sig = scan_tree(hooks)
+        hooks = self._hooks_dir_or_none()
+        hooks_sig = scan_tree(hooks) if hooks is not None else {}
 
         # The coder runs at most twice: the build itself, and ONE automatic repair pass if the result
         # fails the pre-finalize check (a syntax error, a missing entry point, a hologram whose model.scad
@@ -177,7 +177,8 @@ class ForgeService:
                 workspace, prompt_text, on_progress=on_progress, cancel=cancel,
             )
             restore_if_changed(guard)
-            escaped = tree_changed(self._app_root, tree_sig, skip=skip) + tree_changed(hooks, hooks_sig)
+            escaped = tree_changed(self._app_root, tree_sig, skip=skip) + (
+                tree_changed(hooks, hooks_sig) if hooks is not None else [])
             if escaped:
                 self._revert_escapes(escaped)
                 _LOG.warning("build %r wrote outside its workspace: %s", app.name, escaped)
@@ -291,6 +292,19 @@ class ForgeService:
                 self._bus.publish(BuildDeleted(app.slug))
         except Exception:  # noqa: BLE001 — a rollback hiccup must not mask the original BuildError
             _LOG.warning("could not roll back failed build %s", app.slug, exc_info=True)
+
+    def _hooks_dir_or_none(self):
+        """The app root's REAL git hooks folder, for the escape tripwire — or None when the app root
+        isn't a usable git repository. That is the NORMAL state of a packaged install (dist\\HELIX
+        is no repo of its own; on Brian's machine it merely sits inside one, which is how the
+        2026-09-04 IronEye build died on a dangling worktree pointer three folders up) and of a
+        dev checkout whose worktree registration is gone. No repo means no hook can ever fire, so
+        there is nothing to guard; the app-root tree scan still runs. A build must never die here."""
+        try:
+            return self._repo.hooks_dir(self._app_root)
+        except Exception as exc:  # noqa: BLE001 — GitError, or no git at all
+            _LOG.warning("hook tripwire skipped — the app root isn't a usable git repo: %s", exc)
+            return None
 
     def _default_prompt(self, app: App, request: str, iterating: bool) -> str:
         """The coder instruction for this build — kind- AND iteration-aware. An edit of an existing
