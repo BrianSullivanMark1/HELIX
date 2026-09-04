@@ -635,6 +635,18 @@ class SubscriptionBrain:
             raise
         return self._note_success(out)
 
+    def refresh_session(self) -> None:
+        """Drop the persistent orb session so the NEXT turn reconnects fresh and reseeds from the
+        caller's history digest. Used after a turn deliberately ran OUTSIDE the session — the
+        auto-escalated deep turn runs hermetic on the growth model, and without this the live
+        session's model-side history would be missing that whole exchange (the orb would not know
+        its own last answer). Best-effort: a refresh hiccup costs continuity, never a turn."""
+        try:
+            if self._client is not None:
+                self._run(self._drop_client(), timeout=30.0)
+        except Exception:  # noqa: BLE001
+            _LOG.warning("could not refresh the orb session", exc_info=True)
+
     def shutdown(self) -> None:
         if self._closed:
             return

@@ -617,12 +617,20 @@ class Container:
         # the user's go, opens Amazon's own cart page in their browser — pre-filled, never purchased.
         # User-driven only: the BUILD_TOOLS fence keeps every cart mutation off autonomous runs.
         self.shopping = ShoppingService()
+        # The Bambu printer's LAN details, read PER CALL (secrets → legacy settings → env) like the
+        # Tripo key — so connecting the printer mid-conversation works on the very next tool call.
+        def _bambu_key(key: str) -> str | None:
+            return (
+                (self.secrets.get(key) or self.settings.get(key.lower())
+                 or os.environ.get(key) or "").strip() or None
+            )
+
         self.tools = ToolRegistry(
             self.forge, self.builds, self.selfdev, deep_think=_deep_think, queue=self.build_queue,
             tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane, connections=self.connections,
             knowledge=self.knowledge, gmail=self.gmail, reminders=self.reminders, calendar=self.calendar,
             files=self.files, user_memory=self.user_memory, location=self.location,
-            desktop=self.desktop, shopping=self.shopping, cad=cad,
+            desktop=self.desktop, shopping=self.shopping, cad=cad, bambu=_bambu_key,
         )
         # The orb quietly learns who the user is: a background distiller (same fast chat model) keeps a
         # compact profile in the DB, injected into each Console turn like the time anchor. No knobs.
@@ -645,12 +653,17 @@ class Container:
         self.evolve = EvolveService(
             growth_chat, self.lessons, self.selfdev_lane, self.selfdev, self.settings, self.clock,
             growth_model=self.growth_model,  # maps the proposal's EFFORT tier → coder model
+            data_dir=self.paths.data,        # the backlog + journal live beside the other data files
         )
+        self.tools.attach_evolve(self.evolve)  # late-bind: the registry is built before Evolve is
         self.subscription._tools = self.tools  # late-bind (tools → services ctor cycle, like agents)
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM,
             knowledge=self.knowledge, profile=self.profile, subscription=self.subscription,
             lessons=self.lessons, user_memory=self.user_memory, location=self.location,
+            # AUTO-DEEP: hard-looking turns quietly escalate to the growth model (Fable 5) on the
+            # subscription rail — the automatic sibling of think_harder (settings: auto_deep_turns).
+            growth_model=self.growth_model, settings=self.settings,
         )
         # Agents persist in a DEDICATED file (not the guarded settings file): scheduled agents write
         # last_run mid-build via the heartbeat, and the orb can create/pause an agent while a build runs

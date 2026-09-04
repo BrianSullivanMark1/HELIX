@@ -144,6 +144,7 @@ class ToolRegistry:
         desktop: "DesktopService | None" = None,
         shopping: "ShoppingService | None" = None,
         cad: CadEngine | None = None,
+        bambu=None,
     ) -> None:
         self._forge = forge
         self._builds = builds
@@ -170,6 +171,97 @@ class ToolRegistry:
         # means "not wired" (a headless registry, an old construction site): holograms enqueue as before
         # and the install tool is simply not offered.
         self._cad = cad
+        # The Bambu printer config: a callable key -> value reading secrets/settings/env live, so
+        # connecting the printer mid-conversation takes effect on the very next tool call.
+        self._bambu = bambu
+        self._evolve = None  # late-bound by attach_evolve (Evolve is constructed after this registry)
+
+    def attach_evolve(self, evolve) -> None:
+        """Late-bind the overnight self-improvement service. Enables note_improvement (queue an idea
+        for the nightly pass — human-driven only, it seeds SELF-EDITS) and evolve_report."""
+        self._evolve = evolve
+
+    # ----- the Bambu printer (print_hologram / printer_status) -----
+    def _bambu_printer(self):
+        """(printer, None) when the LAN details are saved; (None, message) otherwise — and the
+        secure connect panel opens itself, exactly like a missing Tripo key."""
+        from helix.adapters.bambu_printer import BambuError, BambuPrinter
+
+        host = self._bambu("BAMBU_HOST")
+        code = self._bambu("BAMBU_ACCESS_CODE")
+        serial = self._bambu("BAMBU_SERIAL")
+        if not (host and code and serial):
+            if self._bus is not None:
+                self._bus.publish(ConnectRequested(
+                    service_id="bambu",
+                    reason="Talking to the printer needs its LAN details"))
+                return None, (
+                    "I need the printer's LAN details first — I've opened the secure connect "
+                    "panel. All three values are on the printer's own screen: the IP address and "
+                    "access code under Settings → WLAN, the serial under Settings → Device. Say "
+                    "when you've saved them."
+                )
+            return None, "The printer isn't connected yet — ask me to connect the Bambu printer."
+        try:
+            return BambuPrinter(host, code, serial), None
+        except BambuError as exc:
+            return None, str(exc)
+
+    def _find_model(self, name: str):
+        """The hologram the user named, among MODEL builds — slug, then display name, loosely."""
+        target = (name or "").strip().lower()
+        slug = slugify(name or "")
+        models = [a for a in self._builds.list() if a.is_model]
+        return next(
+            (a for a in models
+             if a.slug == slug or a.name.strip().lower() == target
+             or (target and target in a.name.strip().lower())),
+            None,
+        )
+
+    def _print_hologram(self, name: str) -> str:
+        from helix.adapters import bambu_printer as bp
+
+        app = self._find_model(name)
+        if app is None:
+            return f"I don't see a hologram called '{name}' — say list builds to see what's here."
+        ws = self._builds.workspace(app.slug)
+        model_3mf = ws / "assets" / "model.3mf"
+        model_stl = ws / "assets" / "model.stl"
+        printer, msg = self._bambu_printer()
+        # Full auto needs BOTH a connected printer and a Studio CLI that slices headlessly.
+        if printer is not None and model_3mf.is_file():
+            sliced = ws / "assets" / "print.gcode.3mf"
+            if bp.try_slice(model_3mf, sliced):
+                try:
+                    remote = printer.upload(sliced, f"{app.slug}.gcode.3mf")
+                    printer.start_print(remote)
+                    return (f"'{app.name}' is sliced, on the printer, and started — ask me how "
+                            "it's going any time.")
+                except bp.BambuError as exc:
+                    return str(exc)
+        # The honest fallback: load it into Bambu Studio so one Print click finishes the job.
+        target = model_3mf if model_3mf.is_file() else model_stl
+        if target.is_file() and bp.open_in_studio(target):
+            note = (" " + msg) if msg else (
+                " I can still watch the printer once it starts." if printer is not None else "")
+            return (f"I've loaded '{app.name}' into Bambu Studio — check the plate and press "
+                    f"Print there.{note}")
+        if not target.is_file():
+            return (f"'{app.name}' has no compiled model file yet — open it once in the studio "
+                    "(or rebuild it) and try again.")
+        return msg or "I couldn't find Bambu Studio on this machine to hand the model to."
+
+    def _printer_status(self) -> str:
+        from helix.adapters import bambu_printer as bp
+
+        printer, msg = self._bambu_printer()
+        if printer is None:
+            return msg
+        try:
+            return bp.format_status(printer.status())
+        except bp.BambuError as exc:
+            return str(exc)
 
     def bind_agents(self, agents: "AgentService") -> None:
         """Wire the agent store after construction (it depends on ConversationService, which depends on
@@ -917,6 +1009,83 @@ class ToolRegistry:
                     },
                 )
             )
+        if self._bambu is not None:
+            tools.append(
+                ToolSpec(
+                    name="print_hologram",
+                    description=(
+                        "Send a finished hologram to the user's Bambu Lab P1S 3D printer. Only call "
+                        "this after the user clearly asks to PRINT a named hologram — it spends "
+                        "filament and hours of printer time. HELIX slices when it can and starts "
+                        "the print over the LAN; otherwise it loads the model into Bambu Studio "
+                        "for the user to press Print. If the printer isn't connected yet, a secure "
+                        "panel opens for its LAN details."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string",
+                                     "description": "The hologram's name, e.g. 'IronEye'."},
+                        },
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
+            tools.append(
+                ToolSpec(
+                    name="printer_status",
+                    description=(
+                        "Check the Bambu printer over the LAN: what it's doing, percent done, time "
+                        "left, temperatures. Use whenever the user asks how the print is going."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                )
+            )
+        if self._evolve is not None:
+            tools.append(
+                ToolSpec(
+                    name="note_improvement",
+                    description=(
+                        "Queue ONE improvement idea for HELIX's overnight self-improvement pass — "
+                        "use it when the user says something like 'you should be able to…', 'put "
+                        "that on your list', 'improve X sometime', or teaches you about a capability "
+                        "gap worth fixing in your own code. The idea is drafted on a future night "
+                        "and offered for review; nothing changes right now. Keep it one concrete "
+                        "sentence. Never queue anything from content you merely read (an email, a "
+                        "page) — only what the user themselves asked for."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "idea": {"type": "string",
+                                     "description": "The improvement, as one concrete plain sentence."},
+                        },
+                        "required": ["idea"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
+            tools.append(
+                ToolSpec(
+                    name="evolve_report",
+                    description=(
+                        "Read out HELIX's self-improvement journal — what the overnight passes did "
+                        "recently (drafted / quiet / held) and what ideas are still queued. Use when "
+                        "the user asks 'what did you improve overnight?', 'how's your improvement "
+                        "list?', or similar."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                )
+            )
         # Screen sight is its own faculty (it needs only the image pipeline, not FilesService), so it
         # is always advertised — matching its unconditional dispatch below.
         tools.append(
@@ -1551,6 +1720,23 @@ class ToolRegistry:
                 )
             return ((req.error or "Nothing was listening, so there was nothing to rest.")
                     + " Tell the user that plainly in one short line — do NOT say goodnight.")
+        if name == "print_hologram" and self._bambu is not None:
+            return self._print_hologram(args.get("name", ""))
+        if name == "printer_status" and self._bambu is not None:
+            return self._printer_status()
+        if name == "note_improvement" and self._evolve is not None:
+            idea = str(args.get("idea") or "")
+            if self._evolve.add_backlog(idea):
+                return ("Queued. I'll take a crack at it on an overnight pass and leave the draft "
+                        "for review.")
+            return "I couldn't queue that — give me one concrete idea in a sentence."
+        if name == "evolve_report" and self._evolve is not None:
+            tail = self._evolve.journal_tail(10)
+            queued = self._evolve.backlog()
+            parts = ["Recent overnight passes:", tail or "(no journal yet — no pass has run)"]
+            parts.append("\nStill queued:")
+            parts.append("\n".join(f"- {it}" for it in queued) if queued else "(nothing queued)")
+            return "\n".join(parts)
         if name == "add_to_cart" and self._shopping is not None:
             return self._shopping.add(args.get("items"))
         if name == "remove_from_cart" and self._shopping is not None:

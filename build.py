@@ -196,6 +196,10 @@ def main(argv: list[str] | None = None) -> int:
     # ctranslate2), only the neural speaker-id would reach for it and that has a documented DSP
     # fallback — while collecting it would add gigabytes.
     args += ["--exclude-module", "torch"]
+    # The Bambu printer adapter imports paho.mqtt lazily (inside the tool call), so the static scan
+    # never sees it — name it, or the frozen "print it" dies with ModuleNotFoundError. paho is a
+    # namespace package, so collect submodules rather than collect-all.
+    args += ["--collect-submodules", "paho", "--hidden-import", "paho.mqtt.client"]
     args.append(str(ROOT / "main.py"))
 
     # LIVE user data (keys, history, built apps) may still sit at dist/<name>/data from an older install

@@ -43,7 +43,7 @@ DEFAULT_PORT = 8737
 _SETTING_KEYS = (
     "wake_word", "narration_mode", "proactive_speech", "trust_household_voice",
     "file_write_access", "evolve_enabled", "model_detail", "tts_voice", "tts_rate",
-    "voice_input_on", "remote_enabled", "remote_lan",
+    "voice_input_on", "remote_enabled", "remote_lan", "auto_deep_turns",
 )
 _SECRET_SETTINGS = ("claude_api_key", "claude_code_oauth_token")
 
@@ -108,12 +108,22 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
     app.state.token = token
     servers: dict[str, int] = {}  # slug -> port of a running backend app
 
+    def _tailnet_ok(name: str) -> bool:
+        """A MagicDNS hostname (machine.tailnet.ts.net) — the shape `tailscale serve` forwards
+        with. Honoured ONLY while the user has remote access switched on in Settings, read live so
+        flipping the toggle needs no restart. Rebinding-safe: an attacker's domain isn't *.ts.net,
+        and a foreign tailnet's name never resolves to this machine — plus every /api route still
+        demands the bearer token regardless of where the request came from."""
+        host = name.rsplit(":", 1)[0] if ":" in name and not name.startswith("[") else name
+        return host.lower().endswith(".ts.net") and bool(c.settings.get("remote_enabled", False))
+
     def _local_origin(request) -> bool:
         origin = request.headers.get("origin") or ""
         host = request.headers.get("host") or ""
-        ok_host = host.startswith(("127.0.0.1", "localhost"))
+        ok_host = host.startswith(("127.0.0.1", "localhost")) or _tailnet_ok(host)
         ok_origin = (not origin) or origin.startswith(
-            ("http://127.0.0.1", "http://localhost", "https://127.0.0.1", "https://localhost"))
+            ("http://127.0.0.1", "http://localhost", "https://127.0.0.1", "https://localhost")
+        ) or (origin.startswith("https://") and _tailnet_ok(origin[len("https://"):]))
         return ok_host and ok_origin
 
     @app.middleware("http")
@@ -131,8 +141,9 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
         origin = ws.headers.get("origin") or ""
-        if origin and not origin.startswith(
-                ("http://127.0.0.1", "http://localhost", "https://127.0.0.1", "https://localhost")):
+        if origin and not (origin.startswith(
+                ("http://127.0.0.1", "http://localhost", "https://127.0.0.1", "https://localhost"))
+                or (origin.startswith("https://") and _tailnet_ok(origin[len("https://"):]))):
             await ws.close(code=4403)
             return
         sent = ws.query_params.get("t") or ""

@@ -5,6 +5,7 @@ build_app, so the human always approves a spend in plain language before it happ
 """
 from __future__ import annotations
 
+import re
 import threading
 from typing import TYPE_CHECKING
 
@@ -101,8 +102,41 @@ BUILD_TOOLS = frozenset(
         # the top tier on it. Every peer egress/escalation faculty is fenced here; this one was missed.
         # An agent can still reason: it runs on the model already, it just cannot escalate.
         "think_harder",
+        # Queuing an improvement idea seeds a future SELF-EDIT (the overnight pass drafts it) — so
+        # text an unattended watcher processes must never be able to plant one. Human-driven only;
+        # evolve_report stays readable like any other status recap.
+        "note_improvement",
+        # Starting a 3D print is PHYSICAL actuation — hours of printer time and real filament. An
+        # email saying "print the mount" must never move hardware; printer_status stays readable.
+        "print_hologram",
     }
 )
+
+
+# AUTO-DEEP ROUTING: the words that mark a turn as real reasoning work — debugging, design
+# decisions, analysis, "why won't this…", explicit asks to think hard. Deliberately conservative:
+# a false escalation burns the plan's top tier on chit-chat, a missed one just answers on the
+# everyday brain (and think_harder remains a tool the model can still reach for itself).
+_DEEP_HINT_RE = re.compile(
+    r"(?i)\b(debug|diagnos\w*|root cause|architect\w*|refactor\w*|algorithm\w*|optimi[sz]\w*|"
+    r"trade-?offs?|strateg\w*|analy[sz]e\w*|calculat\w*|equation|theorem|prove|"
+    r"why (?:is|does|do|did|won'?t|isn'?t|can'?t|doesn'?t|would)|"
+    r"how (?:should|would|could) (?:i|we)|what'?s the best way|best approach|"
+    r"pros and cons|compare|versus|\bvs\.?|think (?:hard\w*|deep\w*)|step[ -]by[ -]step|"
+    r"walk me through)\b"
+)
+
+
+def _looks_hard(text: str) -> bool:
+    """Does this turn deserve the growth model without being asked? Two gates: real reasoning words
+    AND enough substance (12+ words — 'compare them' alone is a follow-up, not a project), or sheer
+    size (90+ words of context IS a hard turn, whatever the words). Commands, chit-chat and quick
+    questions stay on the everyday brain."""
+    t = (text or "").strip()
+    words = len(t.split())
+    if words >= 90:
+        return True
+    return words >= 12 and _DEEP_HINT_RE.search(t) is not None
 
 
 def _shed_web(chat: ChatModel) -> ChatModel:
@@ -130,6 +164,8 @@ class ConversationService:
         lessons: "LessonsService | None" = None,
         user_memory: "MemoryService | None" = None,
         location: "LocationService | None" = None,
+        growth_model=None,
+        settings=None,
     ) -> None:
         self._chat = chat
         # The same chat with the model's own web search/fetch shed — what an AUTONOMOUS turn talks to
@@ -148,6 +184,12 @@ class ConversationService:
         self._lessons = lessons      # standing behavioral preferences learned from the user's corrections
         self._user_memory = user_memory  # durable long-term facts about the user (per-speaker)
         self._location = location    # the user's place(s), so local questions ground via web search
+        # AUTO-DEEP ROUTING: the resolver for the strongest model (GrowthModelResolver — Fable 5,
+        # auto-upscaling). When a user turn LOOKS genuinely hard (see _looks_hard), the orb quietly
+        # escalates that one turn to the growth model instead of waiting to be told "think harder".
+        # Subscription rail only (the plan absorbs it); settings key auto_deep_turns (missing = on).
+        self._growth_model = growth_model
+        self._settings = settings
         # A turn is a read-modify-write over the shared history. The Console and an Agent run on
         # separate worker threads against this one service, so serialize whole turns — otherwise their
         # appends interleave and the API gets a malformed (e.g. two-user-in-a-row) turn list.
@@ -302,6 +344,49 @@ class ConversationService:
                     saw_images[0] = True
                 if persist:
                     self._remember_tool(name, digest)
+
+            # AUTO-DEEP: a turn that READS hard escalates itself to the growth model (Fable 5) as a
+            # hermetic run with the recent transcript primed in — the user feels it as "the hard
+            # answers just got good" without saying think-harder. Human-driven turns only (persist +
+            # allow_builds — the same discriminator every other escalation uses), and the fence
+            # matches think_harder's: web on, full tool set. Afterwards the persistent session is
+            # refreshed so the NEXT turn reseeds with a digest that includes this exchange — without
+            # that the orb would not know its own last answer.
+            if (
+                persist and allow_builds and self._growth_model is not None
+                and (self._settings is None
+                     or self._settings.get("auto_deep_turns", True) is not False)
+                and _looks_hard(user_text)
+            ):
+                try:
+                    if on_progress:
+                        on_progress("Worth the deep brain — thinking it through…")
+                    digest = self._recent_digest()
+                    deep_prompt = (
+                        (f"Recent conversation, for context:\n{digest}\n\n" if digest else "")
+                        + prompt
+                    )
+                    text = self._subscription.run_hermetic(
+                        deep_prompt, names, model=self._growth_model.resolve(), effort="high",
+                        on_progress=on_progress, cancel=cancel, on_tool=_on_tool, web=True,
+                    )
+                    if cancel is not None and cancel.is_set():
+                        return finish(STOPPED_REPLY)
+                    if text:
+                        refresh = getattr(self._subscription, "refresh_session", None)
+                        if refresh is not None:
+                            refresh()
+                        return finish(text)
+                except Exception:  # noqa: BLE001
+                    if dispatched:
+                        # Same rule as the orb path below: tools already ran, so re-running the turn
+                        # would double their side effects. Surface a soft partial instead.
+                        _LOG.warning("deep turn failed after tools ran (%s); not re-running",
+                                     dispatched, exc_info=True)
+                        return finish("I started on that but hit a snag partway — check whether it "
+                                      "went through before asking again.")
+                    _LOG.warning("deep turn failed; falling back to the regular orb turn",
+                                 exc_info=True)
 
             try:
                 if persist:

@@ -111,11 +111,57 @@ def _lessons(rules_by_user):
 
 
 def _svc(chat=None, settings=None, clock=None, lane=None, selfdev=None, lessons=None, tail="a log",
-         growth_model=None):
+         growth_model=None, data_dir=None):
     return EvolveService(
         chat or _Chat("QUIET"), lessons, lane or _Lane(), selfdev or _SelfDev(),
         settings or _Settings(), clock or _Clock(), log_tail=lambda: tail, growth_model=growth_model,
+        data_dir=data_dir,
     )
+
+
+# ----- the backlog (user-queued ideas) and the journal -----
+
+def test_backlog_is_queued_deduped_and_mined_first(tmp_path):
+    svc = _svc(data_dir=tmp_path)
+    assert svc.add_backlog("teach the studio to rotate parts")
+    assert svc.add_backlog("Teach the studio to rotate parts")  # case-insensitive dedupe
+    assert svc.backlog() == ["teach the studio to rotate parts"]
+    material = svc._material()
+    assert "IMPROVEMENT BACKLOG" in material and "rotate parts" in material
+    # …and the backlog section comes FIRST, matching the system prompt's "prefer" instruction.
+    assert material.index("IMPROVEMENT BACKLOG") < material.index("LESSONS")
+
+
+def test_a_takes_line_crosses_the_item_off_and_journals(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolve_mod.threading, "Thread", _ImmediateThread)
+    chat = _Chat(
+        "Fix the studio rotation controls.\n"
+        "TAKES: teach the studio to rotate parts\n"
+        "EFFORT: standard"
+    )
+    lane = _Lane()
+    svc = _svc(chat=chat, lane=lane, data_dir=tmp_path, growth_model=_GrowthModel())
+    svc.add_backlog("teach the studio to rotate parts")
+    svc.tick()  # 4 AM — in window
+    assert lane.requests == ["Fix the studio rotation controls."]  # TAKES/EFFORT lines stripped
+    assert lane.models == ["claude-opus-4-8"]                      # standard tier honoured
+    assert svc.backlog() == []                                     # crossed off the queue
+    journal = (tmp_path / "evolve_journal.md").read_text(encoding="utf-8")
+    assert "drafted (backlog, standard)" in journal
+
+
+def test_a_quiet_night_is_journaled(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolve_mod.threading, "Thread", _ImmediateThread)
+    svc = _svc(data_dir=tmp_path)  # the default chat answers QUIET
+    svc.tick()
+    assert "quiet night" in (tmp_path / "evolve_journal.md").read_text(encoding="utf-8")
+    assert "quiet night" in svc.journal_tail()
+
+
+def test_no_data_dir_disables_backlog_and_journal_quietly():
+    svc = _svc()
+    assert svc.add_backlog("an idea") is False
+    assert svc.backlog() == [] and svc.journal_tail() == ""
 
 
 def test_disabled_toggle_never_calls_the_model():

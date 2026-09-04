@@ -42,10 +42,11 @@ def _app():
     return build_app(container, _Shell(), EventHub(), None)
 
 
-def _call(app, method: str, path: str, token: str | None = "tok-test") -> int:
+def _call(app, method: str, path: str, token: str | None = "tok-test",
+          host: str = "127.0.0.1:8737") -> int:
     """One HTTP request straight through the ASGI stack; returns the status code. The host header
-    matters — the app's origin guard only serves 127.0.0.1/localhost."""
-    headers = [(b"host", b"127.0.0.1:8737")]
+    matters — the app's origin guard serves 127.0.0.1/localhost (and, opt-in, the tailnet)."""
+    headers = [(b"host", host.encode())]
     if token is not None:
         headers.append((b"x-helix-token", token.encode()))
     scope = {
@@ -77,6 +78,24 @@ def test_a_refused_quit_does_not_mark_the_instance_dying():
     app = _app()  # no quit hook wired (a bare test app)
     assert _call(app, "POST", "/api/shell/quit") == 501
     assert _call(app, "GET", "/api/snapshot") == 200
+
+
+def test_the_tailnet_host_is_served_only_when_remote_is_switched_on():
+    """The phone path: `tailscale serve` proxies the face with a machine.tailnet.ts.net Host. That
+    host is honoured ONLY while remote_enabled is on (read live — no restart), the token is still
+    demanded, and a non-tailnet foreign host stays forbidden either way."""
+    ts = "brians-pc.tail1234.ts.net"
+    app_off = _app()
+    assert _call(app_off, "GET", "/api/snapshot", host=ts) == 403  # off by default — loopback only
+
+    container = SimpleNamespace(
+        settings=_Settings(web_token="tok-test", remote_enabled=True),
+        paths=SimpleNamespace(builds="does-not-exist"),
+    )
+    app_on = build_app(container, _Shell(), EventHub(), None)
+    assert _call(app_on, "GET", "/api/snapshot", host=ts) == 200
+    assert _call(app_on, "GET", "/api/snapshot", host=ts, token=None) == 401  # token still required
+    assert _call(app_on, "GET", "/api/snapshot", host="evil.example.com") == 403
 
 
 def test_an_accepted_quit_reads_dead_immediately():

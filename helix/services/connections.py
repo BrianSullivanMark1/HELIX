@@ -58,11 +58,18 @@ CONNECTABLE: dict[str, tuple[str, str, tuple[tuple[str, str, str], ...]]] = {
                  (("BLOCKADE_API_KEY", "Blockade Labs API key", "from your Blockade account"),)),
     "voyage": ("Voyage (vault search embeddings)", "secrets",
                (("VOYAGE_API_KEY", "Voyage API key", "pa-…"),)),
+    # The 3D printer (Bambu LAN mode): three values off the printer's own screen, no cloud account.
+    "bambu": ("Bambu printer (LAN mode)", "secrets",
+              (("BAMBU_HOST", "Printer IP address", "on the printer: Settings → WLAN"),
+               ("BAMBU_ACCESS_CODE", "LAN access code", "on the printer: Settings → WLAN → Access Code"),
+               ("BAMBU_SERIAL", "Printer serial number", "on the printer: Settings → Device"))),
 }
 
 _CONNECT_ALIASES: dict[str, str] = {
     "sam.gov": "sam", "samgov": "sam", "sam gov": "sam", "procurement": "sam",
     "blockade labs": "blockade", "skybox": "blockade",
+    "bambu lab": "bambu", "bambulab": "bambu", "printer": "bambu", "p1s": "bambu",
+    "3d printer": "bambu",
 }
 
 

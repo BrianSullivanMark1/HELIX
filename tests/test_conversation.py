@@ -66,6 +66,114 @@ def _service() -> tuple[ConversationService, _CaptureChat]:
     return svc, chat
 
 
+class _FakeSubscription:
+    """Both rails, recording: the persistent orb turn and the hermetic escalation."""
+
+    def __init__(self, hermetic_fails: bool = False) -> None:
+        self.orb_calls: list[str] = []
+        self.hermetic_calls: list[tuple] = []
+        self.refreshed = 0
+        self._fails = hermetic_fails
+
+    def active(self) -> bool:
+        return True
+
+    def run_orb_turn(self, prompt, names, **kw) -> str:
+        self.orb_calls.append(prompt)
+        return "orb answer"
+
+    def run_hermetic(self, prompt, names=(), **kw) -> str:
+        self.hermetic_calls.append((prompt, kw))
+        if self._fails:
+            raise RuntimeError("deep rail down")
+        return "deep answer"
+
+    def refresh_session(self) -> None:
+        self.refreshed += 1
+
+
+class _FakeGrowth:
+    def resolve(self) -> str:
+        return "claude-fable-5"
+
+
+class _FakeSettings:
+    def __init__(self, **kv):
+        self._d = dict(kv)
+
+    def get(self, key, default=None):
+        return self._d.get(key, default)
+
+
+HARD_TURN = "Why does the slicer refuse this part — walk me through the root cause and how to fix it"
+EASY_TURN = "what time is it"
+
+
+def _deep_service(sub, **settings):
+    svc = ConversationService(
+        _CaptureChat(), _FakeTools([]), _FakeStore(), _FakeMemory(), _FixedClock(), "sys",
+        subscription=sub, growth_model=_FakeGrowth(), settings=_FakeSettings(**settings),
+    )
+    return svc
+
+
+def test_looks_hard_reads_reasoning_words_not_chitchat():
+    from helix.services.conversation import _looks_hard
+
+    assert _looks_hard(HARD_TURN)
+    assert _looks_hard("Help me architect the data layer for the irrigation app, three services deep")
+    assert _looks_hard("word " * 95)                    # a wall of context IS a hard turn
+    assert not _looks_hard(EASY_TURN)
+    assert not _looks_hard("compare them")              # reasoning word, no substance — a follow-up
+    assert not _looks_hard("go to sleep")
+    assert not _looks_hard("build me a notes app")
+
+
+def test_a_hard_turn_escalates_to_the_growth_model_and_refreshes_the_session():
+    sub = _FakeSubscription()
+    svc = _deep_service(sub)
+    reply = svc.run_turn(HARD_TURN)
+    assert reply == "deep answer"
+    assert sub.orb_calls == []                          # the everyday session never ran this one
+    assert len(sub.hermetic_calls) == 1
+    _prompt, kw = sub.hermetic_calls[0]
+    assert kw.get("model") == "claude-fable-5" and kw.get("web") is True
+    assert sub.refreshed == 1                           # next turn reseeds with this exchange
+
+
+def test_an_easy_turn_stays_on_the_everyday_brain():
+    sub = _FakeSubscription()
+    svc = _deep_service(sub)
+    assert svc.run_turn(EASY_TURN) == "orb answer"
+    assert sub.hermetic_calls == []
+
+
+def test_the_auto_deep_toggle_turns_escalation_off():
+    sub = _FakeSubscription()
+    svc = _deep_service(sub, auto_deep_turns=False)
+    assert svc.run_turn(HARD_TURN) == "orb answer"
+    assert sub.hermetic_calls == []
+
+
+def test_an_agent_run_never_escalates():
+    # Autonomous runs chew on untrusted content — a hard-LOOKING email must not be able to spend
+    # the top tier. persist=False/allow_builds=False is the same discriminator every fence uses.
+    sub = _FakeSubscription()
+    svc = _deep_service(sub)
+    svc.run_turn(HARD_TURN, allow_builds=False, persist=False)
+    # The agent's ONE hermetic call is the run itself — default model, no growth override, no web.
+    assert len(sub.hermetic_calls) == 1
+    _prompt, kw = sub.hermetic_calls[0]
+    assert "model" not in kw and kw.get("web") is False
+
+
+def test_a_failed_deep_turn_falls_back_to_the_orb():
+    sub = _FakeSubscription(hermetic_fails=True)
+    svc = _deep_service(sub)
+    assert svc.run_turn(HARD_TURN) == "orb answer"      # the user still gets an answer
+    assert sub.refreshed == 0
+
+
 def test_agent_run_denies_build_spend_and_delete_tools():
     svc, chat = _service()
     svc.run_turn("do the thing", allow_builds=False)

@@ -54,6 +54,7 @@ sounddevice>=0.4     # the web voice loop's microphone (PortAudio; Qt-free)
 # --- 3D models (holograms): the CAD kernel ---
 build123d>=0.7       # the B-rep engine (OCCT) hologram model.py designs compile through — the
                      # worker subprocess (helix/cad/runner.py) is its only importer
+paho-mqtt>=2.0       # the Bambu P1S over LAN mode (adapters/bambu_printer.py): status + print-start
 
 # --- Optional: voice ---
 edge-tts>=6.1         # free neural text-to-speech
