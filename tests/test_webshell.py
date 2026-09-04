@@ -84,6 +84,55 @@ def _texts(events, t="msg"):
     return [e.get("text") for e in events if e.get("t") == t]
 
 
+# ----- the camera -----
+
+def _cam_events(events):
+    return [e for e in events if e.get("t") == "camera"]
+
+
+def test_manual_camera_open_raises_a_fresh_window(rig):
+    _c, events, sh = rig
+    out = sh.camera_open()
+    assert out["ok"] and out["id"]
+    cams = _cam_events(events)
+    assert len(cams) == 1 and cams[0]["manual"] is True and cams[0]["id"] == out["id"]
+    assert sh._camera is not None and sh._camera["manual"]
+
+
+def test_reopening_the_camera_always_pops_a_new_window(rig):
+    # THE BUG: after one session the camera "wouldn't pop up again". A manual open must ALWAYS
+    # retire any stale window and raise a fresh one — re-open can never stick.
+    _c, events, sh = rig
+    first = sh.camera_open()["id"]
+    second = sh.camera_open()["id"]
+    assert first != second
+    cams = _cam_events(events)
+    # two fresh windows, newest wins; the swap is silent (the face remounts on the new id, so no
+    # extra close event is needed — one camera event per open is the whole contract).
+    assert [c["id"] for c in cams] == [first, second]
+    assert sh._camera["id"] == second
+
+
+def test_a_manual_frame_becomes_a_component_turn(rig, monkeypatch):
+    _c, events, sh = rig
+    started: list = []
+    monkeypatch.setattr(sh, "_start_turn", lambda *a, **k: started.append(a))
+    cid = sh.camera_open()["id"]
+    assert sh.camera_frame(cid, b"\x89PNG-fake") is True
+    assert sh._camera is None                          # session cleared
+    assert any(e.get("t") == "camera.close" for e in events)
+    assert len(started) == 1                           # a turn was kicked off…
+    assert "electronic component" in started[0][0]     # …with the identify-the-part brief
+    assert started[0][2] and str(started[0][2][0]).endswith(".png")  # carrying the saved photo
+
+
+def test_a_stale_frame_id_is_ignored(rig, monkeypatch):
+    _c, _events, sh = rig
+    monkeypatch.setattr(sh, "_start_turn", lambda *a, **k: pytest.fail("stale frame started a turn"))
+    sh.camera_open()
+    assert sh.camera_frame("not-the-open-id", b"x") is False
+
+
 # ----- the submit gauntlet -----
 
 def test_a_typed_sleep_with_no_ears_answers_honestly_and_never_runs_a_turn(rig):

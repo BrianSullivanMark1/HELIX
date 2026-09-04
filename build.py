@@ -85,7 +85,10 @@ def _build_web_face() -> Path | None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    icon = ROOT / "assets" / "helix.ico"
+    # The glowing 'Contained Star' orb icon (assets/make_orb_icon.py); falls back to the old mark.
+    icon = ROOT / "assets" / "orb.ico"
+    if not icon.exists():
+        icon = ROOT / "assets" / "helix.ico"
     args = [
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
         "--name", NAME, "--onedir", "--windowed",

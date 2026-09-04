@@ -2,6 +2,12 @@
 // live preview, a camera picker, capture by button or by voice (the backend's camera session sends
 // camera.capture when it hears "take the picture"). The captured frame is UN-mirrored (drawn
 // straight from the stream) so printed markings read correctly; nothing touches disk here.
+//
+// It NEVER closes itself on a camera error. The old behaviour posted /cancel the instant
+// getUserMedia threw — so a pending permission prompt, a stale saved device id, or a momentarily
+// busy webcam made the window "open and close really quick". Now a failure keeps the window open
+// with a plain reason and a Retry button, and the only ways out are the user's Cancel/Esc or a
+// successful capture.
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { useHelix } from "../lib/store";
@@ -17,37 +23,74 @@ export default function CameraModal({
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState(() => localStorage.getItem("helix_camera") || "");
   const [status, setStatus] = useState("Waking the camera…");
+  const [error, setError] = useState("");
   const [haveFrame, setHaveFrame] = useState(false);
   const pendingCapture = useRef(false);
   const lastShutter = useRef(shutter);
 
   // Fully release the previous stream BEFORE asking for a new one. The webcam is a single-holder
-  // device: on a quick close→reopen the browser can still consider it busy for a beat, so we stop
-  // every track, detach the <video>, and retry getUserMedia a couple of times before giving up —
-  // this is what made "open it again" fail after the first session.
+  // device: on a quick close→reopen the browser can still consider it busy for a beat.
   const releaseStream = () => {
     stream.current?.getTracks().forEach((t) => t.stop());
     stream.current = null;
     if (video.current) video.current.srcObject = null;
   };
 
-  const getStream = async (id: string): Promise<MediaStream> => {
-    const constraints = { video: id ? { deviceId: { exact: id } } : true, audio: false };
-    let lastErr: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        return await navigator.mediaDevices.getUserMedia(constraints);
-      } catch (e) {
-        lastErr = e;
-        await new Promise((r) => setTimeout(r, 250)); // let the device settle, then retry
-      }
+  const listDevices = async () => {
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      setDevices(all.filter((d) => d.kind === "videoinput"));
+    } catch {
+      /* enumeration can fail before any permission — the picker just stays hidden */
     }
-    throw lastErr;
+  };
+
+  // Try the requested camera; if a SPECIFIC (saved) device id is stale — gone, or over-constrained —
+  // fall back to "any camera" once and forget the bad id, so a remembered camera that no longer
+  // exists can never lock the user out. A busy device gets a couple of quiet retries. Permission
+  // and no-camera errors are surfaced as-is (retrying those just spams).
+  const getStream = async (id: string): Promise<MediaStream> => {
+    const ask = (v: MediaTrackConstraints | boolean) =>
+      navigator.mediaDevices.getUserMedia({ video: v, audio: false });
+    try {
+      return await ask(id ? { deviceId: { exact: id } } : true);
+    } catch (e) {
+      const name = (e as DOMException)?.name || "";
+      if (id && (name === "OverconstrainedError" || name === "NotFoundError")) {
+        localStorage.removeItem("helix_camera");
+        setDeviceId("");
+        return await ask(true); // any camera
+      }
+      if (name === "NotReadableError" || name === "AbortError" || name === "TrackStartError") {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await new Promise((r) => setTimeout(r, 350));
+          try {
+            return await ask(id ? { deviceId: { exact: id } } : true);
+          } catch {
+            /* keep trying, then fall through to throw */
+          }
+        }
+      }
+      throw e;
+    }
+  };
+
+  const reason = (e: unknown): string => {
+    const name = (e as DOMException)?.name || "";
+    if (name === "NotAllowedError" || name === "SecurityError")
+      return "Camera access is blocked. Allow the camera for this page (the address-bar camera icon), then Retry.";
+    if (name === "NotFoundError" || name === "OverconstrainedError")
+      return "No camera found. Plug one in or pick another below, then Retry.";
+    if (name === "NotReadableError" || name === "AbortError" || name === "TrackStartError")
+      return "The camera is in use by another app (Zoom, Teams, another tab). Close it, then Retry.";
+    return "The camera wouldn't start. Check it's connected and allowed, then Retry.";
   };
 
   const open = async (id: string) => {
     releaseStream();
     setHaveFrame(false);
+    setError("");
+    setStatus("Waking the camera…");
     try {
       const s = await getStream(id);
       stream.current = s;
@@ -61,11 +104,12 @@ export default function CameraModal({
           capture();
         }
       }
-      const all = await navigator.mediaDevices.enumerateDevices();
-      setDevices(all.filter((d) => d.kind === "videoinput"));
-    } catch {
-      setStatus("The camera wouldn't start — another app may be using it, or camera access is off.");
-      void api.post(`/api/camera/${modal.id}/cancel`);
+      await listDevices(); // labels are populated now that permission is granted
+    } catch (e) {
+      // DO NOT close the window — let the user fix it and Retry.
+      setStatus("");
+      setError(reason(e));
+      void listDevices(); // still offer the picker so they can switch cameras
     }
   };
 
@@ -142,15 +186,23 @@ export default function CameraModal({
             ))}
           </select>
         )}
-        <div className="text-xs mt-3" style={{ color: "var(--muted)" }}>
-          {status ||
-            (modal.ears
-              ? "No rush — I'm listening. Say 'take the picture' when you're ready, or 'cancel' to close without one. The buttons work too."
-              : "No rush — take the picture with the button when you're ready; Cancel (or Esc) closes without one.")}
-        </div>
+        {error ? (
+          <div className="text-xs mt-3" style={{ color: "var(--amber, #e0a13f)" }}>{error}</div>
+        ) : (
+          <div className="text-xs mt-3" style={{ color: "var(--muted)" }}>
+            {status ||
+              (modal.ears
+                ? "No rush — I'm listening. Say 'take the picture' when you're ready, or 'cancel' to close without one. The buttons work too."
+                : "No rush — take the picture with the button when you're ready; Cancel (or Esc) closes without one.")}
+          </div>
+        )}
         <div className="flex gap-3 mt-4 justify-end">
           <button className="btn" onClick={cancel}>Cancel</button>
-          <button className="btn btn-primary" onClick={capture}>Take the picture</button>
+          {error ? (
+            <button className="btn btn-primary" onClick={() => void open(deviceId)}>Retry</button>
+          ) : (
+            <button className="btn btn-primary" onClick={capture}>Take the picture</button>
+          )}
         </div>
       </div>
     </div>
