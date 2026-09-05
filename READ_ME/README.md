@@ -86,6 +86,14 @@ A packaged install is built with `python build.py --with-voice`; the frozen app 
 - **Evolve** — nightly, HELIX reviews what the day produced (corrections, errors, failed builds) and
   drafts one concrete improvement to its own code — always on a branch, smoke-checked, constitution-
   scanned, and applied only on your explicit approval. It never ships itself.
+- **Dream** — set a window ("dream tonight from eleven for eight hours", or the Dreaming card in
+  Settings) and HELIX spends the night improving itself non-stop: it plans on Fable, drafts change
+  after change on a branch each, and — only if you switch on automatic applying — merges a draft when
+  its full test suite passes on it; anything red waits for you. It can rebuild and relaunch itself
+  before you wake (the previous build is kept and restored if the new one fails), and the first time
+  you speak to it in the morning it tells you, once, what the night did. "No dreaming tonight"
+  switches nightly dreaming off until you turn it back on; "stop dreaming" ends the session running
+  now; "how did you sleep?" reads the night back.
 
 ---
 

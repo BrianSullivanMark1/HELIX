@@ -1,7 +1,7 @@
 """EvolveService — the nightly self-improvement pass: gating, QUIET nights, and real proposals."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from helix.ports.llm import Reply, Text
 from helix.services import evolve as evolve_mod
@@ -501,3 +501,95 @@ def test_the_pending_probe_is_retried_so_a_resolved_draft_still_runs_the_same_ni
     svc.tick()
     assert selfdev.probes == 2
     assert lane.requests == ["A proposal."] and settings.d["evolve_last_run"] == "2026-07-16"
+
+
+# ----- the dream session owns the night: this pass stands down (READ_ME/DREAM.md §4) -----
+class _Dream:
+    def __init__(self, covers=True):
+        self.covers = covers
+        self.asked = 0
+
+    def covers_tonight(self):
+        self.asked += 1
+        return self.covers
+
+
+def test_the_pass_defers_to_a_dream_session_that_covers_tonight(monkeypatch):
+    monkeypatch.setattr(evolve_mod.threading, "Thread", _ImmediateThread)
+    chat, settings, dream = _Chat("A proposal."), _Settings(), _Dream(covers=True)
+    svc = _svc(chat=chat, settings=settings)
+    svc.set_dream(dream)
+    svc.tick()  # 4 AM, in window — and yet nothing: the dream drafts tonight, not this pass
+    assert chat.prompts == [] and "evolve_last_run" not in settings.d and dream.asked == 1
+    dream.covers = False  # dreaming switched off: the pass resumes exactly where it stood
+    svc.tick()
+    assert len(chat.prompts) == 1 and settings.d["evolve_last_run"] == "2026-07-16"
+
+
+def test_a_dream_handed_to_the_constructor_counts_too():
+    chat = _Chat("A proposal.")
+    EvolveService(chat, None, _Lane(), _SelfDev(), _Settings(), _Clock(), log_tail=lambda: "",
+                  dream=_Dream(covers=True)).tick()
+    assert chat.prompts == []
+
+
+def test_a_confused_dream_never_stops_the_plain_pass(monkeypatch):
+    class _Broken:
+        def covers_tonight(self):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(evolve_mod.threading, "Thread", _ImmediateThread)
+    chat, settings = _Chat("QUIET"), _Settings()
+    svc = _svc(chat=chat, settings=settings)
+    svc.set_dream(_Broken())
+    svc.tick()
+    assert len(chat.prompts) == 1
+
+
+def test_deferring_keeps_the_heartbeat_fresh_so_switching_the_dream_off_never_drafts_into_the_day(
+        monkeypatch):
+    # A week of dreaming (the stamp is stale, past the patience fuse), then the user switches the
+    # dream off at two in the afternoon. Had the deferred ticks read as sleep, the first tick after
+    # the switch would count as a WAKE and the fuse would draft straight into the working day. It
+    # must wait for the evening band like any other owed night.
+    monkeypatch.setattr(evolve_mod.threading, "Thread", _ImmediateThread)
+    settings = _Settings({"evolve_last_run": "2026-07-08"})
+    lane, clock, dream = _Lane(), _Clock(hour=14, minute=0), _Dream(covers=True)
+    svc = _svc(chat=_Chat("A proposal."), settings=settings, lane=lane, clock=clock)
+    svc.set_dream(dream)
+    svc.tick()
+    clock.advance(seconds=15)
+    svc.tick()
+    dream.covers = False
+    clock.advance(seconds=15)
+    svc.tick()
+    assert lane.requests == [] and settings.d["evolve_last_run"] == "2026-07-08"
+    clock.advance(hours=6)  # 20:00 — the quiet band: NOW the owed night is caught up, once
+    svc.tick()
+    assert lane.requests == ["A proposal."] and settings.d["evolve_last_run"] == "2026-07-16"
+
+
+def test_mark_night_covered_moves_the_stamp_forward_only():
+    settings = _Settings({"evolve_last_run": "2026-07-14"})
+    svc = _svc(settings=settings)
+    svc.mark_night_covered(date(2026, 7, 16))
+    assert settings.d["evolve_last_run"] == "2026-07-16"
+    svc.mark_night_covered(date(2026, 7, 15))
+    assert settings.d["evolve_last_run"] == "2026-07-16"  # never backwards
+    fresh = _Settings()
+    _svc(settings=fresh).mark_night_covered(date(2026, 7, 16))
+    assert fresh.d["evolve_last_run"] == "2026-07-16"
+    junk = _Settings({"evolve_last_run": "not a date"})
+    _svc(settings=junk).mark_night_covered(date(2026, 7, 16))
+    assert junk.d["evolve_last_run"] == "2026-07-16"
+
+
+def test_the_dream_reads_the_same_material_and_writes_the_same_journal(tmp_path):
+    svc = _svc(data_dir=tmp_path, lessons=_lessons({"": ["Keep replies short"]}), tail="ERROR x")
+    svc.add_backlog("an idea")
+    material = svc.material()
+    assert material == svc._material() and "an idea" in material and "Keep replies short" in material
+    svc.journal("dream: session started")
+    assert "dream: session started" in svc.journal_tail()
+    svc.take_backlog("an idea")
+    assert svc.backlog() == []

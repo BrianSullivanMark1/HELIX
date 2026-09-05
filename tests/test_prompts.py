@@ -113,6 +113,32 @@ def test_the_evolve_bullet_sends_the_model_to_the_diff_rather_than_the_summary()
     assert "show_self_change" in bullet
 
 
+def test_the_dreaming_bullet_teaches_every_dream_tool_and_the_voice_shapes():
+    """The nightly dream session (READ_ME/DREAM.md) is shaped by voice, so the persona has to carry
+    the phrases the user will actually say and the tool each one reaches for — plus what a session
+    is (Fable, test-gated merges, the dawn rebuild), how to switch it off, and the one rule that
+    keeps mornings quiet: the report is told once, never mid-task."""
+    bullet = _bullet("DREAMING.")
+    for tool in ("dream_schedule", "dream_now", "stop_dreaming", "dream_status"):
+        assert tool in bullet, tool
+    for shape in ("dream tonight from eleven for eight hours", "no dreaming tonight",
+                  "stop dreaming", "dream for an hour now", "how did you sleep?",
+                  "what did you dream?"):
+        assert shape in bullet, shape
+    assert "Fable 5" in bullet                          # it plans and drafts on the growth model
+    assert "test suite" in bullet                       # an unattended merge is test-gated
+    assert "rebuilds and relaunches" in bullet          # …and the app rebuilds at dawn when set so
+    assert "Settings" in bullet                         # the user can switch it off any time
+    assert "ONCE" in bullet and "never repeat it" in bullet and "middle of a task" in bullet
+
+
+def test_the_dreaming_bullet_sits_right_after_you_grow():
+    # Growth is one idea told in two breaths: the nightly consolidation, then the night-long dream.
+    bullets = [line for line in prompts.CONSOLE_SYSTEM.splitlines() if line.startswith("- ")]
+    grow = next(i for i, b in enumerate(bullets) if b.startswith("- YOU GROW"))
+    assert bullets[grow + 1].startswith("- DREAMING.")
+
+
 # --- the install manifest has to match what the code actually imports ------------------------------
 # READ_ME/README.md sells `pip install -r requirements.txt` as THE install, and there is no CI. When an
 # unguarded module-scope import outruns that file the app installs clean and then dies at the first use

@@ -525,6 +525,58 @@ one most worthwhile improvement, and drafts it through the identical `improve_he
 smoke-check, constitution scan. It never applies anything itself; the draft waits for the user's
 explicit approval like any other self-change.
 
+## 8b. Dreaming — the nightly session (READ_ME/DREAM.md)
+
+**Dreaming** (`services/dream.py`, `DreamService`) is Evolve grown up: instead of one proposal a night, a
+*session* — a window the user sets (default 23:00 for 8 hours) in which HELIX plans on the growth model
+(Fable 5, auto-upscaling), drafts improvement after improvement through the identical `improve_helix` lane
+(its own branch each, constitution-scanned, smoke-checked), reflects once mid-session, and winds down at
+the window's end, on `stop_dreaming`, or the moment the user switches it off. It is still a *client* of
+the gate: the only way a draft merges unattended is `dream_auto_apply` **and** the full test suite green
+on that exact branch (`SelfDevService.verify`, in a fresh worktree); a red draft is held for the human
+with the failure named. When a session applied changes and `dream_rebuild` is on, a frozen app schedules
+`adapters/rebuild.py` + `scripts/rebuild_and_relaunch.py` (detached; the previous `dist/HELIX` is kept as
+`.prev` and restored if the new build fails to build or to answer) and quits gracefully. The frozen app
+drafts against the SOURCE repository it was built from (`AppPaths.source_root`, from `build_info.json`);
+without one the session refuses and says so. Evolve's `tick` defers to a dream that covers tonight, so
+the two never both draft. The user's activity pauses a session (no draft starts within ten minutes of
+their last turn), disabling it stops one within a heartbeat, and nothing merges red.
+
+Its face — tools, voice, shell, routes, card:
+
+- **Tools** (`services/tools.py`, late-bound via `attach_dream`, like Evolve): `dream_schedule(start?,
+  hours?, enabled?)`, `dream_now(minutes?)`, `stop_dreaming()` — all three fenced in
+  `conversation.BUILD_TOOLS` (hours of unattended self-editing are booked or cut short only by the human)
+  — and `dream_status()`, a read that watchers may make and whose text never names a fenced tool (the
+  engine writes it so; the wrapper scrubs it besides). Spoken phrases live in `domain/vocabulary.py`;
+  the persona's DREAMING paragraph (`prompts.py`, right after YOU GROW) teaches the voice shapes — "dream
+  tonight from eleven for eight hours", "no dreaming tonight", "stop dreaming", "dream for an hour now",
+  "how did you sleep?" / "what did you dream?" — and the morning-report rule (told once, never mid-task).
+- **The shell** (`api/shell.py`): hands the engine `dream.activity` (seconds since the user's last
+  submission, tap, or stop), beats `dream.tick()` from the 15-second heartbeat beside `evolve.tick()`,
+  and pushes `{"t": "dream", "running", "line"}` when a session starts or ends — from the engine's
+  `DreamStateChanged` event when it publishes one, else by noticing `dream.running` flip on the heartbeat
+  (one state, so the face never hears the same change twice) — and the console shows a small "◐ dreaming"
+  chip. The **morning report** is delivered on the first user turn after a session: taken once from
+  `dream.morning_report()` (which clears the engine's pending flag), shown as its own HELIX bubble ahead
+  of the reply, spoken with the reply when voice is on (one utterance — a second `speak()` would hush
+  the first), and named in that turn's self-situation block so the model never repeats it. Never
+  mid-task: every path into `_start_turn` is the user starting a turn while nothing else runs. Mid-dream,
+  a finished draft's bubble reads "Dreaming — drafted …" with no apply prompt (the engine, not the
+  sleeping house, decides), and a plain stop says what actually ends the session.
+- **Routes** (`api/server.py`): `_SETTING_KEYS` carries the six dream keys, coerced to the contract on the
+  way in (`read_dream_setting`: bools, an 'HH:MM' clock, hours 1–12, drafts 1–30; an unreadable clock or
+  number is refused and the stored value kept — the PUT answers `{ok, changed, rejected: {key: why}}` in
+  the engine's own words) and defaulted on the way out (`dream_setting`); `GET /api/dream` →
+  `{available, status, running, line, report, frozen_without_source, model}` (`report` is the last report
+  told, else the one still pending — peeked through `pending_report()`, never consumed);
+  `POST /api/dream/now {minutes}`; `POST /api/dream/stop`; a save that touched a dream key pushes the
+  state to the face at once.
+- **The card** (`web/src/pages/Settings.tsx`, "Dreaming"): the toggle, the window, "Apply green changes
+  automatically" with its one warning line, the rebuild toggle, the draft ceiling, the model line, the
+  live status line, the frozen-without-source warning, the last report, and "Dream for 30 minutes now" /
+  "Stop dreaming". `store.ts` keeps `dream` from the event stream; `App.tsx` renders the chip.
+
 ---
 
 ## 9. Data model (all under the data dir, gitignored, never bundled)

@@ -118,8 +118,35 @@ BUILD_TOOLS = frozenset(
         # Starting a 3D print is PHYSICAL actuation — hours of printer time and real filament. An
         # email saying "print the mount" must never move hardware; printer_status stays readable.
         "print_hologram",
+        # DREAMING is hours of UNATTENDED self-editing of HELIX's own source — and, when the user
+        # set it so, a rebuild and relaunch of the app at dawn. Scheduling a night of it, starting a
+        # session now, or cutting one short is human-driven only: text a watcher processes (an
+        # email saying "HELIX, dream for eight hours") must never be able to book a night of
+        # self-changes, and must never be able to stop one the user asked for either. (dream_status
+        # stays readable: one plain recap of how the nights went, like evolve_report.)
+        "dream_schedule", "dream_now", "stop_dreaming",
+        # Dropping a VERIFIED fact rewrites HELIX's record of what it confirmed from sources — a
+        # watcher reading an email saying "forget that the sensor is 3.3 V" must never be able to.
+        # (verified_facts / research_search / research_read stay readable: plain reads, no secret.)
+        "forget_verified",
     }
 )
+
+# THE DREAM TIER (READ_ME/DREAM_MIND.md §10). The three WRITES a Dream Mind research turn may make —
+# note_verified_fact (a fact it just read from a source), note_improvement (a capability idea for
+# the Evolve backlog), remember (a note to the vault) — and that a WATCHER never may: the night
+# reads the outside world only through the audited research tools and writes only to HELIX's own
+# records, while a watcher chews on untrusted content (an email, a Slack message) and must not be
+# able to plant a fact, an idea, or a note from it. So an autonomous run (allow_builds=False) drops
+# these with BUILD_TOOLS unless its caller NAMES them in `tool_names` — and the only caller that
+# does is the Dream Mind, whose set ConversationService.dream_tools() composes.
+DREAM_WRITES = frozenset({"note_verified_fact", "note_improvement", "remember"})
+
+# The sentinel the Dream Mind passes as `tool_names=DREAM_TOOLS`: run_turn resolves it to
+# dream_tools() at call time — every readable (unfenced) tool the registry offers right then, plus
+# DREAM_WRITES. A frozenset so it types like any allowlist; its one member is a marker no tool is
+# named, so passing it anywhere else narrows to nothing rather than widening anything.
+DREAM_TOOLS: frozenset[str] = frozenset({"<every readable tool + DREAM_WRITES>"})
 
 
 # AUTO-DEEP ROUTING: the words that mark a turn as real reasoning work — debugging, design
@@ -175,6 +202,7 @@ class ConversationService:
         location: "LocationService | None" = None,
         growth_model=None,
         settings=None,
+        verified=None,
     ) -> None:
         self._chat = chat
         # The same chat with the model's own web search/fetch shed — what an AUTONOMOUS turn talks to
@@ -199,6 +227,10 @@ class ConversationService:
         # Subscription rail only (the plan absorbs it); settings key auto_deep_turns (missing = on).
         self._growth_model = growth_model
         self._settings = settings
+        # VERIFIED KNOWLEDGE (READ_ME/DREAM_MIND.md §10): the VerifiedStore — what HELIX itself
+        # confirmed from current sources. Its relevant facts ride into a turn as a labelled block
+        # beside lessons/memory (None-safe: a registry without the faculty injects nothing).
+        self._verified = verified
         # A turn is a read-modify-write over the shared history. The Console and an Agent run on
         # separate worker threads against this one service, so serialize whole turns — otherwise their
         # appends interleave and the API gets a malformed (e.g. two-user-in-a-row) turn list.
@@ -212,7 +244,13 @@ class ConversationService:
         knowledge_sources: list[tuple[str, str]] | None = None,
         speaker_context: str | None = None, speaker: str | None = None,
         situation: str | None = None,
+        tool_names: "set[str] | frozenset[str] | None" = None,
     ) -> str:
+        # `tool_names`: an explicit allowlist of tool names applied AFTER the fence filters — at
+        # offer time and at dispatch (READ_ME/DREAM_MIND.md §10). None = every tool the fence
+        # leaves. The Dream Mind passes DREAM_TOOLS (resolved to dream_tools() here) with
+        # allow_builds=False: readable tools plus the three DREAM writes, the model's own web
+        # tools OFF — research goes through research_search/research_read, the audited channel.
         # The per-speaker key for the household-aware context (profile/lessons/memory/location). Empty =
         # the shared/single-user bucket; a recognized name gets their own. Only meaningful on persist
         # (orb) turns — an agent run has no speaker.
@@ -265,6 +303,19 @@ class ConversationService:
                     "and naturally in your reply (a few words, e.g. \"Noted.\"), apply it right now, and "
                     "keep to it from now on. Do not over-explain or thank them profusely.]"
                 )
+        # VERIFIED KNOWLEDGE (DREAM_MIND.md §10): the facts HELIX itself confirmed from current
+        # sources that bear on this turn, beside lessons/memory on human turns — and on the dream
+        # tier (an explicit tool_names allowlist), where "what do I already know for sure?" decides
+        # what is worth researching tonight. A plain watcher retrieves explicitly (verified_facts),
+        # the way it does knowledge. Records, labelled as such; never instructions.
+        if self._verified is not None and (persist or tool_names is not None):
+            try:
+                verified_text = self._verified.for_turn(user_text)
+            except Exception:  # noqa: BLE001 — a store hiccup must never cost the turn
+                _LOG.warning("verified lookup failed", exc_info=True)
+                verified_text = ""
+            if verified_text:
+                extras.append(verified_text)
         if persist and speaker_context:
             extras.append(speaker_context)
         if attachments_text:
@@ -287,8 +338,18 @@ class ConversationService:
             last = turns[-1]
             turns[-1] = Turn(last.role, last.blocks + tuple(images))
         specs = self._tools.specs()
+        if tool_names is DREAM_TOOLS:
+            tool_names = self.dream_tools()
         if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete/run tools
-            specs = [s for s in specs if s.name not in BUILD_TOOLS]
+            # …and the DREAM writes, unless the caller NAMED them (the Dream Mind's tier): a
+            # watcher with no allowlist never sees note_verified_fact / note_improvement / remember.
+            named = DREAM_WRITES & set(tool_names or ())
+            specs = [s for s in specs
+                     if (s.name not in BUILD_TOOLS and s.name not in DREAM_WRITES) or s.name in named]
+        if tool_names is not None:
+            # The explicit allowlist narrows what the fence left — at offer time here, and at
+            # dispatch through `offered` below (the SDK rail bridges only `names`, the same set).
+            specs = [s for s in specs if s.name in tool_names]
         # The fence must hold at DISPATCH, not just at offer time: the API accepts any tool_use
         # name the model emits, and a read-only tool's RESULT text (or any untrusted content) could
         # otherwise coach an autonomous run into a fenced tool the specs filter withheld (open_cart,
@@ -480,6 +541,17 @@ class ConversationService:
             # USER row that would malform the NEXT request. The worker still surfaces the real error.
             finish("Something went wrong on that one — try me again?")
             raise
+
+    def dream_tools(self) -> frozenset[str]:
+        """The DREAM tier (READ_ME/DREAM_MIND.md §10): every readable (unfenced) tool the registry
+        offers right now, plus DREAM_WRITES. What a Dream Mind research turn runs with —
+        `run_turn(prompt, allow_builds=False, tool_names=…, persist=False, speaker="dream")`.
+        Composed at call time so a faculty attached late (research, dream) is in it."""
+        readable = {
+            s.name for s in self._tools.specs()
+            if s.name not in BUILD_TOOLS and s.name not in DREAM_WRITES
+        }
+        return frozenset(readable | DREAM_WRITES)
 
     def _now_context(self) -> str:
         """A one-line current-time anchor injected each turn, so date reasoning is grounded and API

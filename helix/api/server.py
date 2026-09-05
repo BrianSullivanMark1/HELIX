@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 import socket
 import threading
@@ -48,8 +49,75 @@ _SETTING_KEYS = (
     # per-origin and change), a mirrored preview, clip length, and whether a typed message
     # while the panel is live carries the current view along with it.
     "camera_device", "camera_mirror", "camera_clip_seconds", "camera_attach_view",
+    # Dreaming — the nightly self-improvement session (READ_ME/DREAM.md §2). Read live by the
+    # engine, so a save here needs no restart; the values are coerced to the contract on the way
+    # in (dream_setting below) so a hand-typed "99" hours can never reach the engine.
+    "dream_enabled", "dream_start", "dream_hours", "dream_auto_apply", "dream_rebuild",
+    "dream_max_drafts",
 )
 _SECRET_SETTINGS = ("claude_api_key", "claude_code_oauth_token")
+
+# The dream settings' contract (DREAM.md §2): type, range, default. One table, read by the GET
+# (what the card shows for a key that was never set) and the PUT (what the store may hold).
+_DREAM_DEFAULTS: dict[str, object] = {
+    "dream_enabled": False,
+    "dream_start": "23:00",
+    "dream_hours": 8,
+    "dream_auto_apply": False,
+    "dream_rebuild": True,
+    "dream_max_drafts": 10,
+}
+_DREAM_BOOLS = ("dream_enabled", "dream_auto_apply", "dream_rebuild")
+_CLOCK_RE = re.compile(r"^(\d{1,2}):(\d{1,2})$")  # '7:5' is a shape, not a range problem
+
+
+# What a PUT is told when a dream value cannot be read — the engine's own words (DreamService.schedule
+# refuses in the same voice and saves nothing), so the card and the voice agree.
+_DREAM_UNREADABLE = {
+    "dream_start": "That start time isn't one I can read — say it like 23:00.",
+    "dream_hours": "That isn't a number of hours I can read — say it like 8.",
+    "dream_max_drafts": "That isn't a number of drafts I can read — say it like 10.",
+}
+
+
+def read_dream_setting(key: str, value) -> tuple[object, str | None]:
+    """One dream setting read to the contract: `(value, None)` when it is readable — a bool, an
+    'HH:MM' clock, hours clamped to 1–12, a draft ceiling clamped to 1–30 — or `(None, why)` when it
+    is not (a clock that isn't one, a number that isn't one, nothing at all). Lenient about the shape
+    a browser or a hand-edited JSON sends ('true', '8', '23:0'); a caller that persists must keep what
+    it has when `why` is set, as the engine's schedule() does."""
+    if key in _DREAM_BOOLS:
+        if value is None:
+            return _DREAM_DEFAULTS[key], None
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on"), None
+        return bool(value), None
+    if key == "dream_start":
+        m = _CLOCK_RE.match(str(value or "").strip())
+        if m is None:
+            return None, _DREAM_UNREADABLE[key]
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None, _DREAM_UNREADABLE[key]
+        return f"{hour:02d}:{minute:02d}", None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None, _DREAM_UNREADABLE[key]
+    if number != number:  # NaN
+        return None, _DREAM_UNREADABLE[key]
+    if key == "dream_hours":
+        number = max(1.0, min(12.0, number))
+        return (int(number) if number.is_integer() else round(number, 2)), None
+    return int(max(1, min(30, int(number)))), None  # dream_max_drafts
+
+
+def dream_setting(key: str, value):
+    """One dream setting as the contract wants it, with the DEFAULT for anything missing or
+    unreadable — the GET's reading (a key never set shows its default). The PUT reads through
+    read_dream_setting() instead, so an unreadable value is refused rather than saved as the default."""
+    value, why = read_dream_setting(key, value)
+    return _DREAM_DEFAULTS[key] if why else value
 
 
 def free_port() -> int:
@@ -637,6 +705,9 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         except (TypeError, ValueError):
             values["camera_clip_seconds"] = 6
         values["camera_device"] = str(values.get("camera_device") or "")
+        # Dreaming: a key never set reads as its contract default, so the card can render truth.
+        for key in _DREAM_DEFAULTS:
+            values[key] = dream_setting(key, values.get(key))
         secretset = {k: bool((c.settings.get(k) or "").strip()) for k in _SECRET_SETTINGS}
         conns = {}
         for sid, (label, _store, fields) in CONNECTABLE.items():
@@ -675,10 +746,19 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
     async def put_settings(request: Request):
         body = await request.json()
         changed = []
+        rejected: dict[str, str] = {}
         for key, value in dict(body.get("values") or {}).items():
             if key in LOCKED_SETTINGS:
                 continue
             if key in _SETTING_KEYS:
+                if key in _DREAM_DEFAULTS:
+                    # The contract's types and ranges, always — and an unreadable clock or number
+                    # is refused, not saved as the default: the stored value stays, and the card
+                    # is told why (the engine's schedule() saves nothing in the same case).
+                    value, why = read_dream_setting(key, value)
+                    if why:
+                        rejected[key] = why
+                        continue
                 c.settings.set(key, value)
                 changed.append(key)
             elif key in _SECRET_SETTINGS and str(value or "").strip():
@@ -695,7 +775,33 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
                 shell.voice.set_enabled(bool(c.settings.get("voice_input_on", False)))
             shell.voice.reload_audio_input()
         shell.push({"t": "voice", **shell.voice_state()})
-        return {"ok": True, "changed": changed}
+        if any(key in _DREAM_DEFAULTS for key in changed):
+            # The engine reads the keys live (disabling stops a session within a heartbeat); the
+            # face is told now so the card's status line and the chip don't wait for that beat.
+            shell.dream_settings_changed()
+        return {"ok": True, "changed": changed, "rejected": rejected}
+
+    # ----- dreaming (the nightly self-improvement session — DREAM.md §7) -----
+    @app.get("/api/dream")
+    def dream_state():
+        """The Settings card's truth: the readable status (window, next session, last session, the
+        model), whether a session runs now, the last morning report told, and whether dreaming is
+        frozen on this machine (a frozen app with no source repository to draft against)."""
+        return shell.dream_state()
+
+    @app.post("/api/dream/now")
+    async def dream_now(request: Request):
+        minutes = 30
+        try:
+            body = await request.json()
+            minutes = body.get("minutes", 30)
+        except Exception:  # noqa: BLE001 — a bare POST means the default half hour
+            pass
+        return shell.dream_now(minutes)
+
+    @app.post("/api/dream/stop")
+    def dream_stop():
+        return shell.dream_stop()
 
     @app.post("/api/settings/remove_connection")
     async def remove_connection(request: Request):

@@ -13,6 +13,7 @@ same guards — so the web face inherits every hard-won behavior rather than re-
 """
 from __future__ import annotations
 
+import sys
 import tempfile
 import threading
 import time
@@ -40,6 +41,11 @@ from helix.domain.events import (
     SelfChangeProgress,
     SleepRequested,
 )
+
+try:  # the dream engine's own start/end announcement; without it the heartbeat polls (DREAM.md §7)
+    from helix.domain.events import DreamStateChanged
+except ImportError:  # pragma: no cover — an events module without it: polling only
+    DreamStateChanged = None
 from helix.logging_setup import get_logger
 from helix.services import attachments
 from helix.services import images as imagesvc
@@ -144,6 +150,14 @@ class ShellSession:
         self._hue = "none"
         self._closed = False
         self._greeted = False
+        # Dreaming (the nightly self-improvement session — READ_ME/DREAM.md): when the user last did
+        # anything here (the engine holds a draft while this is recent), the last session state
+        # pushed to the face (so a start/end is pushed once), and the last morning report told
+        # (the Settings card shows it).
+        self._last_activity = time.monotonic()
+        self._dream_running = False
+        self._dream_line = ""
+        self._dream_report_last = ""
 
         bus = self.c.bus
         for etype, handler in (
@@ -164,6 +178,9 @@ class ShellSession:
             (SelfChangeFinished, self._on_selfdev_finished),
         ):
             bus.subscribe(etype, handler)
+        if DreamStateChanged is not None:
+            bus.subscribe(DreamStateChanged, self._on_dream_state)
+        self._wire_dream()
 
         self._heartbeat = threading.Timer(_HEARTBEAT_S, self._tick)
         self._heartbeat.daemon = True
@@ -301,6 +318,8 @@ class ShellSession:
             "camera": self._camera_event(self._camera) if self._camera is not None else None,
             # The staged Amazon cart (survives restarts) so a fresh page shows the panel at once.
             "cart": self.cart_state(),
+            # The dream session's state, so a reloaded page shows the "◐ dreaming" chip at once.
+            "dream": self.dream_state(),
         }
         if not self._greeted:
             self._greeted = True
@@ -324,6 +343,7 @@ class ShellSession:
     # ----- the submit gauntlet (spec §3.4 — same order) -----
     def submit(self, text: str, *, attachment_ids: list[str] | None = None,
                from_voice: bool = False, speaker: str | None = None) -> None:
+        self._touch_activity()  # any submission is the user being here — the dream engine holds
         text = (text or "").strip()
         paths = [self._attachments.pop(a) for a in (attachment_ids or []) if a in self._attachments]
         # A live camera frame attached to a typed message is a look too: AR callouts the model
@@ -403,7 +423,7 @@ class ShellSession:
         return None
 
     # ----- the turn -----
-    def _situation(self, from_voice: bool) -> str:
+    def _situation(self, from_voice: bool, report: str = "") -> str:
         v = self.voice
         if v is None or not v.enabled():
             mic = "hands-free voice is off — nothing is listening"
@@ -419,9 +439,17 @@ class ShellSession:
         build = "; a build is running in the background" if self._working_builds else ""
         session = ", conversation session open" if (v is not None and v._session) else ""
         reach = "reached by voice" if from_voice else "reached by typed message"
+        # Interoception covers the dream too: a session drafting in the background is part of
+        # HELIX's own condition, and a report just told is something it must know it said.
+        dreaming = ("; a dream session is drafting improvements to you in the background"
+                    if self._dream_running else "")
+        told = ""
+        if report:
+            told = (" You have JUST told the user last night's dream report, as its own line before "
+                    f"this reply — do not repeat it, answer what they said. It said: {report[:300]}")
         return (f"[Your own state right now (self-awareness, not the user's words): {reach}; "
-                f"{mic}{session}{build}; it's {day}. Reason from this when it matters — you are a "
-                f"situated presence, aware of where you are in the conversation.]")
+                f"{mic}{session}{build}{dreaming}; it's {day}.{told} Reason from this when it "
+                "matters — you are a situated presence, aware of where you are in the conversation.]")
 
     def _speaker_context(self, speaker: str | None) -> str | None:
         if not speaker:
@@ -438,6 +466,14 @@ class ShellSession:
 
     def _start_turn(self, prompt: str, from_voice: bool, paths: list[Path],
                     speaker: str | None) -> None:
+        # THE MORNING REPORT (DREAM.md §7): the first user turn after a dream session opens with
+        # what the night did — its own HELIX bubble ahead of the reply, told ONCE (taking it clears
+        # the engine's pending flag), and never mid-task: every path into here (a submission, a
+        # drained follow-up, a camera shot) is the user starting a turn while nothing else runs.
+        # The voice says it with the reply in _finish_turn — a second speak() would cut it off.
+        report = self._take_morning_report()
+        if report:
+            self._bubble("helix", report)
         token = CancelToken()
         with self._lock:
             self._busy = True
@@ -461,13 +497,13 @@ class ShellSession:
                     prompt, attachments_text=attach_text, images=images,
                     on_progress=self._on_turn_progress, cancel=token,
                     knowledge_sources=sources, speaker_context=self._speaker_context(speaker),
-                    speaker=speaker, situation=self._situation(from_voice),
+                    speaker=speaker, situation=self._situation(from_voice, report=report),
                 )
             except Exception as exc:  # noqa: BLE001
                 err = f"{type(exc).__name__}: {exc}"
                 _LOG.exception("turn failed")
             finally:
-                self._finish_turn(reply, err, sources, token, from_voice)
+                self._finish_turn(reply, err, sources, token, from_voice, report=report)
 
         threading.Thread(target=work, daemon=True, name="helix-turn").start()
 
@@ -476,12 +512,16 @@ class ShellSession:
         self._narrate(line)
 
     def _finish_turn(self, reply: str | None, err: str | None, sources: list,
-                     token: CancelToken, from_voice: bool) -> None:
+                     token: CancelToken, from_voice: bool, report: str = "") -> None:
         cancelled = token.is_set()
+        # A morning report told at the start of this turn is SPOKEN here, ahead of the reply, as
+        # one utterance: speak() hushes whatever is already playing, so a report voiced when the
+        # turn began would be cut off by the reply seconds later. (Its bubble is already up.)
+        lead = f"{report} " if report else ""
         if err is not None and not cancelled:
             self._bubble("helix", f"⚠  {err}")
             if not cancelled:
-                self._speak("Something went wrong on that one — try me again?")
+                self._speak(lead + "Something went wrong on that one — try me again?")
         elif reply is not None:
             prose, visuals = split_visuals(reply)
             src_line = []
@@ -494,7 +534,7 @@ class ShellSession:
                 if self.voice is not None:
                     self.voice.idle()
             else:
-                self._speak(prose)
+                self._speak(lead + prose)
         with self._lock:
             self._busy = False
             self._cancel = None
@@ -515,6 +555,7 @@ class ShellSession:
 
     # ----- stop (spec §3.7 — same order, same wording) -----
     def stop(self) -> None:
+        self._touch_activity()
         with self._lock:
             dropped = len(self._pending)
             self._pending.clear()
@@ -551,12 +592,17 @@ class ShellSession:
             if self._selfdev_drafting and not self._selfdev_unattended:
                 bits.append("Still improving myself — that one runs to the end. "
                             "Say “discard it” when it lands.")
+            elif self._dream_running:
+                # A plain stop cancels the draft in flight (above) and this activity pauses the
+                # engine, but the session itself goes on — say what ends it, honestly.
+                bits.append("Stopped. I'm still dreaming — say “stop dreaming” to end the session.")
             else:
                 bits.append("Stopped.")
         self._status(" ".join(bits))
 
     def tap(self) -> None:
         """The orb tap: stop when anything is running, else toggle voice (spec §3.3)."""
+        self._touch_activity()
         busy = (self._busy or self._working_builds or self._selfdev_drafting
                 or (self.voice is not None and self.voice.is_active()))
         if busy:
@@ -766,18 +812,31 @@ class ShellSession:
     def _on_selfdev_finished(self, ev: SelfChangeFinished) -> None:
         self._selfdev_drafting = False
         hushed, self._selfdev_hushed = self._selfdev_hushed, False
-        unattended, self._selfdev_unattended = self._selfdev_unattended, False
+        # The flag rides on the ENDING too (the lane stamps every event), and it has to be read
+        # here: a draft that dies before its first progress line — a dirty tree, a refused lane —
+        # arrives as a bare Finished, and reading only the remembered progress flag would speak
+        # "Couldn't draft that change" into a dark house at 3 AM.
+        unattended = self._selfdev_unattended or bool(getattr(ev, "unattended", False))
+        self._selfdev_unattended = False
         self._sync_working()
         self._settle_hue()
         speak = not unattended and not hushed
+        # Mid-dream, the engine decides what becomes of a draft (a test-gated merge, or a hold for
+        # the human) and the morning report tells the whole night — so no "say apply it" prompt
+        # lands in the transcript at 3 AM for a change that may already be merging.
+        dreaming = unattended and self._dream_running
         if ev.stopped:
             msg = "Stopped drafting that change."
         elif ev.ok:
             what = (ev.summary or ev.branch or "the change").strip().splitlines()[0][:90]
-            msg = f"Drafted {what}. Say “apply it” to ship it, or “discard it” to drop it."
+            if dreaming:
+                msg = f"Dreaming — drafted {what}. The morning report will cover it."
+            else:
+                msg = f"Drafted {what}. Say “apply it” to ship it, or “discard it” to drop it."
         else:
             reason = (ev.error or "").strip().splitlines()[0][:120]
-            msg = f"Couldn't draft that change. {reason}".strip()
+            msg = (f"Dreaming — one draft didn't land. {reason}" if dreaming
+                   else f"Couldn't draft that change. {reason}").strip()
         self._bubble("helix", msg)
         self._status(msg)
         if speak:
@@ -1313,7 +1372,12 @@ class ShellSession:
                     self.push({"t": "camera.hologram", "id": cam["id"], "remove": True})
                     cmd.settle("Took the hologram off the camera view.")
                     return
-                slug, name = str(payload.get("slug") or ""), str(payload.get("name") or slug)
+                # Two statements on purpose: as one tuple assignment the right side read `slug`
+                # before it was bound, so a payload with an empty name raised NameError instead
+                # of falling back to the slug (tools.py always sends a name today; a future caller
+                # need not).
+                slug = str(payload.get("slug") or "")
+                name = str(payload.get("name") or slug)
                 mesh = self.c.builds.workspace(slug) / "assets" / "model.stl" if slug else None
                 if mesh is None or not mesh.is_file():
                     cmd.settle(f"'{name}' has no mesh to project yet — open it in the Studio once "
@@ -1365,6 +1429,16 @@ class ShellSession:
             pass
         try:
             self.c.evolve.tick()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            dream = self._dream()
+            if dream is not None:
+                dream.tick()  # the nightly session's heartbeat: start a due one, wind one down
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._poll_dream()  # a start or end since the last beat reaches the face as the chip
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -1439,6 +1513,180 @@ class ShellSession:
         self._bubble("helix", f"{name}: {body}")
         if bool(self.c.settings.get("proactive_speech", False)):
             self._speak(f"{name}: {body}")
+
+    # ----- dreaming (the nightly self-improvement session — READ_ME/DREAM.md §7) -----
+    # The engine (services/dream.py, container.dream) owns the session; the shell is its face. It
+    # hands the engine the user's presence (dream.activity), beats its heart from _tick, delivers
+    # the morning report on the first user turn (_start_turn), and pushes {"t": "dream"} when a
+    # session starts or ends so the console shows the "◐ dreaming" chip. Everything here tolerates
+    # an engine that is missing (an older container, a bare test rig): dreaming is an addition to
+    # the shell, never something it depends on.
+    def _dream(self):
+        return getattr(self.c, "dream", None)
+
+    def _wire_dream(self) -> None:
+        dream = self._dream()
+        if dream is None:
+            return
+        try:
+            # The engine reads this before every draft and holds while the user is active.
+            dream.activity = self.seconds_since_activity
+        except Exception:  # noqa: BLE001 — an engine that can't take the callback just drafts blind
+            _LOG.warning("could not hand the dream engine the activity callback", exc_info=True)
+
+    def seconds_since_activity(self) -> float:
+        """How long since the user last did anything here — a submission, a tap, a stop. The dream
+        engine holds a draft while this is under ten minutes, so a night's work stays out of the
+        way of somebody who is actually at the keyboard."""
+        return max(0.0, time.monotonic() - self._last_activity)
+
+    def _touch_activity(self) -> None:
+        self._last_activity = time.monotonic()
+
+    @staticmethod
+    def _dream_is_running(dream) -> bool:
+        try:
+            running = dream.running
+            if callable(running):  # the contract is a property; a method-style engine still answers
+                running = running()
+            return bool(running)
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _dream_status(dream) -> str:
+        try:
+            return str(dream.status() or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _first_line(text: str, cap: int = 160) -> str:
+        stripped = (text or "").strip()
+        line = stripped.splitlines()[0].strip() if stripped else ""
+        return line if len(line) <= cap else line[: cap - 1].rstrip() + "…"
+
+    def _poll_dream(self) -> None:
+        """The fallback for an engine that publishes no start/end event: notice the change on the
+        heartbeat and push it ONCE — the face never hears the same state twice."""
+        dream = self._dream()
+        if dream is None:
+            return
+        running = self._dream_is_running(dream)
+        if running != self._dream_running:
+            self._set_dream_state(running, self._first_line(self._dream_status(dream)))
+
+    def _set_dream_state(self, running: bool, line: str) -> None:
+        self._dream_running, self._dream_line = bool(running), line or ""
+        self.push({"t": "dream", "running": self._dream_running, "line": self._dream_line})
+
+    def _on_dream_state(self, ev) -> None:
+        """DreamStateChanged from the engine, when it publishes one: the chip flips at once, and
+        the heartbeat poll then finds nothing new to say."""
+        self._set_dream_state(bool(getattr(ev, "running", False)),
+                              self._first_line(str(getattr(ev, "line", "") or "")))
+
+    def _take_morning_report(self) -> str:
+        """The undelivered morning report, taken exactly once (the engine clears its pending flag
+        when this hands back text) — or "" when there is none, or no engine at all."""
+        dream = self._dream()
+        if dream is None:
+            return ""
+        try:
+            text = " ".join(str(dream.morning_report() or "").split())
+        except Exception:  # noqa: BLE001 — a journal hiccup must never block the user's turn
+            _LOG.warning("could not read the morning dream report", exc_info=True)
+            return ""
+        if text:
+            self._dream_report_last = text
+        return text
+
+    def _frozen_without_source(self) -> bool:
+        """The frozen app cannot draft against itself (its code is the bundled _internal); it drafts
+        against the SOURCE repository it was built from (AppPaths.source_root). Without one, dreaming
+        is frozen on this machine, and the Settings card says so instead of promising a night."""
+        if not getattr(sys, "frozen", False):
+            return False
+        try:
+            return getattr(self.c.paths, "source_root", None) is None
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _growth_model_id(self) -> str:
+        try:
+            return str(self.c.growth_model.resolve() or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _peek_morning_report(self, dream) -> str:
+        """The undelivered report WITHOUT delivering it — the engine's pending_report() (an older
+        engine without one, or a journal hiccup, reads as nothing). Only morning_report(), on a user
+        turn, clears the engine's flag, so the paragraph is still told once, in conversation."""
+        peek = getattr(dream, "pending_report", None)
+        if not callable(peek):
+            return ""
+        try:
+            return " ".join(str(peek() or "").split())
+        except Exception:  # noqa: BLE001
+            _LOG.warning("could not peek at the pending dream report", exc_info=True)
+            return ""
+
+    def dream_state(self) -> dict:
+        """GET /api/dream and the snapshot: everything the Settings card and the chip need. `report`
+        is the last report told this process, else the one still waiting to be told (peeked, not
+        consumed) — so the card shows the night the moment the app is up, a dawn relaunch included."""
+        dream = self._dream()
+        running = self._dream_is_running(dream) if dream is not None else False
+        status = self._dream_status(dream) if dream is not None else ""
+        report = self._dream_report_last or (self._peek_morning_report(dream) if dream else "")
+        return {
+            "available": dream is not None,
+            "running": running,
+            "line": self._dream_line if running and self._dream_line else self._first_line(status),
+            "status": status,
+            "report": report,
+            "frozen_without_source": self._frozen_without_source(),
+            "model": self._growth_model_id(),
+        }
+
+    def dream_now(self, minutes=30) -> dict:
+        """The Settings card's 'Dream for 30 minutes now'. Bounded, one session at a time — the
+        engine decides and answers in plain words; the card shows exactly that."""
+        dream = self._dream()
+        if dream is None:
+            return {"ok": False, "text": "Dreaming isn't available in this build."}
+        try:
+            minutes = float(minutes)
+        except (TypeError, ValueError):
+            minutes = 30.0
+        minutes = max(1.0, min(720.0, minutes))
+        try:
+            text = str(dream.dream_now(minutes) or "")
+        except Exception as exc:  # noqa: BLE001 — the card shows the reason; the app keeps going
+            _LOG.warning("dream_now failed", exc_info=True)
+            return {"ok": False, "text": f"Couldn't start a dream session: {exc}"}
+        self._poll_dream()  # the chip flips now, not on the next heartbeat
+        if text:
+            self._status(self._first_line(text))
+        return {"ok": True, "text": text}
+
+    def dream_stop(self) -> dict:
+        dream = self._dream()
+        if dream is None:
+            return {"ok": False, "text": "Dreaming isn't available in this build."}
+        try:
+            text = str(dream.stop("the user asked from Settings") or "")
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("stopping the dream session failed", exc_info=True)
+            return {"ok": False, "text": f"Couldn't stop the session: {exc}"}
+        self._poll_dream()
+        return {"ok": True, "text": text}
+
+    def dream_settings_changed(self) -> None:
+        """After Settings saved a dream key: re-read the engine and push the state even when the
+        running flag is unchanged, so the card's status line and the chip redraw at once."""
+        self._poll_dream()
+        self.push({"t": "dream", "running": self._dream_running, "line": self._dream_line})
 
     # ----- voice wiring (called by server at construction) -----
     def on_voice_recognized(self, command: str) -> None:

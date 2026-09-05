@@ -66,6 +66,12 @@ export interface LegendItem {
   state: "building" | "done" | "error";
 }
 
+/** The nightly dream session (self-improvement while you sleep): running now, and one line about it. */
+export interface DreamState {
+  running: boolean;
+  line: string;
+}
+
 export interface Attachment {
   id: string;
   name: string;
@@ -183,6 +189,7 @@ interface HelixStore {
   keepInput: string;
   toast: string;
   cart: CartSnapshot | null; // the staged Amazon cart (null = nothing known yet)
+  dream: DreamState | null; // the dream session (null = nothing known yet)
 
   navigate: (page: Page) => void;
   addBubble: (b: Bubble) => void;
@@ -222,6 +229,7 @@ export const useHelix = create<HelixStore>((set) => ({
   overlays: [],
   hologram: null,
   cart: null,
+  dream: null,
   cameraCapture: null,
   attachView: readAttachView(),
   lightbox: "",
@@ -284,6 +292,9 @@ export function applyEvent(ev: Record<string, unknown>): void {
       break;
     case "cart":
       s.set({ cart: (ev.cart as CartSnapshot) || null });
+      break;
+    case "dream":
+      s.set({ dream: { running: Boolean(ev.running), line: (ev.line as string) || "" } });
       break;
     case "busy":
       s.set({ busy: Boolean(ev.on) });

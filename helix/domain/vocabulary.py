@@ -125,6 +125,18 @@ _TOOL_PHRASES: dict[str, str] = {
     "printer_status": "Checking on the printer",
     "note_improvement": "Adding that to my list",
     "evolve_report": "Checking my overnight work",
+    # Dreaming — the nightly self-improvement session (READ_ME/DREAM.md). Three of these start, stop
+    # or reschedule hours of unattended self-editing (fenced); the fourth only reads.
+    "dream_schedule": "Setting my dream schedule",
+    "dream_now": "Starting a dream session",
+    "stop_dreaming": "Winding the dream down",
+    "dream_status": "Checking on my dreaming",
+    # The research faculty (READ_ME/DREAM_MIND.md §10): reads on a leash, and the verified record.
+    "research_search": "Searching the web",
+    "research_read": "Reading the page",
+    "verified_facts": "Checking what I've verified",
+    "note_verified_fact": "Noting the verified fact",
+    "forget_verified": "Dropping that record",
     "open_program": "Opening the program",
     "media_control": "Reaching the media keys",
     "system_status": "Checking the machine",

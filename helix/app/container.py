@@ -21,6 +21,7 @@ from helix.adapters.git_repo import GitRepo
 from helix.adapters.json_settings import JsonSettings
 from helix.adapters.model_select import GrowthModelResolver
 from helix.adapters.build123d_cad import Build123dCad
+from helix.adapters.rebuild import Rebuilder
 from helix.adapters.restart import Restarter
 from helix.adapters.signal_bus import SignalBus
 from helix.adapters.speech import EdgeSpeechOut, OsSpeechOut, WhisperSpeechIn, active_model
@@ -44,6 +45,7 @@ from helix.services.gmail import GmailService
 from helix.services.images import load_image_block
 from helix.services.knowledge import KnowledgeService
 from helix.services.desktop import DesktopService
+from helix.services.dream import DreamService
 from helix.services.evolve import EvolveService
 from helix.services.reflexes import ReflexService
 from helix.services.lessons import LessonsService
@@ -539,10 +541,17 @@ class Container:
         self.build_queue = BuildQueue(self.forge, self.bus, max_workers=2)
         # Self-dev worktrees live OUTSIDE the app tree (a temp dir) so a concurrent background build's
         # escape-scan never mistakes an in-progress self-change draft for an escaped write.
+        # THE SOURCE ROOT (READ_ME/DREAM.md §3): in a FROZEN build paths.root is dist/HELIX — the
+        # install folder next to the exe, no git repository at all — so every self-change used to die
+        # at its first git call. The gate now works on the SOURCE repository the build came from
+        # (paths.source_root: the setting, else the build stamp; None when neither is usable, in which
+        # case root is kept and the dream session says so instead of pretending). dev_python is the
+        # interpreter that compiles, tests and rebuilds — sys.executable in dev, HELIX.exe never.
         self.selfdev = SelfDevService(
-            self.growth_coder, self.repo, self.settings, self.clock, self.paths.root,
+            self.growth_coder, self.repo, self.settings, self.clock,
+            self.paths.source_root or self.paths.root,
             worktrees_dir=Path(tempfile.gettempdir()) / "helix-worktrees", guard_files=guard_files,
-            data_dir=self.paths.data,
+            data_dir=self.paths.data, python=self.paths.dev_python,
         )
         # Background lane so drafting a self-change doesn't freeze the orb.
         self.selfdev_lane = SelfDevLane(self.selfdev, self.bus)
@@ -680,6 +689,32 @@ class Container:
             data_dir=self.paths.data,        # the backlog + journal live beside the other data files
         )
         self.tools.attach_evolve(self.evolve)  # late-bind: the registry is built before Evolve is
+        # THE DREAM SESSION (READ_ME/DREAM.md): the nightly long-form of Evolve — a user-set window in
+        # which HELIX plans a whole night on the growth model (Fable), drafts through the same lane,
+        # merges only what the FULL suite proves green (when the user allows), and — frozen — rebuilds
+        # and relaunches itself at dawn through the Rebuilder. The shell beats its heart (tick), hands
+        # it the user's presence (dream.activity = seconds since the last turn) and tells the morning
+        # report; Evolve defers to it for any night it covers, so the two never both draft.
+        self.rebuilder = Rebuilder(self.paths, self.settings, clock=self.clock)
+        self.dream = DreamService(
+            growth_chat, self.selfdev_lane, self.selfdev, self.evolve, self.settings, self.clock,
+            self.bus, paths=self.paths, suite_runner=self.selfdev.verify, rebuilder=self.rebuilder,
+            growth_model=self.growth_model,
+        )
+        self.evolve.set_dream(self.dream)
+        _attach_dream = getattr(self.tools, "attach_dream", None)  # the registry's dream tools
+        if callable(_attach_dream):
+            _attach_dream(self.dream)
+        # The research faculty (READ_ME/DREAM_MIND.md §10): HELIX's own reads of documentation
+        # hosts on an allowlist, and the record of what it verified there. Late-bound like Evolve.
+        from helix.services.research import ResearchService
+        from helix.services.verified import VerifiedStore
+
+        self.verified = VerifiedStore(JsonSettings(self.paths.data / "helix_verified.json"), self.clock)
+        self.research = ResearchService(settings=self.settings)
+        _attach_research = getattr(self.tools, "attach_research", None)
+        if callable(_attach_research):
+            _attach_research(self.research, self.verified)
         self.subscription._tools = self.tools  # late-bind (tools → services ctor cycle, like agents)
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM,
