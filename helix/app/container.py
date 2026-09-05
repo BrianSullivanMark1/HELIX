@@ -589,6 +589,14 @@ class Container:
             self.builds, self.repo, self.clock, bus=self.bus, embedder=self.embedder
         )
         self.tasks = TaskService(self.builds, connections=self.connections, knowledge=self.knowledge)
+        # Servers a previous HELIX life launched and never stopped (a quit, a crash, a rebuild) hold
+        # their build folders open — the "can't remove the music player" trap. Sweep them by pid file.
+        try:
+            _orphans = self.tasks.reap_orphans()
+            if _orphans:
+                _LOG.info("stopped orphaned app servers left by an earlier HELIX: %s", ", ".join(_orphans))
+        except Exception:  # noqa: BLE001
+            _LOG.warning("orphan sweep failed", exc_info=True)
         # Files: the user's own disk. Reads are always on; writes exist only while the Settings
         # toggle (file_write_access) is on — read live per turn, so flipping it needs no restart.
         # HELIX's program folder and data stores stay off-limits in every mode.

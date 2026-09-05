@@ -2316,6 +2316,17 @@ class ToolRegistry:
 
     def confirm_delete(self, target: str) -> str:
         """Actually remove a build or agent — called only AFTER a human confirmation (UI button click)."""
+        # A running server (ours, or an orphan from an earlier HELIX) pins the build's folder; stop
+        # it first so the removal can actually happen instead of answering "it's running".
+        if self._tasks is not None and self._builds is not None:
+            want = target.strip().lower()
+            try:
+                for a in self._builds.list():
+                    if a.slug == slugify(target) or a.name.strip().lower() == want:
+                        self._tasks.release(a.slug)
+                        break
+            except Exception:  # noqa: BLE001
+                pass
         if self._forge.remove_build(target):
             return f"Removed '{target}'."
         if self._agents is not None:

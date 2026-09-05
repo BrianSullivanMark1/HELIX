@@ -6,11 +6,14 @@ later 'stop' / close can reason about them.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
+import time
 from typing import TYPE_CHECKING
 
 from helix.domain.models import App, AppKind, BuildKind, slugify
@@ -37,12 +40,65 @@ def _python() -> str:
     return sys.executable
 
 
+# A build's server writes its process id here. A HELIX that quit (or crashed, or was rebuilt)
+# never used to stop the servers it launched: they lived on as orphans with the build's folder as
+# their working directory, and Windows then refused to move that folder — so "remove the music
+# player" failed with "it's open or running" long after the HELIX that opened it was gone. The pid
+# file lets ANY later HELIX find and stop that server: at boot (a sweep), before a delete, on stop.
+PID_FILE = ".server.pid"
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259
+
+
+def process_image(pid: int) -> str | None:
+    """The executable path of a LIVE process with this id, or None. Windows asks the kernel
+    (a pid can be recycled by an unrelated program — the caller checks the image is a Python);
+    elsewhere a liveness probe only."""
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            code = wintypes.DWORD()
+            if k32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value != _STILL_ACTIVE:
+                return None  # exited, handle still openable
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if not k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return None
+            return buf.value
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    return "python"
+
+
+def terminate_pid(pid: int) -> None:
+    """Stop a process by id (TerminateProcess on Windows, SIGTERM elsewhere)."""
+    os.kill(pid, signal.SIGTERM)
+
+
+def _is_python_image(image: str | None) -> bool:
+    return bool(image) and os.path.basename(image).lower().startswith("python")
+
+
 class TaskService:
     def __init__(
         self, builds: BuildService, connections: "ConnectionsService | None" = None,
-        knowledge: "KnowledgeService | None" = None,
+        knowledge: "KnowledgeService | None" = None, *, probe=None, terminate=None,
     ) -> None:
         self._builds = builds
+        self._probe = probe or process_image      # pid -> live image path (injectable for tests)
+        self._terminate = terminate or terminate_pid
         self._connections = connections  # injects the build's declared API keys as env vars at launch
         self._knowledge = knowledge       # ingests a task's outbox into a knowledge base when it finishes
         self._procs: dict[str, subprocess.Popen] = {}  # slug -> live process (for status / cleanup)
@@ -110,6 +166,7 @@ class TaskService:
             )
             with self._lock:
                 self._procs[slug] = proc
+            self._write_pid(ws, proc.pid)
             # Watch a finishing console task for results to harvest into the user's knowledge. A server app
             # (headless, runs indefinitely) is never harvested.
             if not headless and self._knowledge is not None:
@@ -137,15 +194,107 @@ class TaskService:
             _LOG.warning("could not harvest knowledge from task %s", task_name, exc_info=True)
 
     def stop(self, slug: str) -> None:
-        """Terminate one running build (e.g. a backend app's server when its viewer closes)."""
+        """Terminate one running build (e.g. a backend app's server when its viewer closes) —
+        this HELIX's own child, or an orphan from an earlier HELIX found through its pid file."""
+        self.release(slug)
+
+    def stop_all(self) -> int:
+        """Quit-time teardown: stop every server this HELIX launched, so none outlives it as an
+        orphan holding its build folder open. Returns how many were stopped."""
+        with self._lock:
+            procs = dict(self._procs)
+            self._procs.clear()
+        n = 0
+        for slug, proc in procs.items():
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    n += 1
+            except Exception:  # noqa: BLE001
+                pass
+            self._clear_pid(self._builds.workspace(slug))
+        return n
+
+    def release(self, slug: str) -> bool:
+        """Make a build's folder movable: stop its server — ours, or an orphan's found through the
+        pid file. True when a process was actually running and is now stopped."""
         with self._lock:
             proc = self._procs.pop(slug, None)
+        was = False
         if proc is not None:
             try:
                 if proc.poll() is None:
                     proc.terminate()
-            except Exception:
+                    was = True
+            except Exception:  # noqa: BLE001
                 pass
+        return self.reap(slug) or was
+
+    def reap(self, slug: str) -> bool:
+        """Stop a server recorded in the build's pid file that this HELIX doesn't track (it was
+        launched by an earlier HELIX life). Only a Python image is ever killed — a recycled pid
+        that now belongs to something else just gets its stale file cleared. True when killed."""
+        ws = self._builds.workspace(slug)
+        pid = self._read_pid(ws)
+        if pid is None:
+            return False
+        killed = False
+        image = self._probe(pid)
+        if _is_python_image(image):
+            try:
+                self._terminate(pid)
+                killed = True
+            except OSError:
+                pass
+            for _ in range(20):  # let the folder unlock before a delete follows
+                if self._probe(pid) is None:
+                    break
+                time.sleep(0.1)
+        self._clear_pid(ws)
+        if killed:
+            _LOG.info("stopped an orphaned server for %s (pid %s)", slug, pid)
+        return killed
+
+    def reap_orphans(self) -> list[str]:
+        """Boot-time sweep: every build with a pid file this HELIX doesn't own gets its stale server
+        stopped. Returns the slugs whose servers were killed."""
+        killed: list[str] = []
+        try:
+            folders = [d for d in self._builds.dir.iterdir() if d.is_dir() and (d / PID_FILE).is_file()]
+        except OSError:
+            return killed
+        with self._lock:
+            tracked = set(self._procs)
+        for d in folders:
+            if d.name in tracked:
+                continue
+            if self.reap(d.name):
+                killed.append(d.name)
+        return killed
+
+    # ----- pid files -----
+    @staticmethod
+    def _write_pid(ws, pid: int) -> None:
+        try:
+            (ws / PID_FILE).write_text(json.dumps({"pid": int(pid)}), encoding="utf-8")
+        except OSError:
+            pass
+
+    @staticmethod
+    def _read_pid(ws) -> int | None:
+        try:
+            data = json.loads((ws / PID_FILE).read_text(encoding="utf-8"))
+            pid = int(data.get("pid"))
+            return pid if pid > 0 else None
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None
+
+    @staticmethod
+    def _clear_pid(ws) -> None:
+        try:
+            (ws / PID_FILE).unlink()
+        except OSError:
+            pass
 
     def _prune(self) -> None:
         with self._lock:

@@ -78,8 +78,9 @@ def run_web(open_mode: str = "window") -> int:
             shell.shutdown()
         except Exception:  # noqa: BLE001
             pass
-        for fn in (container.build_queue.shutdown, container.selfdev_lane.shutdown,
-                   container.subscription.shutdown, container.store.close):
+        for fn in (container.tasks.stop_all, container.build_queue.shutdown,
+                   container.selfdev_lane.shutdown, container.subscription.shutdown,
+                   container.store.close):
             try:
                 fn()
             except Exception:  # noqa: BLE001
@@ -146,6 +147,7 @@ def run_web(open_mode: str = "window") -> int:
         except Exception:  # noqa: BLE001
             pass
         for label, fn in (
+            ("app servers", lambda: container.tasks.stop_all()),  # no orphans holding build folders
             ("build queue", lambda: container.build_queue.shutdown()),
             ("selfdev lane", lambda: container.selfdev_lane.shutdown()),
             ("subscription", lambda: container.subscription.shutdown()),

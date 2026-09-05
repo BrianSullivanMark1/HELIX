@@ -423,6 +423,14 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
 
     @app.delete("/api/builds/{slug}")
     def delete_build(slug: str):
+        # The build's own server — this HELIX's, or an orphan a previous HELIX left behind (found
+        # through its pid file) — holds the workspace as its working directory, and Windows refuses
+        # to move a folder under a live process. Release it first, then remove.
+        try:
+            c.tasks.release(slug)
+        except Exception:  # noqa: BLE001
+            _LOG.warning("could not release %s before deleting it", slug, exc_info=True)
+        servers.pop(slug, None)
         ok = c.builds.delete(slug)
         if ok:
             from helix.domain.events import BuildDeleted
