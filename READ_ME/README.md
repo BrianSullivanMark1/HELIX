@@ -124,3 +124,11 @@ nothing. See [`ARCHITECTURE.md`](ARCHITECTURE.md).
   and gated by the Constitution;** the shell (orb, navigation, Settings) can't be removed by voice or
   text.
 - **`data/` is never committed and never bundled.** A fresh build ships blank.
+
+## Amazon: HELIX searches, verifies, stages, and hands the cart over
+
+"Find me an INMP441 mic and two 28mm speakers" → HELIX searches amazon.com itself (live prices, stars,
+Prime, pictures on screen), stages verified ids at the planned quantities (the cart panel shows them),
+and on "go" drives its own Chrome window to press Add-to-Cart per item and read Amazon's cart back. A
+project's parts list (`save_parts` / `stage_parts`) stages a whole BOM at once and logs the handoff as
+the expense trail. HELIX never buys — checkout is yours, on Amazon. Details: ARCHITECTURE.md §7c.

@@ -37,6 +37,7 @@ if TYPE_CHECKING:  # AgentService -> ConversationService -> ToolRegistry would b
     from helix.services.location import LocationService
     from helix.services.memory import MemoryService
     from helix.services.reminders import ReminderService
+    from helix.services.parts import PartsService
     from helix.services.shopping import ShoppingService
     from helix.services.tasks import TaskService
     from helix.services.workflows import WorkflowService
@@ -144,6 +145,7 @@ class ToolRegistry:
         workflows: "WorkflowService | None" = None,
         desktop: "DesktopService | None" = None,
         shopping: "ShoppingService | None" = None,
+        parts: "PartsService | None" = None,
         cad: CadEngine | None = None,
         bambu=None,
     ) -> None:
@@ -166,7 +168,8 @@ class ToolRegistry:
         self._location = location  # the user's place(s), so local questions ground via web search
         self._workflows = workflows  # ordered pipelines of agents (create/run/list)
         self._desktop = desktop  # JARVIS desktop control: open programs, media keys, machine status
-        self._shopping = shopping  # the Amazon cart faculty: stage verified ASINs, open the cart page
+        self._shopping = shopping  # the Amazon faculty: search, verify, stage, hand the cart to Amazon
+        self._parts = parts  # durable parts lists (a project's BOM) + the handoff ledger
         # The hologram engine (build123d behind the CadEngine port). Only two things are asked of it here:
         # a cheap available() pre-flight before a design is enqueued, and the just-in-time install. None
         # means "not wired" (a headless registry, an old construction site): holograms enqueue as before
@@ -1360,25 +1363,67 @@ class ToolRegistry:
         if self._shopping is not None:
             tools += [
                 ToolSpec(
+                    name="search_amazon",
+                    description=(
+                        "SEARCH AMAZON YOURSELF — HELIX reads the live results page: title, price, "
+                        "stars, rating count, Prime, and the ASIN of each product, with picture cards "
+                        "shown on the user's screen. Use it whenever the user wants something found, "
+                        "ordered, restocked, or compared on Amazon, and whenever you'd otherwise tell "
+                        "them what to search for — never send the user to search; search for them. "
+                        "Describe the product the way a shopper types it (part number, maker, key "
+                        "spec: 'INMP441 I2S microphone ESP32', 'M3x8 socket head screws 100 pack'). "
+                        "Pick the closest real match (organic results first; sponsored are marked), "
+                        "then stage it with add_to_cart. Read-only; nothing is staged by searching."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string",
+                                      "description": "What to search Amazon for, in shopper's words."},
+                            "budget": {"type": "number",
+                                       "description": "Optional per-item price ceiling in dollars; "
+                                                      "results above it are left out."},
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="lookup_amazon",
+                    description=(
+                        "READ ONE AMAZON LISTING — the product page behind an ASIN or an Amazon link: "
+                        "exact title, live price, availability, rating, brand, option pickers, item "
+                        "model number and other details. Use it to answer 'is this the right part?' "
+                        "(from a link the user pasted, or a listing screenshot: read the title off the "
+                        "picture, search_amazon it, then lookup_amazon the match), to confirm a part "
+                        "number, or to price-check before staging. Read-only."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "asin": {"type": "string",
+                                     "description": "The 10-character ASIN, or the full Amazon link."},
+                        },
+                        "required": ["asin"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
                     name="add_to_cart",
                     description=(
                         "STAGE items for the user's Amazon cart — the legwork half of 'get me X on "
                         "Amazon'. Each item needs a short plain name, the EXACT Amazon ASIN, and a "
-                        "quantity. An ASIN is the 10-character id in every Amazon product link "
-                        "(right after /dp/); you may pass the full product URL instead and HELIX "
-                        "reads the ASIN out of it. NEVER guess or invent an ASIN — resolve it FIRST "
-                        "by searching the web for the product on amazon.com and taking the id from "
-                        "the real product link; a wrong id silently carts the WRONG product. If no "
-                        "confident match exists, don't stage that item — tell the user which one "
-                        "you couldn't pin down and ask for its link or ASIN. Pass the price "
-                        "EXACTLY as you just read it on the product page — and if you never saw "
-                        "one (the user handed you a bare link), OMIT it rather than recall or "
-                        "estimate one; it powers spoken answers to 'how much?' and a running "
-                        "estimated total, so a guessed price poisons every later total. Staging "
-                        "the same ASIN again ADDS "
-                        "quantities ('two more'); for an exact count, remove_from_cart it and "
-                        "stage it fresh. Staging is instant, local, and buys nothing; read the "
-                        "staged list back so the user can adjust it before the cart ever opens."
+                        "quantity. Take the ASIN from search_amazon results, lookup_amazon, or a link "
+                        "the user gave (pass the full link; HELIX reads the id out of it). NEVER "
+                        "guess or invent an ASIN. HELIX verifies every id against the live listing "
+                        "before staging (a dead id is refused by name) and records the price it READ "
+                        "off Amazon — pass a price only as a fallback for a link you never saw a price "
+                        "for. Staging the same ASIN again ADDS quantities ('two more'); for an exact "
+                        "count, remove_from_cart it and stage it fresh. Pass `project` when the items "
+                        "belong to a saved parts list, so its rows are linked and flip to carted after "
+                        "the handoff. Staging is instant, local, and buys nothing; the staged list "
+                        "shows live on the user's screen — read it back briefly so they can adjust it "
+                        "before the cart is handed to Amazon."
                     ),
                     input_schema={
                         "type": "object",
@@ -1396,8 +1441,8 @@ class ToolRegistry:
                                         },
                                         "asin": {
                                             "type": "string",
-                                            "description": "The 10-character Amazon ASIN read "
-                                            "from the product link — or the full link itself.",
+                                            "description": "The 10-character Amazon ASIN from a "
+                                            "search result or listing — or the full link itself.",
                                         },
                                         "quantity": {
                                             "type": "number",
@@ -1405,15 +1450,18 @@ class ToolRegistry:
                                         },
                                         "price": {
                                             "type": "number",
-                                            "description": "Optional: the per-item price in "
-                                            "dollars as you just read it on Amazon — powers "
-                                            "spoken price answers and the running total. Omit "
-                                            "if you didn't see one.",
+                                            "description": "Optional fallback: the per-item price "
+                                            "in dollars as you saw it, used only when HELIX "
+                                            "couldn't read one off the listing itself.",
                                         },
                                     },
                                     "required": ["name", "asin"],
                                     "additionalProperties": False,
                                 },
+                            },
+                            "project": {
+                                "type": "string",
+                                "description": "Optional: the saved parts list these items belong to.",
                             },
                         },
                         "required": ["items"],
@@ -1423,8 +1471,8 @@ class ToolRegistry:
                 ToolSpec(
                     name="remove_from_cart",
                     description=(
-                        "Take a staged item back OUT of the not-yet-opened Amazon cart ('drop the "
-                        "filters', 'actually skip the screws') — pass part of its name or its "
+                        "Take a staged item back OUT of the not-yet-handed-over Amazon cart ('drop "
+                        "the filters', 'actually skip the screws') — pass part of its name or its "
                         "ASIN, or 'everything' to clear the whole staged list. This edits only "
                         "HELIX's staged list; it can't touch a cart already handed to Amazon."
                     ),
@@ -1446,22 +1494,130 @@ class ToolRegistry:
                         "READ-ONLY recap of what's staged for the Amazon cart so far — names, "
                         "quantities, ASINs, prices as read at staging, and the estimated total. "
                         "Use to answer 'what's in the cart?', 'how much is it?', 'what's the "
-                        "total so far?' before it opens."
+                        "total so far?' before it is handed over. (The staged list is HELIX's; for "
+                        "what Amazon's own cart holds, check_amazon_cart.)"
                     ),
                     input_schema={"type": "object", "properties": {}, "additionalProperties": False},
                 ),
                 ToolSpec(
                     name="open_cart",
                     description=(
-                        "Open the user's browser on Amazon's own cart page with every staged item "
-                        "pre-loaded — call ONLY after the user has heard the staged list and said "
-                        "go. This uses Amazon's add-to-cart link: it pre-fills and NOTHING is "
-                        "purchased by this call, ever — reviewing and checking out happen on "
-                        "Amazon's side, by the user. The staged list clears once handed over "
-                        "(Amazon's link is additive — reopening a stale list would double items), "
-                        "so to add more afterwards, stage fresh items and open again."
+                        "HAND THE STAGED LIST TO AMAZON — call ONLY after the user has heard the "
+                        "staged list and said go. HELIX's own Chrome window opens each product page, "
+                        "presses Amazon's Add-to-Cart at the staged quantity, then opens Amazon's cart "
+                        "page and READS IT BACK, so the result says exactly what the cart holds (items "
+                        "that couldn't be added stay staged with the reason). The first time, that "
+                        "window is a guest cart until the user signs in there once; checkout always "
+                        "needs their sign-in. NOTHING is purchased by this call, ever — reviewing and "
+                        "checking out happen on Amazon, by the user. Without Chrome it falls back to "
+                        "Amazon's add-to-cart link, which may show a sign-in page first; pass "
+                        "resend_last=true to send that same link again if the cart didn't appear."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "resend_last": {"type": "boolean",
+                                            "description": "Re-send the previous link handoff "
+                                                           "(only when it visibly failed)."},
+                        },
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="check_amazon_cart",
+                    description=(
+                        "Read what AMAZON'S OWN CART holds right now — HELIX opens its cart window on "
+                        "Amazon's cart page and reads the rows (title, quantity, price, subtotal). Use "
+                        "for 'what's in my cart?', to confirm a handoff landed, or instead of asking "
+                        "the user to screenshot their cart. Raises the window so they see it too."
                     ),
                     input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                ),
+            ]
+        if self._parts is not None:
+            tools += [
+                ToolSpec(
+                    name="save_parts",
+                    description=(
+                        "SAVE or UPDATE a project's PARTS LIST (its bill of materials) so it outlives "
+                        "the conversation: each row a name, planned quantity, spec/notes, and — once "
+                        "resolved — the verified ASIN and price, plus a status (need / on hand / "
+                        "carted). Call it whenever a BOM takes shape or changes ('add a TP4056 to "
+                        "the IronEye list', 'we have the ESP32 on hand'), so the list never has to "
+                        "be re-derived from memory. Rows are matched by name: given fields update, "
+                        "omitted fields keep their values. Also show the table in a viz block."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "project": {"type": "string", "description": "The project's short name."},
+                            "items": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "quantity": {"type": "number"},
+                                        "spec": {"type": "string",
+                                                 "description": "Key spec in a few words."},
+                                        "asin": {"type": "string",
+                                                 "description": "Verified ASIN or Amazon link, "
+                                                                "when known — never guessed."},
+                                        "price": {"type": "number"},
+                                        "status": {"type": "string",
+                                                   "description": "need | on hand | carted"},
+                                        "note": {"type": "string"},
+                                    },
+                                    "required": ["name"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["project", "items"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="show_parts",
+                    description=(
+                        "READ-ONLY: a saved parts list (or every list when no project is named) — "
+                        "rows with quantities, ASINs, prices, what's on hand vs. still needed, and the "
+                        "recent handoffs to Amazon with estimated spend (the expense trail)."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {"project": {"type": "string"}},
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="remove_parts",
+                    description=(
+                        "Take a row off a saved parts list (part of its name or its ASIN), or "
+                        "'everything' to drop the whole list."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {"project": {"type": "string"}, "which": {"type": "string"}},
+                        "required": ["project", "which"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="stage_parts",
+                    description=(
+                        "STAGE A WHOLE PARTS LIST for the Amazon cart — every row still needed that "
+                        "has an ASIN, at its planned quantity, in one call ('stage the IronEye "
+                        "parts', 'cart everything we still need'). Rows without an id are named "
+                        "back so you can search_amazon each and add_to_cart it with project set. "
+                        "Then read the staged list back; the cart is handed over only on their go."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {"project": {"type": "string"}},
+                        "required": ["project"],
+                        "additionalProperties": False,
+                    },
                 ),
             ]
         if self._selfdev is not None:
@@ -1933,14 +2089,30 @@ class ToolRegistry:
             parts.append("\nStill queued:")
             parts.append("\n".join(f"- {it}" for it in queued) if queued else "(nothing queued)")
             return "\n".join(parts)
+        if name == "search_amazon" and self._shopping is not None:
+            return self._shopping.search(args.get("query", ""), budget=args.get("budget"))
+        if name == "lookup_amazon" and self._shopping is not None:
+            return self._shopping.lookup(args.get("asin", ""))
         if name == "add_to_cart" and self._shopping is not None:
-            return self._shopping.add(args.get("items"))
+            return self._shopping.add(args.get("items"), project=str(args.get("project") or ""))
         if name == "remove_from_cart" and self._shopping is not None:
             return self._shopping.remove(args.get("which", ""))
         if name == "show_cart" and self._shopping is not None:
             return self._shopping.show()
         if name == "open_cart" and self._shopping is not None:
-            return self._shopping.open_cart()
+            # The driven handoff takes seconds per item; the progress line keeps the orb honest.
+            return self._shopping.open_cart(resend_last=bool(args.get("resend_last")),
+                                            on_progress=on_progress)
+        if name == "check_amazon_cart" and self._shopping is not None:
+            return self._shopping.check_amazon_cart()
+        if name == "save_parts" and self._parts is not None:
+            return self._parts.save(str(args.get("project") or ""), args.get("items"))
+        if name == "show_parts" and self._parts is not None:
+            return self._parts.show(str(args.get("project") or ""))
+        if name == "remove_parts" and self._parts is not None:
+            return self._parts.remove(str(args.get("project") or ""), str(args.get("which") or ""))
+        if name == "stage_parts" and self._shopping is not None:
+            return self._shopping.stage_parts(str(args.get("project") or ""))
         if name == "open_program" and self._desktop is not None:
             return self._desktop.open_program(args.get("name", ""))
         if name == "media_control" and self._desktop is not None:

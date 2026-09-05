@@ -90,6 +90,11 @@ BUILD_TOOLS = frozenset(
         # a Slack message, a web page) must never stage merchandise or pop a cart page in the
         # user's browser. (show_cart stays readable: it's one status recap, like list_reminders.)
         "add_to_cart", "remove_from_cart", "open_cart",
+        # check_amazon_cart RAISES HELIX's browser window on the user's screen and stage_parts
+        # stages merchandise; save/remove_parts WRITE the user's parts lists. All human-driven.
+        # (search_amazon / lookup_amazon / show_parts stay readable: plain reads of amazon.com with
+        # no secret in flight, like call_api — a price watcher is a legitimate agent.)
+        "check_amazon_cart", "stage_parts", "save_parts", "remove_parts",
         # Sleeping the mic is human-driven only — content an unattended watcher processes must
         # never be able to deafen HELIX (an email saying "HELIX, go to sleep" must not mute the mic).
         "go_to_sleep",

@@ -22,6 +22,8 @@ from pathlib import Path
 
 from helix.domain.events import (
     AgentsChanged,
+    CartChanged,
+    ProductsFound,
     BuildCreated,
     BuildDeleted,
     BuildDeleteRequested,
@@ -156,6 +158,8 @@ class ShellSession:
             (CameraRequested, self._on_camera_requested),
             (CameraCommandRequested, self._on_camera_command),
             (SleepRequested, self._on_sleep_requested),
+            (CartChanged, self._on_cart_changed),
+            (ProductsFound, self._on_products_found),
             (SelfChangeProgress, self._on_selfdev_progress),
             (SelfChangeFinished, self._on_selfdev_finished),
         ):
@@ -295,6 +299,8 @@ class ShellSession:
             # A reloaded page re-raises the open camera panel (same id, so a parked look still
             # finds its panel) instead of leaving the backend believing in a panel nobody shows.
             "camera": self._camera_event(self._camera) if self._camera is not None else None,
+            # The staged Amazon cart (survives restarts) so a fresh page shows the panel at once.
+            "cart": self.cart_state(),
         }
         if not self._greeted:
             self._greeted = True
@@ -786,6 +792,80 @@ class ShellSession:
             pass
         self.push({"t": "open", "slug": ev.slug, "name": ev.name})
         self.push({"t": "legend", "items": self.board.legend()})
+
+    # ----- the Amazon cart panel -----
+    def _on_cart_changed(self, ev: CartChanged) -> None:
+        self.push({"t": "cart", "cart": ev.snapshot})
+
+    def _on_products_found(self, ev: ProductsFound) -> None:
+        """Search results as picture cards in the transcript, ahead of the model's spoken pick."""
+        self._bubble("helix", "", visuals=[{"type": "products", "title": ev.title,
+                                            "items": [dict(i) for i in ev.items]}])
+
+    def _shopping(self):
+        from helix.services.shopping import ShoppingService
+
+        svc = getattr(self.c, "shopping", None)
+        return svc if isinstance(svc, ShoppingService) else None
+
+    def cart_state(self) -> dict | None:
+        svc = self._shopping()
+        if svc is None:
+            return None
+        try:
+            snap = svc.snapshot()
+        except Exception:  # noqa: BLE001
+            return None
+        return snap if isinstance(snap, dict) else None
+
+    def cart_stage(self, asin: str, name: str, price, quantity) -> dict:
+        """The Stage button on a product card: one item, verified like any staging."""
+        svc = self._shopping()
+        if svc is None:
+            return {"ok": False, "text": "The cart isn't available."}
+        text = svc.add([{"name": name, "asin": asin, "price": price, "quantity": quantity or 1}])
+        self._status(text.split(". ")[0][:120])
+        return {"ok": not text.startswith("Couldn't"), "text": text}
+
+    def cart_remove(self, asin: str) -> dict:
+        svc = self._shopping()
+        return {"ok": True, "text": svc.remove(asin)} if svc is not None else {"ok": False}
+
+    def cart_quantity(self, asin: str, quantity) -> dict:
+        svc = self._shopping()
+        return {"ok": True, "text": svc.set_quantity(asin, quantity)} if svc is not None else {"ok": False}
+
+    def cart_clear(self) -> dict:
+        svc = self._shopping()
+        return {"ok": True, "text": svc.remove("everything")} if svc is not None else {"ok": False}
+
+    def cart_open(self) -> dict:
+        """The panel's 'Hand to Amazon' button — the same handoff the model runs, minus a turn.
+        Runs on the request's worker thread (seconds per item); the outcome lands as a bubble
+        and a spoken line, so the user hears what actually reached the cart."""
+        svc = self._shopping()
+        if svc is None:
+            return {"ok": False, "text": "The cart isn't available."}
+        self._status("Handing the cart to Amazon…")
+        try:
+            text = svc.open_cart(on_progress=self._status)
+        except Exception as exc:  # noqa: BLE001
+            text = f"The handoff failed: {exc}"
+        # The service writes for the model ("the user reviews…"); a button press is read by the
+        # person directly, so the bubble and the spoken line address them.
+        human = text.replace("the user's", "your").replace("the user", "you")
+        self._bubble("helix", human)
+        self._status(self.voice_state()["idle_line"])
+        self._speak(human.split("\n", 1)[0][:220])
+        return {"ok": True, "text": text}
+
+    def cart_check(self) -> dict:
+        svc = self._shopping()
+        if svc is None:
+            return {"ok": False, "text": "The cart isn't available."}
+        text = svc.check_amazon_cart().replace("the user's", "your").replace("the user", "you")
+        self._bubble("helix", text)
+        return {"ok": True, "text": text}
 
     def _on_connect_requested(self, ev: ConnectRequested) -> None:
         entry = CONNECTABLE.get(ev.service_id)

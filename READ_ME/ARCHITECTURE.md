@@ -444,6 +444,60 @@ business logic, and **never imports helix.ui** (no Qt loads in the web process):
 
 ---
 
+### 7c. The Amazon faculty — eyes, hands, and the parts list
+
+**Why it was rebuilt (Sept 2026).** The first cut let the model "find" products through web-search
+snippets and open Amazon's remote add-to-cart link. Two things broke in practice: the model could not
+see Amazon (ids drifted between turns, prices were guessed, the user screenshotted listings one by one
+and asked "is this the right part?"), and the add-to-cart link now bounces every open through Amazon's
+sign-in page with `openid.pape.max_auth_age=3600` — a password prompt whenever the browser's last
+authentication is over an hour old, so "open the cart" rarely showed a cart.
+
+**Eyes — `domain/amazon.py` + `adapters/amazon_web.py`.** HELIX reads amazon.com itself: plain HTTPS
+GETs with a browser's headers (no cookies, no credentials), redirects followed only on Amazon hosts,
+one read per ~1.2 s, ten-minute cache, Amazon's robot wall detected and reported as *unavailable*
+(never parsed as "no results"). `parse_search` turns the results page into `Product` rows (title,
+price, stars, rating count, Prime, "bought last month", picture, ASIN — organic before sponsored,
+deduplicated); `parse_listing` turns a product page into a `Listing` (live price, availability, brand,
+bullets, item model number and specs, option pickers, whether a plain Add-to-Cart button exists, the
+quantity picker's ceiling). Tools: `search_amazon` (with an optional budget) and `lookup_amazon` — both
+read-only and readable on autonomous runs; their text never names a fenced tool.
+
+**Verification before staging — `services/shopping.py`.** `add_to_cart` checks every id against the
+live listing (the search cache first, then a page read): an id Amazon has no page for is refused by
+name, the price recorded is the one READ (a model-passed price is only a fallback), the listing's own
+title and picture ride on the staged line, and a listing without a plain Add-to-Cart button is
+flagged. The staged list is persisted to `data/helix_cart.json` and every change publishes
+`CartChanged` — the face's cart panel (`web/src/components/CartDock.tsx`) redraws from that snapshot
+(pictures, ± quantity, remove, the running estimate, *Hand to Amazon*, *Amazon's cart?*). Search
+results publish `ProductsFound` → picture cards in the transcript with a *Stage* button
+(`/api/cart/stage`), verified like any staging.
+
+**Hands — `adapters/chrome_cart.py`.** On the user's go, `open_cart` drives HELIX's OWN Chrome window
+(a dedicated profile at `data/amazon-chrome`, never the user's everyday browser profile) over the
+DevTools protocol on localhost: for each staged line it opens the real product page, sets the quantity
+picker (rounds when the picker caps below the count), presses Amazon's own Add-to-Cart button, then
+opens Amazon's cart page and READS IT BACK — the tool result is what the cart holds, item by item;
+misses stay staged with the reason (option needed, buying-options only, unavailable). Amazon keeps a
+guest cart per profile, so it works before any sign-in; the first sign-in in that window merges the
+cart into the account (an Amazon Business login there makes every HELIX cart a business order). The
+driver presses exactly one button per product page and opens one cart URL — never checkout, Buy now,
+1-Click, or a form. Chrome writes its port to `DevToolsActivePort`; a window left open is reused.
+Without Chrome the old link handoff remains, with its sign-in catch stated and `resend_last` to send
+the same link again. `check_amazon_cart` reads the real cart on demand (no more cart screenshots).
+
+**The parts list — `services/parts.py` (`data/helix_parts.json`).** A project's BOM as a record:
+rows with name, spec, planned quantity, verified ASIN and price, status (need / on hand / staged /
+carted). `save_parts` upserts by name, `show_parts` recaps (readable, non-coaching), `stage_parts`
+stages every needed row with an id at its planned quantity and names the unresolved ones for
+`search_amazon` → `add_to_cart(project=…)`; a handoff flips linked rows to carted and writes a ledger
+line (date, project, items, estimated spend) — the expense trail on HELIX's side.
+
+**Fence.** `open_cart`, `add_to_cart`, `remove_from_cart`, `check_amazon_cart`, `stage_parts`,
+`save_parts`, `remove_parts` are BUILD_TOOLS (human-driven only). The three stores and the Chrome
+profile folder are on the guard skip list (`config.VOLATILE_STORE_NAMES`) — a browser writes into its
+profile constantly, exactly the live churn a coder guard must ignore.
+
 ## 8. Self-modification & the Constitution
 
 HELIX can improve its *own* code through the same `CoderAgent`, but every self-change funnels through

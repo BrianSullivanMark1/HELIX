@@ -44,6 +44,12 @@ _URL_ASIN = re.compile(
 _AMAZON_HOST = re.compile(r"(?:[a-z0-9-]+\.)*amazon\.[a-z]{2,3}(?:\.[a-z]{2})?")
 
 
+def is_amazon_host(host: str) -> bool:
+    """True for an Amazon storefront host (amazon.com, smile.amazon.co.uk, …) — full-match, so
+    lookalikes (amazonx.com, evil-amazon.com, amazon.com.evil.net) fail."""
+    return bool(_AMAZON_HOST.fullmatch((host or "").strip().lower()))
+
+
 def _amazon_hosted(text: str, start: int) -> bool:
     """True when the link fragment containing the match at `start` sits on an Amazon host — a
     /dp/-shaped path on some other site must never be read as an ASIN (never a guess)."""
@@ -65,6 +71,10 @@ class CartItem:
     asin: str      # validated, uppercase
     quantity: int  # 1..MAX_QUANTITY
     price: float | None = None  # dollars per item as read when staged; None = no price was read
+    title: str = ""    # the listing's own title, when HELIX read the page (what Amazon will add)
+    image: str = ""    # the listing's picture (https://m.media-amazon.com/…) for the cart panel
+    project: str = ""  # the parts list this line belongs to, if any
+    note: str = ""     # "unverified: Amazon didn't answer" — honesty carried into the recap
 
 
 def normalize_asin(text: str) -> str | None:

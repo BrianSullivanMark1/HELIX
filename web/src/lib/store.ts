@@ -5,8 +5,31 @@ export type OrbState = "idle" | "listening" | "transcribing" | "thinking" | "spe
 export type Hue = "none" | "working" | "done" | "error";
 
 export interface Visual {
-  type: "table" | "chart";
+  type: "table" | "chart" | "products";
   [k: string]: unknown;
+}
+
+// ----- the Amazon cart panel -----
+export interface CartLine {
+  label: string;
+  title: string;
+  asin: string;
+  quantity: number;
+  price: number | null;
+  image: string;
+  url: string;
+  project: string;
+  note: string;
+}
+
+export interface CartSnapshot {
+  items: CartLine[];
+  count: number;
+  estimated_total: number | null;
+  unpriced: number;
+  driver: boolean; // HELIX can drive its own Chrome window (else the link fallback)
+  opening: boolean; // a handoff is in flight
+  last_handoff: { at: string; how: string; count: number; subtotal: string } | null;
 }
 
 export interface BubbleAction {
@@ -159,6 +182,7 @@ interface HelixStore {
   buildsVersion: number; // bumps to refresh the menu
   keepInput: string;
   toast: string;
+  cart: CartSnapshot | null; // the staged Amazon cart (null = nothing known yet)
 
   navigate: (page: Page) => void;
   addBubble: (b: Bubble) => void;
@@ -197,6 +221,7 @@ export const useHelix = create<HelixStore>((set) => ({
   captureOrder: null,
   overlays: [],
   hologram: null,
+  cart: null,
   cameraCapture: null,
   attachView: readAttachView(),
   lightbox: "",
@@ -256,6 +281,9 @@ export function applyEvent(ev: Record<string, unknown>): void {
       break;
     case "status":
       s.set({ status: (ev.text as string) || "" });
+      break;
+    case "cart":
+      s.set({ cart: (ev.cart as CartSnapshot) || null });
       break;
     case "busy":
       s.set({ busy: Boolean(ev.on) });

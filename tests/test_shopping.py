@@ -388,14 +388,22 @@ def test_persona_teaches_the_flow_and_the_no_guessing_rule():
     from helix.services.prompts import CONSOLE_SYSTEM
 
     flat = " ".join(CONSOLE_SYSTEM.split())
-    assert "add_to_cart" in flat and "open_cart" in flat and "remove_from_cart" in flat
-    assert "NEVER guess an ASIN" in flat
-    assert "checks out themselves" in flat  # the boundary: HELIX stages, the user buys
-    assert "view_camera first" in flat     # the camera → identify → cart composition
-    # Money honesty: prices are read, never recalled or invented — and a total with no reads
-    # is refused out loud, not estimated.
-    assert "rather than recalling or inventing a number" in flat
-    assert "never estimate a total you didn't read" in flat
+    for tool in ("search_amazon", "lookup_amazon", "add_to_cart", "open_cart", "remove_from_cart",
+                 "check_amazon_cart", "save_parts", "stage_parts", "show_parts"):
+        assert tool in flat, tool
+    # HELIX searches; it never sends the user to search, never asks permission it already has,
+    # and never recalls an id — the exact failures of the September 4 session.
+    assert "SEARCH AND STAGE IN THE SAME TURN" in flat
+    assert "Never tell the user what to type into Amazon" in flat
+    assert "never recall an ASIN from memory" in flat
+    # The three states are named apart, so "it's in your cart" can't be said of a staged line.
+    assert "three different things" in flat
+    # The boundary: HELIX stages and hands over, the user buys — and the window's guest-cart truth.
+    assert "only they check out" in flat and "guest cart" in flat
+    # The composition with sight: a listing screenshot, a part on the camera.
+    assert "read its title off the picture" in flat and "view_camera, read its markings" in flat
+    # Parts lists are the durable BOM, staged whole at planned quantities.
+    assert "stage_parts (needed rows at planned quantities)" in flat
 
 
 def test_cart_tools_have_speakable_labels():

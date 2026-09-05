@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import Orb from "./components/Orb";
 import CameraDock from "./components/CameraDock";
+import CartDock from "./components/CartDock";
 import ConnectModal from "./components/ConnectModal";
 import StateColor from "./components/StateColor";
 import Console from "./pages/Console";
@@ -11,7 +12,7 @@ import Studio from "./pages/Studio";
 import Vault from "./pages/Vault";
 import Viewer from "./pages/Viewer";
 import { api, connectEvents, tokenUrl } from "./lib/api";
-import { applyEvent, cameraFromEvent, useHelix, type Page } from "./lib/store";
+import { applyEvent, cameraFromEvent, useHelix, type CartSnapshot, type Page } from "./lib/store";
 
 interface Snapshot {
   authed: boolean;
@@ -22,12 +23,14 @@ interface Snapshot {
   status: string;
   greeting?: string;
   camera?: Record<string, unknown> | null;
+  cart?: CartSnapshot | null;
 }
 
 export default function App() {
   const page = useHelix((s) => s.page);
   const navigate = useHelix((s) => s.navigate);
   const camera = useHelix((s) => s.camera);
+  const cart = useHelix((s) => s.cart);
   const connectModal = useHelix((s) => s.connectModal);
   const lightbox = useHelix((s) => s.lightbox);
   const [navShown, setNavShown] = useState(true);
@@ -53,6 +56,7 @@ export default function App() {
         } else if (s.camera) {
           s.set({ camera: null, captureOrder: null, overlays: [], hologram: null, cameraCapture: null });
         }
+        if (snap.cart !== undefined) s.set({ cart: snap.cart || null });
         if (snap.greeting) {
           s.addBubble({
             id: "greeting", role: "helix", text: snap.greeting,
@@ -147,6 +151,7 @@ export default function App() {
           surface belongs. Keyed by session id so a re-open (new id) always remounts and can
           never 'stick' on a stale stream. */}
       {camera && <CameraDock key={camera.id} session={camera} hidden={!onConsole} />}
+      {cart && <CartDock cart={cart} hidden={!onConsole} />}
       {connectModal && <ConnectModal modal={connectModal} />}
 
       {lightbox && (

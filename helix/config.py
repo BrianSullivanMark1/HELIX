@@ -55,6 +55,12 @@ VOLATILE_STORE_NAMES: tuple[str, ...] = (
     "helix_reminders.json",
     "helix_reflexes.json",
     "helix_secrets.json",
+    # The Amazon faculty's stores: the staged cart (survives a restart mid-shop), the parts lists /
+    # handoff ledger, and the Chrome PROFILE FOLDER HELIX drives to build the cart — a browser writes
+    # into its profile constantly while open, exactly the kind of live churn a coder guard must skip.
+    "helix_cart.json",
+    "helix_parts.json",
+    "amazon-chrome",
 )
 
 

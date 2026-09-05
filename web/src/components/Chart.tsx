@@ -1,6 +1,7 @@
 // Inline visuals for ```viz blocks: charts (bar/column/line/area/pie/donut) and tables — SVG/HTML,
 // HELIX-palette, grow-in animated. Data is untrusted: everything renders as text, never as markup.
 import { useEffect, useState } from "react";
+import { api } from "../lib/api";
 import type { Visual } from "../lib/store";
 
 const SERIES = ["#3fe0e0", "#f5a623", "#78c8ff", "#2ec496", "#c878ff", "#ff7896", "#96dc78"];
@@ -207,10 +208,74 @@ function TableViz({ spec }: { spec: Visual }) {
   );
 }
 
+interface ProductCard {
+  asin: string;
+  title: string;
+  price: number | null;
+  rating: number | null;
+  reviews: number | null;
+  prime: boolean;
+  image: string;
+  url: string;
+}
+
+// Amazon search results as picture cards (pushed by the backend from HELIX's own read of the
+// results page — never authored by the model). "Stage" stages one, verified like any staging.
+function Products({ spec }: { spec: Visual }) {
+  const [staged, setStaged] = useState<Record<string, string>>({});
+  const items = ((spec.items as ProductCard[]) || []).slice(0, 12);
+  const stage = async (p: ProductCard) => {
+    setStaged((m) => ({ ...m, [p.asin]: "…" }));
+    try {
+      const res = await api.post<{ ok: boolean; text: string }>("/api/cart/stage", {
+        asin: p.asin, name: p.title.slice(0, 80), price: p.price, quantity: 1,
+      });
+      setStaged((m) => ({ ...m, [p.asin]: res.ok ? "✓ staged" : "couldn't stage" }));
+    } catch {
+      setStaged((m) => ({ ...m, [p.asin]: "couldn't stage" }));
+    }
+  };
+  return (
+    <div className="flex gap-2 overflow-x-auto pb-1" style={{ maxWidth: 520 }}>
+      {items.map((p) => (
+        <div key={p.asin} className="shrink-0 rounded-xl p-2 flex flex-col gap-1"
+          style={{ width: 150, background: "rgba(13,20,27,0.7)", border: "1px solid var(--line)" }}>
+          <a href={p.url} target="_blank" rel="noreferrer" title={p.title}>
+            {p.image ? (
+              <img src={p.image} alt="" referrerPolicy="no-referrer"
+                style={{ width: "100%", height: 96, objectFit: "contain", borderRadius: 8, background: "#fff" }} />
+            ) : (
+              <div style={{ width: "100%", height: 96, borderRadius: 8, background: "var(--panel-hi)" }} />
+            )}
+          </a>
+          <div className="text-[11px] leading-snug" title={p.title}
+            style={{ color: "var(--text)", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+            {p.title}
+          </div>
+          <div className="text-[12px] font-semibold" style={{ color: "var(--cyan)" }}>
+            {typeof p.price === "number" ? `$${p.price.toFixed(2)}` : "price not shown"}
+            {p.prime && <span className="ml-1 text-[10px]" style={{ color: "var(--blue)" }}>Prime</span>}
+          </div>
+          <div className="text-[10px]" style={{ color: "var(--muted)" }}>
+            {typeof p.rating === "number" ? `★ ${p.rating.toFixed(1)}` : "no rating"}
+            {typeof p.reviews === "number" ? ` · ${p.reviews.toLocaleString()}` : ""}
+            {" · "}{p.asin}
+          </div>
+          <button className="btn btn-primary text-[11px] py-0.5" disabled={Boolean(staged[p.asin])}
+            onClick={() => void stage(p)}>
+            {staged[p.asin] || "Stage"}
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function VisualBlock({ spec }: { spec: Visual }) {
   const title = typeof spec.title === "string" ? spec.title : "";
   let body: React.ReactNode;
   if (spec.type === "table") body = <TableViz spec={spec} />;
+  else if (spec.type === "products") body = <Products spec={spec} />;
   else {
     const kind = String(spec.kind || "bar");
     if (kind === "line") body = <Line spec={spec} area={false} />;

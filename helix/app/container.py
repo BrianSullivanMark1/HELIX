@@ -60,6 +60,7 @@ from helix.services.workflows import WorkflowService
 from helix.services.prompts import CONSOLE_SYSTEM, DEEP_THINK_SYSTEM
 from helix.services.selfdev import SelfDevService
 from helix.services.selfdev_lane import SelfDevLane
+from helix.services.parts import PartsService
 from helix.services.shopping import ShoppingService
 from helix.services.tools import ToolRegistry
 from helix.services.voiceid import VoiceIdService
@@ -613,10 +614,25 @@ class Container:
         # Desktop control (V3): open installed programs, media keys, one machine-status line. All
         # user-driven — the BUILD_TOOLS fence keeps open_program/media_control off autonomous runs.
         self.desktop = DesktopService()
-        # Shopping (V3): the Amazon cart faculty. The model stages web-search-verified ASINs and, on
-        # the user's go, opens Amazon's own cart page in their browser — pre-filled, never purchased.
-        # User-driven only: the BUILD_TOOLS fence keeps every cart mutation off autonomous runs.
-        self.shopping = ShoppingService()
+        # Shopping (V3): the Amazon faculty. HELIX searches amazon.com with its OWN reads (live
+        # prices, stars, ASINs), verifies every id against the listing before staging, keeps the
+        # staged list on disk, and on the user's go drives its OWN Chrome window (a dedicated profile
+        # under data/, never the user's everyday browser) to press Add-to-Cart per item and read the
+        # cart back — never purchased. Parts lists (a project's BOM) and the handoff ledger live in
+        # their own store. User-driven only: the BUILD_TOOLS fence keeps every mutation and window
+        # launch off autonomous runs. All three stores are on the guard skip list (config).
+        from helix.adapters.amazon_web import AmazonWeb
+        from helix.adapters.chrome_cart import ChromeCart
+
+        def _stamp() -> str:
+            return self.clock.now().isoformat(timespec="minutes")
+
+        self.parts = PartsService(JsonSettings(self.paths.data / "helix_parts.json"), clock=_stamp)
+        self.shopping = ShoppingService(
+            web=AmazonWeb(), driver=ChromeCart(self.paths.data / "amazon-chrome"),
+            store=JsonSettings(self.paths.data / "helix_cart.json"), parts=self.parts, bus=self.bus,
+            clock=_stamp,
+        )
         # The Bambu printer's LAN details, read PER CALL (secrets → legacy settings → env) like the
         # Tripo key — so connecting the printer mid-conversation works on the very next tool call.
         def _bambu_key(key: str) -> str | None:
@@ -630,7 +646,7 @@ class Container:
             tasks=self.tasks, bus=self.bus, selfdev_lane=self.selfdev_lane, connections=self.connections,
             knowledge=self.knowledge, gmail=self.gmail, reminders=self.reminders, calendar=self.calendar,
             files=self.files, user_memory=self.user_memory, location=self.location,
-            desktop=self.desktop, shopping=self.shopping, cad=cad, bambu=_bambu_key,
+            desktop=self.desktop, shopping=self.shopping, parts=self.parts, cad=cad, bambu=_bambu_key,
         )
         # The orb quietly learns who the user is: a background distiller (same fast chat model) keeps a
         # compact profile in the DB, injected into each Console turn like the time anchor. No knobs.

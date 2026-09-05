@@ -292,6 +292,39 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
                              "stl": f"/builds/{a.slug}/assets/model.stl"})
         return {"holograms": rows}
 
+    # ----- the Amazon cart panel -----
+    @app.get("/api/cart")
+    def cart_state():
+        return {"cart": shell.cart_state()}
+
+    @app.post("/api/cart/stage")
+    async def cart_stage(request: Request):
+        body = await request.json()
+        return shell.cart_stage(str(body.get("asin") or ""), str(body.get("name") or ""),
+                                body.get("price"), body.get("quantity"))
+
+    @app.post("/api/cart/remove")
+    async def cart_remove(request: Request):
+        body = await request.json()
+        return shell.cart_remove(str(body.get("asin") or ""))
+
+    @app.post("/api/cart/quantity")
+    async def cart_quantity(request: Request):
+        body = await request.json()
+        return shell.cart_quantity(str(body.get("asin") or ""), body.get("quantity"))
+
+    @app.post("/api/cart/clear")
+    def cart_clear():
+        return shell.cart_clear()
+
+    @app.post("/api/cart/open")
+    def cart_open():
+        return shell.cart_open()
+
+    @app.post("/api/cart/check")
+    def cart_check():
+        return shell.cart_check()
+
     @app.post("/api/connect/{service_id}")
     async def connect(service_id: str, request: Request):
         body = await request.json()

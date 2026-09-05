@@ -305,3 +305,22 @@ class BuildFinished(Event):
     handle: object | None = None
     iterating: bool = False  # True = an existing build was updated in place (announce "Updated", not "Done")
     slug: str = ""  # the build's slug, so the menu tile / status board can be keyed without re-resolving
+
+
+@dataclass(frozen=True)
+class CartChanged(Event):
+    """The staged Amazon cart changed (an item staged/removed, a handoff done). The face redraws
+    its cart panel from `snapshot` — a plain dict the shopping service already shaped for display
+    (items with label/asin/quantity/price/image, the estimated total, the last handoff line)."""
+
+    snapshot: dict
+
+
+@dataclass(frozen=True)
+class ProductsFound(Event):
+    """An Amazon search (or a listing lookup) just returned product rows — the face shows them as
+    picture cards with a Stage button while the model talks the pick through. `items` are plain
+    dicts (asin/title/price/rating/reviews/prime/image/url); `title` is the card strip's heading."""
+
+    title: str
+    items: tuple[dict, ...]
