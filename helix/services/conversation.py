@@ -148,6 +148,10 @@ BUILD_TOOLS = frozenset(
 # these with BUILD_TOOLS unless its caller NAMES them in `tool_names` — and the only caller that
 # does is the Dream Mind, whose set ConversationService.dream_tools() composes.
 DREAM_WRITES = frozenset({"note_verified_fact", "note_improvement", "remember"})
+# Readable tools a dream research turn does NOT get: call_api is an unaudited GET channel to any
+# connected host (the second real night read sam.gov live through it) — at night, reads go only
+# through research_read's allowlist and the Amazon faculty, the audited channels (§10).
+DREAM_EXCLUDED = frozenset({"call_api"})
 
 # The sentinel the Dream Mind passes as `tool_names=DREAM_TOOLS`: run_turn resolves it to
 # dream_tools() at call time — every readable (unfenced) tool the registry offers right then, plus
@@ -345,6 +349,12 @@ class ConversationService:
             last = turns[-1]
             turns[-1] = Turn(last.role, last.blocks + tuple(images))
         specs = self._tools.specs()
+        # THE DREAM TIER (DREAM_MIND.md §13): a Dream Mind research/verify turn runs on the growth
+        # model at high effort — "Fable or nothing" — on the subscription rail, and NEVER falls
+        # through to the API-key leg: a failure on the plan is raised as it is, limit text intact, so
+        # the mind's pause discipline can read it. The orb's own rules (a snag after a tool ran is
+        # softened into a sentence; a rail failure retries on the key) are for a person at the orb.
+        dream_tier = tool_names is DREAM_TOOLS
         if tool_names is DREAM_TOOLS:
             tool_names = self.dream_tools()
         if not allow_builds:  # an agent run is autonomous — deny build/spend/self-mod/delete/run tools
@@ -472,6 +482,13 @@ class ConversationService:
                         on_progress=on_progress, cancel=cancel, on_tool=_on_tool, user=user,
                         images=images,
                     )
+                elif dream_tier and self._growth_model is not None:
+                    # The night's research on the growth model (Fable) at high effort — the same
+                    # rail and fence as any hermetic run, the model named instead of the orb's.
+                    text = self._subscription.run_hermetic(
+                        prompt, names, model=self._growth_model.resolve(), effort="high",
+                        on_progress=on_progress, cancel=cancel, on_tool=_on_tool, web=web_ok,
+                    )
                 else:
                     text = self._subscription.run_hermetic(
                         prompt, names, on_progress=on_progress, cancel=cancel, on_tool=_on_tool,
@@ -483,6 +500,12 @@ class ConversationService:
                 # model failure and re-run the whole turn (double answer, double side effects).
                 subscription_text = text or "I got stuck — could you rephrase?"
             except Exception:  # noqa: BLE001
+                if dream_tier:
+                    # Dream work never degrades (§13): no API-key leg, no softened sentence — the
+                    # provider's own words reach the mind, which pauses on a limit and journals
+                    # anything else as one line. Tools that already ran are not re-run either.
+                    _LOG.warning("dream turn failed on the plan; not falling back", exc_info=True)
+                    raise
                 if dispatched:
                     # Tools with real side effects (a build enqueued, a reminder set) already ran. Do
                     # NOT re-run the whole turn on the API path — that would double them. Surface a
@@ -556,7 +579,7 @@ class ConversationService:
         Composed at call time so a faculty attached late (research, dream) is in it."""
         readable = {
             s.name for s in self._tools.specs()
-            if s.name not in BUILD_TOOLS and s.name not in DREAM_WRITES
+            if s.name not in BUILD_TOOLS and s.name not in DREAM_WRITES and s.name not in DREAM_EXCLUDED
         }
         return frozenset(readable | DREAM_WRITES)
 

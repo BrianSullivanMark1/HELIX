@@ -1791,6 +1791,42 @@ class ShellSession:
         self._poll_dream()
         self.push({"t": "dream", "running": self._dream_running, "line": self._dream_line})
 
+    def dream_journal(self, nights=30) -> dict:
+        """GET /api/dream/journal — the Dream journal page's truth (READ_ME/DREAM_MIND.md §11):
+        the last `nights` sessions, newest first, straight from the engine's `journal_entries()`
+        (each night: discoveries, facts with host and date, experiments, drafts and their outcomes,
+        the applied changes, the counts, the rebuild result, the report). Beside the nights, what
+        the page's EMPTY state needs to be honest: whether dreaming is switched on and when the
+        window opens — "the first session runs tonight at 23:00" is only said when it is true. A
+        missing engine, an older one without a journal view, or a journal hiccup reads as no nights,
+        never as an error page."""
+        try:
+            nights = int(nights)
+        except (TypeError, ValueError):
+            nights = 30
+        nights = max(1, min(90, nights))
+        dream = self._dream()
+        entries: list[dict] = []
+        reader = getattr(dream, "journal_entries", None) if dream is not None else None
+        if callable(reader):
+            try:
+                entries = [e for e in (reader(nights) or []) if isinstance(e, dict)]
+            except Exception:  # noqa: BLE001 — a journal hiccup must never break the page
+                _LOG.warning("could not read the dream journal", exc_info=True)
+                entries = []
+        try:
+            enabled = bool(self.c.settings.get("dream_enabled"))
+            start = str(self.c.settings.get("dream_start") or "23:00").strip() or "23:00"
+        except Exception:  # noqa: BLE001 — a bare rig without settings
+            enabled, start = False, "23:00"
+        return {
+            "available": dream is not None and callable(reader),
+            "enabled": enabled,
+            "start": start,
+            "running": self._dream_is_running(dream) if dream is not None else False,
+            "nights": entries,
+        }
+
     # ----- voice wiring (called by server at construction) -----
     def on_voice_recognized(self, command: str) -> None:
         speaker = self.voice.current_speaker if self.voice is not None else None

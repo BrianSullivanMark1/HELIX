@@ -155,6 +155,10 @@ export default function Menu() {
             </button>
           ))}
           <div className="flex-1" />
+          <button className="btn" title="What HELIX found, verified, tried and applied overnight"
+            onClick={() => navigate({ name: "dream" })}>
+            ◐ Dream journal
+          </button>
           <button className="btn btn-primary" onClick={() => navigate({ name: "console" })}>
             ＋ New
           </button>

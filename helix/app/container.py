@@ -45,8 +45,9 @@ from helix.services.gmail import GmailService
 from helix.services.images import load_image_block
 from helix.services.knowledge import KnowledgeService
 from helix.services.desktop import DesktopService
-from helix.services.dream import DreamService
-from helix.services.evolve import EvolveService
+from helix.services.dream import DreamService, SubscriptionOnlyChat
+from helix.services.dream_mind import SELF_MODEL_FILE, DreamMind
+from helix.services.evolve import EvolveService, _default_log_tail
 from helix.services.reflexes import ReflexService
 from helix.services.lessons import LessonsService
 from helix.services.location import LocationService
@@ -709,22 +710,8 @@ class Container:
             data_dir=self.paths.data,        # the backlog + journal live beside the other data files
         )
         self.tools.attach_evolve(self.evolve)  # late-bind: the registry is built before Evolve is
-        # THE DREAM SESSION (READ_ME/DREAM.md): the nightly long-form of Evolve — a user-set window in
-        # which HELIX plans a whole night on the growth model (Fable), drafts through the same lane,
-        # merges only what the FULL suite proves green (when the user allows), and — frozen — rebuilds
-        # and relaunches itself at dawn through the Rebuilder. The shell beats its heart (tick), hands
-        # it the user's presence (dream.activity = seconds since the last turn) and tells the morning
-        # report; Evolve defers to it for any night it covers, so the two never both draft.
+        # The rebuild-and-relaunch adapter the dream session hands its keys to at dawn (frozen only).
         self.rebuilder = Rebuilder(self.paths, self.settings, clock=self.clock)
-        self.dream = DreamService(
-            growth_chat, self.selfdev_lane, self.selfdev, self.evolve, self.settings, self.clock,
-            self.bus, paths=self.paths, suite_runner=self.selfdev.verify, rebuilder=self.rebuilder,
-            growth_model=self.growth_model,
-        )
-        self.evolve.set_dream(self.dream)
-        _attach_dream = getattr(self.tools, "attach_dream", None)  # the registry's dream tools
-        if callable(_attach_dream):
-            _attach_dream(self.dream)
         # The research faculty (READ_ME/DREAM_MIND.md §10): HELIX's own reads of documentation
         # hosts on an allowlist, and the record of what it verified there. Late-bound like Evolve.
         from helix.services.research import ResearchService
@@ -743,6 +730,9 @@ class Container:
             # AUTO-DEEP: hard-looking turns quietly escalate to the growth model (Fable 5) on the
             # subscription rail — the automatic sibling of think_harder (settings: auto_deep_turns).
             growth_model=self.growth_model, settings=self.settings,
+            # VERIFIED KNOWLEDGE rides into a turn beside lessons/memory (§10): what HELIX itself
+            # confirmed on a current source, labelled as data, so an engineering answer prefers it.
+            verified=self.verified,
         )
         # Agents persist in a DEDICATED file (not the guarded settings file): scheduled agents write
         # last_run mid-build via the heartbeat, and the orb can create/pause an agent while a build runs
@@ -753,6 +743,51 @@ class Container:
         self.agents = AgentService(self.agent_store, self.conversation, bus=self.bus, clock=self.clock)
         self.tools.bind_agents(self.agents)  # late-bind: agents → conversation → tools, so it can't be ctor-passed
         _seed_watchers(self.agent_store, self.agents)  # the sentinel: default watchers, once per version
+        # THE DREAM MIND (READ_ME/DREAM_MIND.md §11): the night's thinking. Reflects on the growth
+        # chat over the tool registry, the builds and agents, the parts lists, the week's user turns,
+        # Evolve's backlog and lessons, the log tail and the journal; researches and verifies through
+        # the conversation service on the DREAM tool tier (research_search / research_read on the
+        # allowlist, note_verified_fact into the verified store, the research trail as the audit);
+        # experiments through the gate's discardable scratch runs; keeps its self-model in
+        # data/helix_self.json. Built here, after the conversation and the agents it reads, and
+        # handed to the session below — the session owns the window, the lane, the stop flag, the
+        # limit pause and the user's presence (handed through NightHooks), the mind owns the thinking.
+        # THE DREAM'S CHAT (DREAM_MIND.md §13, rule 1): the subscription rail ONLY, on the growth
+        # model at high effort, with no API-key leg. growth_chat above is a PreferredChat whose
+        # fallback to the metered key is right for Evolve's one proposal and the distillers — for
+        # the night it is a silent downgrade that also swallows the limit text the pause needs. So
+        # reflection, the plan fold, the digest and the resume probe all go through this one; an
+        # inactive plan or an unnamed model raises RailUnavailable, which the mind treats as a limit.
+        dream_chat = SubscriptionOnlyChat(self.subscription, self.growth_model)
+        self.dream_mind = DreamMind(
+            chat=dream_chat, conversation=self.conversation, selfdev=self.selfdev,
+            verified=self.verified, research=self.research, parts=self.parts, builds=self.builds,
+            tools_registry=self.tools, store=JsonSettings(self.paths.data / SELF_MODEL_FILE),
+            settings=self.settings, clock=self.clock, log_tail=_default_log_tail,
+            activity=None,  # the session hands the mind the shell's presence probe (NightHooks.activity)
+            evolve=self.evolve, agents=self.agents, source_root=self.paths.source_root,
+            # Fable or nothing for an experiment's coder too; and the seeded watchers are marked as
+            # HELIX's own in the reflect material, never read as the user's project.
+            growth_model=self.growth_model,
+            default_agent_names=frozenset(name for name, _goal, _hint in _DEFAULT_WATCHERS),
+        )
+        # THE DREAM SESSION (READ_ME/DREAM.md): the nightly long-form of Evolve — a user-set window in
+        # which HELIX runs the mind's six cycles on the growth model (Fable, and only Fable: §13),
+        # drafts through the same lane, merges only what the FULL suite proves green (when the user
+        # allows), pauses for the plan's limit instead of degrading (the subscription rail is checked
+        # before each step), and — frozen — rebuilds and relaunches itself at dawn through the
+        # Rebuilder. The shell beats its heart (tick), hands it the user's presence (dream.activity =
+        # seconds since the last turn) and tells the morning report; Evolve defers to it for any
+        # night it covers, so the two never both draft.
+        self.dream = DreamService(
+            dream_chat, self.selfdev_lane, self.selfdev, self.evolve, self.settings, self.clock,
+            self.bus, paths=self.paths, suite_runner=self.selfdev.verify, rebuilder=self.rebuilder,
+            growth_model=self.growth_model, mind=self.dream_mind, subscription=self.subscription,
+        )
+        self.evolve.set_dream(self.dream)
+        _attach_dream = getattr(self.tools, "attach_dream", None)  # the registry's dream tools
+        if callable(_attach_dream):
+            _attach_dream(self.dream)
         # Which scheduled agents are due — the shell's heartbeat (main_window) asks this every tick.
         self.scheduler = AgentScheduler(self.agents, self.clock)
         # Workflows chain agents into ordered pipelines. A dedicated JSON store, and — because Workflow

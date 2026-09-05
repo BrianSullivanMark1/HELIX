@@ -93,7 +93,13 @@ A packaged install is built with `python build.py --with-voice`; the frozen app 
   before you wake (the previous build is kept and restored if the new one fails), and the first time
   you speak to it in the morning it tells you, once, what the night did. "No dreaming tonight"
   switches nightly dreaming off until you turn it back on; "stop dreaming" ends the session running
-  now; "how did you sleep?" reads the night back.
+  now; "how did you sleep?" reads the night back. With the Dream Mind (READ_ME/DREAM_MIND.md) the
+  night also reflects on what HELIX can and can't do, researches the questions your projects raise
+  on documentation, manufacturer and distributor pages, verifies engineering facts against their
+  sources, and tries experiments in a throwaway copy that ships nothing — the **Dream journal** page
+  (◐ Dream in the nav, or from the Menu and the Dreaming card) shows every night: what it discovered
+  (each line sourced, the unverified marked), the facts it verified with host and date, what it
+  tried, and what it applied.
 
 ---
 

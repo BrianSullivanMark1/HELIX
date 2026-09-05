@@ -6,6 +6,7 @@ import CartDock from "./components/CartDock";
 import ConnectModal from "./components/ConnectModal";
 import StateColor from "./components/StateColor";
 import Console from "./pages/Console";
+import Dream from "./pages/Dream";
 import Menu from "./pages/Menu";
 import Settings from "./pages/Settings";
 import Studio from "./pages/Studio";
@@ -130,6 +131,7 @@ export default function App() {
             [
               ["◉ Console", { name: "console" }],
               ["☰ Menu", { name: "menu" }],
+              ["◐ Dream", { name: "dream" }],
               ["⚙ Settings", { name: "settings" }],
             ] as [string, Page][]
           ).map(([label, target]) => (
@@ -149,6 +151,7 @@ export default function App() {
         {page.name === "console" && <Console />}
         {page.name === "menu" && <Menu />}
         {page.name === "settings" && <Settings />}
+        {page.name === "dream" && <Dream />}
         {page.name === "vault" && <Vault slug={page.slug} title={page.title} />}
         {page.name === "studio" && <Studio slug={page.slug} title={page.title} />}
         {page.name === "viewer" && (

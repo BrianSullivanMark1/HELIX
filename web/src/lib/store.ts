@@ -83,6 +83,7 @@ export type Page =
   | { name: "console" }
   | { name: "menu" }
   | { name: "settings" }
+  | { name: "dream" } // the Dream journal: what the nights found, verified, tried and applied
   | { name: "vault"; slug: string; title: string }
   | { name: "studio"; slug: string; title: string }
   | { name: "viewer"; slug: string; title: string; url: string; server?: boolean };

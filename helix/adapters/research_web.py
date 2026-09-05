@@ -47,8 +47,12 @@ _LOG = get_logger("research")
 # THE ALLOWLIST (DREAM_MIND.md §10): suffix-matched on the registrable host, subdomains included —
 # wiki.seeedstudio.com and docs.espressif.com read; github.com.evil.net and evil-adafruit.com do not.
 READ_HOSTS: tuple[str, ...] = (
-    # code + packages
-    "github.com", "raw.githubusercontent.com", "gist.github.com", "pypi.org", "npmjs.com",
+    # code + packages (github.io / readme.io / gitbook.io host most projects' published docs)
+    "github.com", "raw.githubusercontent.com", "gist.github.com", "github.io", "pypi.org", "npmjs.com",
+    "readme.io", "gitbook.io",
+    # the official docs of the services HELIX's own seeded watchers talk to (the first real night
+    # had to verify SAM.gov, Alpaca and Slack facts from GitHub mirrors because these were refused)
+    "gsa.gov", "alpaca.markets", "slack.com",
     "readthedocs.io", "readthedocs.org", "python.org", "developer.mozilla.org", "arxiv.org",
     # makers of the boards and parts on the bench
     "espressif.com", "arduino.cc", "seeedstudio.com", "adafruit.com", "sparkfun.com",
@@ -90,6 +94,7 @@ _HEADERS = {
 _TIMEOUT_S = 20.0
 MAX_BYTES = 4_000_000        # the body cap (a datasheet PDF is ~1–3 MB; a docs page ~200 KB)
 _MIN_GAP_S = 1.5             # pacing between real fetches
+_SEARCH_GAP_S = 6.0          # searches pace slower: DuckDuckGo challenges bursts (both real nights hit its robot wall)
 _CACHE_TTL_S = 600.0         # ten minutes — a research turn re-reads the same page freely
 DEFAULT_MAX_CHARS = 12_000
 TRUNCATED = "… (truncated)"
@@ -529,7 +534,8 @@ class ResearchWeb:
             hit = self._cache.get(url)
             if hit is not None and now - hit[0] < _CACHE_TTL_S:
                 return hit[1]
-            gap = _MIN_GAP_S - (now - self._last_fetch)
+            pace = _SEARCH_GAP_S if url.startswith(_SEARCH_URL) else _MIN_GAP_S
+            gap = pace - (now - self._last_fetch)
             if gap > 0:
                 self._sleep(gap)
             self._last_fetch = self._clock()

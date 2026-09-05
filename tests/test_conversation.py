@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from helix.ports.llm import Reply, Text, ToolSpec, ToolUse
 from helix.services.conversation import MAX_STEPS, ConversationService
 
@@ -542,11 +544,19 @@ def test_the_dream_tier_bridges_only_its_names_on_the_subscription_rail():
     from helix.services.conversation import DREAM_TOOLS, DREAM_WRITES
 
     sub = _FakeSubscription()
-    svc, _, _ = _tier_service(subscription=sub)
+    svc, _, _ = _tier_service(subscription=sub, growth_model=_FakeGrowth())
     svc.run_turn("research", allow_builds=False, persist=False, tool_names=DREAM_TOOLS)
     _prompt, kw = sub.hermetic_calls[-1]
     assert kw.get("web") is False                    # the model's own web tools stay OFF
-    assert "model" not in kw                         # no auto-deep escalation on the tier
+    # Fable or nothing (DREAM_MIND.md §13): the tier runs on the growth model at high effort — a
+    # research turn on the orb's Sonnet was two of the six cycles running below the night's model.
+    assert kw["model"] == "claude-fable-5" and kw["effort"] == "high"
+    bare = _FakeSubscription()
+    svc_bare, _, _ = _tier_service(subscription=bare)  # no resolver wired (a bare rig): the rail's default
+    svc_bare.run_turn("research", allow_builds=False, persist=False, tool_names=DREAM_TOOLS)
+    assert "model" not in bare.hermetic_calls[-1][1]
+    svc.run_turn("watch", allow_builds=False, persist=False)  # a watcher never escalates
+    assert "model" not in sub.hermetic_calls[-1][1]
     # the names the rail bridges are exactly the tier's
     svc2, _, _ = _tier_service(subscription=(sub2 := _NamesSubscription()))
     svc2.run_turn("research", allow_builds=False, persist=False, tool_names=DREAM_TOOLS)
@@ -563,6 +573,39 @@ class _NamesSubscription(_FakeSubscription):
     def run_hermetic(self, prompt, names=(), **kw) -> str:
         self.names = tuple(names)
         return super().run_hermetic(prompt, names, **kw)
+
+
+class _LimitSubscription(_FakeSubscription):
+    """The plan's limit mid-turn — after a tool already ran when `after_tool` is set."""
+
+    def __init__(self, text="usage limit reached — resets at 3pm", after_tool=False):
+        super().__init__()
+        self.text, self.after_tool = text, after_tool
+
+    def run_hermetic(self, prompt, names=(), **kw) -> str:
+        self.hermetic_calls.append((prompt, kw))
+        if self.after_tool and kw.get("on_tool") is not None:
+            kw["on_tool"]("list_apps", "ran", False)
+        raise RuntimeError(self.text)
+
+
+def test_a_dream_turn_never_falls_to_the_api_key_when_the_plan_fails():
+    """DREAM_MIND.md §13: a limit on the subscription is raised with the provider's own words — the
+    mind pauses on it — never softened into a sentence, never retried on the metered API key (a
+    downgrade to Sonnet with tools that also hid the limit from the pause discipline)."""
+    from helix.services.conversation import DREAM_TOOLS
+
+    for after_tool in (False, True):
+        sub = _LimitSubscription(after_tool=after_tool)
+        svc, chat, _ = _tier_service(subscription=sub, growth_model=_FakeGrowth())
+        with pytest.raises(RuntimeError, match="usage limit reached — resets at 3pm"):
+            svc.run_turn("research", allow_builds=False, persist=False, speaker="dream", tool_names=DREAM_TOOLS)
+        assert chat.last_tools == [] and chat.last_turns == []  # the API chat was never asked
+        assert len(sub.hermetic_calls) == 1
+    # A watcher (no tool_names) keeps the orb's safety net: the API leg answers.
+    sub = _LimitSubscription()
+    svc, chat, _ = _tier_service(subscription=sub)
+    assert svc.run_turn("watch", allow_builds=False, persist=False) == "done" and chat.last_turns
 
 
 class _FakeVerified:

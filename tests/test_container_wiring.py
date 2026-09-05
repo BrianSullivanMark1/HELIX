@@ -31,7 +31,8 @@ EXPECTED_SERVICES = (
     "growth_coder", "builds", "secrets", "model_baker", "forge", "build_queue", "selfdev",
     "selfdev_lane", "connections", "knowledge", "files", "user_memory", "tools", "profile",
     "lessons", "evolve", "conversation", "agents", "scheduler", "workflows", "speech_in",
-    "speech_out", "voice_id", "cad",
+    "speech_out", "voice_id", "cad", "parts", "verified", "research", "rebuilder", "dream",
+    "dream_mind",
 )
 
 
@@ -104,6 +105,45 @@ def test_composing_does_not_drag_in_the_heavy_stacks(tmp_path):
         f"constructing the container pulled in {verdict} — a lazy seam (the baker proxy, or the "
         f"deferred anthropic import) is no longer lazy"
     )
+
+
+def test_the_dream_mind_is_built_on_the_real_collaborators_and_handed_to_the_session(container):
+    """READ_ME/DREAM_MIND.md §11: the night's mind reflects over the tool registry, the builds and
+    agents, the parts lists and Evolve's material, researches through the conversation service on
+    the DREAM tier, verifies into the verified store, experiments through the gate, and keeps its
+    self-model in data/helix_self.json — and the session runs it with the plan's rail checked (§13).
+    Every one of those is a constructor argument that could drift to None while dream_mind.py's own
+    tests, which use fakes, stayed green; this pins the identity of each."""
+    from helix.services.dream_mind import DreamMind
+
+    from helix.services.dream import SubscriptionOnlyChat
+
+    mind = container.dream_mind
+    assert isinstance(mind, DreamMind)
+    assert container.dream._mind is mind, "the session was built without mind= — Phase 1's bare loop runs"
+    assert container.dream._subscription is container.subscription, "no rail check: a limit could degrade"
+    assert mind._chat is container.dream._chat, "the mind must reflect on the same growth chat the session plans on"
+    # §13 rule 1: the dream's chat has NO API-key leg — the subscription only, on the growth model.
+    # A PreferredChat here would fall to the metered key (a downgrade) and swallow the limit text.
+    assert isinstance(mind._chat, SubscriptionOnlyChat), "the dream must not reflect on a chat with an API fallback"
+    assert mind._chat._sub is container.subscription and mind._chat._growth_model is container.growth_model
+    assert mind._growth_model is container.growth_model, "an experiment's coder must be named by the night"
+    assert "procurement watcher" in mind._default_agent_names and "morning brief" in mind._default_agent_names
+    assert mind._conversation is container.conversation
+    assert mind._selfdev is container.selfdev
+    assert mind._verified is container.verified and mind._research is container.research
+    assert mind._parts is container.parts and mind._builds is container.builds
+    assert mind._tools is container.tools and mind._evolve is container.evolve and mind._agents is container.agents
+    assert mind._settings is container.settings and mind._clock is container.clock
+    assert mind._store._path.name == "helix_self.json", "the self-model must live in its own volatile store"
+    assert mind._source_root == container.paths.source_root
+    assert callable(mind._log_tail)
+    # The user's presence reaches the mind through the session's hooks, live: the shell registers its
+    # probe on the session after construction, and the session's reader follows it.
+    container.dream.activity = lambda: 7.0
+    assert container.dream._activity_seconds() == 7.0
+    # VERIFIED KNOWLEDGE rides into the orb's turns: the conversation holds the same store the tools write.
+    assert container.conversation._verified is container.verified
 
 
 def test_rail_diagnostic_names_the_missing_piece_not_the_credential(container):

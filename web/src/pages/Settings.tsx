@@ -218,6 +218,10 @@ export default function Settings() {
               {dreamRunning && (
                 <button className="btn btn-danger" onClick={dreamStop}>Stop dreaming</button>
               )}
+              <button className="btn" title="What the nights found, verified, tried and applied"
+                onClick={() => navigate({ name: "dream" })}>
+                ◐ Dream journal
+              </button>
               {dreamNote && <span className="text-xs" style={{ color: "var(--cyan)" }}>{dreamNote}</span>}
             </div>
           </div>

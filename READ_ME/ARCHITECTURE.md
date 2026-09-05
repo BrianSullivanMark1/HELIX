@@ -603,7 +603,9 @@ explicit approval like any other self-change.
 
 **Dreaming** (`services/dream.py`, `DreamService`) is Evolve grown up: instead of one proposal a night, a
 *session* — a window the user sets (default 23:00 for 8 hours) in which HELIX plans on the growth model
-(Fable 5, auto-upscaling), drafts improvement after improvement through the identical `improve_helix` lane
+(Fable 5, auto-upscaling — the reflect/plan/digest calls and the coder; the research and verify turns run
+through `ConversationService.run_turn` on the conversation's own model, see the Dream Mind bullet below),
+drafts improvement after improvement through the identical `improve_helix` lane
 (its own branch each, constitution-scanned, smoke-checked), reflects once mid-session, and winds down at
 the window's end, on `stop_dreaming`, or the moment the user switches it off. It is still a *client* of
 the gate: the only way a draft merges unattended is `dream_auto_apply` **and** the full test suite green
@@ -650,6 +652,39 @@ Its face — tools, voice, shell, routes, card:
   automatically" with its one warning line, the rebuild toggle, the draft ceiling, the model line, the
   live status line, the frozen-without-source warning, the last report, and "Dream for 30 minutes now" /
   "Stop dreaming". `store.ts` keeps `dream` from the event stream; `App.tsx` renders the chip.
+- **The Dream Mind** (Phase 2, READ_ME/DREAM_MIND.md §11–§13, READ_ME/DREAM.md §11; `services/dream_mind.py`,
+  `DreamMind`): the container builds it after the conversation (`ConversationService(…,
+  verified=self.verified)`) and the agents — `DreamMind(chat=growth_chat, conversation, selfdev, verified,
+  research, parts, builds, tools_registry, store=JsonSettings(data/helix_self.json), settings, clock,
+  log_tail, evolve, agents, source_root)` — and hands it to `DreamService(…, mind=, subscription=)`; a
+  night runs REFLECT → RESEARCH → VERIFY → EXPERIMENT → IMPROVE → RECORD through
+  `NightHooks(improve, note, record, should_stop, nights, limit, rail_problem, activity)`, the session
+  keeping the window, the lane, the stop flag, the limit pause and the user's presence. Rail and model:
+  reflect/plan/digest on `growth_chat` (Fable, plan-only, no web), experiments and drafts on the coder
+  (`work_model(deep=True)`), research/verify through `run_turn(tool_names=DREAM_TOOLS, persist=False,
+  speaker="dream")` — currently on the conversation's own model, since a hermetic turn skips the auto-deep
+  escalation and the mind names none; the subscription rail only (`rail_problem()` before every step, the
+  API key never; a limit pauses with 20/30/45/60-minute probes, three pauses end the night). The
+  self-model lives in `data/helix_self.json` (volatile; no route yet).
+- **The Dream journal** (Phase 2, READ_ME/DREAM_MIND.md §11 — the night's structure lives in
+  `services/dream_mind.py`, its record in `services/dream.py`'s journal): `GET /api/dream/journal?nights=30`
+  → `shell.dream_journal(nights)` → the engine's `journal_entries(nights)`, the last nights newest first,
+  each one plain record — `discoveries` (a sentence, its source, `verified` true/false/null), `facts`
+  (claim, value, host, url, date, project), `experiments` (idea, ok, recommendation), `drafts` with their
+  outcomes, `applied` (branch + one-line summary), `counts`, `rebuild` (ok / restored / message / at),
+  `report`, `limit`, `weekly_digest`, `in_progress` — beside `available`, `enabled`, `start` and `running`,
+  so an empty journal can say the truth ("the first session runs tonight at 23:00" only when dreaming
+  is on). The shell tolerates no engine, a Phase 1 engine without the view, and a locked journal (each
+  reads as no nights, never a 500); the count is clamped 1–90. The page (`web/src/pages/Dream.tsx`,
+  route `{name: "dream"}` in `store.ts`/`App.tsx`, "◐ Dream" in the nav, "◐ Dream journal" on the Menu
+  and on the Dreaming card) renders nights as cards: DISCOVERED first (verified/unverified marked),
+  APPLIED, VERIFIED (each fact with its host and date, linked when https), TRIED (a failed experiment
+  shows the journal's own reason), the other DRAFTS with their outcome (the request leads; the coder's
+  summary sits muted beneath it and is dropped when it is only sign-off chatter), the rebuild line, the
+  limit sentence, the REPORT (and "not told yet" while it waits), the weekly digest, and a fold for the
+  night's notes (questions researched with their findings, claims re-checked, the agenda carried over).
+  The header's "drafted on Fable 5" names what the night planned and drafted on. It reads once on open
+  and again when the event stream flips `dream.running`.
 
 ---
 

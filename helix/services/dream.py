@@ -77,9 +77,9 @@ _NOW_MIN_MINUTES, _NOW_MAX_MINUTES = 5.0, 12 * 60.0
 _MAX_CONSECUTIVE_FAILURES = 2
 # The ways a session ends on its own. Any other stopped_reason means a person (or the app closing)
 # ended it — and a night the user cut short never quits the app under them for a rebuild.
+_LIMIT_THREE_TIMES = "the plan's limit was reached three times"
 _NATURAL_ENDS = ("the window closed", "the window was ending", "the plan was done", "a quiet night",
-                 "the draft ceiling was reached", "the night's work was done",
-                 "the plan's limit was reached three times")
+                 "the draft ceiling was reached", "the night's work was done", _LIMIT_THREE_TIMES)
 _CLOSED_MID_SESSION = "HELIX closed mid-session"
 # ----- limits and model discipline (READ_ME/DREAM_MIND.md §13) -----
 # While PAUSED for the plan's limit the session re-checks the clock this often; each probe waits its
@@ -162,6 +162,89 @@ class Request:
     deep: bool = True
     takes: str = ""
     origin: str = ""
+    # True when the request reads as a change to a host, endpoint, default, guard, allow-list or
+    # fallback — a documented choice the code explains in its own comments. The draft record carries
+    # it and the morning report says "review it carefully": the first real night's top draft rewired
+    # the Procurement Watcher off a deliberately chosen endpoint on model knowledge alone.
+    changes_decision: bool = False
+
+
+class RailUnavailable(RuntimeError):
+    """Dream work asked the plan and the plan could not serve it — the subscription rail is inactive,
+    or no Fable-class model could be named. Raised by SubscriptionOnlyChat; the mind treats it exactly
+    like a limit (§13): the night pauses and probes, it never degrades."""
+
+
+class SubscriptionOnlyChat:
+    """The dream's chat (DREAM_MIND.md §13, rule 1): a ChatModel over the subscription rail ONLY, on
+    the growth model at high effort. PreferredChat quietly falls to the API-key leg when the
+    subscription fails — for the orb that is a safety net, for the night it is a silent downgrade that
+    also swallows the limit text the pause discipline needs. This chat has no second leg: a failure
+    on the plan is raised as it is (so `looks_like_limit` can read it), an inactive plan or an
+    unnamed model is a RailUnavailable. No tools, no web, no images — reflection, planning, the
+    digest and the resume probe are plain text. Duck-typed on the subscription brain (active() +
+    run_hermetic) and the growth-model resolver (resolve()), so a bare rig can hand in fakes."""
+
+    def __init__(self, subscription, growth_model=None, *, effort: str = "high") -> None:
+        self._sub = subscription
+        self._growth_model = growth_model
+        self._effort = effort
+
+    @staticmethod
+    def _flatten(turns) -> str:
+        parts: list[str] = []
+        for t in turns or ():
+            for b in getattr(t, "blocks", ()) or ():
+                text = getattr(b, "text", None)
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        return "\n\n".join(parts)
+
+    def model(self) -> str:
+        resolve = getattr(self._growth_model, "resolve", None)
+        if not callable(resolve):
+            raise RailUnavailable("no growth model resolver is wired, so no Fable-class model can be named")
+        try:
+            model_id = str(resolve() or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            raise RailUnavailable("the growth model couldn't be named right now (" + _first_line(str(exc), 120)
+                                  + ")") from exc
+        if not model_id:
+            raise RailUnavailable("the growth model resolver named no model")
+        return model_id
+
+    def chat(self, turns, system: str | None = None, tools=None):
+        if tools:
+            raise RailUnavailable("the dream's chat takes no tools — research runs through the conversation service")
+        sub = self._sub
+        try:
+            active = bool(sub.active()) if sub is not None else False
+        except Exception as exc:  # noqa: BLE001
+            raise RailUnavailable("the plan isn't answering: " + _first_line(str(exc), 120)) from exc
+        if not active:
+            why = None
+            probe = getattr(sub, "why_inactive", None)
+            if callable(probe):
+                try:
+                    why = probe()
+                except Exception:  # noqa: BLE001
+                    why = None
+            raise RailUnavailable("the plan isn't available right now"
+                                  + (f" ({_first_line(str(why), 140)})" if why else ""))
+        text = sub.run_hermetic(self._flatten(turns), (), model=self.model(), effort=self._effort,
+                                system=system)
+        return _PlainReply(str(text or ""))
+
+
+class _PlainReply:
+    """The minimal Reply the dream reads back: `.text` (and `.blocks` for anyone who flattens)."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.blocks = (Text(text),)
+        self.usage = None
+        self.wants_tools = False
+        self.tool_uses = ()
 
 
 @dataclass
@@ -183,6 +266,9 @@ class NightHooks:
         False when it is over (the window closed, a stop landed, or three pauses were spent).
     rail_problem() -> str | None: why the dream rail is unavailable right now (the subscription
         inactive), checked before each step — inactivity is treated exactly like a limit.
+    activity() -> float | None: seconds since the user's last turn (None = unknown = idle) — the
+        shell's presence probe, handed through the session so the mind holds a step while the user
+        is at the machine exactly as a draft is held. None when the session has no probe.
     """
 
     improve: Callable[[list], list]
@@ -192,6 +278,7 @@ class NightHooks:
     nights: Callable[[int], list]
     limit: Callable[[str], bool]
     rail_problem: Callable[[], str | None] = lambda: None
+    activity: Callable[[], float | None] | None = None
 
 
 def parse_plan(text: str, cap: int = DEFAULT_MAX_DRAFTS) -> tuple[list[Request], str]:
@@ -340,6 +427,46 @@ def _landed(drafts: list) -> list:
             and d.get("held_for") != "limit"]
 
 
+def _records(value) -> list:
+    """A journaled list, or [] when a hand-edited or damaged record holds something else there (an
+    int where `drafts` should be): every reader of a session goes through this so one bad field
+    never takes status(), the journal page or the next night's REFLECT down with it."""
+    return value if isinstance(value, list) else []
+
+
+# The systemic ways a night ends on its own that are not in _NATURAL_ENDS: the person did nothing.
+_SYSTEMIC_END_PREFIXES = ("drafts kept failing", "reflection failed")
+
+
+def _natural_end(reason: str) -> bool:
+    """Did the night end on its own (the window, the plan, the ceiling, a limit, drafts that kept
+    failing, a reflection that failed) rather than by a person's hand? The rebuild decision reads
+    this: an applied change rebuilds after a systemic end exactly as after a finished plan."""
+    reason = str(reason or "")
+    return reason in _NATURAL_ENDS or any(reason.startswith(p) for p in _SYSTEMIC_END_PREFIXES)
+
+
+_PREAMBLE_RE = re.compile(
+    r"(?i)\b(all done|all set|everything is in place|here'?s (?:a |the )?(?:quick |brief |short )?summary|"
+    r"summary of (?:the |my )?changes?|let me summari[sz]e|in summary)\b"
+    r"|^(?:done|ok|okay|finished|complete|completed)[.!]?$"
+)
+
+
+def _summary_line(coder_text: str, request: str, cap: int = 160) -> str:
+    """One line that says what a draft changed, for the journal, the page and the report. The
+    coder's final message is chatter first ("All done — here's a summary of the change:"), so the
+    first line that is neither a preamble nor a heading is taken; when there is none, the request's
+    first sentence — what was asked — stands in. Never the chatter."""
+    for raw in (coder_text or "").splitlines():
+        line = " ".join(raw.split()).strip(" -*#•").strip()
+        if not line or line.endswith(":") or _PREAMBLE_RE.search(line):
+            continue
+        return _first_line(line, cap)
+    sentence = re.split(r"(?<=[.!?])\s+", " ".join((request or "").split()), maxsplit=1)[0]
+    return _first_line(sentence, cap)
+
+
 class DreamService:
     def __init__(
         self,
@@ -402,6 +529,7 @@ class DreamService:
         # the next heartbeat after the lane frees — the user's "no dreaming" must stick.
         self._intent: dict[str, object] = {}
         self._orphans_closed = False  # a session HELIX died in the middle of is closed on the first tick
+        self._improve_stopped = ""    # why the mind's IMPROVE cycle ended early ("" = it drained its queue)
         try:
             bus.subscribe(SelfChangeFinished, self._on_finished)
         except Exception:  # noqa: BLE001 — a bus without subscribe (a bare stand-in) still publishes
@@ -592,9 +720,10 @@ class DreamService:
                     f"So far: {_plural(len(drafts), 'draft')}, {applied} applied."
                 )
             else:
+                doing = self._cycle_word(session)
                 parts.append(
-                    f"{kind} — since {start:%H:%M}, until {end:%H:%M}: {_plural(len(drafts), 'draft')} "
-                    f"so far, {applied} applied."
+                    f"{kind}{f' ({doing})' if doing else ''} — since {start:%H:%M}, until {end:%H:%M}: "
+                    f"{_plural(len(drafts), 'draft')} so far, {applied} applied."
                 )
         elif self._enabled() and self._fable_problem():
             # Fable or nothing (§13): the card and the voice say why no night will start.
@@ -614,7 +743,10 @@ class DreamService:
         problem = self._source_problem()
         if problem and problem not in parts[0]:  # the open-window line may already carry it
             parts.append("I can't dream in this build: " + problem + ".")
-        parts.append(f"I plan and draft on {self._model_name()}.")
+        if self._fable_problem():
+            parts.append("I only dream on Fable — never on a weaker model.")
+        else:
+            parts.append(f"I plan and draft on {self._model_name()}.")
         if self._auto_apply():
             parts.append("A draft whose full test suite is green applies on its own; anything red "
                          "waits for you.")
@@ -696,7 +828,7 @@ class DreamService:
         start = _parse_iso(str(s.get("window_start") or ""))
         end = _parse_iso(str(s.get("window_end") or ""))
         drafts = []
-        for d in (s.get("drafts") or []):
+        for d in _records(s.get("drafts")):
             if not isinstance(d, dict):
                 continue
             drafts.append({
@@ -707,6 +839,7 @@ class DreamService:
                 "branch": str(d.get("branch") or ""),
                 "reason": _first_line(str(d.get("reason") or ""), 200),
                 "origin": str(d.get("origin") or ""),
+                "changes_decision": bool(d.get("changes_decision")),
             })
         rebuild = None
         if s.get("rebuild"):
@@ -719,7 +852,7 @@ class DreamService:
             else:
                 rebuild = {"ok": None, "restored": False, "message": "requested — no record of how it went",
                            "at": requested}
-        limit_log = [e for e in (s.get("limit_log") or []) if isinstance(e, dict)]
+        limit_log = [e for e in _records(s.get("limit_log")) if isinstance(e, dict)]
         return {
             "id": str(s.get("id") or ""),
             "day": str(s.get("day") or ""),
@@ -730,19 +863,19 @@ class DreamService:
             "stopped_reason": str(s.get("stopped_reason") or ""),
             "theme": str(s.get("theme") or ""),
             "model": str(s.get("model") or ""),
-            "discoveries": [d for d in (s.get("discoveries") or []) if isinstance(d, dict)],
-            "facts": [f for f in (s.get("facts") or []) if isinstance(f, dict)],
+            "discoveries": [d for d in _records(s.get("discoveries")) if isinstance(d, dict)],
+            "facts": [f for f in _records(s.get("facts")) if isinstance(f, dict)],
             "facts_noted": b["facts"],
-            "experiments": [e for e in (s.get("experiments") or []) if isinstance(e, dict)],
-            "research": [r for r in (s.get("research") or []) if isinstance(r, dict)],
-            "verify": [v for v in (s.get("verify") or []) if isinstance(v, dict)],
+            "experiments": [e for e in _records(s.get("experiments")) if isinstance(e, dict)],
+            "research": [r for r in _records(s.get("research")) if isinstance(r, dict)],
+            "verify": [v for v in _records(s.get("verify")) if isinstance(v, dict)],
             "agenda": s.get("agenda") if isinstance(s.get("agenda"), dict) else {},
-            "agenda_remaining": [str(x) for x in (s.get("agenda_remaining") or [])],
+            "agenda_remaining": [str(x) for x in _records(s.get("agenda_remaining"))],
             "self_model_delta": s.get("self_model_delta") if isinstance(s.get("self_model_delta"), dict) else {},
             "drafts": drafts,
             "applied": [{"branch": str(a.get("branch") or ""),
                          "summary": _first_line(str(a.get("summary") or a.get("request") or ""), 160)}
-                        for a in (s.get("applied") or []) if isinstance(a, dict)],
+                        for a in _records(s.get("applied")) if isinstance(a, dict)],
             "counts": b,
             "rebuild": rebuild,
             "restart_needed": int(s.get("restart_needed") or 0),
@@ -859,6 +992,18 @@ class DreamService:
         if start.date() == now.date():
             return "tonight" if start.hour >= 17 else "today"
         return "tomorrow" if start.hour < 12 else "tomorrow night"
+
+    @staticmethod
+    def _cycle_word(session: dict) -> str:
+        """What the mind is doing right now, as a person says it ("researching"), from the open
+        cycle on the record; "" for a bare Phase 1 night or between cycles."""
+        cycles = [c for c in (session.get("cycles") or []) if isinstance(c, dict)]
+        if not cycles or cycles[-1].get("ended"):
+            return ""
+        return {
+            "reflect": "reflecting", "research": "researching", "verify": "verifying facts",
+            "experiment": "experimenting", "improve": "drafting", "record": "writing the journal",
+        }.get(str(cycles[-1].get("name") or ""), "")
 
     # ------------------------------------------------------------------ the session
     def _new_session(self, kind: str, start: datetime, end: datetime, now: datetime) -> dict:
@@ -1027,6 +1172,12 @@ class DreamService:
         """Phase 2's night (DREAM_MIND.md §11): the mind runs REFLECT → RESEARCH → VERIFY →
         EXPERIMENT → IMPROVE → RECORD against the hooks below; the session keeps owning the journal,
         the lane, the stop flag and the pause. Returns the reason the night ended."""
+        self._improve_stopped = ""
+        # The user's presence holds a NIGHTLY session's steps (the mind waits for ten quiet minutes
+        # exactly as a draft does). A manual "dream now" is the user's own ask — they are at the
+        # keyboard by definition — so the mind gets no probe and starts at once, as Phase 1's draft
+        # loop (_await_quiet) has always done for a manual session.
+        activity = self._activity_seconds if session.get("kind") == "nightly" else None
         hooks = NightHooks(
             improve=lambda requests: self._improve(session, list(requests), ceiling),
             note=lambda line: self._note(session, line),
@@ -1035,38 +1186,79 @@ class DreamService:
             nights=self._recent_sessions,
             limit=lambda text: self._pause_for_limit(session, text),
             rail_problem=self._rail_problem,
+            activity=activity,
         )
         summary = self._mind.run_night(end, ceiling, hooks=hooks)
         fields = {}
         for key in ("discoveries", "facts", "facts_noted", "experiments", "agenda", "self_model_delta",
-                    "research", "verify", "weekly_digest", "theme"):
+                    "research", "verify", "weekly_digest"):
             value = getattr(summary, key, None)
             if value is not None:
                 fields[key] = value
-        remaining = getattr(summary, "agenda_remaining", None)
-        if remaining is not None:
-            fields["agenda_remaining"] = list(remaining)
-        if fields:
-            self._record(session, fields)
+        theme = str(getattr(summary, "theme", "") or "").strip()
+        if theme:
+            fields["theme"] = theme
+        # The user's presence held the night, on either side (the mind's steps, or the draft loop's
+        # quiet wait): the report reads this, so neither side may clear the other's flag.
+        if getattr(summary, "held_for_user", False) or session.get("held_for_user"):
+            fields["held_for_user"] = True
+        # What never got drafted, from both sides: the requests the mind had no time to hand over
+        # (its summary) and the ones the improve loop above could not reach (left on the session by
+        # _improve). Neither may erase the other — tomorrow night starts from the whole list.
+        leftover = [str(x) for x in _records(session.get("agenda_remaining")) if str(x).strip()]
+        for text in (getattr(summary, "agenda_remaining", None) or []):
+            text = str(text)
+            if text.strip() and text not in leftover:
+                leftover.append(text)
+        fields["agenda_remaining"] = leftover
+        # A night that planned improvements but never reached IMPROVE (the window ended, the user was
+        # at the machine) has an agenda and no plan — and the report keys on the plan. The leftover
+        # IS the plan tonight never got to start, so the report can say "planned N but didn't get to
+        # start one" instead of "found nothing worth changing".
+        if leftover and not _records(session.get("plan")) and not _records(session.get("drafts")):
+            fields["plan"] = [{"request": text, "effort": "deep", "takes": "", "origin": ""} for text in leftover]
+        self._record(session, fields)
         if self._stop.is_set():
             return self._stop_reason or "stopped"
+        if self._improve_stopped:
+            return self._improve_stopped
         return str(getattr(summary, "reason", "") or "the night's work was done")
+
+    def _activity_seconds(self) -> float | None:
+        """Seconds since the user's last turn through the shell's probe (dream.activity), or None
+        when there is no probe or it failed — the presence the mind and the draft loop both read."""
+        fn = self.activity
+        if fn is None:
+            return None
+        try:
+            seconds = fn()
+        except Exception:  # noqa: BLE001 — a broken presence probe must not stall the night
+            return None
+        if seconds is None:
+            return None
+        try:
+            return float(seconds)
+        except (TypeError, ValueError):
+            return None
 
     def _improve(self, session: dict, requests: list[Request], ceiling: int) -> list[dict]:
         """The IMPROVE cycle for the mind: Phase 1's draft loop over the mind's requests — the quiet
         wait, the lane, the limit pause, verify and apply as configured — without the mid-session
         re-plan (the mind's REFLECT already did that thinking). Returns the draft records it made;
         whatever it could not get to is left on the session as `agenda_remaining`."""
-        session["plan"] = (session.get("plan") or []) + [
+        session["plan"] = _records(session.get("plan")) + [
             {"request": r.text, "effort": "deep" if r.deep else "standard", "takes": r.takes,
-             "origin": r.origin} for r in requests
+             "origin": r.origin, "changes_decision": bool(getattr(r, "changes_decision", False))}
+            for r in requests
         ]
         self._save_session(session)
         queue: deque[Request] = deque(requests)
         made: list[dict] = []
         failures_in_a_row = 0
+        stopped = ""
         while queue and len(session["drafts"]) < ceiling:
             if not self._await_quiet(session):
+                stopped = "the window was ending"  # (a stop's own reason wins over this, above)
                 break
             item = queue.popleft()
             record = self._draft(session, item)
@@ -1084,12 +1276,16 @@ class DreamService:
                 if failures_in_a_row >= _MAX_CONSECUTIVE_FAILURES:
                     self._note(session, f"{failures_in_a_row} drafts failed in a row — no more "
                                         f"drafts tonight: {record['reason']}")
+                    stopped = f"drafts kept failing: {record['reason']}"
                     break
             else:
                 failures_in_a_row = 0
             if (record["outcome"] == "drafted" and self._auto_apply()
                     and not self._stop.is_set()):
                 self._apply(session, record)
+        if queue and not stopped and len(session["drafts"]) >= ceiling:
+            stopped = "the draft ceiling was reached"
+        self._improve_stopped = stopped
         session["agenda_remaining"] = [r.text for r in queue]
         self._save_session(session)
         return made
@@ -1137,8 +1333,11 @@ class DreamService:
             return None
         try:
             model_id = str(resolve() or "")
-        except Exception:  # noqa: BLE001 — a resolver hiccup is not a downgrade
-            return None
+        except Exception as exc:  # noqa: BLE001
+            # Fail closed: a resolver that cannot answer names no Fable-class model, and a night
+            # started on it would hand every draft to the coder's boot-time default — the one
+            # downgrade §13 forbids. Not a downgrade in itself, so the sentence says what it is.
+            return "the growth model couldn't be named right now (" + _first_line(str(exc), 120) + ")"
         m = _MODEL_ID_RE.match(model_id.strip())
         if m is not None and m.group(1).lower() in _FABLE_FAMILIES:
             return None
@@ -1146,8 +1345,8 @@ class DreamService:
 
     def _probe(self) -> tuple[bool, str]:
         """One cheap question to the rail — the resume probe while paused. (True, "") when the
-        plan answers; (False, why) otherwise."""
-        problem = self._rail_problem()
+        plan answers on a Fable-class model; (False, why) otherwise."""
+        problem = self._rail_problem() or self._fable_problem()
         if problem:
             return False, problem
         try:
@@ -1173,7 +1372,7 @@ class DreamService:
             self._note(session, f"the plan's limit was reached again at {now:%H:%M} — three pauses "
                                 "tonight already, so I'm ending the session early; what's left is "
                                 "saved for tomorrow night")
-            self._request_stop("the plan's limit was reached three times")
+            self._request_stop(_LIMIT_THREE_TIMES)
             return False
         session["limit_pauses"] = pauses + 1
         entry = {"at": now.isoformat(timespec="seconds"), "resumed_at": None, "hint": hint,
@@ -1266,19 +1465,8 @@ class DreamService:
             self._stop.wait(_ACTIVITY_POLL_S)
 
     def _user_idle(self) -> bool:
-        fn = self.activity
-        if fn is None:
-            return True
-        try:
-            seconds = fn()
-        except Exception:  # noqa: BLE001 — a broken presence probe must not stall the night
-            return True
-        if seconds is None:
-            return True
-        try:
-            return float(seconds) >= _ACTIVE_HOLD.total_seconds()
-        except (TypeError, ValueError):
-            return True
+        seconds = self._activity_seconds()
+        return True if seconds is None else seconds >= _ACTIVE_HOLD.total_seconds()
 
     def _draft(self, session: dict, item: Request) -> dict | None:
         """One draft through the lane. Returns its record — or None when the lane turned out busy
@@ -1289,7 +1477,20 @@ class DreamService:
             "request": item.text, "effort": "deep" if item.deep else "standard",
             "model": model or "", "started": self._stamp(), "ended": None, "outcome": "",
             "branch": "", "summary": "", "reason": "", "origin": item.origin,
+            "changes_decision": bool(getattr(item, "changes_decision", False)),
         }
+        if model is None and self._growth_model is not None:
+            # Fable or nothing (§13): a resolver that cannot name the model right now must not hand
+            # the coder its boot-time default. Held exactly like a limit — the loop pauses, probes
+            # the resolver with the rail, and retries the same request once a model can be named.
+            why = "no Fable-class model could be named — the growth model resolver isn't answering"
+            record["limit_text"] = why
+            record["ended"] = self._stamp()
+            session["drafts"].append(record)
+            self._hold_for_limit(record, "")
+            record["reason"] = "limit — " + why
+            self._note(session, f"held: {why} — {_first_line(item.text)}")
+            return record
         with self._lock:
             self._finished = None
             self._draft_open = True
@@ -1355,7 +1556,10 @@ class DreamService:
         elif ev.ok:
             record["outcome"] = "drafted"
             record["branch"] = ev.branch or ""
-            record["summary"] = (ev.summary or "").strip()
+            # The coder's whole final message is kept for the record; the journal, the page and
+            # the report get one line that says what changed — never "All done — here's a summary:".
+            record["coder_said"] = (ev.summary or "").strip()
+            record["summary"] = _summary_line(record["coder_said"], item.text)
         else:
             record["outcome"] = "failed"
             record["reason"] = _first_line(ev.error or "the coder produced no change", 200)
@@ -1625,14 +1829,16 @@ class DreamService:
             self._note(session, "the next nightly session will rebuild and relaunch with the applied "
                                 "changes; until then this is still the old build")
             return ""
-        if session.get("stopped_reason") not in _NATURAL_ENDS or not self._user_idle():
+        reason = str(session.get("stopped_reason") or "")
+        if not _natural_end(reason) or not self._user_idle():
             # The user ended the night by hand, or is at the machine as it ends: the rebuild quits
             # the app, and that never happens under someone's hands. The next quiet night does it.
+            # (A night that ended on its own — drafts kept failing, a reflection that failed — is a
+            # natural end: the person did nothing, and the note never says they did.)
             self._set_flag("rebuild_pending", True)
             self._note(session, "applied changes will rebuild and relaunch after the next quiet "
-                                "night — " + ("you stopped the session"
-                                              if session.get("stopped_reason") not in _NATURAL_ENDS
-                                              else "you're using the machine"))
+                                "night — " + ("you're using the machine" if _natural_end(reason)
+                                              else "you stopped the session"))
             return ""
         rebuilder = self._rebuilder
         why = None
@@ -1667,7 +1873,7 @@ class DreamService:
         """Nothing is lost to a limit (§13): when the night paused for the plan's limit and ended
         with improvements still queued, they go to the Evolve backlog so tomorrow night starts from
         them. The journal keeps them as `agenda_remaining` either way."""
-        remaining = [str(x) for x in (session.get("agenda_remaining") or []) if str(x).strip()]
+        remaining = [str(x) for x in _records(session.get("agenda_remaining")) if str(x).strip()]
         if not remaining or not session.get("limit_log"):
             return
         add = getattr(self._evolve, "add_backlog", None)
@@ -1685,8 +1891,9 @@ class DreamService:
                                 "tomorrow night")
 
     def _compose_report(self, session: dict) -> str:
-        drafts = [d for d in session["drafts"] if isinstance(d, dict)]
-        applied = session["applied"]
+        drafts = [d for d in _records(session.get("drafts")) if isinstance(d, dict)]
+        applied = [a for a in _records(session.get("applied")) if isinstance(a, dict)]
+        plan = _records(session.get("plan"))
         held = [d for d in drafts if d.get("outcome") == "held" and d.get("held_for") != "limit"]
         limited = [d for d in drafts if d.get("outcome") == "held" and d.get("held_for") == "limit"]
         waiting = [d for d in drafts if d.get("outcome") == "drafted"] + held
@@ -1703,13 +1910,25 @@ class DreamService:
             sentences.append(lead)
         who = "I" if lead else f"{opener} I"
         if not counted:
-            if not session["plan"]:
+            if reason == "an error" and not plan:
+                sentences.append(f"{who} hit an error and stopped early before changing anything — "
+                                 "the journal and the log have the details.")
+            elif not plan and session.get("limit_log"):
+                sentences.append(f"{who} didn't get to draft anything — the plan's limit got in the way.")
+            elif not plan and session.get("held_for_user") and reason in ("the window was ending",
+                                                                          "the window closed"):
+                sentences.append(f"{who} waited while you were using the machine, and the window ended "
+                                 "before I could start.")
+            elif not plan:
                 sentences.append(f"{who} found nothing worth changing, so I let the code rest.")
             elif session.get("held_for_user"):
-                sentences.append(f"{who} planned {_plural(len(session['plan']), 'improvement')} "
+                sentences.append(f"{who} planned {_plural(len(plan), 'improvement')} "
                                  "but you were using the machine, so I didn't start any.")
+            elif reason == _LIMIT_THREE_TIMES:
+                sentences.append(f"{who} planned {_plural(len(plan), 'improvement')} "
+                                 "but the plan's limit stopped every attempt.")
             else:
-                sentences.append(f"{who} planned {_plural(len(session['plan']), 'improvement')} "
+                sentences.append(f"{who} planned {_plural(len(plan), 'improvement')} "
                                  f"but didn't get to start one ({reason}).")
         else:
             # "Drafted" means a branch exists; an attempt that failed or was cut short is not one.
@@ -1736,6 +1955,11 @@ class DreamService:
                     line += (" — one of them held because its tests failed" if len(held) == 1
                              else f" — {len(held)} of them held because their tests failed")
                 sentences.append(line + ".")
+                decisions = [d for d in waiting if d.get("changes_decision")]
+                if decisions:
+                    sentences.append(("One of them changes" if len(decisions) == 1
+                                      else f"{len(decisions)} of them change")
+                                     + " a documented choice in the code — review it carefully.")
             if failed and landed:
                 sentences.append(f"{'One' if len(failed) == 1 else str(len(failed))} more didn't "
                                  f"land{why}.")
@@ -1759,9 +1983,10 @@ class DreamService:
 
     @staticmethod
     def _discovery_sentence(session: dict, opener: str) -> str:
-        """The best discovery of the night as the report's first sentence — with its source, and
-        honest when it is unverified. "" when the night found nothing."""
-        discoveries = [d for d in (session.get("discoveries") or []) if isinstance(d, dict)]
+        """The best discovery of the night as the report's first sentence — with the host it was
+        verified on, and honest when it is unverified (an applied change or an experiment says
+        what it is in its own words). "" when the night found nothing."""
+        discoveries = [d for d in _records(session.get("discoveries")) if isinstance(d, dict)]
         if not discoveries:
             return ""
         best = discoveries[0]
@@ -1771,28 +1996,38 @@ class DreamService:
         source = " ".join(str(best.get("source") or "").split())
         if best.get("verified") and source:
             tail = f" (verified on {source})"
-        elif source:
-            tail = f" ({source})"
+        elif best.get("verified") is False:
+            tail = " (unverified)"
         else:
-            tail = " (unverified)" if best.get("verified") is False else ""
+            tail = ""
         more = len(discoveries) - 1
         extra = f" — and {more} more {'discovery' if more == 1 else 'discoveries'} in the journal" if more else ""
-        return f"{opener}'s best find: {text}{tail}{extra}."
+        lead = "Last night's best find" if opener == "Last night" else "The best find of the session you asked for"
+        return f"{lead}: {text}{tail}{extra}."
 
     @staticmethod
     def _night_counts_sentence(session: dict) -> str:
         """"I researched 3 questions, verified 4 facts and ran 1 experiment." — only the parts that
         happened; "" for a bare Phase 1 night."""
-        research = [r for r in (session.get("research") or []) if isinstance(r, dict)]
-        facts = int(session.get("facts_noted") or 0)
-        experiments = [e for e in (session.get("experiments") or []) if isinstance(e, dict)]
+        research = [r for r in _records(session.get("research")) if isinstance(r, dict)]
+        try:
+            facts = int(session.get("facts_noted") or 0)
+        except (TypeError, ValueError):
+            facts = 0
+        experiments = [e for e in _records(session.get("experiments")) if isinstance(e, dict)]
         bits: list[str] = []
         if research:
             bits.append(f"researched {_plural(len(research), 'question')}")
         if facts:
             bits.append(f"verified {_plural(facts, 'fact')}")
-        if experiments:
-            bits.append(f"ran {_plural(len(experiments), 'experiment')}")
+        # An experiment that was stopped unread or refused did not "run": say so.
+        ran = [e for e in experiments if e.get("ok")]
+        unfinished = len(experiments) - len(ran)
+        if ran:
+            bits.append(f"ran {_plural(len(ran), 'experiment')}"
+                        + (f" (and tried {unfinished} more that didn't finish)" if unfinished else ""))
+        elif unfinished:
+            bits.append(f"tried {_plural(unfinished, 'experiment')} that didn't finish")
         if not bits:
             return ""
         if len(bits) == 1:
@@ -1803,7 +2038,7 @@ class DreamService:
     def _limit_sentence(session: dict) -> str:
         """The plain truth about the plan's limit (§13): when it was reached, whether the night
         resumed, and how much of the plan ran when it didn't."""
-        log = [e for e in (session.get("limit_log") or []) if isinstance(e, dict)]
+        log = [e for e in _records(session.get("limit_log")) if isinstance(e, dict)]
         if not log:
             return ""
         first = _parse_iso(str(log[0].get("at") or ""))
@@ -1811,12 +2046,15 @@ class DreamService:
         again = " and again later" if len(log) > 1 else ""
         resumed = [e for e in log if e.get("resumed_at")]
         last = log[-1]
+        if session.get("stopped_reason") == _LIMIT_THREE_TIMES:
+            return (f"The plan's limit was hit three times (first{when}), so I ended the night early; "
+                    "what was left is saved for tomorrow night.")
         if last.get("resumed_at"):
             back = _parse_iso(str(last["resumed_at"]))
             return (f"The plan's limit was reached{when}{again}; I paused and resumed"
                     + (f" at {back:%H:%M}" if back is not None else "") + ".")
-        planned = len(session.get("plan") or [])
-        ran = len([d for d in (session.get("drafts") or [])
+        planned = len(_records(session.get("plan")))
+        ran = len([d for d in _records(session.get("drafts"))
                    if isinstance(d, dict) and d.get("held_for") != "limit"])
         tail = f" — {ran} of {planned} planned improvements ran" if planned else ""
         if resumed:
@@ -1851,21 +2089,25 @@ class DreamService:
     def _buckets(session: dict) -> dict[str, int]:
         """The journal's tally, tolerant of a hand-edited or older-shape record (missing keys, a
         draft without an outcome): every reader of a journaled session goes through this."""
-        drafts = [d for d in (session.get("drafts") or []) if isinstance(d, dict)]
+        drafts = [d for d in _records(session.get("drafts")) if isinstance(d, dict)]
         limited = [d for d in drafts if d.get("outcome") == "held" and d.get("held_for") == "limit"]
         outcomes = [d.get("outcome") for d in drafts if d not in limited]
+        try:
+            facts = int(session.get("facts_noted") or 0)
+        except (TypeError, ValueError):
+            facts = 0
         return {
             "tried": len(outcomes),
             "landed": len(_landed(drafts)),
-            "applied": len(session.get("applied") or []),
+            "applied": len(_records(session.get("applied"))),
             "held": outcomes.count("held"),
             "waiting": outcomes.count("drafted"),
             "failed": sum(1 for o in outcomes if o in ("failed", "skipped")),
             "stopped": outcomes.count("stopped"),
             "limited": len(limited),
-            "facts": int(session.get("facts_noted") or 0),
-            "discoveries": len([d for d in (session.get("discoveries") or []) if isinstance(d, dict)]),
-            "experiments": len([e for e in (session.get("experiments") or []) if isinstance(e, dict)]),
+            "facts": facts,
+            "discoveries": len([d for d in _records(session.get("discoveries")) if isinstance(d, dict)]),
+            "experiments": len([e for e in _records(session.get("experiments")) if isinstance(e, dict)]),
         }
 
     @classmethod
@@ -1926,7 +2168,7 @@ class DreamService:
             reason = str(s.get("stopped_reason") or "").strip()
             bits.append("nothing drafted" + (f" ({reason})" if reason else ""))
         line = f"Last session ({s.get('day', '?')}): {', '.join(bits)}."
-        if s.get("limit_log"):
+        if _records(s.get("limit_log")):
             line += " The plan's limit paused it."
         return line
 
@@ -2013,9 +2255,9 @@ class DreamService:
                     continue
                 s["ended"] = now.isoformat(timespec="seconds")
                 s["stopped_reason"] = _CLOSED_MID_SESSION
-                s.setdefault("plan", [])
-                s.setdefault("drafts", [])
-                s.setdefault("applied", [])
+                s["plan"] = _records(s.get("plan"))
+                s["drafts"] = _records(s.get("drafts"))
+                s["applied"] = _records(s.get("applied"))
                 for d in s["drafts"]:
                     if isinstance(d, dict) and not d.get("outcome"):
                         d["outcome"], d["reason"] = "stopped", _CLOSED_MID_SESSION
@@ -2024,7 +2266,7 @@ class DreamService:
                     data["rebuild_pending"] = True  # the exe is still the old build
                 s["report"] = self._compose_report(s)
                 s["report_delivered"] = False
-                s["notes"] = (s.get("notes") or [])[-(_NOTES_CAP - 1):] + [
+                s["notes"] = _records(s.get("notes"))[-(_NOTES_CAP - 1):] + [
                     f"{now:%H:%M} session closed after a restart — HELIX had closed mid-session"]
                 closed.append(s)
             if closed:

@@ -191,7 +191,9 @@ report}`; `POST /api/dream/now` `{minutes}`; `POST /api/dream/stop`.
 4. **Frozen truth.** The frozen app drafts against the source repo through `source_root`; when that
    isn't possible the session says so instead of pretending.
 5. **Fable.** Planning and drafting use the growth model (`work_model(deep=True)` for the coder);
-   `dream_status` states the model in use.
+   `dream_status` states the model in use. Which rail and model each cycle of a night runs on is
+   recorded honestly in §11 — the journal's per-night `model` names what the night PLANNED and
+   DRAFTED on, not every turn in it.
 6. **Suite green, web builds clean, existing Evolve/self-dev tests untouched in meaning.**
 
 ## 9. What shipped — E2, the face (2026-09-04)
@@ -240,3 +242,91 @@ engine; the shell reads `container.dream`, `container.paths.source_root` and
 report the shell TOLD, else the one still waiting — peeked through the engine's `pending_report()`, which
 never consumes it (only `morning_report()`, on the first user turn, does); the card's status line carries
 the last session summary either way.
+
+## 10. What shipped — Phase 2, the face (2026-09-05)
+
+The Dream Mind (READ_ME/DREAM_MIND.md §11) gives every journaled night `discoveries`, `facts`,
+`experiments`, `agenda`, `agenda_remaining` and `self_model_delta` beside Phase 1's drafts, applied
+list, rebuild result and report; `DreamService.journal_entries(nights)` (dream.py) reads them back
+as one plain record per night, newest first, every field defaulted so an older-shape night still
+renders. The face on top of it:
+
+- **Route** (`helix/api/server.py`): `GET /api/dream/journal?nights=30` → `shell.dream_journal(nights)`
+  → `{available, enabled, start, running, nights: [...]}`; token-guarded like every `/api` route; an
+  unreadable `nights` is refused (422), the count is clamped 1–90 in the shell.
+- **Shell** (`helix/api/shell.py`, `dream_journal`): hands the engine's nights through untouched and
+  adds what the empty state needs to be honest — whether `dream_enabled` is on and `dream_start` — so
+  "the first session runs tonight at 23:00" is only said when it is true. No engine, a Phase 1 engine
+  without `journal_entries`, or a journal that cannot be read each answer no nights, never an error.
+- **Page** (`web/src/pages/Dream.tsx`; `{name: "dream"}` in `store.ts`; routed and "◐ Dream" in the nav
+  in `App.tsx`; "◐ Dream journal" on the Menu's tab row and on the Settings Dreaming card): nights as
+  cards — the date and window, the night in numbers, DISCOVERED first (each line with its source,
+  verified / unverified marked), APPLIED with one-line summaries, VERIFIED (each fact with its host
+  and date, linked when the source is https), TRIED (experiments, with what they recommend and the
+  reminder that they ship nothing), the remaining DRAFTS with their outcome, the rebuild line, the
+  limit sentence, the REPORT ("not told yet" while it waits for the morning), the weekly digest, and
+  a fold with the night's notes (questions researched and their findings, claims re-checked, the
+  agenda carried over). Empty states: "No dreams yet — the first session runs tonight at HH:MM" when
+  dreaming is on; "dreaming is switched off" when it isn't; "running now" during the first session;
+  "isn't available in this build" without an engine. The page re-reads when the event stream flips
+  `dream.running`, so a night appears the moment it ends.
+- **Tests** (`tests/test_dream_journal.py`): the shell accessor against a fake engine (the nights pass
+  through, the empty-state facts, the count clamp, no engine / an older engine / a locked journal,
+  stray journal entries dropped, a rig without settings) and the route over plain ASGI (the shape,
+  `?nights=`, 401 without or with a wrong token, 422 on an unreadable count).
+- **The page's honesty rules**: a failed experiment shows the journal's own sentence for why (its
+  `summary`, e.g. "The experiment ran past its 4-minute budget and was stopped."), "could not run"
+  only when there is none; a draft line leads with the REQUEST and shows the coder's one-line summary
+  muted beneath it — a summary that is only the coder's sign-off chatter (ends in a colon, "here's a
+  summary", "All done") is dropped rather than shown as the change; the night's header says
+  "drafted on Fable 5" because that is what the field records (below).
+
+## 11. What shipped — Phase 2, the mind (2026-09-05)
+
+The engine side of the same merge (READ_ME/DREAM_MIND.md §11–§13), so the face above has something
+to show:
+
+- **Wiring** (`helix/app/container.py`), in this order: `ConversationService(…, verified=self.verified)`
+  (the store the DREAM writes go to) → the agents (`_seed_watchers`) → `DreamMind(chat=growth_chat,
+  conversation, selfdev, verified, research, parts, builds, tools_registry=self.tools,
+  store=JsonSettings(data/helix_self.json), settings, clock, log_tail=Evolve's _default_log_tail,
+  activity=None, evolve, agents, source_root=paths.source_root)` → `DreamService(…, mind=self.dream_mind,
+  subscription=self.subscription)`. The mind is built after the conversation and the agents because it
+  reads both. `data/helix_self.json` (the self-model: `nights`, `updated`, `capable[]`, `weak[]`,
+  `building[]`, each line with `first`/`last` night seen) is on `config.VOLATILE_STORE_NAMES`; no route
+  exposes it yet (`container.dream_mind.self_model()` would).
+- **The seam**: `DreamService._run` → `_run_mind` → `mind.run_night(window_end, dream_max_drafts,
+  hooks=NightHooks(improve, note, record, should_stop, nights, limit, rail_problem, activity))`. The
+  session owns the window, the lane, the stop flag, the limit pause and the user's presence (`activity`
+  is the shell's `seconds_since_activity`, handed through `DreamService._activity_seconds`; the mind
+  prefers it over its own); the mind owns the thinking. A leftover agenda from either side is merged
+  into `agenda_remaining` (the next night's material), never overwritten.
+- **Rail and model per cycle** — the honest version of bar 5: REFLECT, the improve-plan fold and the
+  weekly DIGEST run on `growth_chat` (`PreferredChat(subscription, …, model=growth_model.resolve(),
+  effort="high").without_web()` — Fable, plan-only, no web); EXPERIMENT and IMPROVE run the coder
+  (`SelfDevService.experiment` / the `improve_helix` lane, `work_model(deep=True)`, Fable in the
+  container). RESEARCH and VERIFY go through `ConversationService.run_turn(prompt, tool_names=DREAM_TOOLS,
+  allow_builds=False, persist=False, speaker="dream", cancel=…)` — the audited research channel
+  (`research_search` / `research_read` on the allowlist, `note_verified_fact`, the model's own web off)
+  — and, as of this merge, that hermetic turn runs on the conversation's OWN model (the orb's, not the
+  growth model: `persist=False` skips the auto-deep escalation and the mind passes no model). So the
+  journal's per-night `model` and the Dream page's "drafted on Fable 5" name what the night planned
+  and drafted on; the research and verify turns are on the orb rail until `run_turn` learns a model
+  for the dream speaker. Everything is on the subscription rail only: `hooks.rail_problem()`
+  (`subscription.active()`; inactivity reads as a limit) is checked before every mind step, the API key
+  is never used, and a limit PAUSES the night (backoff probes at 20/30/45/60 minutes, resume the same
+  step, three pauses end it; a mid-draft limit is journaled "held" with `held_for: "limit"`, the branch
+  rejected). The Fable gate (`why_not_now`) refuses a night whose resolver is not Fable-class and
+  journals "Fable isn't available on this plan right now" once; `dream_status` then says "I only dream on
+  Fable — never on a weaker model."
+- **The journal record per night** (what `journal_entries` reads back; §10's page renders it): `id`,
+  `day`, `kind` (nightly | now), `started`, `ended`, `window`, `stopped_reason`, `theme`, `model`,
+  `in_progress`; `discoveries[]` {text, source, url, verified true/false/null, kind, score} already
+  ordered best first; `facts[]` {id, claim, value, host, url, date, project, topics}; `facts_noted`;
+  `experiments[]` {idea, ok, findings, recommendation, summary}; `research[]` {question, why, status,
+  findings[], facts[], facts_noted, ideas[], queries[] — the audit trail}; `verify[]` {claim, verdict,
+  status, findings, facts, facts_noted, url, was, id}; `agenda` {research, verify, experiments,
+  improve}; `agenda_remaining[]`; `self_model_delta` {added, dropped, kept}; `drafts[]` {outcome,
+  held_for, summary, request, branch, reason, origin}; `applied[]`; `counts`; `rebuild`;
+  `restart_needed`; `report`; `report_delivered`; `limit`; `limit_log[]`; `weekly_digest` (every 7th
+  night).

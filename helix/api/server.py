@@ -851,6 +851,14 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
     def dream_stop():
         return shell.dream_stop()
 
+    @app.get("/api/dream/journal")
+    def dream_journal(nights: int = 30):
+        """The Dream journal page (READ_ME/DREAM_MIND.md §11): the last `nights` sessions, newest
+        first — each night's discoveries, verified facts (host and date), experiments, drafts with
+        their outcomes, the applied changes, the counts, the rebuild result and the report — plus
+        whether dreaming is on and when the window opens, so an empty journal says the truth."""
+        return shell.dream_journal(nights)
+
     @app.post("/api/settings/remove_connection")
     async def remove_connection(request: Request):
         body = await request.json()
