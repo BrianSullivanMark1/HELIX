@@ -429,3 +429,200 @@ def test_escalation_is_fenced_from_autonomous_runs():
     # Reading stays open to an agent — fencing escalation must not have fenced the read faculties a
     # morning brief is made of.
     assert "read_file" not in BUILD_TOOLS and "search_knowledge" not in BUILD_TOOLS
+
+
+# ----- THE DREAM TIER (READ_ME/DREAM_MIND.md §10): DREAM_TOOLS, tool_names, the verified block -----
+
+def _spec(name: str) -> ToolSpec:
+    return ToolSpec(name, name, {"type": "object", "properties": {}})
+
+
+_TIER_SPECS = [_spec(n) for n in (
+    "list_apps", "research_search", "research_read", "verified_facts",   # readable
+    "note_verified_fact", "note_improvement", "remember",                # the DREAM writes
+    "build_app", "forget_verified", "view_screen", "think_harder",       # fenced
+)]
+_READABLE = {"list_apps", "research_search", "research_read", "verified_facts"}
+
+
+class _RecordingTools(_FakeTools):
+    def __init__(self, specs):
+        super().__init__(specs)
+        self.dispatched: list[str] = []
+
+    def dispatch(self, name, args, **k) -> str:
+        self.dispatched.append(name)
+        return f"{name} ran"
+
+
+def _tier_service(chat=None, tools=None, **kw):
+    chat = chat or _CaptureChat()
+    tools = tools or _RecordingTools(_TIER_SPECS)
+    svc = ConversationService(chat, tools, _FakeStore(), _FakeMemory(), _FixedClock(), "sys", **kw)
+    return svc, chat, tools
+
+
+def test_dream_tools_is_every_readable_tool_plus_the_three_writes():
+    from helix.services.conversation import BUILD_TOOLS, DREAM_TOOLS, DREAM_WRITES
+
+    svc, _, _ = _tier_service()
+    assert svc.dream_tools() == _READABLE | DREAM_WRITES
+    assert DREAM_WRITES == {"note_verified_fact", "note_improvement", "remember"}
+    # the sentinel is a frozenset (types like any allowlist) that names no real tool
+    assert isinstance(DREAM_TOOLS, frozenset) and not (DREAM_TOOLS & _READABLE)
+    # note_verified_fact is the one DREAM write that is NOT fenced (the orb has it too);
+    # forget_verified is fenced like every other record-rewriting tool
+    assert "note_verified_fact" not in BUILD_TOOLS and "forget_verified" in BUILD_TOOLS
+    # composed live: a faculty attached later is in the tier next time it is asked
+    svc2, _, tools = _tier_service(tools=_RecordingTools([_spec("list_apps")]))
+    assert svc2.dream_tools() == {"list_apps"} | DREAM_WRITES
+    tools._specs.append(_spec("research_read"))
+    assert "research_read" in svc2.dream_tools()
+
+
+def test_the_dream_tier_is_offered_the_writes_only_because_it_names_them():
+    from helix.services.conversation import DREAM_TOOLS, DREAM_WRITES
+
+    svc, chat, _ = _tier_service()
+    svc.run_turn("research esp32 psram", allow_builds=False, persist=False, tool_names=DREAM_TOOLS)
+    offered = {t.name for t in chat.last_tools}
+    assert offered == _READABLE | DREAM_WRITES
+    for fenced in ("build_app", "forget_verified", "view_screen", "think_harder"):
+        assert fenced not in offered
+    # an explicit set narrows further — and can never re-admit a fenced tool
+    svc.run_turn("read", allow_builds=False, persist=False,
+                 tool_names={"research_read", "build_app", "view_screen"})
+    assert {t.name for t in chat.last_tools} == {"research_read"}
+    # on a human turn the allowlist only narrows what the full set offers
+    svc.run_turn("read", allow_builds=True, tool_names={"research_read", "build_app"})
+    assert {t.name for t in chat.last_tools} == {"research_read", "build_app"}
+    # the sentinel anywhere else narrows to nothing rather than widening anything
+    svc.run_turn("x", allow_builds=True, tool_names=frozenset(DREAM_TOOLS | {"list_apps"}))
+    assert {t.name for t in chat.last_tools} == {"list_apps"}
+
+
+def test_a_watcher_never_gets_the_dream_writes():
+    from helix.services.conversation import DREAM_WRITES
+
+    svc, chat, _ = _tier_service()
+    svc.run_turn("process this email", allow_builds=False, persist=False)   # no tool_names: a watcher
+    offered = {t.name for t in chat.last_tools}
+    assert offered == _READABLE
+    assert not (offered & DREAM_WRITES)
+    svc.run_turn("process this email", allow_builds=False)                  # a persisted autonomous turn too
+    assert not ({t.name for t in chat.last_tools} & DREAM_WRITES)
+
+
+def test_the_orb_keeps_note_verified_fact_but_the_fence_holds_on_forget():
+    svc, chat, _ = _tier_service()
+    svc.run_turn("note what you verified", allow_builds=True)
+    offered = {t.name for t in chat.last_tools}
+    assert {"note_verified_fact", "forget_verified", "research_read"} <= offered
+
+
+def test_tool_names_is_enforced_at_dispatch_on_the_api_rail():
+    from helix.ports.llm import ToolResult
+
+    chat = _ScriptChat([
+        Reply(blocks=(ToolUse("t1", "list_apps", {}), ToolUse("t2", "note_verified_fact", {}),
+                      ToolUse("t3", "build_app", {}))),
+        Reply(blocks=(Text("done"),)),
+    ])
+    svc, chat, tools = _tier_service(chat=chat)
+    out = svc.run_turn("go", allow_builds=False, persist=False, tool_names={"list_apps"})
+    assert out == "done"
+    assert tools.dispatched == ["list_apps"]          # the model's other two calls never ran
+    results = [b for b in chat.last_turns[-1].blocks if isinstance(b, ToolResult)]
+    errors = {r.tool_use_id: r for r in results if r.is_error}
+    assert set(errors) == {"t2", "t3"}
+    assert "isn't available in this run" in errors["t2"].content
+
+
+def test_the_dream_tier_bridges_only_its_names_on_the_subscription_rail():
+    from helix.services.conversation import DREAM_TOOLS, DREAM_WRITES
+
+    sub = _FakeSubscription()
+    svc, _, _ = _tier_service(subscription=sub)
+    svc.run_turn("research", allow_builds=False, persist=False, tool_names=DREAM_TOOLS)
+    _prompt, kw = sub.hermetic_calls[-1]
+    assert kw.get("web") is False                    # the model's own web tools stay OFF
+    assert "model" not in kw                         # no auto-deep escalation on the tier
+    # the names the rail bridges are exactly the tier's
+    svc2, _, _ = _tier_service(subscription=(sub2 := _NamesSubscription()))
+    svc2.run_turn("research", allow_builds=False, persist=False, tool_names=DREAM_TOOLS)
+    assert set(sub2.names) == _READABLE | DREAM_WRITES
+    svc2.run_turn("watch", allow_builds=False, persist=False)
+    assert set(sub2.names) == _READABLE
+
+
+class _NamesSubscription(_FakeSubscription):
+    def __init__(self):
+        super().__init__()
+        self.names: tuple = ()
+
+    def run_hermetic(self, prompt, names=(), **kw) -> str:
+        self.names = tuple(names)
+        return super().run_hermetic(prompt, names, **kw)
+
+
+class _FakeVerified:
+    """Stand-in VerifiedStore: a block when the turn mentions PSRAM, records what it was asked."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.asked: list[str] = []
+        self.fail = fail
+
+    def for_turn(self, text: str, project: str = "") -> str:
+        self.asked.append(text)
+        if self.fail:
+            raise OSError("disk")
+        if "psram" in text.lower():
+            return ("[VERIFIED KNOWLEDGE — records: 1) XIAO ESP32S3 Sense PSRAM: 8 MB — verified "
+                    "2026-09-04 from wiki.seeedstudio.com]")
+        return ""
+
+
+def test_verified_knowledge_is_injected_on_orb_turns_but_never_persisted():
+    ver = _FakeVerified()
+    chat = _CaptureChat()
+    store = _FakeStore()
+    svc = ConversationService(chat, _FakeTools([]), store, _FakeMemory(), _FixedClock(), "sys",
+                              verified=ver)
+    svc.run_turn("how much PSRAM does the xiao have", speaker="Brian")
+    seen = _all_text(chat.last_turns)
+    assert "verified 2026-09-04 from wiki.seeedstudio.com" in seen
+    assert "wiki.seeedstudio.com" not in "".join(m.text for m in store.msgs)   # ephemeral, like lessons
+    assert ver.asked == ["how much PSRAM does the xiao have"]
+    chat2 = _CaptureChat()
+    svc2 = ConversationService(chat2, _FakeTools([]), _FakeStore(), _FakeMemory(), _FixedClock(), "sys",
+                               verified=ver)
+    svc2.run_turn("what time is it")
+    assert "VERIFIED KNOWLEDGE" not in _all_text(chat2.last_turns)   # nothing relevant → no block
+
+
+def test_verified_knowledge_reaches_the_dream_tier_but_not_a_plain_watcher():
+    from helix.services.conversation import DREAM_TOOLS
+
+    ver = _FakeVerified()
+    chat = _CaptureChat()
+    svc = ConversationService(chat, _RecordingTools(_TIER_SPECS), _FakeStore(), _FakeMemory(),
+                              _FixedClock(), "sys", verified=ver)
+    svc.run_turn("verify the PSRAM claim", allow_builds=False, persist=False, tool_names=DREAM_TOOLS)
+    assert "verified 2026-09-04 from wiki.seeedstudio.com" in _all_text(chat.last_turns)
+    svc.run_turn("an email about PSRAM", allow_builds=False, persist=False)   # a watcher
+    assert "VERIFIED KNOWLEDGE" not in _all_text(chat.last_turns)
+    assert ver.asked == ["verify the PSRAM claim"]   # the watcher never even consulted the store
+
+
+def test_a_verified_store_failure_never_costs_the_turn():
+    chat = _CaptureChat()
+    svc = ConversationService(chat, _FakeTools([]), _FakeStore(), _FakeMemory(), _FixedClock(), "sys",
+                              verified=_FakeVerified(fail=True))
+    assert svc.run_turn("psram?") == "done"
+    assert "VERIFIED KNOWLEDGE" not in _all_text(chat.last_turns)
+
+
+def test_no_verified_store_means_no_block_and_no_error():
+    svc, chat, _ = _tier_service()
+    assert svc.run_turn("psram?") == "done"
+    assert "VERIFIED KNOWLEDGE" not in _all_text(chat.last_turns)

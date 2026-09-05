@@ -5,6 +5,7 @@ the executable), and derives every read/write path from it. Nothing else hard-co
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -15,13 +16,49 @@ from helix.logging_setup import get_logger
 
 _LOG = get_logger("config")
 
+# THE BUILD STAMP (READ_ME/DREAM.md §3). build.py writes this file into the bundle (--add-data) so a
+# FROZEN HELIX knows which source repository it was built from and which Python built it — the two
+# facts the dream session needs to draft against the real source and to rebuild the app at dawn.
+# Absent in development (nothing writes it into the tree), so build_info() is empty there.
+BUILD_INFO_NAME = "build_info.json"
+# Settings that override the stamp in a frozen build (the Settings card can point a moved repo).
+SOURCE_ROOT_SETTING = "source_root"
+DEV_PYTHON_SETTING = "dev_python"
+
+
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
 
 def _app_root() -> Path:
     # Frozen (PyInstaller --onedir): the folder next to the executable.
-    if getattr(sys, "frozen", False):
+    if _is_frozen():
         return Path(sys.executable).resolve().parent
     # Development: the repo root (helix/config.py -> repo/).
     return Path(__file__).resolve().parent.parent
+
+
+def _build_info_candidates() -> tuple[Path, ...]:
+    """Where the stamp can sit: beside this module (the package-relative path that is right both in
+    dev and in the bundle, exactly as helix/ui/assets is found), and the bundle root as a backstop."""
+    here = Path(__file__).resolve().parent / BUILD_INFO_NAME
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return (here, Path(meipass) / "helix" / BUILD_INFO_NAME)
+    return (here,)
+
+
+def build_info(path: Path | None = None) -> dict:
+    """What build.py stamped into this bundle: {"source_root", "python", "sha", "built_at"}. Empty in
+    development or when the stamp is missing or unreadable — callers treat every key as optional."""
+    candidates = (Path(path),) if path is not None else _build_info_candidates()
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        return data if isinstance(data, dict) else {}
+    return {}
 
 
 def _frozen_data_dir() -> Path:
@@ -61,6 +98,15 @@ VOLATILE_STORE_NAMES: tuple[str, ...] = (
     "helix_cart.json",
     "helix_parts.json",
     "amazon-chrome",
+    # The dream session's journal (services/dream.py): the session thread writes it after every plan,
+    # draft and apply — i.e. WHILE its own coder draft runs — so both guards must skip it or every
+    # overnight draft would be refused as an escape the moment the journal recorded it.
+    "helix_dream.json",
+    # The Dream Mind's stores (READ_ME/DREAM_MIND.md §10–§11): the verified-knowledge record (a
+    # night notes facts while its own coder drafts run) and the self-model — written mid-draft
+    # by the session thread, so both guards must skip them like the dream journal.
+    "helix_verified.json",
+    "helix_self.json",
 )
 
 
@@ -134,10 +180,14 @@ def migrate_legacy_data(old: Path, new: Path) -> None:
 
 @dataclass(frozen=True)
 class AppPaths:
-    """Resolved, absolute paths for everything HELIX reads or writes."""
+    """Resolved, absolute paths for everything HELIX reads or writes.
+
+    `frozen` pins whether this is a packaged build (None = ask sys.frozen, the real answer; tests
+    set it explicitly to exercise the frozen paths without freezing anything)."""
 
     root: Path
     data: Path
+    frozen: bool | None = None
 
     @classmethod
     def resolve(cls) -> "AppPaths":
@@ -147,12 +197,59 @@ class AppPaths:
             # An explicit data-dir override (tests, a scratch instance beside the real one). The
             # single-instance lock is per-data-dir, so an override instance never fights the real app.
             return cls(root=root, data=Path(override))
-        if getattr(sys, "frozen", False):
+        if _is_frozen():
             data = _frozen_data_dir()
             migrate_legacy_data(root / "data", data)
         else:
             data = root / "data"  # development: repo-local, unchanged
         return cls(root=root, data=data)
+
+    @property
+    def is_frozen(self) -> bool:
+        return _is_frozen() if self.frozen is None else bool(self.frozen)
+
+    def _setting(self, key: str) -> str:
+        """One string setting, read fresh from helix_settings.json. config sits below the adapters,
+        so it reads the file itself rather than importing the settings store; the two keys it reads
+        are written only by hand or by the Settings card, so a fresh read per call is the right
+        trade — nothing here caches a path the user just corrected."""
+        try:
+            data = json.loads(self.settings_file.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return ""
+        value = data.get(key) if isinstance(data, dict) else None
+        return value.strip() if isinstance(value, str) else ""
+
+    @property
+    def source_root(self) -> Path | None:
+        """The git repository self-changes draft against (READ_ME/DREAM.md §3).
+
+        Development: the repo itself (`root`). Frozen: `root` is dist/HELIX — the install folder next
+        to the exe, which is no git repository at all — so the answer is the SOURCE tree the build
+        came from: the `source_root` setting when set, else the build stamp; either counts only when
+        that folder really holds a `.git` (a linked worktree has a .git FILE, a repo a directory —
+        both pass). None means "no usable source": the dream session says so instead of pretending."""
+        if not self.is_frozen:
+            return self.root
+        for candidate in (self._setting(SOURCE_ROOT_SETTING),
+                          str(build_info().get("source_root") or "")):
+            if candidate:
+                folder = Path(candidate)
+                if (folder / ".git").exists():
+                    return folder
+        return None
+
+    @property
+    def dev_python(self) -> str | None:
+        """The interpreter that runs the test suite and build.py. Development: this very Python.
+        Frozen: sys.executable is HELIX.exe, so it is the `dev_python` setting when set, else the
+        interpreter recorded in the build stamp — and only if that file still exists."""
+        if not self.is_frozen:
+            return sys.executable
+        for candidate in (self._setting(DEV_PYTHON_SETTING), str(build_info().get("python") or "")):
+            if candidate and Path(candidate).is_file():
+                return candidate
+        return None
 
     def ensure(self) -> "AppPaths":
         """Create data/ and its subfolders if missing. Safe to call repeatedly."""

@@ -324,3 +324,23 @@ class ProductsFound(Event):
 
     title: str
     items: tuple[dict, ...]
+
+
+@dataclass(frozen=True)
+class DreamStateChanged(Event):
+    """The nightly dream session (services/dream.py) started or ended. The face flips its small
+    "◐ dreaming" chip on it; `line` is the one-line status the chip can show. Published from the
+    session thread — a subscriber must marshal onto its own thread if it needs one."""
+
+    running: bool
+    line: str = ""
+
+
+@dataclass(frozen=True)
+class RebuildRequested(Event):
+    """A dream session applied changes to the SOURCE of a frozen HELIX and has already scheduled the
+    detached rebuild-and-relaunch job (adapters/rebuild.py). The job waits for HELIX.exe to exit, so
+    the only thing left to do is quit: the web shell answers this by running its graceful quit hook
+    (app/webboot.py). `reason` is the plain line for the log ("applied 3 changes")."""
+
+    reason: str = ""

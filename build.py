@@ -8,15 +8,48 @@ NEVER bundles data/ — a shipped build starts blank (no keys, no history, nobod
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 NAME = "HELIX"
+# THE BUILD STAMP (READ_ME/DREAM.md §3): where this build came from and which Python built it, shipped
+# into the bundle as helix/build_info.json (config.build_info reads it). A FROZEN HELIX drafts its
+# overnight self-changes against that source repository and asks that interpreter to run the suite and
+# rebuild it — without the stamp a packaged app has no idea where its own source lives. Written under
+# build/ (gitignored) rather than into helix/ so a build never dirties the tree those drafts start from.
+BUILD_INFO = ROOT / "build" / "build_info.json"
+
+
+def _git_head(root: Path) -> str:
+    try:
+        proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(root), capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=30)
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def stamp_build_info(root: Path = ROOT, out: Path = BUILD_INFO, *, python: str | None = None,
+                     sha: str | None = None, now: datetime | None = None) -> Path:
+    """Write the stamp and return its path. `sha` and `python` default to this repo's HEAD and this
+    interpreter — the one that has every dependency installed, so it is the one that can run the
+    suite and build.py again from inside the frozen app."""
+    info = {
+        "source_root": str(Path(root).resolve()),
+        "python": python or sys.executable,
+        "sha": _git_head(root) if sha is None else sha,
+        "built_at": (now or datetime.now().astimezone()).isoformat(timespec="seconds"),
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(info, indent=2), encoding="utf-8")
+    return out
 
 
 def _force_rmtree(path: Path) -> None:
@@ -103,6 +136,9 @@ def main(argv: list[str] | None = None) -> int:
     web_dist = _build_web_face()
     if web_dist is not None:
         args += ["--add-data", f"{web_dist}{os.pathsep}helix/webui"]
+    # THE BUILD STAMP: source repo + interpreter + sha, as helix/build_info.json in the bundle — how the
+    # frozen app's dream session finds the source it must draft against and the Python that rebuilds it.
+    args += ["--add-data", f"{stamp_build_info()}{os.pathsep}helix"]
     # The web shell's server + window + mic. fastapi/uvicorn are imported at module scope on the web
     # path; uvicorn's workers/loops resolve dynamically, so collect it in full. pywebview loads its
     # Windows backend (winforms/WebView2) dynamically — collect it whole. sounddevice ctypes-loads a

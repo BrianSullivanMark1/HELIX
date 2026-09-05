@@ -17,9 +17,33 @@ from pathlib import Path
 from helix.api.server import DEFAULT_PORT, PORT_SETTING, EventHub, build_app
 from helix.api.shell import ShellSession
 from helix.app.container import Container
+from helix.domain.events import RebuildRequested
 from helix.logging_setup import get_logger
 
 _LOG = get_logger("webboot")
+
+# How long after RebuildRequested the quit hook runs: the dream session publishes it as its very last
+# act, from its own thread, and the journal write + status push just before it deserve a moment to
+# land. The rebuild script is already waiting for the exe to exit, so nothing else is in a hurry.
+_REBUILD_QUIT_DELAY_S = 1.0
+
+
+def wire_rebuild_quit(bus, app, quit_fn):
+    """The quit-for-rebuild hook (READ_ME/DREAM.md §6): when the dream session has scheduled the
+    detached rebuild it publishes RebuildRequested, and the ONLY thing left is to get out of the
+    way — the same graceful quit the Settings power button runs. Marks the instance as quitting
+    first (the snapshot probe answers 503 from that moment, so an icon click during the teardown
+    boots in our place instead of pointing a tab at a corpse). Returns the handler for tests."""
+
+    def _on_rebuild(ev: RebuildRequested) -> None:
+        _LOG.info("quit requested for the overnight rebuild: %s", ev.reason or "(no reason)")
+        app.state.quitting = True
+        timer = threading.Timer(_REBUILD_QUIT_DELAY_S, quit_fn)
+        timer.daemon = True
+        timer.start()
+
+    bus.subscribe(RebuildRequested, _on_rebuild)
+    return _on_rebuild
 
 
 def _web_dist(app_root: Path) -> Path | None:
@@ -88,6 +112,9 @@ def run_web(open_mode: str = "window") -> int:
         os._exit(0)
 
     app.state.quit = graceful_quit
+    # The dream session's rebuild (DREAM.md §6): it schedules the detached rebuild-and-relaunch job
+    # itself, then asks for this same graceful quit through the bus so the new build can take over.
+    wire_rebuild_quit(container.bus, app, graceful_quit)
     port = int(container.settings.get(PORT_SETTING) or DEFAULT_PORT)
     token = app.state.token
     url = f"http://127.0.0.1:{port}/?t={token}"

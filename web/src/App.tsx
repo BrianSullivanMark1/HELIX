@@ -24,6 +24,7 @@ interface Snapshot {
   greeting?: string;
   camera?: Record<string, unknown> | null;
   cart?: CartSnapshot | null;
+  dream?: { running?: boolean; line?: string } | null;
 }
 
 export default function App() {
@@ -31,6 +32,7 @@ export default function App() {
   const navigate = useHelix((s) => s.navigate);
   const camera = useHelix((s) => s.camera);
   const cart = useHelix((s) => s.cart);
+  const dream = useHelix((s) => s.dream);
   const connectModal = useHelix((s) => s.connectModal);
   const lightbox = useHelix((s) => s.lightbox);
   const [navShown, setNavShown] = useState(true);
@@ -57,6 +59,14 @@ export default function App() {
           s.set({ camera: null, captureOrder: null, overlays: [], hologram: null, cameraCapture: null });
         }
         if (snap.cart !== undefined) s.set({ cart: snap.cart || null });
+        // A dream session already running (a reload at 3 AM, a reconnect) shows its chip at once.
+        if (snap.dream !== undefined) {
+          s.set({
+            dream: snap.dream
+              ? { running: Boolean(snap.dream.running), line: snap.dream.line || "" }
+              : null,
+          });
+        }
         if (snap.greeting) {
           s.addBubble({
             id: "greeting", role: "helix", text: snap.greeting,
@@ -145,6 +155,20 @@ export default function App() {
           <Viewer slug={page.slug} title={page.title} url={page.url} server={page.server} />
         )}
       </main>
+
+      {/* The dream chip: a session of self-improvement is drafting in the background right now.
+          Small and out of the way (under the nav, clear of the legend strip and the input row);
+          it opens Settings, where the Dreaming card holds the status line and the stop button. */}
+      {dream?.running && (
+        <button
+          className="glass rounded-full px-3 py-1 text-xs absolute"
+          style={{ top: 52, right: 18, zIndex: 25, color: "var(--working)", pointerEvents: "auto" }}
+          title={dream.line || "HELIX is dreaming — improving its own code in the background."}
+          onClick={() => navigate({ name: "settings" })}
+        >
+          ◐ dreaming
+        </button>
+      )}
 
       {/* The camera panel stays MOUNTED across pages (its stream and tracker keep running while
           you glance at the Menu or Settings) and simply hides off the Console, where the AR

@@ -14,6 +14,17 @@ interface SettingsData {
   calendar: { configured: boolean };
 }
 
+/** GET /api/dream — the nightly dream session as the backend sees it right now. */
+interface DreamInfo {
+  available: boolean;
+  running: boolean;
+  line: string;
+  status: string;
+  report: string;
+  frozen_without_source: boolean;
+  model: string;
+}
+
 function Dot({ on }: { on: boolean }) {
   return (
     <span className="text-xs" style={{ color: on ? "var(--done)" : "var(--muted)" }}>
@@ -32,6 +43,13 @@ export default function Settings() {
   const [calUrl, setCalUrl] = useState("");
   const [note, setNote] = useState("");
   const [cameras, setCameras] = useState<string[]>([]);
+  const [dream, setDream] = useState<DreamInfo | null>(null);
+  const [dreamNote, setDreamNote] = useState("");
+  const liveDream = useHelix((s) => s.dream); // the event stream's view: flips the moment a session starts/ends
+
+  const loadDream = useCallback(() => {
+    void api.get<DreamInfo>("/api/dream").then(setDream).catch(() => undefined);
+  }, []);
 
   const load = useCallback(() => {
     void api.get<SettingsData>("/api/settings").then((d) => {
@@ -40,16 +58,32 @@ export default function Settings() {
       setSecretEdits({});
       setGmailAddr(d.gmail.address || "");
     });
+    loadDream();
     // Camera names are only readable once the camera has been allowed; until then the list is
     // empty and the hint says so.
     void navigator.mediaDevices?.enumerateDevices?.()
       .then((all) => setCameras(all.filter((x) => x.kind === "videoinput" && x.label).map((x) => x.label)))
       .catch(() => undefined);
-  }, []);
+  }, [loadDream]);
   useEffect(load, [load]);
+  // A session starting or ending while this page is open re-reads the status line.
+  useEffect(() => { loadDream(); }, [liveDream?.running, loadDream]);
 
   const val = (key: string): unknown => (key in edits ? edits[key] : data?.values[key]);
   const setVal = (key: string, v: unknown) => setEdits((e) => ({ ...e, [key]: v }));
+
+  const dreamRunning = liveDream ? liveDream.running : Boolean(dream?.running);
+  const dreamNow = () => {
+    setDreamNote("Starting…");
+    void api.post<{ ok: boolean; text: string }>("/api/dream/now", { minutes: 30 })
+      .then((res) => { setDreamNote(res.text || (res.ok ? "Dreaming." : "Couldn't start.")); loadDream(); })
+      .catch(() => setDreamNote("Couldn't start a dream session — try again."));
+  };
+  const dreamStop = () => {
+    void api.post<{ ok: boolean; text: string }>("/api/dream/stop")
+      .then((res) => { setDreamNote(res.text || "Stopped."); loadDream(); })
+      .catch(() => setDreamNote("Couldn't stop it — try again."));
+  };
 
   const save = () => {
     const values: Record<string, unknown> = { ...edits };
@@ -57,11 +91,18 @@ export default function Settings() {
     const body: Record<string, unknown> = { values };
     if (gmailAddr.trim() && gmailPw.trim()) body.gmail = { address: gmailAddr.trim(), password: gmailPw.trim() };
     if (calUrl.trim()) body.calendar_url = calUrl.trim();
-    void api.put("/api/settings", body).then(() => {
-      setNote("Saved.");
+    void api.put<{ ok: boolean; changed: string[]; rejected?: Record<string, string> }>("/api/settings", body).then((res) => {
+      // A dream value the backend could not read (a cleared start time, say) is refused and kept as
+      // it was, not saved as the default — say so and stay on the page instead of leaving.
+      const refused = Object.values(res?.rejected ?? {});
       setGmailPw("");
       setCalUrl("");
       load();
+      if (refused.length) {
+        setNote(`Saved the rest. ${refused.join(" ")}`);
+        return;
+      }
+      setNote("Saved.");
       window.setTimeout(() => navigate({ name: "console" }), 400);
     }).catch(() => setNote("Save failed — try again."));
   };
@@ -111,6 +152,74 @@ export default function Settings() {
                 onChange={(e) => setVal("evolve_enabled", e.target.checked)} />
               Evolve — draft one self-improvement overnight (never applies itself)
             </label>
+          </div>
+        </section>
+
+        <section className="glass rounded-2xl p-5">
+          <div className="section-title mb-4">Dreaming</div>
+          <div className="space-y-3 text-[13px]">
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={Boolean(val("dream_enabled"))}
+                onChange={(e) => setVal("dream_enabled", e.target.checked)} />
+              Dream nightly — a session of non-stop self-improvement while you sleep (replaces Evolve's one draft on those nights)
+            </label>
+            <div className="flex items-center gap-3">
+              <span className="w-44">Window</span>
+              <span>from</span>
+              <input type="time" value={String(val("dream_start") ?? "23:00")}
+                onChange={(e) => setVal("dream_start", e.target.value)} />
+              <span>for</span>
+              <input type="number" min={1} max={12} step={1} className="w-20"
+                value={Number(val("dream_hours") ?? 8)}
+                onChange={(e) => setVal("dream_hours", Number(e.target.value))} />
+              <span>hours</span>
+            </div>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={Boolean(val("dream_auto_apply"))}
+                onChange={(e) => setVal("dream_auto_apply", e.target.checked)} />
+              Apply green changes automatically
+            </label>
+            <div className="text-xs pl-6" style={{ color: "var(--working)" }}>
+              A drafted change merges on its own only after HELIX's full test suite passes on that exact
+              branch; anything red waits for your review. Off, every draft waits for you.
+            </div>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={Boolean(val("dream_rebuild") ?? true)}
+                onChange={(e) => setVal("dream_rebuild", e.target.checked)} />
+              Rebuild and relaunch after applying (the previous build is kept and restored if the new one fails)
+            </label>
+            <div className="flex items-center gap-3">
+              <span className="w-44">Drafts per night, at most</span>
+              <input type="number" min={1} max={30} step={1} className="w-20"
+                value={Number(val("dream_max_drafts") ?? 10)}
+                onChange={(e) => setVal("dream_max_drafts", Number(e.target.value))} />
+            </div>
+            <div style={{ color: "var(--muted)" }}>
+              Plans and drafts on Fable — the growth model{dream?.model ? ` (${dream.model})` : ""}.
+            </div>
+            {dream?.frozen_without_source && (
+              <div style={{ color: "var(--error)" }}>
+                Dreaming is frozen on this machine: this installed copy can't find the source repository it
+                was built from, so it has nothing to draft against. With HELIX closed, set source_root (the
+                repository path) and dev_python (its Python) in helix_settings.json, saved as plain UTF-8,
+                then start it again.
+              </div>
+            )}
+            {(dream?.status || liveDream?.line) && (
+              <div style={{ whiteSpace: "pre-line", color: dreamRunning ? "var(--working)" : "var(--muted)" }}>
+                {dreamRunning ? "◐ " : ""}{dream?.status || liveDream?.line}
+              </div>
+            )}
+            {dream?.report && (
+              <div style={{ color: "var(--muted)" }}>Last report: {dream.report}</div>
+            )}
+            <div className="flex items-center gap-3 flex-wrap">
+              <button className="btn" onClick={dreamNow} disabled={dreamRunning}>Dream for 30 minutes now</button>
+              {dreamRunning && (
+                <button className="btn btn-danger" onClick={dreamStop}>Stop dreaming</button>
+              )}
+              {dreamNote && <span className="text-xs" style={{ color: "var(--cyan)" }}>{dreamNote}</span>}
+            </div>
           </div>
         </section>
 

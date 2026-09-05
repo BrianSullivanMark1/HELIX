@@ -135,6 +135,7 @@ class EvolveService:
         log_tail: Callable[[], str] | None = None,
         growth_model=None,
         data_dir: Path | None = None,
+        dream=None,
     ) -> None:
         self._chat = chat
         self._lessons = lessons
@@ -149,10 +150,42 @@ class EvolveService:
         # The backlog + journal live beside the other data files. None (older tests / a bare
         # service) simply disables both — every accessor is None-safe.
         self._data_dir = Path(data_dir) if data_dir is not None else None
+        # The DREAM SESSION (services/dream.py, READ_ME/DREAM.md): when it is enabled for the night it
+        # REPLACES this one-proposal pass — tick() defers to it so the two never both draft. Late-bound
+        # by set_dream (the container builds the dream after Evolve, because the dream reads Evolve's
+        # backlog and journal); None keeps the pass exactly as it always was.
+        self._dream = dream
         self._files_lock = threading.Lock()
         self._last_tick: datetime | None = None  # wall clock of the previous heartbeat (wake detection)
         self._catchup = False                    # is a missed night ARMED? (fires at a quiet hour)
         self._pending_probe_at = float("-inf")   # monotonic stamp of the last (costly) pending() probe
+
+    def set_dream(self, dream) -> None:
+        """Late-bind the dream session this pass defers to (see __init__)."""
+        self._dream = dream
+
+    def _dream_covers_tonight(self) -> bool:
+        if self._dream is None:
+            return False
+        try:
+            return bool(self._dream.covers_tonight())
+        except Exception:  # noqa: BLE001 — a confused dream must not stop the plain nightly pass
+            _LOG.warning("evolve: could not ask the dream session whether it covers tonight",
+                         exc_info=True)
+            return False
+
+    def mark_night_covered(self, day: date) -> None:
+        """The dream session ran the night that ends on `day` — record it as this pass's last run,
+        so the night is not ALSO owed here (an owed night is what the catch-up chases; a week of
+        dreaming must not turn into a catch-up draft the day dreaming is switched off). Only ever
+        moves the stamp forward."""
+        try:
+            current = date.fromisoformat(str(self._settings.get(_LAST_RUN_KEY) or "").strip())
+        except ValueError:
+            current = None
+        if current is None or day > current:
+            self._settings.set(_LAST_RUN_KEY, day.isoformat())
+            self._catchup = False
 
     # ----- the backlog (user-queued ideas) and the journal (the morning report's material) -----
     def add_backlog(self, text: str) -> bool:
@@ -173,6 +206,20 @@ class EvolveService:
     def backlog(self) -> list[str]:
         with self._files_lock:
             return self._read_backlog()
+
+    def take_backlog(self, item: str) -> None:
+        """Cross a drafted idea off the queue — the dream session drafts backlog items too."""
+        self._take_backlog(item)
+
+    def material(self) -> str:
+        """The night's material (backlog + lessons + log tail), labelled — the dream planner reads
+        the same text this pass does, so both nights mine one truth."""
+        return self._material()
+
+    def journal(self, line: str) -> None:
+        """Append one dated line to the journal (the dream session mirrors its events here, so
+        `evolve_report` still tells the whole story of the night)."""
+        self._journal(line)
 
     def journal_tail(self, nights: int = 10) -> str:
         """The last few nights' journal lines — what the evolve_report tool reads out."""
@@ -237,6 +284,15 @@ class EvolveService:
         if self._settings.get("evolve_enabled") is False:  # missing = on
             return
         now = self._clock.now()
+        if self._dream_covers_tonight():
+            # The dream session owns tonight: it plans and drafts for hours on the same lane, so this
+            # one-proposal pass stands down — no double drafting. Keep the heartbeat stamp fresh
+            # while deferring: a deferral is not a nap, and the tick after dreaming is switched off
+            # must not read the gap as a wake and arm a catch-up (or, past the patience fuse, draft
+            # into the working day). Nothing else here changes — disable the dream and this pass
+            # resumes exactly where it stood.
+            self._last_tick = now
+            return
         woke = self._woke(now)
         if woke:
             # A launch or a wake from sleep ARMS a missed night. The heartbeat is a QTimer inside a
