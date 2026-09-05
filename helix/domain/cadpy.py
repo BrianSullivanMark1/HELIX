@@ -6,10 +6,14 @@ export) instead of `model.scad` (a mesh kernel with a homemade dialect). LLMs wr
 accurately than OpenSCAD, and the parts here are what "make a case for an ESP32" needs to come out
 *fitting*: a curated hardware catalog with real dimensions and an enclosure helper library.
 
-This module is PURE domain (stdlib only — no build123d import, no I/O, no subprocess):
+This module is PURE domain (stdlib plus the component catalog — no build123d import, no I/O, no
+subprocess):
 
   - `HELIX_LIB` / `HELIX_LIB_FILE`  — the helix_parts.py helper library seeded beside model.py. It
-    imports build123d *at compile time in the runner subprocess*, never here.
+    imports build123d *at compile time in the runner subprocess*, never here. Its BOARDS block is
+    RENDERED at import time by `render_boards()` from helix.domain.components.CATALOG (union the
+    LEGACY_BOARDS the library carried before the catalog), so one source of truth feeds the
+    parts list, the enclosure generator and `board(key)` in model.py.
   - `HELIX_LIB_DOC`                 — the model-facing cheat-sheet the coder prompt embeds.
   - `parse_params` / `set_params`   — the `# --- Parameters ---` block: read it for the studio's
     sliders; rewrite a value in place for "make it 100 wide" and the studio's Commit button.
@@ -27,6 +31,8 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass, field
+
+from helix.domain.components import CATALOG, Component
 
 HELIX_LIB_FILE = "helix_parts.py"
 
@@ -356,17 +362,18 @@ def friendly_error(err_text: str) -> tuple[str, str]:
 # "will my board fit" is the question the user is actually asking.
 # ---------------------------------------------------------------------------------------------
 
-HELIX_LIB = '''"""helix_parts — HELIX's enclosure & hardware library for holograms (build123d inside).
+_LIB_HEAD = '''"""helix_parts — HELIX's enclosure & hardware library for holograms (build123d inside).
 
 Everything is millimetres. Enclosure sizes are INNER (cavity) dimensions. `from helix_parts import *`
 re-exports all of build123d, the board catalog, and the helpers below — model.py needs no other import.
 """
+import math
 from dataclasses import dataclass, field
 
 from build123d import *  # noqa: F401,F403 — the design language rides on build123d's names
 from build123d import (
-    Align, Axis, Box, BuildPart, Compound, Cone, Cylinder, Location, Part, Plane, Pos, Rot,
-    chamfer, extrude, fillet,
+    Align, Axis, Box, BuildPart, Compound, Cone, Cylinder, Location, Part, Plane, Pos, Rot, Text,
+    chamfer, extrude, fillet, mirror,
 )
 
 MM = 1.0
@@ -390,48 +397,92 @@ class BoardSpec:
     approx: bool = False
 
 
-BOARDS: dict[str, BoardSpec] = {
-    # Canonical footprints (official drawings)
-    "arduino_uno": BoardSpec("Arduino Uno R3", 68.6, 53.4,
-                             ((14.0, 2.5), (66.0, 7.6), (66.0, 35.5), (15.3, 50.6)), 3.2, 15, "left"),
-    "arduino_mega": BoardSpec("Arduino Mega 2560", 101.6, 53.4,
-                              ((14.0, 2.5), (66.0, 7.6), (66.0, 35.5), (15.3, 50.6),
-                               (96.5, 2.5), (90.2, 50.6)), 3.2, 15, "left"),
-    "arduino_nano": BoardSpec("Arduino Nano", 43.2, 17.8,
-                              ((1.3, 1.3), (41.9, 1.3), (1.3, 16.5), (41.9, 16.5)), 1.8, 8, "left"),
-    "pi_pico": BoardSpec("Raspberry Pi Pico", 51.0, 21.0,
-                         ((2.0, 4.8), (2.0, 16.2), (49.0, 4.8), (49.0, 16.2)), 2.1, 5, "left"),
-    "pi_4": BoardSpec("Raspberry Pi 4B", 85.0, 56.0,
-                      ((3.5, 3.5), (3.5, 52.5), (61.5, 3.5), (61.5, 52.5)), 2.7, 20, "right"),
-    "pi_zero": BoardSpec("Raspberry Pi Zero 2 W", 65.0, 30.0,
-                         ((3.5, 3.5), (3.5, 26.5), (61.5, 3.5), (61.5, 26.5)), 2.7, 8, "front"),
+'''
+
+# The footprints the library carried before the component catalog existed. Any key the catalog
+# does not (yet) define is rendered from here, so every key that ever worked keeps working;
+# a key the catalog defines is rendered from the catalog — the single source of truth.
+# (name, length, width, holes, hole_d, height, usb side, approx)
+LEGACY_BOARDS: dict[str, tuple] = {
+    "arduino_uno": ("Arduino Uno R3", 68.6, 53.4,
+                    ((14.0, 2.5), (66.0, 7.6), (66.0, 35.5), (15.3, 50.6)), 3.2, 15.0, "left", False),
+    "arduino_mega": ("Arduino Mega 2560", 101.6, 53.4,
+                     ((14.0, 2.5), (66.0, 7.6), (66.0, 35.5), (15.3, 50.6), (96.5, 2.5), (90.2, 50.6)),
+                     3.2, 15.0, "left", False),
+    "arduino_nano": ("Arduino Nano", 43.2, 17.8,
+                     ((1.3, 1.3), (41.9, 1.3), (1.3, 16.5), (41.9, 16.5)), 1.8, 8.0, "left", False),
+    "pi_pico": ("Raspberry Pi Pico", 51.0, 21.0,
+                ((2.0, 4.8), (2.0, 16.2), (49.0, 4.8), (49.0, 16.2)), 2.1, 5.0, "left", False),
+    "pi_4": ("Raspberry Pi 4B", 85.0, 56.0,
+             ((3.5, 3.5), (3.5, 52.5), (61.5, 3.5), (61.5, 52.5)), 2.7, 20.0, "right", False),
+    "pi_zero": ("Raspberry Pi Zero 2 W", 65.0, 30.0,
+                ((3.5, 3.5), (3.5, 26.5), (61.5, 3.5), (61.5, 26.5)), 2.7, 8.0, "front", False),
     # ESP32 DevKitC has NO mounting holes — clamp it with side_rails() instead of standoffs.
-    "esp32_devkitc": BoardSpec("ESP32 DevKitC V4", 48.2, 25.4, (), 0.0, 12, "left"),
+    "esp32_devkitc": ("ESP32 DevKitC V4", 48.2, 25.4, (), 0.0, 12.0, "left", False),
     # Community-measured modules — approx: verify against the part in hand, leave 0.5 mm slack.
-    "esp8266_nodemcu": BoardSpec("NodeMCU ESP8266 (Amica)", 48.6, 25.9,
-                                 ((2.2, 2.2), (46.4, 2.2), (2.2, 23.7), (46.4, 23.7)), 2.5, 12,
-                                 "left", approx=True),
-    "wemos_d1_mini": BoardSpec("Wemos D1 Mini", 34.2, 25.6, (), 0.0, 8, "left", approx=True),
-    "relay_1ch": BoardSpec("Relay module, 1 channel", 50.0, 26.0,
-                           ((2.75, 2.75), (47.25, 2.75), (2.75, 23.25), (47.25, 23.25)), 3.1, 19,
-                           "", approx=True),
-    "relay_2ch": BoardSpec("Relay module, 2 channel", 50.5, 38.5,
-                           ((2.75, 2.75), (47.75, 2.75), (2.75, 35.75), (47.75, 35.75)), 3.1, 19,
-                           "", approx=True),
-    "relay_4ch": BoardSpec("Relay module, 4 channel", 75.0, 55.0,
-                           ((2.75, 2.75), (72.25, 2.75), (2.75, 52.25), (72.25, 52.25)), 3.1, 19,
-                           "", approx=True),
-    "buck_lm2596": BoardSpec("LM2596 buck converter", 43.2, 21.3,
-                             ((3.0, 6.0), (40.2, 15.3)), 3.1, 14, "", approx=True),
-    "breadboard_half": BoardSpec("Half-size breadboard", 83.0, 55.0, (), 0.0, 10, "", approx=True),
+    "esp8266_nodemcu": ("NodeMCU ESP8266 (Amica)", 48.6, 25.9,
+                        ((2.2, 2.2), (46.4, 2.2), (2.2, 23.7), (46.4, 23.7)), 2.5, 12.0, "left", True),
+    "wemos_d1_mini": ("Wemos D1 Mini", 34.2, 25.6, (), 0.0, 8.0, "left", True),
+    "relay_1ch": ("Relay module, 1 channel", 50.0, 26.0,
+                  ((2.75, 2.75), (47.25, 2.75), (2.75, 23.25), (47.25, 23.25)), 3.1, 19.0, "", True),
+    "relay_2ch": ("Relay module, 2 channel", 50.5, 38.5,
+                  ((2.75, 2.75), (47.75, 2.75), (2.75, 35.75), (47.75, 35.75)), 3.1, 19.0, "", True),
+    "relay_4ch": ("Relay module, 4 channel", 75.0, 55.0,
+                  ((2.75, 2.75), (72.25, 2.75), (2.75, 52.25), (72.25, 52.25)), 3.1, 19.0, "", True),
+    "buck_lm2596": ("LM2596 buck converter", 43.2, 21.3, ((3.0, 6.0), (40.2, 15.3)), 3.1, 14.0, "", True),
+    "breadboard_half": ("Half-size breadboard", 83.0, 55.0, (), 0.0, 10.0, "", True),
 }
 
+# Port kinds that leave the board and want a wall opening — the first of these on a component is
+# the BoardSpec's `usb` side. Internal connectors (JST, headers) are not.
+_EXTERNAL_PORT_KINDS = ("usb_c", "micro_usb", "usb_a", "barrel_5_5", "sd", "hdmi", "audio_3_5",
+                        "antenna")
+
+
+def _board_line(key: str, name: str, length: float, width: float, holes, hole_d: float,
+                height: float, usb: str, approx: bool) -> str:
+    holes_txt = "(" + ", ".join(f"({float(x)!r}, {float(y)!r})" for x, y in holes) + ("," if len(holes) == 1 else "") + ")"
+    tail = ", approx=True" if approx else ""
+    return (f'    "{key}": BoardSpec({name!r}, {float(length)!r}, {float(width)!r}, {holes_txt}, '
+            f'{float(hole_d)!r}, {float(height)!r}, {usb!r}{tail}),')
+
+
+def render_boards(catalog: dict[str, Component] | None = None) -> str:
+    """The `BOARDS` block of helix_parts.py, rendered from the component catalog (every entry,
+    keys sorted) UNION the legacy footprints for keys the catalog lacks. Deterministic text: the
+    seeded library is compared byte-for-byte with what a workspace already holds. A catalog hole
+    becomes (x, y); `hole_d` is the first hole's diameter; the `usb` side is the first external
+    port's side; `approx` mirrors the catalog's confidence < 0.7."""
+    cat = CATALOG if catalog is None else catalog
+    lines = ["BOARDS: dict[str, BoardSpec] = {",
+             "    # From HELIX's component catalog (helix/domain/components.py) — the single source of truth."]
+    for key in sorted(cat):
+        c = cat[key]
+        usb = ""
+        for p in c.ports:
+            if p.kind in _EXTERNAL_PORT_KINDS:
+                usb = p.side
+                break
+        hole_d = float(c.holes[0].d) if c.holes else 0.0
+        lines.append(_board_line(key, c.name, c.length, c.width, [(h.x, h.y) for h in c.holes], hole_d,
+                                 c.height, usb, c.confidence < 0.7))
+    legacy = [k for k in LEGACY_BOARDS if k not in cat]
+    if legacy:
+        lines.append("    # Footprints the catalog does not carry yet (kept so every known key still works).")
+        for key in legacy:
+            lines.append(_board_line(key, *LEGACY_BOARDS[key]))
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+_LIB_TAIL = '''
 # Heat-set insert pilot holes (diameter to print) and the screw that goes with them.
 INSERT_M2 = 3.2
 INSERT_M2_5 = 3.6
 INSERT_M3 = 4.0
 INSERT_M4 = 5.6
 # Self-tapping pilot holes straight into printed bosses.
+PILOT_M2 = 1.6
 PILOT_M2_5 = 2.05
 PILOT_M3 = 2.5
 
@@ -494,7 +545,14 @@ def standoffs_for(spec: BoardSpec, height: float = 5.0, hole_d: float | None = N
     Z=0 inside the cavity — translate up by the floor if you built the body yourself."""
     if not spec.holes:
         raise ValueError(f"{spec.name} has no mounting holes — clamp it with side_rails() instead")
-    d = hole_d if hole_d is not None else (PILOT_M3 if spec.hole_d >= 2.8 else PILOT_M2_5)
+    if hole_d is not None:
+        d = hole_d
+    elif spec.hole_d >= 2.8:
+        d = PILOT_M3
+    elif spec.hole_d >= 2.3:
+        d = PILOT_M2_5
+    else:
+        d = PILOT_M2  # a 2.1–2.2 mm board hole is M2 (Pi camera, Pico); a 1.8 mm hole is M1.6, treated as M2
     posts = [
         Pos(x - spec.length / 2, y - spec.width / 2, 0) * standoff(height, d)
         for (x, y) in spec.holes
@@ -594,14 +652,18 @@ def lip_ring(inner_l: float, inner_w: float, wall: float = 2.0, r: float = 3.0,
     base_h = 2.0
     over = max(0.8, wall - 1.0)                    # how far the flange overlaps the rim wall top
     ol, ow = inner_l - 2 * clear, inner_w - 2 * clear
+    # Corner radii follow the CAVITY they nest into: `r` is the cavity's radius, so the lip's
+    # outline is that radius less the clearance and its bore that less the lip thickness. (Cutting
+    # them from r - wall, as the first version did, left the lip's corners ~0.6 mm proud of the
+    # receiving cavity at every corner — an assembled boolean intersection showed four slivers.)
+    r_lip = max(r - clear, 0.5)
+    r_bore = max(r - clear - t, 0.5)
     # Base flange: from the rim-wall overlap down to the lip's inner bore — SITS ON THE RIM.
-    base = rbox(inner_l + 2 * over, inner_w + 2 * over, base_h, r)
-    base = base - (Pos(0, 0, -1) * rbox(ol - 2 * t, ow - 2 * t, base_h + 2,
-                                        max(r - wall - t, 0.5)))
+    base = rbox(inner_l + 2 * over, inner_w + 2 * over, base_h, r + over)
+    base = base - (Pos(0, 0, -1) * rbox(ol - 2 * t, ow - 2 * t, base_h + 2, r_bore))
     # The rising lip that seats into the other cavity.
-    lip = rbox(ol, ow, base_h + lip_h, max(r - wall, 0.8))
-    lip = lip - (Pos(0, 0, -1) * rbox(ol - 2 * t, ow - 2 * t, base_h + lip_h + 2,
-                                      max(r - wall - t, 0.5)))
+    lip = rbox(ol, ow, base_h + lip_h, r_lip)
+    lip = lip - (Pos(0, 0, -1) * rbox(ol - 2 * t, ow - 2 * t, base_h + lip_h + 2, r_bore))
     ring = base + lip
     # Chamfer the bottom edges so the flange underside self-supports at ~45°. The size must cover
     # the FULL inboard overhang (t + clear — the part hanging over the cavity void), capped by the
@@ -610,11 +672,18 @@ def lip_ring(inner_l: float, inner_w: float, wall: float = 2.0, r: float = 3.0,
     # A single try/except here once swallowed a failing chamfer and shipped the flat underside it
     # exists to prevent — so this is a RETRY LADDER: shrink until the kernel accepts one. The last
     # rungs are small enough to succeed on any corner combination this ring can produce.
+    # Only the INBOARD loop (the bore's bottom edges, over the cavity void) is chamfered: the
+    # outboard loop sits on the rim wall and needs no chamfer — and chamfering both loops made
+    # them collide on a 2.35 mm flange, so the ladder fell to 0.9 mm and left a 0.4 mm-wide
+    # flat over the void all the way round (1.8 cm² on a 120 × 80 shell, most of the runner's
+    # overhang budget). One loop, the full overhang: the residue is a 0.05 mm sliver.
     want = max(0.3, min(t + clear - 0.05, base_h - 0.05))
+    hx, hy = (ol - 2 * t) / 2 + 0.05, (ow - 2 * t) / 2 + 0.05
     for cham in (want, want * 0.7, want * 0.5, 0.45, 0.3):
         try:
             bottom = ring.edges().group_by(Axis.Z)[0]
-            ring = chamfer(bottom, cham)
+            inboard = [e for e in bottom if abs(e.center().X) <= hx and abs(e.center().Y) <= hy]
+            ring = chamfer(inboard or bottom, cham)
             break
         except Exception:  # noqa: BLE001 — try the next rung
             continue
@@ -634,8 +703,8 @@ def lip_rebate(inner_l: float, inner_w: float, wall: float = 2.0, r: float = 3.0
     over = max(0.8, wall - 1.0)
     depth_cut = 2.0 + clear + 0.05                 # the flange's base_h plus seating clearance
     ol, ow = inner_l + 2 * (over + clear), inner_w + 2 * (over + clear)
-    ring = rbox(ol, ow, depth_cut + 2, r)
-    bore = Pos(0, 0, -1) * rbox(inner_l - 2, inner_w - 2, depth_cut + 4, max(r - wall, 0.5))
+    ring = rbox(ol, ow, depth_cut + 2, r + over + clear)
+    bore = Pos(0, 0, -1) * rbox(inner_l - 2, inner_w - 2, depth_cut + 4, max(r - 1.0, 0.5))
     return ring - bore
 
 
@@ -676,18 +745,210 @@ def arrange(*parts: Part, gap: float = 8.0) -> Compound:
         x += bb.size.X + gap
     total = sum((p.bounding_box().size.X for p in placed), 0.0)
     return Compound(children=[Pos(-total / 2 + 0, 0, 0) * p for p in placed])
+
+
+# ----- pockets, bays, and the cutters an enclosure around real parts needs ------------------
+# Conventions: ADDED features sit on Z=0 (place them with Pos(x, y, floor - 0.01)). CUTTERS span
+# from 1 mm BELOW Z=0 up to `depth` (so Pos(x, y, 0) at a plate face cuts clean through when
+# depth = plate + 1) — except wire_notch, which starts AT Z=0 so the floor under it survives.
+
+_C3 = (Align.CENTER, Align.CENTER, Align.CENTER)
+_CM = (Align.CENTER, Align.CENTER, Align.MIN)
+_SIDE = {"left": (-1, 0), "right": (1, 0), "front": (0, -1), "back": (0, 1)}
+
+
+def pocket(l: float, w: float, h: float, rib: float = 1.6, clear: float = FIT, omit: str = "") -> Part:
+    """A rib-walled POCKET a part drops into — ADD it to a floor. `l` × `w` is the PART; the
+    inside is the part + 2*clear, the ribs are `rib` thick outside that and `h` tall, with no
+    floor of its own (the enclosure's floor is the floor). Centered, sits on Z=0. `omit` drops one
+    rib ("left"/"right"/"front"/"back" = -x/+x/-y/+y) so the pocket can back onto a wall or open
+    toward a connector; the corner stubs stay."""
+    il, iw = l + 2 * clear, w + 2 * clear
+    # every cut runs from 1 below Z=0 to 1 above the rib top — a centred cutter of height h + 2
+    # would leave a solid cap over any pocket taller than 2 mm (measured: 42 cm² of ceilings)
+    ring = Box(il + 2 * rib, iw + 2 * rib, h, align=_CM) - Pos(0, 0, -1) * Box(il, iw, h + 2, align=_CM)
+    dx, dy = _SIDE.get(omit, (0, 0))
+    if dx:
+        ring = ring - Pos(dx * (il / 2 + rib / 2), 0, -1) * Box(rib + 1, iw, h + 2, align=_CM)
+    elif dy:
+        ring = ring - Pos(0, dy * (iw / 2 + rib / 2), -1) * Box(il, rib + 1, h + 2, align=_CM)
+    return ring
+
+
+def pocket_for(spec, h: float | None = None, rib: float = 1.6, clear: float = FIT, omit: str = "") -> Part:
+    """pocket() sized from the catalog: a board key, a BoardSpec, or a (length, width[, height])
+    tuple. The rib height defaults to the part's height minus 1, kept between 3 and 6 mm; approx
+    parts get 0.5 mm more room per side."""
+    if isinstance(spec, str):
+        spec = BOARDS[spec]
+    if isinstance(spec, BoardSpec):
+        l, w, ph, extra = spec.length, spec.width, spec.height, (0.5 if spec.approx else 0.0)
+    else:
+        dims = tuple(spec)
+        l, w = float(dims[0]), float(dims[1])
+        ph, extra = (float(dims[2]) if len(dims) > 2 else 6.0), 0.0
+    height = h if h is not None else max(3.0, min(6.0, ph - 1.0))
+    return pocket(l, w, height, rib, clear + extra, omit)
+
+
+def battery_bay(l: float, w: float, h: float, rib: float = 1.6, clear: float = 0.6,
+                lead: float = 8.0, side: str = "right") -> Part:
+    """A pocket for a pouch cell / battery holder with a `lead`-wide gap in the `side` rib for the
+    leads (left/right/front/back = -x/+x/-y/+y). Centered, sits on Z=0; ADD it to a floor."""
+    bay = pocket(l, w, h, rib, clear)
+    il, iw = l + 2 * clear, w + 2 * clear
+    dx, dy = _SIDE.get(side, (1, 0))
+    if dx:
+        gap = Pos(dx * (il / 2 + rib / 2), 0, -1) * Box(rib + 1, min(lead, iw - 2), h + 2, align=_CM)
+    else:
+        gap = Pos(0, dy * (iw / 2 + rib / 2), -1) * Box(min(lead, il - 2), rib + 1, h + 2, align=_CM)
+    return bay - gap
+
+
+def lens_bore(d: float, depth: float, recess_d: float = 0.0, recess_h: float = 1.0) -> Part:
+    """CUTTER for a lens looking out through a plate face: a Ø d bore from 1 mm below Z=0 up to
+    `depth` (plate + 1 goes through), plus an optional shallow recess Ø recess_d, recess_h deep, at
+    the outside face so the lens sits back from the surface. Subtract at Pos(x, y, 0)."""
+    bore = Pos(0, 0, -1) * Cylinder(d / 2, depth + 1, align=_CM)
+    if recess_d > d:
+        bore = bore + Pos(0, 0, -1) * Cylinder(recess_d / 2, recess_h + 1, align=_CM)
+    return bore
+
+
+def grille(d: float, hole: float = 1.6, pitch: float = 2.8, depth: float = 6.0) -> Part:
+    """CUTTER: a hex-packed field of Ø hole holes filling a Ø d circle — a speaker grille through a
+    plate face. One shape to subtract, spanning 1 mm below Z=0 up to `depth`."""
+    r_max = d / 2 - hole / 2 - 0.2
+    row = pitch * math.sqrt(3) / 2
+    n = int(d / min(row, pitch)) + 2
+    holes = []
+    for j in range(-n, n + 1):
+        y = j * row
+        xoff = pitch / 2 if j % 2 else 0.0
+        for i in range(-n, n + 1):
+            x = i * pitch + xoff
+            if x * x + y * y <= r_max * r_max:
+                holes.append(Pos(x, y, -1) * Cylinder(hole / 2, depth + 1, align=_CM))
+    if not holes:
+        return Pos(0, 0, -1) * Cylinder(max(hole, min(d, 2.0)) / 2, depth + 1, align=_CM)
+    return Compound(children=holes)
+
+
+def mic_hole(d: float = 1.5, depth: float = 6.0) -> Part:
+    """CUTTER: one small hole for a MEMS microphone's port, 1 mm below Z=0 up to `depth`."""
+    return Pos(0, 0, -1) * Cylinder(d / 2, depth + 1, align=_CM)
+
+
+def led_window(d: float, depth: float = 6.0) -> Part:
+    """CUTTER: a round window for an LED (or any round hole), 1 mm below Z=0 up to `depth`."""
+    return Pos(0, 0, -1) * Cylinder(d / 2, depth + 1, align=_CM)
+
+
+def screen_window(w: float, h: float, r: float = 1.0, depth: float = 6.0) -> Part:
+    """CUTTER: a rounded rectangular window (a display's active area + clearance), centered,
+    1 mm below Z=0 up to `depth`."""
+    win = Pos(0, 0, -1) * Box(w, h, depth + 1, align=_CM)
+    r = min(r, w / 2 - 0.1, h / 2 - 0.1)
+    if r > 0.05:
+        win = fillet(win.edges().filter_by(Axis.Z), r)
+    return win
+
+
+# Switch cutouts, mm: kind -> (shape, along, tall). The long side runs along X — Rot it onto a wall.
+SWITCH_SLOTS = {
+    "ss12d00": ("slot", 8.5, 3.6),      # SS12D00 slide switch — the actuator's travel slot
+    "kcd1": ("rect", 19.2, 13.5),       # KCD1 rocker — the panel cutout it snaps into
+    "tact_6": ("round", 6.5, 6.5),      # 6x6 tactile — a plunger / keycap hole
+    "push_12": ("round", 12.4, 12.4),   # 12 mm latching push button — its threaded bushing
+    "ky040": ("round", 7.2, 7.2),       # KY-040 rotary encoder — the shaft's bushing
+}
+
+
+def switch_slot(kind: str, depth: float = 6.0) -> Part:
+    """CUTTER for a switch's actuator or bushing through a plate or wall (see SWITCH_SLOTS; the
+    long side along X — Rot(90, 0, 0) it onto a wall). 1 mm below Z=0 up to `depth`."""
+    shape, w, h = SWITCH_SLOTS[kind]
+    if shape == "round":
+        return Pos(0, 0, -1) * Cylinder(w / 2, depth + 1, align=_CM)
+    return screen_window(w, h, (h / 2 - 0.05) if shape == "slot" else 1.0, depth)
+
+
+def port_slot(w: float, h: float, wall: float, r: float = 1.5) -> Part:
+    """CUTTER: a rounded opening `w` wide × `h` tall running through a wall `wall` thick in Y
+    (overshooting 1 mm each side), centered at the origin — Pos/Rot it onto the wall exactly like
+    usb_cutout. usb_cutout knows the plug kinds; this one takes any size."""
+    cutter = Box(w, wall + 2, h, align=_C3)
+    r = min(r, h / 2 - 0.1, w / 2 - 0.1)
+    if r > 0.1:
+        cutter = fillet(cutter.edges().filter_by(Axis.Y), r)
+    return cutter
+
+
+def wire_notch(w: float, depth: float) -> Part:
+    """CUTTER through a pocket rib so a wire drops into the trench: `w` wide along X, crossing 4 mm
+    in Y (any rib up to 3 thick), from Z=0 — the floor under it survives — up `depth` + 1. Position
+    it at the rib's centreline at floor height: Pos(x, y, floor) * wire_notch(4, pocket_h);
+    Rot(0, 0, 90) for a rib that runs along Y."""
+    return Box(w, 4.0, depth + 1, align=_CM)
+
+
+def deboss_tag(text: str, size: float, depth: float) -> Part:
+    """The fallback for deboss_text when no font can be loaded: a shallow rectangular tag as big as
+    the text would be, so a label still marks the pocket and the build never fails on a font."""
+    n = max(1, len(text))
+    return Box(0.62 * size * n, 0.78 * size, depth + 0.2, align=_CM)
+
+
+def deboss_text(text: str, size: float, depth: float, font: str = "Arial") -> Part:
+    """CUTTER for a debossed label: the text extruded from Z=0 up depth + 0.2, centered — subtract
+    at Pos(x, y, face_z - depth). Inner-face labels read as written; a label on the PLATE face reads
+    from outside only when mirrored: mirror(deboss_text(...), about=Plane.YZ). Degrades to
+    deboss_tag() if the font fails, never an error."""
+    try:
+        solid = extrude(Text(text, font_size=size, font=font), amount=depth + 0.2)
+        if solid is None or not solid.solids():
+            raise ValueError("no glyphs")
+        return solid
+    except Exception:  # noqa: BLE001 — a missing font must never fail a build
+        return deboss_tag(text, size, depth)
 '''
 
+HELIX_LIB = _LIB_HEAD + render_boards(CATALOG) + _LIB_TAIL
 
-HELIX_LIB_DOC = """\
+
+def _board_key_lines(catalog: dict[str, Component] | None = None, width: int = 96) -> str:
+    """The catalog's keys grouped by category, wrapped, for the coder's cheat-sheet."""
+    cat = CATALOG if catalog is None else catalog
+    groups: dict[str, list[str]] = {}
+    for key in sorted(cat):
+        groups.setdefault(cat[key].category, []).append(key)
+    legacy = [k for k in LEGACY_BOARDS if k not in cat]
+    if legacy:
+        groups["legacy"] = legacy
+    out: list[str] = []
+    for cat_name, keys in groups.items():
+        line = f"  {cat_name}: "
+        for key in keys:
+            if len(line) + len(key) + 2 > width:
+                out.append(line.rstrip())
+                line = "    " + key + ", "
+            else:
+                line += key + ", "
+        out.append(line.rstrip().rstrip(","))
+    return "\n".join(out)
+
+
+_DOC_HEAD = """\
 helix_parts cheat-sheet (the ONLY library; `from helix_parts import *` gives you build123d too):
 
-BOARDS — real footprints, mm: arduino_uno, arduino_mega, arduino_nano, pi_pico, pi_4, pi_zero,
-  esp32_devkitc (NO holes — use side_rails), esp8266_nodemcu, wemos_d1_mini, relay_1ch/2ch/4ch,
-  buck_lm2596, breadboard_half. board(key) -> BoardSpec(.length .width .holes .hole_d .height .usb
-  .approx). approx=True boards: leave ~0.5 mm slack.
+BOARDS — real footprints, mm, rendered from HELIX's component catalog: board(key) ->
+  BoardSpec(.name .length .width .holes .hole_d .height .usb .approx). approx=True: leave ~0.5 mm
+  slack. Hole-less boards (esp32_devkitc, wemos_d1_mini…): side_rails, never standoffs. Keys:
+"""
+
+_DOC_TAIL = """
 Fits: FIT=0.30 slide clearance, SNAP_CLEAR=0.15; inserts INSERT_M3=4.0 (M2 3.2, M2.5 3.6, M4 5.6),
-  pilots PILOT_M3=2.5.
+  pilots PILOT_M3=2.5, PILOT_M2_5=2.05, PILOT_M2=1.6 (standoffs_for picks by hole size).
 Helpers (all sit on Z=0, centered X/Y; enclosure sizes are INNER/cavity mm):
   rbox(l,w,h,r)                       rounded box
   shell_box(l,w,h,wall,r,floor)      open-top body around an inner cavity
@@ -695,8 +956,14 @@ Helpers (all sit on Z=0, centered X/Y; enclosure sizes are INNER/cavity mm):
   standoff(h,hole_d,od)              one boss; standoffs_for(board(k),h) bosses for every hole,
                                      board centered — Pos(0,0,floor)* to sit on the cavity floor
   side_rails(board(k),h)             edge clamp for hole-less boards (ESP32 DevKitC)
+  pocket(l,w,h,rib,clear,omit)       rib-walled pocket a PART l×w drops into (inside = part + 2*clear,
+                                     no floor of its own) — ADD at Pos(x,y,floor-0.01); omit="left"/
+                                     "right"/"front"/"back" drops one rib (against a wall)
+  pocket_for(key|BoardSpec|(l,w,h),h)  pocket sized from the catalog (approx parts get +0.5)
+  battery_bay(l,w,h,rib,clear,lead,side)  pocket with a lead gap in one rib
   vent_slots(span,depth,rows)        louvres to SUBTRACT (Rot/Pos onto the face)
   usb_cutout(wall,kind)              subtract; kinds usb_c, micro_usb, usb_a, barrel_5_5, rj45
+  port_slot(w,h,wall,r)              any-size wall opening through `wall` in Y (Pos/Rot like usb_cutout)
   cable_gland_boss(wall,thread_d)    -> (boss, hole): add boss, subtract hole
   screw_boss(h,insert_d)             lid screw boss / screw TOWER (full-height for two-half shells)
   lip_ring(l,w,wall,r,lip_h,clear)   THE joint between two shell halves — an L-profile that SITS ON
@@ -710,9 +977,23 @@ Helpers (all sit on Z=0, centered X/Y; enclosure sizes are INNER/cavity mm):
                                      M2 = csk_hole(2.4, 4.4); M2.5 = csk_hole(2.9, 5.5)
   strap_tab(slot_w,slot_h,t,margin)  flat slotted band anchor ON the plate — never a protruding ring
   arrange(*parts,gap)                print-plate layout, or return {"body": b, "lid": l}
+Plate-face CUTTERS (subtract at Pos(x,y,0); each spans 1 mm below Z=0 up to `depth` — use
+  depth = plate + 1 to go through; on a face-down front shell the plate face IS Z=0):
+  lens_bore(d,depth,recess_d,recess_h)  lens hole + shallow recess (the lens sits back from the face)
+  grille(d,hole=1.6,pitch=2.8,depth) hex field of holes filling Ø d — a speaker grille
+  mic_hole(d=1.5,depth)  led_window(d,depth)  screen_window(w,h,r,depth)
+  switch_slot(kind,depth)            ss12d00 8.5×3.6 | kcd1 19.2×13.5 | tact_6 Ø6.5 | push_12 Ø12.4 |
+                                     ky040 Ø7.2 (long side along X; Rot(90,0,0) onto a wall)
+  wire_notch(w,depth)                notch through a pocket rib, floor kept: Pos(x,y,floor)*;
+                                     Rot(0,0,90) for a rib running along Y
+  deboss_text(text,size,depth)       label cutter from Z=0 up depth+0.2: Pos(x,y,face_z-depth)*;
+                                     mirror(..., about=Plane.YZ) on a plate face so it reads from
+                                     outside; degrades to deboss_tag (a plain recess) if no font loads
 build123d in 6 lines (algebra mode): parts combine with + - &; move with Pos(x,y,z)*p and
   Rot(x,y,z)*p; primitives Box(l,w,h,align=...), Cylinder(r,h); round with
   fillet(p.edges().filter_by(Axis.Z), r) and chamfer(p.edges(), c); sketch+extrude for profiles:
   extrude(Plane.XY * RectangleRounded(w,h,r), amount). Booleans need real overlap — never touch
   shapes only on a face/edge; sink one 0.01 into the other.
 """
+
+HELIX_LIB_DOC = _DOC_HEAD + _board_key_lines(CATALOG) + "\n" + _DOC_TAIL

@@ -118,6 +118,13 @@ BUILD_TOOLS = frozenset(
         # Starting a 3D print is PHYSICAL actuation — hours of printer time and real filament. An
         # email saying "print the mount" must never move hardware; printer_status stays readable.
         "print_hologram",
+        # THE MAKER FLOW (READ_ME/MAKER_FLOW.md §7): design_enclosure WRITES a build (a hologram
+        # workspace, a compile, a commit) from the user's parts list; check_fit and camera_measure
+        # RAISE the camera panel on the user's screen and, for a measurement, park on it for
+        # minutes. All three are human-driven — text a watcher processes must never design, project
+        # or open the webcam. (suggest_components stays readable: a plain read of the component
+        # library that names no fenced tool, like search_amazon.)
+        "design_enclosure", "check_fit", "camera_measure",
     }
 )
 

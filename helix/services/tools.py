@@ -148,6 +148,7 @@ class ToolRegistry:
         parts: "PartsService | None" = None,
         cad: CadEngine | None = None,
         bambu=None,
+        maker=None,
     ) -> None:
         self._forge = forge
         self._builds = builds
@@ -178,6 +179,10 @@ class ToolRegistry:
         # The Bambu printer config: a callable key -> value reading secrets/settings/env live, so
         # connecting the printer mid-conversation takes effect on the very next tool call.
         self._bambu = bambu
+        # The maker flow (READ_ME/MAKER_FLOW.md): pick components from the library, design the
+        # enclosure deterministically from a parts list, check the fit over the camera, measure a
+        # part with the ruler, and the print sheet print_hologram carries. None = not wired.
+        self._maker = maker
         self._evolve = None  # late-bound by attach_evolve (Evolve is constructed after this registry)
 
     def attach_evolve(self, evolve) -> None:
@@ -233,6 +238,9 @@ class ToolRegistry:
         model_3mf = ws / "assets" / "model.3mf"
         model_stl = ws / "assets" / "model.stl"
         printer, msg = self._bambu_printer()
+        # The print sheet (settings, parts with sizes and grams, screws/inserts, assembly order)
+        # rides on every reply that actually sends the model somewhere — read it back briefly.
+        sheet = self._print_sheet(app.slug)
         # Full auto needs BOTH a connected printer and a Studio CLI that slices headlessly.
         if printer is not None and model_3mf.is_file():
             sliced = ws / "assets" / "print.gcode.3mf"
@@ -241,7 +249,7 @@ class ToolRegistry:
                     remote = printer.upload(sliced, f"{app.slug}.gcode.3mf")
                     printer.start_print(remote)
                     return (f"'{app.name}' is sliced, on the printer, and started — ask me how "
-                            "it's going any time.")
+                            "it's going any time." + sheet)
                 except bp.BambuError as exc:
                     return str(exc)
         # The honest fallback: load it into Bambu Studio so one Print click finishes the job.
@@ -250,11 +258,23 @@ class ToolRegistry:
             note = (" " + msg) if msg else (
                 " I can still watch the printer once it starts." if printer is not None else "")
             return (f"I've loaded '{app.name}' into Bambu Studio — check the plate and press "
-                    f"Print there.{note}")
+                    f"Print there.{note}" + sheet)
         if not target.is_file():
             return (f"'{app.name}' has no compiled model file yet — open it once in the studio "
                     "(or rebuild it) and try again.")
         return msg or "I couldn't find Bambu Studio on this machine to hand the model to."
+
+    def _print_sheet(self, slug: str) -> str:
+        """The maker flow's print sheet for a hologram, as a trailing block — '' without a maker
+        (a headless registry) or for a build with no design file. Never raises: the print is the
+        job, the sheet is the courtesy."""
+        if self._maker is None:
+            return ""
+        try:
+            sheet = self._maker.print_sheet(slug)
+        except Exception:  # noqa: BLE001
+            return ""
+        return f"\n\n{sheet}" if sheet else ""
 
     def _printer_status(self) -> str:
         from helix.adapters import bambu_printer as bp
@@ -316,7 +336,10 @@ class ToolRegistry:
                     "form. Only call after the user confirms — building spends Claude time, like "
                     "build_app. If the hologram engine isn't installed, a DESIGN returns that instead "
                     "of building; offer install_cad_engine and build once it lands. Places, walkthroughs "
-                    "and references don't need the engine — say so with `kind`."
+                    "and references don't need the engine — say so with `kind`. For an ENCLOSURE around "
+                    "KNOWN parts (a saved parts list), prefer design_enclosure — deterministic, with "
+                    "correct pockets from the component library; use build_3d_model for everything "
+                    "else, and for edits to any hologram."
                 ),
                 input_schema={
                     "type": "object",
@@ -1545,7 +1568,15 @@ class ToolRegistry:
                         "carted). Call it whenever a BOM takes shape or changes ('add a TP4056 to "
                         "the IronEye list', 'we have the ESP32 on hand'), so the list never has to "
                         "be re-derived from memory. Rows are matched by name: given fields update, "
-                        "omitted fields keep their values. Also show the table in a viz block."
+                        "omitted fields keep their values. Also show the table in a viz block. The "
+                        "PHYSICAL fields are what the enclosure is designed from: `component` (the "
+                        "library key suggest_components gave, e.g. xiao_esp32s3_sense — or the part's "
+                        "spoken name; HELIX resolves it), `length`/`width`/`height` in mm for a part "
+                        "the library doesn't know (read off the listing, or measured with the "
+                        "camera's ruler — never from memory), `face` for anything that must reach a "
+                        "wall (a camera lens or speaker → front; a USB port or switch → left/right/"
+                        "top/bottom), and `on_lid` true for a battery. A row that needs no room in "
+                        "the box (a cable, screws) gets note 'no pocket'."
                     ),
                     input_schema={
                         "type": "object",
@@ -1567,6 +1598,22 @@ class ToolRegistry:
                                         "status": {"type": "string",
                                                    "description": "need | on hand | carted"},
                                         "note": {"type": "string"},
+                                        "component": {"type": "string",
+                                                      "description": "The component library key "
+                                                                     "(or the part's spoken name)."},
+                                        "length": {"type": "number",
+                                                   "description": "mm, for a part not in the library — "
+                                                                  "from a listing or the ruler."},
+                                        "width": {"type": "number", "description": "mm."},
+                                        "height": {"type": "number",
+                                                   "description": "mm, the tallest point."},
+                                        "face": {"type": "string",
+                                                 "enum": ["front", "back", "left", "right", "top", "bottom"],
+                                                 "description": "The enclosure wall its lens/port/"
+                                                                "speaker/switch must reach."},
+                                        "on_lid": {"type": "boolean",
+                                                   "description": "true = it sits on the lid's inner "
+                                                                  "face (a battery)."},
                                     },
                                     "required": ["name"],
                                     "additionalProperties": False,
@@ -1620,6 +1667,133 @@ class ToolRegistry:
                     },
                 ),
             ]
+        if self._maker is not None:
+            # THE MAKER FLOW (READ_ME/MAKER_FLOW.md §7). suggest_components is a READ of the component
+            # library and stays readable; design_enclosure writes a build and joins BUILD_TOOLS.
+            tools += [
+                ToolSpec(
+                    name="suggest_components",
+                    description=(
+                        "PICK THE COMPONENTS for a device the user wants to build — 'a hat cam with "
+                        "vision and sound', 'a garden sensor node', 'a clock with a big display' — "
+                        "from HELIX's component library: real parts with real sizes (a confidence per "
+                        "number), grouped by role (vision, hearing, speaking, brain, power, charging, "
+                        "sensing, display, motion, storage, wireless, lighting, input), two or three "
+                        "candidates each with its size and a one-line why, and an honest line about "
+                        "what the library doesn't know. READ-ONLY. Pass what the device should do in "
+                        "the user's words (and the project's short name). Talk the choices through in "
+                        "one breath each; live prices come from search_amazon when they ask about "
+                        "buying. Then save the picks to the project's parts list with their library "
+                        "keys — that list is what the enclosure is designed from."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "project": {"type": "string",
+                                        "description": "The project's short name, e.g. 'IronEye'."},
+                            "needs": {"type": "string",
+                                      "description": "What the device should do, in the user's words "
+                                                     "('see, hear and speak; runs on a battery, "
+                                                     "charges over USB-C')."},
+                        },
+                        "required": ["needs"],
+                        "additionalProperties": False,
+                    },
+                ),
+                ToolSpec(
+                    name="design_enclosure",
+                    description=(
+                        "DESIGN THE ENCLOSURE around a saved parts list — deterministically, from the "
+                        "library's numbers, not from memory. HELIX resolves every row to a library part "
+                        "(or the size saved on the row), packs them into a two-half shell — a ribbed "
+                        "pocket, standoffs or a bay per part, a lens bore, mic hole or speaker grille "
+                        "through the face for anything with a face hint, USB/switch openings on their "
+                        "wall, screw towers with heat-set inserts, debossed labels, a wire trench — "
+                        "compiles it, bakes it as a hologram named '<project> enclosure' (or `name`), "
+                        "and returns the fit report: outer size, every pocket, the wall openings, "
+                        "screws, PLA grams, and any problems. Call it once the parts are saved with "
+                        "their library keys (face hints for a camera, speaker, USB or switch; on_lid for "
+                        "a battery). If a row has no library match and no size it stops and names the "
+                        "row — give its size or measure it, then call again. Optional lid (screw, snap), "
+                        "mount (none, wall tabs, strap, DIN rail, flat feet), wall thickness in mm. "
+                        "Calling it again for the same project updates the same hologram. Prefer this "
+                        "over build_3d_model for any box around known parts; afterwards 'make the wall 3 "
+                        "mm' is a build_3d_model edit by the same name, or the studio's slider. Confirm "
+                        "with the user first, like any build."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "project": {"type": "string",
+                                        "description": "The saved parts list to design around."},
+                            "lid": {"type": "string",
+                                    "description": "screw (default) or snap."},
+                            "mount": {"type": "string",
+                                      "description": "none (default), wall tabs, strap (a hat, a "
+                                                     "wearable), DIN rail, or flat feet."},
+                            "wall": {"type": "number",
+                                     "description": "Wall thickness in mm, 1.6–3.5 (default 2)."},
+                            "name": {"type": "string",
+                                     "description": "The hologram's name (default '<project> "
+                                                    "enclosure'). Reuse it to update the design."},
+                        },
+                        "required": ["project"],
+                        "additionalProperties": False,
+                    },
+                ),
+            ]
+            if self._bus is not None:
+                # Both open the camera panel on the user's screen — fenced like view_camera.
+                tools += [
+                    ToolSpec(
+                        name="check_fit",
+                        description=(
+                            "CHECK THE FIT ON THE CAMERA: opens the camera panel if it isn't open and "
+                            "projects the named hologram over the live view with a ghost pocket per "
+                            "part (from its component layout), so the user can lay the real parts "
+                            "inside their ghosts on the desk and see whether they fit before printing. "
+                            "The reply says what was projected and how the view gets to true scale: "
+                            "the user calibrates once in the panel's Measure mode by clicking the two "
+                            "ends of a credit card's long edge (85.6 mm) lying flat beside the parts — "
+                            "the hologram then snaps to 1:1. Use it after design_enclosure, or whenever "
+                            "they ask 'will it fit?', 'show me the case on the parts'. Only at the "
+                            "user's request."
+                        ),
+                        input_schema={
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string",
+                                         "description": "The hologram's name, e.g. 'IronEye enclosure'."},
+                            },
+                            "required": ["name"],
+                            "additionalProperties": False,
+                        },
+                    ),
+                    ToolSpec(
+                        name="camera_measure",
+                        description=(
+                            "MEASURE A REAL PART with the camera's ruler: the camera panel opens (if it "
+                            "isn't open) in Measure mode with your prompt showing; the user calibrates "
+                            "on a credit card (once), drags across the part (shift-drag for a box), "
+                            "labels it, and presses Send — the reply is one plain line of real "
+                            "millimetres ('Measured: XIAO 21.1 × 17.6 mm …') or their cancel. This "
+                            "WAITS for them, up to five minutes. Use it for a part the library doesn't "
+                            "know, or to confirm a size before the enclosure is designed; then save "
+                            "the numbers to the part's row as length, width and height. Never type a "
+                            "dimension from memory instead. Only at the user's request."
+                        ),
+                        input_schema={
+                            "type": "object",
+                            "properties": {
+                                "what": {"type": "string",
+                                         "description": "What to measure, one short line shown in the "
+                                                        "panel ('the mic board, long edge then short')."},
+                            },
+                            "required": ["what"],
+                            "additionalProperties": False,
+                        },
+                    ),
+                ]
         if self._selfdev is not None:
             tools.append(
                 ToolSpec(
@@ -2113,6 +2287,27 @@ class ToolRegistry:
             return self._parts.remove(str(args.get("project") or ""), str(args.get("which") or ""))
         if name == "stage_parts" and self._shopping is not None:
             return self._shopping.stage_parts(str(args.get("project") or ""))
+        if name == "suggest_components" and self._maker is not None:
+            return self._maker.suggest(str(args.get("project") or ""), str(args.get("needs") or ""))
+        if name == "design_enclosure" and self._maker is not None:
+            wall = args.get("wall")
+            try:
+                wall_mm = float(wall) if wall is not None and str(wall).strip() != "" else None
+            except (TypeError, ValueError):
+                wall_mm = None
+            # Compiles on this turn's worker (a few seconds of kernel time); the progress lines keep
+            # the orb honest while it does.
+            return self._maker.design_enclosure(
+                str(args.get("project") or ""), lid=str(args.get("lid") or "screw"),
+                mount=str(args.get("mount") or ""), wall=wall_mm, name=str(args.get("name") or ""),
+                on_progress=on_progress,
+            )
+        if name == "check_fit" and self._maker is not None and self._bus is not None:
+            _ok, line = self._maker.project(str(args.get("name") or ""))
+            return line
+        if name == "camera_measure" and self._maker is not None and self._bus is not None:
+            # Parked on the panel until the user's Send or ✕ — cancel-aware, so a 'stop' unparks it.
+            return self._maker.measure(str(args.get("what") or ""), cancel=cancel)
         if name == "open_program" and self._desktop is not None:
             return self._desktop.open_program(args.get("name", ""))
         if name == "media_control" and self._desktop is not None:

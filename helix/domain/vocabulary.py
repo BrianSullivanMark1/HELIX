@@ -139,6 +139,12 @@ _TOOL_PHRASES: dict[str, str] = {
     "show_parts": "Checking the parts list",
     "remove_parts": "Updating the parts list",
     "stage_parts": "Staging the parts list",
+    # The maker flow: the library brief, the deterministic enclosure (a compile, a few seconds),
+    # the AR fit check, and the ruler that waits on the user — each named by what the user sees.
+    "suggest_components": "Picking the parts",
+    "design_enclosure": "Designing the enclosure",
+    "check_fit": "Checking the fit on the camera",
+    "camera_measure": "Measuring with the ruler",
     "create_workflow": "Saving that workflow",
     "run_workflow": "Running the workflow",
     "list_workflows": "Checking your workflows",

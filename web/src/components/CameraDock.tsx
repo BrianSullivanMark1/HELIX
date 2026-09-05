@@ -9,7 +9,13 @@
 //     for your click or "take the picture";
 //   • a typed message carries the current view along (the 👁 chip) so "what's this pin?" just works;
 //   • HELIX's callouts are drawn over the video and a chosen hologram is projected onto it — both
-//     ride on the board through the tracker (lib/track.ts) as it moves.
+//     ride on the board through the tracker (lib/track.ts) as it moves;
+//   • MEASURE mode (📐): calibrate on something of known size (a credit card, the HELIX marker),
+//     then drag across a part for its length — shift-drag for a box — in real millimetres; the
+//     scale is remembered with the tracker's frame so it stays right as the camera drifts, a
+//     10 mm grid can be laid over the plane, and Send hands the labelled numbers to HELIX (or
+//     answers a measurement HELIX asked for). Calibrated, a projected hologram lands at 1:1 and
+//     its component layout is drawn as ghost pockets, so the real parts can be laid inside them.
 //
 // It NEVER closes itself on a camera error: a failure keeps the panel with a plain reason, Retry,
 // the picker, and the demo board. Only ✕ (or HELIX, asked to) closes it.
@@ -20,18 +26,55 @@ import {
   DEMO_ID, DEMO_LABEL, grabFrame, grabGray, listCameras, loadPrefs, newFrameId, openCamera,
   reason as explain, recordClip, savePrefs, syncPrefs, type CamPrefs, type Opened,
 } from "../lib/camera";
-import { drawOverlays } from "../lib/overlay";
-import { useHelix, type CameraSession, type Shot } from "../lib/store";
+import {
+  PRESETS, UNCALIBRATED_HINT, boxMm, describe, fmtMm, lengthMm, makeCalibration, measurePayload,
+  nextLabel, scaleLine, trueScaleSize, type Calibration, type Measurement, type Norm,
+} from "../lib/measure";
+import { drawMeasureLayer, drawOverlays } from "../lib/overlay";
+import { layoutFromJson, useHelix, type CameraSession, type HologramLayout, type Shot } from "../lib/store";
 import { IDENTITY, Tracker, angleOf, apply, relative, scaleOf, type Similarity } from "../lib/track";
 import ArHologram, { type ArFrame, type Box, type Placement } from "./ArHologram";
 
 const TRACK_MS = 45; // ~22 tracker updates a second
 const SETTLE_MS = 700; // let exposure settle before an automatic first grab
+const MIN_DRAG_PX = 4; // a shorter drag is a click, and a click measures nothing
+const MAX_MEASUREMENTS = 40;
 
 interface HologramRow {
   slug: string;
   name: string;
   stl: string;
+  layout: HologramLayout | null;
+}
+
+/** Measure mode's state: the calibration, the measurements, the grid, and the calibration in
+ * progress. Each anchored piece carries the tracker frame it was made in, so it rides the board. */
+interface RulerState {
+  on: boolean;
+  cal: Calibration | null;
+  items: Measurement[];
+  grid: boolean;
+  preset: string;
+  customMm: string;
+  calibrating: { mm: number; reference: string; first: { T: Similarity; a: Norm } | null } | null;
+  hint: string; // one plain line — a refusal, an instruction, what was sent
+}
+
+const RULER_START: RulerState = {
+  on: false, cal: null, items: [], grid: false, preset: PRESETS[0].key, customMm: "",
+  calibrating: null, hint: "",
+};
+
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+
+/** Keep the drag even when the pointer leaves the view. A pointer that is already gone (a
+ * cancelled touch, a synthetic event) makes the browser throw — a drag is not worth a crash. */
+function holdPointer(e: React.PointerEvent<HTMLElement>): void {
+  try {
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  } catch {
+    /* fine — the move/up handlers still run while the pointer stays over the panel */
+  }
 }
 
 export default function CameraDock({ session, hidden = false }: { session: CameraSession; hidden?: boolean }) {
@@ -43,6 +86,7 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
   const busy = useHelix((s) => s.busy);
   const setStore = useHelix((s) => s.set);
   const ask = session.ask;
+  const measureAsk = session.measure;
 
   const video = useRef<HTMLVideoElement>(null);
   const frameEl = useRef<HTMLDivElement>(null);
@@ -73,11 +117,17 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
   const [holograms, setHolograms] = useState<HologramRow[]>([]);
   const [holoDims, setHoloDims] = useState<THREE.Vector3 | null>(null);
   const [sending, setSending] = useState(false);
+  const [trueScale, setTrueScale] = useState(false); // the hologram sits at 1 mm = 1 mm
+  const [ruler, setRuler] = useState<RulerState>(RULER_START);
+  const rulerRef = useRef(ruler); // the drawing loop and pointer handlers read the latest without re-binding
+  rulerRef.current = ruler;
+  const draftRef = useRef<Measurement | null>(null); // the drag under way (drawn, not yet a row)
+  const measureDrag = useRef<{ T: Similarity; a: Norm } | null>(null);
   const full = layout === "full";
   const mirror = prefs.mirror;
 
   // ----- geometry: where the video actually sits inside its container (object-fit: contain) -----
-  const measure = useCallback(() => {
+  const fitBox = useCallback(() => {
     const el = frameEl.current;
     const v = video.current;
     if (!el || !v) return;
@@ -99,11 +149,11 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
   useEffect(() => {
     const el = frameEl.current;
     if (!el) return;
-    const ro = new ResizeObserver(measure);
+    const ro = new ResizeObserver(fitBox);
     ro.observe(el);
-    measure();
+    fitBox();
     return () => ro.disconnect();
-  }, [measure, full]);
+  }, [fitBox, full]);
 
   // ----- mirror-aware screen mapping -----
   const normToScreen = useCallback((nx: number, ny: number): [number, number] => {
@@ -120,9 +170,9 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
 
   /** Frame F's normalized point → the screen, NOW. Unknown frames stay put. */
   const mapPoint = useCallback((frame: string, nx: number, ny: number): [number, number] => {
-    const ar = arRef.current;
     const at = frameT.current.get(frame);
     if (!at) return normToScreen(nx, ny);
+    const ar = arRef.current;
     const M = relative(ar.T, at);
     const [px, py] = apply(M, nx * ar.tw, ny * ar.th);
     return normToScreen(px / ar.tw, py / ar.th);
@@ -132,6 +182,34 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
     const at = frameT.current.get(frame);
     return at ? scaleOf(relative(arRef.current.T, at)) : 1;
   }, []);
+
+  /** A point normalized in the frame whose transform is `at` → the screen, NOW (the ruler's map). */
+  const mapAt = useCallback((at: Similarity, nx: number, ny: number): [number, number] => {
+    const ar = arRef.current;
+    const M = relative(ar.T, at);
+    const [px, py] = apply(M, nx * ar.tw, ny * ar.th);
+    return normToScreen(px / ar.tw, py / ar.th);
+  }, [normToScreen]);
+
+  /** A point normalized in the LIVE frame → normalized in the frame `at` (the inverse). */
+  const toFrame = useCallback((at: Similarity, nx: number, ny: number): [number, number] => {
+    const ar = arRef.current;
+    const M = relative(at, ar.T);
+    const [px, py] = apply(M, nx * ar.tw, ny * ar.th);
+    return [px / ar.tw, py / ar.th];
+  }, []);
+
+  /** Where a pointer event lands on the video, normalized (mirror-aware), or null off the video. */
+  const pointerNorm = useCallback((e: { clientX: number; clientY: number }): Norm | null => {
+    const el = frameEl.current;
+    const b = boxRef.current;
+    if (!el || !b.w || !b.h) return null;
+    const r = el.getBoundingClientRect();
+    const sx = e.clientX - r.left - (r.width - b.w) / 2;
+    const sy = e.clientY - r.top - (r.height - b.h) / 2;
+    const [nx, ny] = screenToNorm(sx, sy);
+    return [clamp01(nx), clamp01(ny)];
+  }, [screenToNorm]);
 
   // ----- the stream -----
   const stop = useCallback(() => {
@@ -146,11 +224,24 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
     void api.post(`/api/camera/${session.id}/live`, { on, label: lbl }).catch(() => undefined);
   }, [session.id]);
 
+  /** A new stream restarts the tracker from a new BASE: a calibration made against the old one
+   * would silently be wrong, so it goes — with a plain line saying why. */
+  const resetRuler = useCallback(() => {
+    draftRef.current = null;
+    measureDrag.current = null;
+    setTrueScale(false);
+    setRuler((s) => (s.cal || s.items.length || s.calibrating
+      ? { ...s, cal: null, items: [], calibrating: null, grid: false,
+          hint: "New camera stream — the tracker restarted, so calibrate again before measuring." }
+      : s));
+  }, []);
+
   const open = useCallback(async (pick: { deviceId?: string; label?: string }) => {
     stop();
     setError("");
     setStatus("Waking the camera…");
     tracker.current.reset();
+    resetRuler();
     try {
       const o = await openCamera(pick);
       if (!mountedRef.current) {
@@ -166,7 +257,7 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
       setStatus("");
       liveRef.current = true;
       setLive(true);
-      measure();
+      fitBox();
       reportLive(true, o.label);
       if (!o.demo) {
         const next = { ...prefs, deviceId: o.deviceId, device: o.label };
@@ -181,7 +272,7 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
       setDevices(await listCameras());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stop, measure, reportLive, session.id]);
+  }, [stop, fitBox, reportLive, resetRuler, session.id]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -194,8 +285,10 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
       savePrefs(merged, false);
       await open({ deviceId: merged.deviceId, label: merged.device });
     })();
-    void api.get<{ holograms: HologramRow[] }>("/api/camera/holograms")
-      .then((d) => setHolograms(d.holograms || []))
+    void api.get<{ holograms: { slug: string; name: string; stl: string; layout?: unknown }[] }>("/api/camera/holograms")
+      .then((d) => setHolograms((d.holograms || []).map((h) => ({
+        slug: h.slug, name: h.name, stl: h.stl, layout: layoutFromJson(h.layout),
+      }))))
       .catch(() => undefined);
     return () => {
       cancelled = true;
@@ -333,20 +426,19 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
       ctx.clearRect(0, 0, b.w, b.h);
       const groups = useHelix.getState().overlays;
       if (groups.length) drawOverlays(ctx, groups, mapPoint, scaleFor, now);
+      const r = rulerRef.current;
+      if (r.on) {
+        drawMeasureLayer(ctx, {
+          cal: r.cal, items: r.items, draft: draftRef.current, grid: r.grid,
+          pending: r.calibrating?.first ?? null,
+        }, mapAt, toFrame, now);
+      }
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [mapPoint, scaleFor]);
+  }, [mapPoint, scaleFor, mapAt, toFrame]);
 
   // ----- the hologram: first placement + gestures -----
-  const onHoloLoaded = useCallback((dims: THREE.Vector3) => {
-    setHoloDims(dims);
-    const maxDim = Math.max(dims.x, dims.y, dims.z, 1);
-    placeRef.current = {
-      x: 0.5, y: 0.5, size: 0.32 / maxDim, roll: 0, tiltX: 0, yaw: 0, T: tracker.current.snapshot(),
-    };
-  }, []);
-
   /** Fold the tracker's motion since the anchor into the placement, so edits apply to NOW. */
   const reanchor = useCallback(() => {
     const p = placeRef.current;
@@ -359,11 +451,115 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
     };
   }, []);
 
+  /** True scale: 1 mm on the plate = 1 mm on the desk, from the calibration (the ↺ 1:1 button,
+   * and where a hologram lands when the panel is already calibrated). */
+  const snapTrueScale = useCallback((cal: Calibration | null = rulerRef.current.cal) => {
+    if (!cal) return;
+    reanchor();
+    placeRef.current = { ...placeRef.current, size: trueScaleSize(cal, arRef.current.T) };
+    setTrueScale(true);
+  }, [reanchor]);
+
+  const onHoloLoaded = useCallback((dims: THREE.Vector3) => {
+    setHoloDims(dims);
+    const cal = rulerRef.current.cal;
+    const T = tracker.current.snapshot();
+    const maxDim = Math.max(dims.x, dims.y, dims.z, 1);
+    placeRef.current = {
+      x: 0.5, y: 0.5, size: cal ? trueScaleSize(cal, T) : 0.32 / maxDim, roll: 0, tiltX: 0, yaw: 0, T,
+    };
+    setTrueScale(Boolean(cal));
+  }, []);
+
   const drag = useRef<{ x: number; y: number; nx: number; ny: number; tilt: number; yaw: number; mode: "move" | "tilt" } | null>(null);
+
+  // ----- measure mode: calibration clicks, measuring drags -----
+  const measureDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const r = rulerRef.current;
+    const v = video.current;
+    const W = v?.videoWidth || 0;
+    const H = v?.videoHeight || 0;
+    const p = pointerNorm(e);
+    if (!p) return;
+    e.preventDefault();
+    if (!liveRef.current || !W || !H) {
+      setRuler((s) => ({ ...s, hint: "The camera isn't live yet — nothing to measure." }));
+      return;
+    }
+    const T = tracker.current.snapshot();
+    if (r.calibrating) {
+      const c = r.calibrating;
+      if (!c.first) {
+        setRuler((s) => (s.calibrating
+          ? { ...s, calibrating: { ...s.calibrating, first: { T, a: p } }, hint: "Now click the other end." }
+          : s));
+        return;
+      }
+      // The second click may come after the camera moved: read it in the first click's frame.
+      const b = toFrame(c.first.T, p[0], p[1]);
+      const cal = makeCalibration(c.first.a, b, c.mm, c.reference, c.first.T, W, H);
+      if (!cal) {
+        setRuler((s) => ({
+          ...s, calibrating: { ...c, first: null },
+          hint: "Those two clicks were on top of each other — click one end, then the other.",
+        }));
+        return;
+      }
+      setRuler((s) => ({ ...s, cal, calibrating: null, grid: s.grid, hint: "" }));
+      if (hologram) snapTrueScale(cal);
+      return;
+    }
+    if (!r.cal) {
+      setRuler((s) => ({ ...s, hint: UNCALIBRATED_HINT })); // refused in words, never in pixels
+      return;
+    }
+    holdPointer(e);
+    measureDrag.current = { T, a: p };
+    draftRef.current = null;
+  };
+
+  const measureMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = measureDrag.current;
+    const r = rulerRef.current;
+    if (!d || !r.cal) return;
+    const p = pointerNorm(e);
+    if (!p) return;
+    const b = toFrame(d.T, p[0], p[1]);
+    const asBox = e.shiftKey;
+    const dims = asBox ? boxMm(r.cal, d.T, d.a, b) : { w: 0, h: 0 };
+    draftRef.current = {
+      id: "draft", kind: asBox ? "box" : "distance", label: "", T: d.T, a: d.a, b,
+      mm: asBox ? 0 : lengthMm(r.cal, d.T, d.a, b), w: dims.w, h: dims.h,
+    };
+  };
+
+  const measureUp = () => {
+    const d = measureDrag.current;
+    const draft = draftRef.current;
+    measureDrag.current = null;
+    draftRef.current = null;
+    if (!d) return;
+    if (!draft) return; // a click: nothing was dragged
+    const [x1, y1] = mapAt(d.T, d.a[0], d.a[1]);
+    const [x2, y2] = mapAt(d.T, draft.b[0], draft.b[1]);
+    if (Math.hypot(x2 - x1, y2 - y1) < MIN_DRAG_PX) {
+      setRuler((s) => ({ ...s, hint: "Drag across the part — a click alone measures nothing." }));
+      return;
+    }
+    setRuler((s) => ({
+      ...s, hint: "",
+      items: [...s.items, { ...draft, id: newFrameId(), label: nextLabel(s.items) }].slice(-MAX_MEASUREMENTS),
+    }));
+  };
+
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (rulerRef.current.on) {
+      measureDown(e);
+      return;
+    }
     if (!hologram) return;
     e.preventDefault();
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    holdPointer(e);
     reanchor();
     const p = placeRef.current;
     drag.current = {
@@ -372,6 +568,10 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
     };
   };
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (measureDrag.current) {
+      measureMove(e);
+      return;
+    }
     const d = drag.current;
     if (!d) return;
     const dx = e.clientX - d.x;
@@ -390,6 +590,7 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
     if (b.w && b.h) placeRef.current = { ...placeRef.current, x: nx, y: ny };
   };
   const onPointerUp = () => {
+    if (measureDrag.current) measureUp();
     drag.current = null;
   };
   const onWheel = (e: React.WheelEvent<HTMLDivElement>) => {
@@ -398,11 +599,63 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
     reanchor();
     const f = Math.pow(1.1, -e.deltaY / 100);
     placeRef.current = { ...placeRef.current, size: Math.max(1e-5, placeRef.current.size * f) };
+    setTrueScale(false); // the user chose a size; ↺ 1:1 brings true scale back
   };
   const resetView = (iso: boolean) => {
     reanchor();
     placeRef.current = { ...placeRef.current, tiltX: iso ? 0.9 : 0, yaw: iso ? 0.6 : 0, roll: 0 };
   };
+
+  // ----- measure mode: the panel's controls -----
+  const toggleRuler = () => {
+    draftRef.current = null;
+    measureDrag.current = null;
+    setRuler((s) => ({ ...s, on: !s.on, calibrating: null, hint: "" }));
+  };
+  const startCalibration = () => {
+    const r = rulerRef.current;
+    const preset = PRESETS.find((p) => p.key === r.preset) || PRESETS[0];
+    const mm = preset.key === "custom" ? Number(r.customMm) : preset.mm;
+    if (!(mm > 0) || !Number.isFinite(mm)) {
+      setRuler((s) => ({ ...s, hint: "Type the custom length in millimetres first." }));
+      return;
+    }
+    const reference = preset.key === "custom" ? `custom ${fmtMm(mm)} mm` : preset.reference;
+    const thing = preset.key === "custom" ? `the ${fmtMm(mm)} mm length` : `the ${preset.reference}`;
+    setRuler((s) => ({
+      ...s, calibrating: { mm, reference, first: null },
+      hint: `Click one end of ${thing}, then the other. It should lie in the same plane as the parts.`,
+    }));
+  };
+  const stopCalibration = () => setRuler((s) => ({ ...s, calibrating: null, hint: "" }));
+  const renameItem = (id: string, text: string) =>
+    setRuler((s) => ({ ...s, items: s.items.map((m) => (m.id === id ? { ...m, label: text.slice(0, 40) } : m)) }));
+  const removeItem = (id: string) => setRuler((s) => ({ ...s, items: s.items.filter((m) => m.id !== id) }));
+  const clearItems = () => setRuler((s) => ({ ...s, items: [], hint: "" }));
+
+  const sendMeasure = async () => {
+    const r = rulerRef.current;
+    if (!r.cal || !r.items.length) return;
+    setSending(true);
+    try {
+      const out = await api.post<{ ok: boolean; line: string }>(
+        `/api/camera/${session.id}/measure`, measurePayload(r.cal, r.items),
+      );
+      setRuler((s) => ({ ...s, hint: out.ok ? `Sent — ${out.line}` : "HELIX couldn't read that measurement." }));
+    } catch {
+      setRuler((s) => ({ ...s, hint: "Couldn't reach HELIX to send that — try again." }));
+    } finally {
+      setSending(false);
+    }
+  };
+  const cancelMeasureAsk = () =>
+    void api.post(`/api/camera/${session.id}/measure`, { cancel: true }).catch(() => undefined);
+
+  // HELIX asked for a measurement (camera_measure, or a reloaded page with one parked): Measure
+  // mode comes on with the prompt in its banner. The user's own toggle still works afterwards.
+  useEffect(() => {
+    if (measureAsk) setRuler((s) => (s.on ? s : { ...s, on: true, hint: "" }));
+  }, [measureAsk]);
 
   // ----- picker / toggles -----
   const pickDevice = (id: string) => {
@@ -428,7 +681,17 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && useHelix.getState().camera?.ask) dismissAsk();
+      if (e.key !== "Escape") return;
+      const cam = useHelix.getState().camera;
+      if (cam?.ask) {
+        dismissAsk();
+        return;
+      }
+      if (rulerRef.current.calibrating) {
+        setRuler((s) => ({ ...s, calibrating: null, hint: "" }));
+        return;
+      }
+      if (cam?.measure) cancelMeasureAsk();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -437,23 +700,33 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
 
   // ----- render -----
   const wake = session.wake || "HELIX";
+  const rulerHint = ruler.hint
+    || (ruler.calibrating
+      ? (ruler.calibrating.first ? "Now click the other end." : "Click one end of the reference, then the other.")
+      : ruler.cal
+        ? "Drag across a part for its length, hold Shift for a box (w × h); name each row, then Send."
+        : UNCALIBRATED_HINT);
   const hint = error
     ? ""
-    : ask
-      ? ask.hold
-        ? ask.ears
-          ? `Say “take the picture” (or “cancel”), or use the buttons.`
-          : `Take the picture when it's ready — Esc cancels this look.`
-        : sending
-          ? "Sending what I see…"
-          : "Grabbing what the camera sees…"
-      : live
-        ? `Snap or record a clip, type a question first if you like — or just talk: “${wake}, what's this?”`
-        : status;
+    : ruler.on
+      ? rulerHint
+      : ask
+        ? ask.hold
+          ? ask.ears
+            ? `Say “take the picture” (or “cancel”), or use the buttons.`
+            : `Take the picture when it's ready — Esc cancels this look.`
+          : sending
+            ? "Sending what I see…"
+            : "Grabbing what the camera sees…"
+        : live
+          ? `Snap or record a clip, type a question first if you like — or just talk: “${wake}, what's this?”`
+          : status;
 
   const shellStyle: React.CSSProperties = full
     ? { position: "fixed", left: 16, right: 16, top: 52, bottom: 152, zIndex: 26 }
     : { position: "fixed", right: 18, top: 58, width: 440, bottom: 128, zIndex: 26, maxWidth: "calc(100vw - 36px)" };
+  const cursor = ruler.on ? "crosshair" : hologram ? (drag.current ? "grabbing" : "grab") : "default";
+  const ghostCount = hologram?.layout?.components.length ?? 0;
 
   return (
     <div
@@ -477,7 +750,7 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
         <div className="flex-1" />
         <select
           className="text-[12px] py-1 px-2 elide"
-          style={{ maxWidth: full ? 320 : 190 }}
+          style={{ maxWidth: full ? 320 : 150 }}
           value={deviceId || ""}
           onChange={(e) => pickDevice(e.target.value)}
           title="Which camera"
@@ -489,6 +762,14 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
           <option value={DEMO_ID}>{DEMO_LABEL}</option>
         </select>
         <button className="btn-nav px-2" title="Next camera" onClick={cycle}>⇄</button>
+        <button
+          className="btn-nav px-2"
+          title={ruler.on ? "Measure mode is on — back to the plain view" : "Measure: calibrate on a card, then drag across parts for real millimetres"}
+          style={{ color: ruler.on ? "var(--cyan)" : undefined }}
+          onClick={toggleRuler}
+        >
+          📐
+        </button>
         <button
           className="btn-nav px-2"
           title={mirror ? "Mirrored preview (on)" : "Mirror the preview"}
@@ -511,21 +792,21 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
       <div
         ref={frameEl}
         className="relative flex-1 rounded-xl overflow-hidden flex items-center justify-center"
-        style={{ background: "#05080b", border: "1px solid #1b2730", minHeight: 120, cursor: hologram ? (drag.current ? "grabbing" : "grab") : "default" }}
+        style={{ background: "#05080b", border: "1px solid #1b2730", minHeight: 120, cursor }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
         onWheel={onWheel}
         onContextMenu={(e) => hologram && e.preventDefault()}
-        onDoubleClick={() => hologram && resetView(false)}
+        onDoubleClick={() => hologram && !ruler.on && resetView(false)}
       >
         <video
           ref={video}
           muted
           playsInline
           autoPlay
-          onLoadedMetadata={measure}
+          onLoadedMetadata={fitBox}
           style={{
             width: box.w || "100%", height: box.h || "100%", objectFit: "contain",
             transform: mirror ? "scaleX(-1)" : undefined, display: "block",
@@ -537,21 +818,35 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
         >
           {hologram && box.w > 0 && (
             <ArHologram
-              stl={hologram.stl} arRef={arRef} placeRef={placeRef} boxRef={boxRef} box={box}
+              stl={hologram.stl} layout={hologram.layout} arRef={arRef} placeRef={placeRef} boxRef={boxRef} box={box}
               mirror={mirror} onLoaded={onHoloLoaded}
             />
           )}
           <canvas ref={overlayCanvas} style={{ position: "absolute", inset: 0, width: box.w, height: box.h, pointerEvents: "none" }} />
         </div>
 
-        {/* the model's prompt banner */}
-        {ask && (
-          <div
-            className="absolute left-3 right-3 top-3 rounded-xl px-3 py-2 text-[13px] fade-up"
-            style={{ background: "rgba(5,8,11,0.86)", border: "1px solid var(--cyan-dim)", color: "var(--text)", pointerEvents: "auto" }}
-          >
-            <span style={{ color: "var(--cyan)" }}>HELIX: </span>{ask.prompt}
-            {ask.frames > 1 && <span style={{ color: "var(--muted)" }}> · a {ask.seconds}s clip, {ask.frames} frames</span>}
+        {/* the model's prompt banners: a look it is waiting for, a measurement it asked for */}
+        {(ask || measureAsk) && (
+          <div className="absolute left-3 right-3 top-3 flex flex-col gap-2" style={{ pointerEvents: "none" }}>
+            {ask && (
+              <div
+                className="rounded-xl px-3 py-2 text-[13px] fade-up"
+                style={{ background: "rgba(5,8,11,0.86)", border: "1px solid var(--cyan-dim)", color: "var(--text)", pointerEvents: "auto" }}
+              >
+                <span style={{ color: "var(--cyan)" }}>HELIX: </span>{ask.prompt}
+                {ask.frames > 1 && <span style={{ color: "var(--muted)" }}> · a {ask.seconds}s clip, {ask.frames} frames</span>}
+              </div>
+            )}
+            {measureAsk && (
+              <div
+                className="rounded-xl px-3 py-2 text-[13px] fade-up flex items-center gap-2"
+                style={{ background: "rgba(5,8,11,0.86)", border: "1px solid var(--cyan-dim)", color: "var(--text)", pointerEvents: "auto" }}
+              >
+                <span style={{ color: "var(--cyan)" }}>HELIX · measure:</span>
+                <span className="flex-1">{measureAsk.prompt}</span>
+                <button className="btn-nav px-1.5 py-0 text-[13px]" onClick={cancelMeasureAsk} title="Cancel this measurement (Esc)">✕</button>
+              </div>
+            )}
           </div>
         )}
 
@@ -574,6 +869,16 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
           </div>
         )}
 
+        {ruler.on && recording === 0 && (
+          <div
+            className="absolute right-3 bottom-3 rounded-lg px-2.5 py-1 text-[12px]"
+            style={{ background: "rgba(5,8,11,0.8)", border: `1px solid ${ruler.cal ? "var(--done)" : "var(--line)"}`, color: ruler.cal ? "var(--done)" : "var(--muted)", pointerEvents: "none" }}
+            title={scaleLine(ruler.cal)}
+          >
+            📐 {ruler.cal ? scaleLine(ruler.cal) : "not calibrated"}
+          </div>
+        )}
+
         {(error || (!live && status)) && (
           <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-[13px]" style={{ color: error ? "var(--amber)" : "var(--muted)", pointerEvents: "none" }}>
             {error || status}
@@ -581,12 +886,122 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
         )}
       </div>
 
+      {/* measure mode: calibration, the grid, the list, Send */}
+      {ruler.on && (
+        <div className="flex flex-col gap-1.5 text-[12px]" style={{ color: "var(--muted)" }}>
+          {/* the reference and the two-click calibration */}
+          <div className="flex items-center gap-2">
+            <select
+              className="flex-1 text-[12px] py-1 px-2 elide"
+              style={{ minWidth: 140, maxWidth: 360 }}
+              value={ruler.preset}
+              disabled={Boolean(ruler.calibrating)}
+              onChange={(e) => setRuler((s) => ({ ...s, preset: e.target.value }))}
+              title="What you will click across — something of known size, lying in the same plane as the parts"
+            >
+              {PRESETS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+            </select>
+            {ruler.preset === "custom" && (
+              <input
+                className="text-[12px] py-1 px-2 shrink-0"
+                style={{ width: 72 }}
+                placeholder="mm"
+                inputMode="decimal"
+                value={ruler.customMm}
+                disabled={Boolean(ruler.calibrating)}
+                onChange={(e) => setRuler((s) => ({ ...s, customMm: e.target.value }))}
+                title="The known length, in millimetres"
+              />
+            )}
+            {ruler.calibrating ? (
+              <button className="btn text-[12px] shrink-0" onClick={stopCalibration} title="Stop calibrating (Esc)">✕ stop</button>
+            ) : (
+              <button className="btn btn-primary text-[12px] shrink-0" disabled={!live} onClick={startCalibration} title="Two clicks across the reference set the scale">
+                {ruler.cal ? "Recalibrate" : "Calibrate"}
+              </button>
+            )}
+          </div>
+          {/* the grid, and Send */}
+          <div className="flex items-center gap-2">
+            <button
+              className="btn-nav px-2 py-1 shrink-0"
+              disabled={!ruler.cal}
+              style={{ color: ruler.grid ? "var(--cyan)" : undefined, whiteSpace: "nowrap" }}
+              onClick={() => setRuler((s) => ({ ...s, grid: !s.grid }))}
+              title={ruler.cal ? "A 10 mm grid over the calibrated plane (it rides the board)" : "Calibrate first"}
+            >
+              ⊞ 10 mm grid
+            </button>
+            <span className="elide flex-1" title={scaleLine(ruler.cal)}>{scaleLine(ruler.cal)}</span>
+            <button
+              className="btn btn-primary text-[12px] shrink-0"
+              style={{ whiteSpace: "nowrap" }}
+              disabled={!ruler.cal || !ruler.items.length || sending}
+              onClick={() => void sendMeasure()}
+              title={measureAsk ? "Answer HELIX with these measurements" : "Send these measurements to HELIX"}
+            >
+              Send to HELIX{ruler.items.length ? ` (${ruler.items.length})` : ""}
+            </button>
+          </div>
+          {ruler.items.length > 0 && (
+            <div className="flex flex-col gap-1" style={{ maxHeight: full ? 160 : 92, overflowY: "auto" }}>
+              {ruler.items.map((m) => (
+                <div key={m.id} className="flex items-center gap-2">
+                  <input
+                    className="text-[12px] py-0.5 px-2"
+                    style={{ width: 132 }}
+                    value={m.label}
+                    onChange={(e) => renameItem(m.id, e.target.value)}
+                    title="Name this measurement — which part, which feature"
+                  />
+                  <span style={{ color: "var(--text)" }}>{describe(m)}</span>
+                  <span className="elide flex-1">{m.kind === "box" ? "box" : "length"}</span>
+                  <button className="btn-nav px-1.5 py-0" onClick={() => removeItem(m.id)} title="Remove this measurement">✕</button>
+                </div>
+              ))}
+              {ruler.items.length > 1 && (
+                <div className="flex items-center">
+                  <div className="flex-1" />
+                  <button className="btn-nav px-1.5 py-0" onClick={clearItems} title="Remove every measurement">clear all</button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* hologram bar */}
       {hologram && (
         <div className="flex items-center gap-2 text-[12px]" style={{ color: "var(--muted)" }}>
           <span className="elide" style={{ color: "var(--cyan)" }}>◈ {hologram.name}</span>
           {holoDims && <span>{Math.round(holoDims.x)}×{Math.round(holoDims.y)}×{Math.round(holoDims.z)} mm</span>}
-          <span className="elide flex-1">drag to move · scroll to size · shift-drag to tilt · double-click resets</span>
+          {trueScale && (
+            <span
+              className="shrink-0"
+              style={{ color: "var(--done)", border: "1px solid var(--done)", borderRadius: 6, padding: "0 5px", fontSize: 11 }}
+              title="True scale: 1 mm on the plate is 1 mm on the desk (from the calibration)"
+            >
+              1:1
+            </span>
+          )}
+          {ghostCount > 0 && (
+            <span className="shrink-0" title="The design's component layout, drawn as ghost pockets inside the shell">
+              {ghostCount} ghost{ghostCount === 1 ? "" : "s"}
+            </span>
+          )}
+          <span className="elide flex-1">
+            {ruler.on
+              ? "measure mode — turn 📐 off to move the hologram"
+              : "drag to move · scroll to size · shift-drag to tilt · double-click resets"}
+          </span>
+          <button
+            className="btn-nav px-1.5"
+            disabled={!ruler.cal}
+            onClick={() => snapTrueScale()}
+            title={ruler.cal ? "Snap the hologram to true scale (1 mm = 1 mm)" : "Calibrate in Measure mode to place it at true scale"}
+          >
+            ↺ 1:1
+          </button>
           <button className="btn-nav px-1.5" onClick={() => resetView(false)} title="Top view">▭</button>
           <button className="btn-nav px-1.5" onClick={() => resetView(true)} title="Isometric">◇</button>
           <button className="btn-nav px-1.5" onClick={() => setStore({ hologram: null })} title="Remove the hologram">✕</button>
@@ -664,12 +1079,12 @@ export default function CameraDock({ session, hidden = false }: { session: Camer
             value={hologram?.slug || ""}
             onChange={(e) => {
               const row = holograms.find((h) => h.slug === e.target.value);
-              setStore({ hologram: row ? { slug: row.slug, name: row.name, stl: row.stl } : null });
+              setStore({ hologram: row ? { slug: row.slug, name: row.name, stl: row.stl, layout: row.layout } : null });
             }}
             title="Project one of your holograms onto the view"
           >
             <option value="">Project a hologram…</option>
-            {holograms.map((h) => <option key={h.slug} value={h.slug}>{h.name}</option>)}
+            {holograms.map((h) => <option key={h.slug} value={h.slug}>{h.name}{h.layout ? " ◫" : ""}</option>)}
           </select>
         )}
         {overlays.length > 0 && (

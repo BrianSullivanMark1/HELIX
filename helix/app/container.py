@@ -60,10 +60,17 @@ from helix.services.workflows import WorkflowService
 from helix.services.prompts import CONSOLE_SYSTEM, DEEP_THINK_SYSTEM
 from helix.services.selfdev import SelfDevService
 from helix.services.selfdev_lane import SelfDevLane
+from helix.services.components import ComponentService
+from helix.services.maker import MakerService
 from helix.services.parts import PartsService
 from helix.services.shopping import ShoppingService
 from helix.services.tools import ToolRegistry
 from helix.services.voiceid import VoiceIdService
+
+# The module logger the orphan sweep below reports through. It was referenced there without ever
+# being defined, so the first launch that actually found an orphaned app server would have died in
+# Container.__init__ with a NameError inside its own except clause.
+_LOG = get_logger("container")
 
 
 def _migrate_agents(settings: JsonSettings, agent_store: JsonSettings) -> None:
@@ -641,6 +648,18 @@ class Container:
             store=JsonSettings(self.paths.data / "helix_cart.json"), parts=self.parts, bus=self.bus,
             clock=_stamp,
         )
+        # THE MAKER FLOW (READ_ME/MAKER_FLOW.md): the component library in service (suggest the parts
+        # of a device; resolve a parts-list row to a library part, a LiPo code, or a measured size)
+        # and the maker brain that designs an enclosure from the list DETERMINISTICALLY — no coder
+        # run: the generator emits model.py + assets/layout.json, the same baker/engine/repo the
+        # Forge uses bake and version it, and the shell hears BuildCreated/BuildIterated like any
+        # hologram. It also projects a design over the camera with ghost pockets (check_fit), parks
+        # the ruler on the panel (camera_measure), and writes the print sheet print_hologram and
+        # the studio show. Pure Python until a design is asked for; the kernel runs in its worker.
+        self.components = ComponentService(self.parts)
+        self.maker = MakerService(
+            self.components, self.parts, self.builds, self.model_baker, self.repo, self.bus, cad=cad,
+        )
         # The Bambu printer's LAN details, read PER CALL (secrets → legacy settings → env) like the
         # Tripo key — so connecting the printer mid-conversation works on the very next tool call.
         def _bambu_key(key: str) -> str | None:
@@ -655,6 +674,7 @@ class Container:
             knowledge=self.knowledge, gmail=self.gmail, reminders=self.reminders, calendar=self.calendar,
             files=self.files, user_memory=self.user_memory, location=self.location,
             desktop=self.desktop, shopping=self.shopping, parts=self.parts, cad=cad, bambu=_bambu_key,
+            maker=self.maker,
         )
         # The orb quietly learns who the user is: a background distiller (same fast chat model) keeps a
         # compact profile in the DB, injected into each Console turn like the time anchor. No knobs.

@@ -20,6 +20,7 @@ import threading
 from dataclasses import asdict, dataclass, replace
 from typing import Callable
 
+from helix.domain import components as _components
 from helix.domain.shopping import clamp_quantity, extract_asin, read_price
 from helix.logging_setup import get_logger
 from helix.ports.stores import SettingsStore
@@ -50,14 +51,48 @@ class Part:
     status: str = "need"
     note: str = ""
     updated: str = ""
+    # Physical fields (MAKER_FLOW §3) — all optional; the enclosure generator reads them.
+    component: str = ""            # catalog key (helix.domain.components) when the row maps to a library part
+    length: float | None = None    # ad-hoc or measured mm (L ≥ W ≥ H not required — set_dims sorts)
+    width: float | None = None
+    height: float | None = None
+    face: str = ""                 # which enclosure wall the aperture/port should reach: front/back/left/right/top/bottom
+    on_lid: bool = False
 
     @property
     def key(self) -> str:
         return _norm(self.name)
 
+    @property
+    def dims(self) -> tuple[float, float, float] | None:
+        if self.length is None or self.width is None or self.height is None:
+            return None
+        return (self.length, self.width, self.height)
+
 
 def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def _mm(value) -> float | None:
+    """A millimetre number from a field: positive floats only; text like "21.1 mm" is tolerated."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        m = re.search(r"\d+(?:[.,]\d+)?", value)
+        if not m:
+            return None
+        value = m.group(0).replace(",", ".")
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(f, 2) if f > 0 else None
+
+
+def _face(value) -> str:
+    f = str(value or "").strip().lower()
+    return f if f in _components.FACES else ""
 
 
 def _squash(text: str) -> str:
@@ -112,13 +147,18 @@ class PartsService:
             spec=str(raw.get("spec") or ""), asin=str(raw.get("asin") or ""),
             price=read_price(raw.get("price")), status=str(raw.get("status") or "need"),
             note=str(raw.get("note") or ""), updated=str(raw.get("updated") or ""),
+            component=str(raw.get("component") or ""), length=_mm(raw.get("length")),
+            width=_mm(raw.get("width")), height=_mm(raw.get("height")), face=_face(raw.get("face")),
+            on_lid=bool(raw.get("on_lid", False)),
         )
 
     # ----- writes -----
     def save(self, project: str, raw_items) -> str:
         """Create or update a project's rows (upsert by name). Each item: name, quantity, spec,
-        asin (bare or Amazon link), price, status (need/on hand/carted), note. A row's given
-        fields overwrite; omitted fields keep what was there."""
+        asin (bare or Amazon link), price, status (need/on hand/carted), note, and the physical
+        fields — component (a library key or spoken name; resolved to the key when the library
+        knows it), length/width/height (mm), face (front/back/left/right/top/bottom), on_lid. A
+        row's given fields overwrite; omitted fields keep what was there."""
         proj = _slug(project)
         if not proj:
             return "Which project is this parts list for? Give it a short name."
@@ -161,6 +201,31 @@ class PartsService:
                     st = _STATUS_WORDS.get(str(entry["status"]).strip().lower().replace("-", " "))
                     if st:
                         fields["status"] = st
+                if entry.get("component") is not None:
+                    want = " ".join(str(entry["component"]).split())[:80]
+                    hit = _components.find(want) if want else None
+                    if hit is not None:
+                        fields["component"] = hit.key
+                    elif not want:
+                        fields["component"] = ""
+                    else:
+                        fields["component"] = want
+                        skipped.append(f"{pname}: '{want}' isn't a library part — kept the name; give its "
+                                       "size (length/width/height) or measure it")
+                for dim in ("length", "width", "height"):
+                    if dim in entry and entry[dim] is not None:
+                        v = _mm(entry[dim])
+                        if v is not None:
+                            fields[dim] = v
+                if entry.get("face") is not None:
+                    f = _face(entry["face"])
+                    if f or not str(entry["face"]).strip():
+                        fields["face"] = f
+                    else:
+                        skipped.append(f"{pname}: face '{entry['face']}' isn't one of "
+                                       f"{'/'.join(_components.FACES)} — face left unset")
+                if entry.get("on_lid") is not None:
+                    fields["on_lid"] = bool(entry["on_lid"])
                 part = replace(base, **fields)
                 if existing is None:
                     if len(rows) >= _MAX_ROWS:
@@ -169,7 +234,10 @@ class PartsService:
                     rows.append(part)
                 else:
                     rows[rows.index(existing)] = part
-                saved.append(f"{part.name} x{part.quantity}" + (f" ({part.asin})" if part.asin else ""))
+                tag = f" ({part.asin})" if part.asin else ""
+                if part.component and _components.find(part.component) is not None:
+                    tag += f" [{part.component}]"
+                saved.append(f"{part.name} x{part.quantity}{tag}")
             data[name] = [asdict(r) for r in rows]
             self._save(data)
         out = f"Saved to the '{name}' parts list: " + "; ".join(saved) + "." if saved else ""
@@ -230,6 +298,31 @@ class PartsService:
                 if r.key == key or (key and key in r.key):
                     rows[i] = replace(r, asin=asin.upper(), price=price if price is not None else r.price,
                                       updated=self._clock())
+                    data[name] = [asdict(x) for x in rows]
+                    self._save(data)
+                    return True
+        return False
+
+    def set_dims(self, project: str, part_name: str, length, width, height, *,
+                 source: str = "measured") -> bool:
+        """Record a row's physical size in mm (from the camera ruler or a listing). Sorted so
+        length ≥ width ≥ height. False when the project/row doesn't exist or a number is bad."""
+        vals = [_mm(length), _mm(width), _mm(height)]
+        if any(v is None for v in vals):
+            return False
+        l, w, h = sorted(vals, reverse=True)  # type: ignore[type-var]
+        with self._lock:
+            data = self._load()
+            name = self._find_project(data, project)
+            if name is None:
+                return False
+            rows = [self._part(r) for r in data[name]]
+            key = _norm(part_name)
+            for i, r in enumerate(rows):
+                if r.key == key or (key and key in r.key):
+                    stamp = f"dims {source}" if source else ""
+                    note = r.note if (not stamp or stamp in r.note) else " ".join(x for x in (r.note, stamp) if x)[:160]
+                    rows[i] = replace(r, length=l, width=w, height=h, note=note, updated=self._clock())
                     data[name] = [asdict(x) for x in rows]
                     self._save(data)
                     return True
@@ -296,6 +389,15 @@ class PartsService:
                 bits.append(f"about ${r.price:,.2f}")
             if r.spec:
                 bits.append(r.spec)
+            if r.component:
+                c = _components.find(r.component)
+                bits.append(f"library part {r.component}" if c is not None else f"part '{r.component}' (not in the library)")
+            if r.dims is not None:
+                bits.append(f"{r.length:g} × {r.width:g} × {r.height:g} mm")
+            if r.face:
+                bits.append(f"reaches the {r.face} wall")
+            if r.on_lid:
+                bits.append("on the lid")
             if r.note:
                 bits.append(r.note)
             lines.append(f"{i}. {r.name} — " + "; ".join(bits))

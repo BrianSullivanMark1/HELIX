@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { api, getToken } from "../lib/api";
 import { parseSTL } from "../lib/stl";
-import { useHelix } from "../lib/store";
+import { layoutFromJson, useHelix, type HologramLayout, type LayoutComponent } from "../lib/store";
 
 interface Param {
   name: string;
@@ -31,9 +31,60 @@ interface Hologram {
   meta: { bbox_mm?: number[]; volume_cm3?: number; solid_grams_pla?: number; parts?: string[];
           print_warnings?: string[] };
   engine: string;
+  // The maker flow (MAKER_FLOW §7): the component layout design_enclosure wrote beside the mesh
+  // (null for a hologram the coder drew) and the P1S print sheet, plain text.
+  layout?: unknown;
+  print_sheet?: string;
 }
 
 const P1S_BED = [256, 256, 256];
+
+const KIND_WORDS: Record<string, string> = {
+  usb_c: "USB-C", micro_usb: "micro-USB", usb_a: "USB-A", barrel_5_5: "barrel jack", sd: "SD slot",
+  hdmi: "HDMI", audio_3_5: "3.5 mm audio", antenna: "antenna", switch: "switch slot", panel: "panel hole",
+  lens: "lens bore", mic: "mic hole", speaker: "grille", led: "LED window", screen: "screen window",
+  button: "button", sensor: "sensor window", vent: "vent", shaft: "shaft", other: "opening",
+};
+
+const MOUNT_WORDS: Record<string, string> = {
+  standoff: "standoffs", rails: "side rails", pocket: "ribbed pocket", ring: "ring", bay: "bay",
+  clip: "panel-mounted",
+};
+
+const fmt = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
+
+/** One line per component: what was cut for it — its own face cuts, then the wall openings that
+ * serve it (an enclosure aperture's `for` is the component's label). Plain words, no guesses. */
+function cutsFor(c: LayoutComponent, layout: HologramLayout): string {
+  const bits: string[] = [];
+  const face = c.face || "front";
+  for (const a of c.apertures) {
+    const size = a.d > 0 ? `Ø${fmt(a.d)}` : a.w > 0 && a.h > 0 ? `${fmt(a.w)} × ${fmt(a.h)}` : "";
+    bits.push(`${KIND_WORDS[a.kind] || a.kind}${size ? ` ${size}` : ""} through the ${face} face`);
+  }
+  for (const a of layout.apertures) {
+    if (a.for !== c.label) continue;
+    const size = a.d > 0 ? `Ø${fmt(a.d)}` : a.w > 0 && a.h > 0 ? `${fmt(a.w)} × ${fmt(a.h)}` : "";
+    bits.push(`${KIND_WORDS[a.kind] || a.kind}${size ? ` ${size}` : ""} on the ${a.face} wall`);
+  }
+  return bits.join("; ");
+}
+
+/** The component's library name rides on the raw layout (an additive key the store's parser
+ * drops); read it back defensively so the panel can say "XIAO — Seeed XIAO ESP32-S3 Sense". */
+function namesByLabel(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!raw || typeof raw !== "object") return out;
+  const comps = (raw as { components?: unknown }).components;
+  if (!Array.isArray(comps)) return out;
+  for (const c of comps) {
+    if (c && typeof c === "object") {
+      const r = c as Record<string, unknown>;
+      if (typeof r.label === "string" && typeof r.name === "string") out[r.label] = r.name;
+    }
+  }
+  return out;
+}
 
 interface LoadedModel {
   geo: THREE.BufferGeometry;
@@ -132,6 +183,7 @@ function StudioCanvas({ stlUrl }: { stlUrl: string }) {
 export default function Studio({ slug, title }: { slug: string; title: string }) {
   const navigate = useHelix((s) => s.navigate);
   const buildsVersion = useHelix((s) => s.buildsVersion);
+  const camera = useHelix((s) => s.camera);
   const [holo, setHolo] = useState<Hologram | null>(null);
   const [values, setValues] = useState<Record<string, number | boolean | string>>({});
   const [dirty, setDirty] = useState(false);
@@ -194,6 +246,29 @@ export default function Studio({ slug, title }: { slug: string; title: string })
   };
 
   const dl = (url: string) => `${url}${url.includes("?") ? "&" : "?"}t=${encodeURIComponent(getToken())}`;
+
+  // The component layout (a hologram designed from a parts list) and its part names.
+  const layout = useMemo(() => layoutFromJson(holo?.layout), [holo]);
+  const partNames = useMemo(() => namesByLabel(holo?.layout), [holo]);
+
+  // Check fit on camera: raise the panel when none is open, then project THIS hologram with its
+  // layout through the shell's own camera command path (the same path check_fit takes), and go
+  // to the Console, where the camera panel lives — the ghosts and the 1:1 scale ride along.
+  const checkFit = () => {
+    setBusyLine("Projecting onto the camera…");
+    const open = camera ? Promise.resolve() : api.post("/api/camera/open").then(() => undefined);
+    void open
+      .then(() => api.post<{ ok: boolean; line: string }>(`/api/holograms/${slug}/project`))
+      .then((res) => {
+        if (res.ok) {
+          setBusyLine("Projected onto the camera — calibrate once on a credit card for 1:1.");
+          navigate({ name: "console" });
+        } else {
+          setBusyLine(res.line || "Couldn't project it onto the camera.");
+        }
+      })
+      .catch(() => setBusyLine("Couldn't reach the camera panel."));
+  };
 
   if (holo?.legacy) {
     return (
@@ -304,6 +379,52 @@ export default function Studio({ slug, title }: { slug: string; title: string })
           )}
         </div>
 
+        {layout && (
+          <div className="glass rounded-2xl p-4">
+            <div className="section-title mb-2">Components &amp; fit</div>
+            <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+              Shell <span style={{ color: "var(--text)" }}>
+                {fmt(layout.outer[0])} × {fmt(layout.outer[1])} × {fmt(layout.outer[2])} mm
+              </span> outside, {fmt(layout.wall)} mm walls, {layout.lid || "screw"} lid
+              {layout.screws.length > 0 && ` · ${layout.screws.length} × ${layout.screws[0].size} inserts`}
+              {" · "}{layout.components.length} part{layout.components.length === 1 ? "" : "s"}
+            </div>
+            <div className="space-y-1.5">
+              {layout.components.map((c) => {
+                const cuts = cutsFor(c, layout);
+                return (
+                  <div key={`${c.label}-${c.x}-${c.y}`} className="text-xs rounded-lg px-2 py-1"
+                    style={{ background: "rgba(63,224,224,0.06)", border: "1px solid rgba(63,224,224,0.12)" }}>
+                    <div>
+                      <span style={{ color: "var(--cyan)" }}>{c.label}</span>
+                      <span style={{ color: "var(--muted)" }}> — {partNames[c.label] || c.key || "part"}</span>
+                    </div>
+                    <div style={{ color: "var(--muted)" }}>
+                      pocket {fmt(c.w)} × {fmt(c.h)} mm · {MOUNT_WORDS[c.mount] || c.mount || "pocket"}
+                      {c.on_lid ? " · on the lid" : ""}
+                      {c.face ? ` · faces ${c.face}` : ""}
+                      {cuts ? ` · ${cuts}` : ""}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {layout.problems.length > 0 && (
+              <div className="mt-2 text-xs space-y-1" style={{ color: "var(--working)" }}>
+                {layout.problems.map((p, i) => <div key={i}>⚠ {p}</div>)}
+              </div>
+            )}
+            <button className="btn btn-primary text-xs mt-3 w-full" onClick={checkFit}>
+              Check fit on camera
+            </button>
+            <div className="text-[11px] mt-2" style={{ color: "var(--muted)" }}>
+              Projects the shell over the live camera with a ghost pocket per part. Calibrate once on a
+              credit card's long edge in the panel's Measure mode and it lands at 1:1 — lay the real
+              parts inside their ghosts.
+            </div>
+          </div>
+        )}
+
         <div className="glass rounded-2xl p-4">
           <div className="section-title mb-3">Print — Bambu P1S</div>
           <div className="text-xs space-y-1.5" style={{ color: "var(--muted)" }}>
@@ -348,6 +469,14 @@ export default function Studio({ slug, title }: { slug: string; title: string })
           <div className="text-[11px] mt-2" style={{ color: "var(--muted)" }}>
             STEP opens natively in Bambu Studio — cleanest geometry for slicing.
           </div>
+          {holo?.print_sheet && (
+            <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--line)" }}>
+              <div className="text-xs mb-1" style={{ color: "var(--text)" }}>Print sheet</div>
+              <div className="text-[11px] whitespace-pre-wrap leading-relaxed" style={{ color: "var(--muted)" }}>
+                {holo.print_sheet}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="glass rounded-2xl p-4">

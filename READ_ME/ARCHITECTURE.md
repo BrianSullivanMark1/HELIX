@@ -498,6 +498,80 @@ line (date, project, items, estimated spend) — the expense trail on HELIX's si
 profile folder are on the guard skip list (`config.VOLATILE_STORE_NAMES`) — a browser writes into its
 profile constantly, exactly the live churn a coder guard must ignore.
 
+### 7d. The maker flow — parts, enclosure, fit, print
+
+**Why (Sept 2026).** The IronEye session — a hat camera with vision, hearing and speech, for the
+P1S — took four hours and never got a printable box: the model guessed component sizes into
+`model.py` constants, re-derived the BOM from chat memory every turn, and the AR panel could show a
+hologram over the camera but not at a known scale, so "will the XIAO fit in that pocket" had no
+answer. The maker flow (spec and contracts: `READ_ME/MAKER_FLOW.md`) makes every number in the box
+come from one of three places — the component library, a listing, or the camera's ruler — and
+turns the four-hour improvisation into one conversation.
+
+**The library — `domain/components.py` + `services/components.py`.** A 132-part catalog of maker
+staples (boards, cameras, mics, amps, speakers, cells, chargers, switches, displays, sensors, motors,
+drivers, LEDs, connectors) with L × W × H, mounting holes ONLY where a manufacturer drawing gave
+them (otherwise `mount=pocket` and no holes — a wrong hole is worse than a pocket), ports and
+apertures (lens, mic, grille, screen), an Amazon search phrase, a source kind and a confidence per
+entry (community-measured ≤ 0.7 gets 0.5 mm more room). `find` resolves keys, names and spoken
+aliases and never guesses; `lipo_from_code` reads a pouch cell's size code; `adhoc` carries a part
+the user measured; `kit_for` ranks candidates per role for a need ("vision, hearing, speech").
+`ComponentService.suggest` is the readable brief (roles, 2–3 sized candidates, honest notes, no
+fenced tool named); `resolve_parts` maps a parts list to components. The parts list itself
+(`services/parts.py`) gained the physical fields the box is designed from: `component` (the key),
+`length/width/height`, `face` (which wall a lens/port/speaker must reach), `on_lid`.
+
+**The generator — `domain/enclosure.py` + `helix_parts` additions in `domain/cadpy.py`.** Pure
+Python: `plan_layout(spec)` packs the parts (rotation, clearance, a wire trench, standoffs only for
+verified holes, rib-walled pockets, bays, rings; wall hints put a part against its wall and open
+every port facing it; plate hints flip a part face-down and cut its lens bore, mic hole or hex
+grille through the front; `on_lid` parts go on the lid's inner face, clear of the lip band and
+towers) into a two-half, plate-face-down shell with lip ring + rebate, 2–4 screw towers on the
+tower formula, debossed labels, and real geometry for the mount options (strap tabs, wall tabs, a
+DIN clip, foot recesses). `model_source` emits ordinary `model.py` (parameter block with `wall`,
+`clearance`, `corner_r`, `lid_style`, `label_deep`, one `<label>_extra` per pocket; a `# --- Layout
+---` table) so the studio's sliders and the LLM edit path work on it unchanged; `layout_json` is
+the §6 record the camera panel draws ghosts from; `validate` lists overlaps, out-of-cavity parts,
+off-wall apertures, bed and thin walls in plain lines. The `BOARDS` block of `helix_parts` is now
+rendered from the catalog at import (`render_boards`), so `board("xiao_esp32s3_sense")` works in
+any hologram and the catalog is the single source of truth.
+
+**AR measure and true scale — the camera panel (workstream C).** Measure mode (📐): two clicks
+across a known length (credit card long edge 85.60 mm, short edge 53.98, the printable HELIX
+marker 80.0, a US quarter, an AA cell, or a typed mm) calibrate `mm/px` at the tracker's base
+frame, so the scale survives camera drift; drag = a length, shift-drag = a box, labelled rows,
+a 10 mm grid; uncalibrated measuring is refused, never shown in pixels. Send posts one batch to
+`POST /api/camera/{id}/measure` and the shell turns it into ONE line — `Measured: XIAO 21.1 × 17.6
+mm; … (0.19 mm/px, card long edge)` — settling a parked `camera_measure` tool or becoming a turn.
+A calibrated projection lands a hologram at 1:1 (a "↺ 1:1" snaps back after a drag), and a
+hologram with a layout draws each component as a labelled ghost pocket on the shell's floor, its
+apertures and screws marked, so the real parts are laid inside their ghosts on the desk.
+
+**The brain — `services/maker.py` (`MakerService`), wired in the container.** Four tools:
+`suggest_components` (readable: the library brief), `design_enclosure` (resolve the project's rows
+— a row with neither a library match nor a size STOPS it with a precise line per row; hardware rows
+and rows noted "no pocket" are listed, not pocketed — then `plan_layout` → `validate` →
+`model_source` → the MODEL build `'<project> enclosure'` is created or updated: `model.py` +
+`assets/layout.json` written, `ModelBaker.prepare`, one kernel compile through the shared
+`CadEngine` (the compiler's own words on failure, and a rollback: a new build is deleted, an
+update is `git reset --hard`), `bake`, `BuildService.finalize` (the version commit),
+`BuildCreated`/`BuildIterated` for the menu and studio — and the plain fit report: outer size,
+every pocket, the wall openings with their estimated heights flagged, screws, PLA grams and the
+size measured off the compiled mesh, `validate`'s problems and the runner's print warnings),
+`check_fit` (raise the panel if needed, project with the layout, say how to calibrate), and
+`camera_measure` (park the ruler ask on the panel, wait up to 300 s cancel-aware, relay the line).
+`print_hologram` now carries a **print sheet** (P1S settings, the parts with planned sizes and
+measured grams, screws/inserts, the assembly order from the brief) and the studio shows it; the
+studio's **Components & fit** panel lists each pocket and its cuts, shows problems in amber, and
+its "Check fit on camera" button goes through `POST /api/holograms/{slug}/project` — the same shell
+command path the tool takes. `GET /api/holograms/{slug}` carries `layout` and `print_sheet`. The
+persona's "THE MAKER FLOW" paragraph runs the five steps in order and ends with the rule: never
+hand-type a dimension you didn't read from the library, a listing, or the ruler.
+
+**Fence.** `design_enclosure`, `check_fit`, `camera_measure` are BUILD_TOOLS (a build write; the
+camera on the user's screen). `suggest_components` stays readable and its text names no fenced
+tool. Nothing here prints or buys by itself, and the camera opens only on the user's request.
+
 ## 8. Self-modification & the Constitution
 
 HELIX can improve its *own* code through the same `CoderAgent`, but every self-change funnels through

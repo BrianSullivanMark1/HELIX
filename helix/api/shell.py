@@ -43,6 +43,7 @@ from helix.domain.events import (
 from helix.logging_setup import get_logger
 from helix.services import attachments
 from helix.services import images as imagesvc
+from helix.services.camera import measure_line, read_layout
 from helix.services.cancel import CancelToken
 from helix.services.connections import CONNECTABLE
 from helix.services.conversation import STOPPED_REPLY
@@ -122,7 +123,8 @@ class ShellSession:
         self._attachment_frames: dict[str, str] = {}  # attachment id -> camera frame id (live view)
         # The camera panel session — ONE at a time. {"id", "manual", "live", "label", "prompt",
         # "request" (a parked CameraRequest or None), "rid" (that request's capture id),
-        # "opened_for_request" (the panel came up FOR a look, so a spoken cancel folds it)}.
+        # "opened_for_request" (the panel came up FOR a look, so a spoken cancel folds it),
+        # "measure" (a parked CameraCommand("measure") or None), "mid" (its id), "measure_prompt"}.
         self._camera: dict | None = None
         self._camera_watchdog: threading.Timer | None = None
         self._last_frame_id = ""                 # the frame the model saw last (AR callouts anchor to it)
@@ -947,6 +949,18 @@ class ShellSession:
     )
     _DEFAULT_ASK = "Hold it up to the camera — take your time."
     _MANUAL_ASK = "Show me the part — I'll identify it and we can talk it through."
+    _MEASURE_ASK = "Measure the part for me — calibrate on a card first, then drag across it."
+    # What HELIX is told alongside a measurement the user sent on their own (no tool waiting): the
+    # ruler's numbers are real millimetres, and the sensible next step is the parts list.
+    _MEASURE_CONTEXT = (
+        "Context: I just measured this on the camera panel's ruler, calibrated against the reference "
+        "named in the brackets — the numbers are real millimetres (one decimal), and each label is "
+        "what I called the thing I dragged across. If a part belongs to a project we're building, "
+        "save its size to that project's parts list and say so in a sentence; otherwise tell me what "
+        "you make of the numbers. Don't re-derive or round them."
+    )
+    _MEASURE_CANCELLED = "The user cancelled the measurement."
+    _MEASURE_CLOSED = "The camera panel closed before a measurement was sent."
     # How long a LIVE panel gets to answer a no-wait look before the shell decides the panel is
     # gone (a reloaded page, a closed tab) and raises a fresh one for the user instead.
     _CAPTURE_WATCHDOG_S = 8.0
@@ -960,8 +974,14 @@ class ShellSession:
         if req is not None:
             ask = {"rid": cam.get("rid"), "prompt": cam.get("prompt") or self._DEFAULT_ASK,
                    "hold": bool(req.hold), "frames": req.frames, "seconds": req.seconds}
+        # A parked measurement re-raises with the panel too (a reloaded page lands in Measure mode
+        # with the prompt showing, the same way a parked look finds its banner again).
+        measure = None
+        if cam.get("measure") is not None:
+            measure = {"mid": cam.get("mid"), "prompt": cam.get("measure_prompt") or self._MEASURE_ASK}
         return {"t": "camera", "id": cam["id"], "prompt": cam.get("prompt") or "", "ears": ears,
-                "manual": bool(cam.get("manual")), "ask": ask, "wake": self._wake_word()}
+                "manual": bool(cam.get("manual")), "ask": ask, "measure": measure,
+                "wake": self._wake_word()}
 
     def _wake_word(self) -> str:
         return (self.c.settings.get(WAKE_WORD_SETTING) or DEFAULT_WAKE_WORD).strip() or DEFAULT_WAKE_WORD
@@ -1210,8 +1230,76 @@ class ShellSession:
         cam["request"], cam["rid"] = None, None
         if req is not None:
             req.fail(reason or "The user closed the camera panel before a picture was taken.")
+        # Likewise a measurement HELIX was waiting for: the panel is gone, so say so plainly.
+        self._settle_measure(cam, reply=self._MEASURE_CLOSED, announce=False)
         if not quiet:
             self.push({"t": "camera.close", "id": cam["id"]})
+
+    # -- the ruler: measurements the user sends, and the measure command that asks for them --
+    def camera_measured(self, cam_id: str, payload: dict) -> str:
+        """The panel's Send: the ruler's batch (MAKER_FLOW §5 body) becomes ONE plain line —
+        `Measured: XIAO 21.1 × 17.6 mm; hole pitch 15.2 mm (0.19 mm/px, card long edge)`. When a
+        camera_measure tool is parked on this panel the line settles it (the tool relays it to the
+        model mid-turn); otherwise it reaches HELIX as a turn of its own, with a context bracket
+        saying where the numbers came from. Either way the transcript shows the line on a system
+        bubble, so a measurement is never invisible. Returns the line, or '' when nothing was
+        measurable or the panel id is stale (nothing happens then)."""
+        cam = self._camera
+        if cam is None or cam["id"] != cam_id:
+            return ""
+        line = measure_line(payload)
+        if not line:
+            return ""
+        self._bubble("system", f"📐 {line}")
+        cmd = cam.get("measure")
+        if cmd is not None and cmd.waiting:
+            self._settle_measure(cam, reply=line)
+            return line
+        if cmd is not None:
+            # The tool gave up before the user finished (stop, or the 300 s ceiling): clear the
+            # parked ask, and still hand the measurement to HELIX — it was real work.
+            self._settle_measure(cam, reply=line, announce=True)
+        self._submit_measure(line)
+        return line
+
+    def camera_measure_cancel(self, cam_id: str) -> bool:
+        """✕ on the measure banner (or Esc): the parked measure command is answered with the cancel
+        line and the panel stays open in whatever mode the user left it. False = nothing parked."""
+        cam = self._camera
+        if cam is None or cam["id"] != cam_id or cam.get("measure") is None:
+            return False
+        self._settle_measure(cam, reply=self._MEASURE_CANCELLED)
+        return True
+
+    def _park_measure(self, cam: dict, cmd, prompt: str) -> None:
+        """Park a measure command on the panel: one at a time (a newer ask replaces an older one
+        still waiting), and tell the face to switch to Measure mode with the prompt showing."""
+        if cam.get("measure") is not None:
+            self._settle_measure(cam, reply="A newer measurement request replaced this one.")
+        cam["measure"], cam["mid"], cam["measure_prompt"] = cmd, uuid.uuid4().hex[:10], prompt
+        self.push({"t": "camera.measure", "id": cam["id"], "mid": cam["mid"], "prompt": prompt})
+        self._status(f"Camera — measure: {prompt}")
+
+    def _settle_measure(self, cam: dict, *, reply: str, announce: bool = True) -> None:
+        """Answer the measure command parked on this panel (if any) and clear its banner."""
+        cmd = cam.get("measure")
+        cam["measure"], cam["mid"], cam["measure_prompt"] = None, None, ""
+        if cmd is None:
+            return
+        cmd.settle(reply)
+        if announce:
+            self.push({"t": "camera.measure.clear", "id": cam["id"]})
+
+    def _submit_measure(self, line: str) -> None:
+        """A measurement nobody was waiting for becomes a turn — on the shared busy path, like a
+        camera shot, so it queues politely behind anything in flight. The system bubble already
+        shows the line, so the turn adds no user bubble of its own."""
+        prompt = f"{line}\n\n[{self._MEASURE_CONTEXT}]"
+        with self._lock:
+            if self._busy:
+                self._pending.append((prompt, False, [], None))
+                return
+        self._start_turn(prompt, False, [], None)
 
     # -- AR commands from the model --
     _OVERLAY_KINDS = frozenset({"box", "circle", "arrow", "label", "pin", "wire"})
@@ -1319,12 +1407,27 @@ class ShellSession:
                     cmd.settle(f"'{name}' has no mesh to project yet — open it in the Studio once "
                                "so it bakes, or ask me to rebuild it.")
                     return
+                # The component layout beside the mesh (design_enclosure writes it) rides along, so
+                # the panel can draw each part's ghost pocket inside the projected shell.
+                layout = read_layout(mesh.parent.parent)
                 self.push({"t": "camera.hologram", "id": cam["id"], "slug": slug, "name": name,
-                           "stl": f"/builds/{slug}/assets/model.stl"})
+                           "stl": f"/builds/{slug}/assets/model.stl", "layout": layout})
                 self._status(f"Projecting {name} onto the camera view")
+                n_parts = len(layout.get("components") or []) if layout else 0
+                ghosts = (f" It carries a component layout ({n_parts} part{'s' if n_parts != 1 else ''}), "
+                          "drawn as ghost pockets inside the shell." if layout else "")
                 cmd.settle(f"Projected {name} onto the camera view — the user can drag it into "
                            "place, scroll to scale it, and shift-drag to tilt it; it then tracks "
-                           "the board.")
+                           f"the board.{ghosts}")
+            elif cmd.command == "measure":
+                # Parked, not answered: the panel comes up (exactly the manual open when none is
+                # showing), switches to Measure mode with the prompt, and the command waits for
+                # the user's Send (camera_measured) or ✕ (camera_measure_cancel).
+                prompt = " ".join(str(payload.get("prompt") or "").split())[:160] or self._MEASURE_ASK
+                if cam is None:
+                    self.camera_open()
+                    cam = self._camera
+                self._park_measure(cam, cmd, prompt)
             else:
                 cmd.settle(f"Unknown camera command '{cmd.command}'.")
         except Exception as exc:  # noqa: BLE001 — never leave the worker parked on a crash

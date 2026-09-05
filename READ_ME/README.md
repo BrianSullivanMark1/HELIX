@@ -132,3 +132,17 @@ Prime, pictures on screen), stages verified ids at the planned quantities (the c
 and on "go" drives its own Chrome window to press Add-to-Cart per item and read Amazon's cart back. A
 project's parts list (`save_parts` / `stage_parts`) stages a whole BOM at once and logs the handoff as
 the expense trail. HELIX never buys — checkout is yours, on Amazon. Details: ARCHITECTURE.md §7c.
+
+## The maker flow: describe a device, get a printable enclosure that fits
+
+"A hat cam that sees, hears and talks, on a battery" → HELIX picks the parts from its component
+library (132 real boards, mics, amps, speakers, cells, chargers, switches, sensors — real sizes, a
+confidence per number, holes only from manufacturer drawings), you save them to the project's parts
+list with their library keys and face hints, and `design_enclosure` plans the box deterministically:
+a pocket, standoffs or a bay per part, the lens bore and mic hole and speaker grille through the
+face, USB and switch openings on their wall, screw towers with heat-set inserts, debossed labels — then
+compiles it into an ordinary hologram with a fit report. "Check fit on camera" projects it over the
+live view at true scale (calibrate once on a credit card) with a ghost pocket per part, so the real
+parts go inside their ghosts before anything prints; a part the library doesn't know is measured with
+the camera's ruler in real millimetres. Print on your go, with a print sheet for the P1S. No dimension
+is ever typed from memory. Details: ARCHITECTURE.md §7d and READ_ME/MAKER_FLOW.md.

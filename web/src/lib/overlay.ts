@@ -1,10 +1,17 @@
-// Drawing the model's callouts over the live view. Coordinates arrive normalized to the frame the
-// model saw; `map` turns them into screen pixels for NOW (through the tracker), so the drawing rides
-// on the board. Text stays upright and readable no matter how the board turned.
+// Drawing the model's callouts over the live view — and the user's ruler. Coordinates arrive
+// normalized to the frame the model saw (or the frame a measurement was dragged in); `map` turns
+// them into screen pixels for NOW (through the tracker), so the drawing rides on the board. Text
+// stays upright and readable no matter how the board turned.
+import { describe, fmtMm, gridLines, type Calibration, type Measurement, type Norm } from "./measure";
 import type { OverlayGroup, OverlayItem } from "./store";
+import type { Similarity } from "./track";
 
 export type MapFn = (frame: string, x: number, y: number) => [number, number];
 export type ScaleFn = (frame: string) => number; // how much bigger the frame's content is now
+/** A point normalized in the frame whose BASE→frame transform is `at` → the screen, NOW. */
+export type MapAtFn = (at: Similarity, x: number, y: number) => [number, number];
+/** A point normalized in the LIVE frame → normalized in the frame `at` (the inverse of MapAtFn). */
+export type ToFrameFn = (at: Similarity, x: number, y: number) => [number, number];
 
 const PALETTE: Record<string, string> = {
   cyan: "#3fe0e0",
@@ -166,4 +173,130 @@ export function drawOverlays(
     const k = scale(g.frame);
     for (const it of g.items) drawItem(ctx, g.frame, it, map, k, pulse);
   }
+}
+
+// ----- the ruler -----------------------------------------------------------------------------
+
+/** Everything Measure mode draws: each piece anchored to the frame it was made in, so it rides. */
+export interface MeasureLayer {
+  cal: Calibration | null;
+  items: Measurement[];
+  draft: Measurement | null; // the drag in progress (its mm read live, no label yet)
+  grid: boolean; // the 10 mm grid over the calibrated plane
+  pending: { T: Similarity; a: Norm } | null; // the first calibration click, waiting for the second
+}
+
+const RULER = "#3fe07a"; // the calibration: green — "this is the known length"
+const MEASURE = "#f2f6f8"; // the user's measurements: white
+const GRID = "#3fe0e0";
+
+function tick(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number, size: number) {
+  // perpendicular end ticks on a distance line, so the endpoints read like a ruler's
+  const a = Math.atan2(y2 - y1, x2 - x1) + Math.PI / 2;
+  const dx = Math.cos(a) * size;
+  const dy = Math.sin(a) * size;
+  ctx.beginPath();
+  ctx.moveTo(x1 - dx, y1 - dy);
+  ctx.lineTo(x1 + dx, y1 + dy);
+  ctx.moveTo(x2 - dx, y2 - dy);
+  ctx.lineTo(x2 + dx, y2 + dy);
+  ctx.stroke();
+}
+
+function drawMeasurement(ctx: CanvasRenderingContext2D, m: Measurement, mapAt: MapAtFn, col: string, text: string) {
+  ctx.save();
+  ctx.strokeStyle = col;
+  ctx.fillStyle = col;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.shadowColor = "rgba(0,0,0,0.6)";
+  ctx.shadowBlur = 4;
+  if (m.kind === "box") {
+    const c = [
+      mapAt(m.T, m.a[0], m.a[1]), mapAt(m.T, m.b[0], m.a[1]),
+      mapAt(m.T, m.b[0], m.b[1]), mapAt(m.T, m.a[0], m.b[1]),
+    ];
+    ctx.beginPath();
+    ctx.moveTo(c[0][0], c[0][1]);
+    for (let i = 1; i < 4; i++) ctx.lineTo(c[i][0], c[i][1]);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.globalAlpha = 0.1;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    const top = c.reduce((best, p) => (p[1] < best[1] ? p : best), c[0]);
+    const cx = (c[0][0] + c[2][0]) / 2;
+    tag(ctx, cx, top[1], text, col);
+  } else {
+    const [x1, y1] = mapAt(m.T, m.a[0], m.a[1]);
+    const [x2, y2] = mapAt(m.T, m.b[0], m.b[1]);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    tick(ctx, x1, y1, x2, y2, 6);
+    tag(ctx, (x1 + x2) / 2, Math.min(y1, y2), text, col);
+  }
+  ctx.restore();
+}
+
+/** Measure mode's drawing pass: the grid, the calibration, the measurements, the drag under way. */
+export function drawMeasureLayer(
+  ctx: CanvasRenderingContext2D, layer: MeasureLayer, mapAt: MapAtFn, toFrame: ToFrameFn, t: number,
+) {
+  const pulse = (Math.sin(t / 300) + 1) / 2;
+  const cal = layer.cal;
+  if (cal && layer.grid) {
+    // the live view's corners, mapped back into the calibration frame → the region to cover
+    const region: Norm[] = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([x, y]) => toFrame(cal.T, x, y));
+    ctx.save();
+    ctx.strokeStyle = GRID;
+    ctx.lineWidth = 1;
+    for (const s of gridLines(cal, region)) {
+      const [x1, y1] = mapAt(cal.T, s.a[0], s.a[1]);
+      const [x2, y2] = mapAt(cal.T, s.b[0], s.b[1]);
+      ctx.globalAlpha = s.major ? 0.45 : 0.16;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  if (cal) {
+    // the known length itself, faint once the grid is off, so the calibration is never a secret
+    const [x1, y1] = mapAt(cal.T, cal.a[0], cal.a[1]);
+    const [x2, y2] = mapAt(cal.T, cal.b[0], cal.b[1]);
+    ctx.save();
+    ctx.strokeStyle = RULER;
+    ctx.fillStyle = RULER;
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = layer.grid ? 0.95 : 0.55;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    tick(ctx, x1, y1, x2, y2, 5);
+    if (layer.grid) tag(ctx, (x1 + x2) / 2, Math.max(y1, y2), `${fmtMm(cal.mm)} mm · ${cal.reference}`, RULER, false);
+    ctx.restore();
+  }
+  if (layer.pending) {
+    const [px, py] = mapAt(layer.pending.T, layer.pending.a[0], layer.pending.a[1]);
+    ctx.save();
+    ctx.strokeStyle = RULER;
+    ctx.fillStyle = RULER;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(px, py, 6 + pulse * 3, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(px, py, 2, 0, Math.PI * 2);
+    ctx.fill();
+    tag(ctx, px, py - 8, "now click the other end", RULER);
+    ctx.restore();
+  }
+  for (const m of layer.items) drawMeasurement(ctx, m, mapAt, MEASURE, `${m.label} · ${describe(m)}`);
+  if (layer.draft) drawMeasurement(ctx, layer.draft, mapAt, "#ffcf45", describe(layer.draft));
 }

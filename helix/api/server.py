@@ -30,6 +30,7 @@ from helix.domain.constitution import LOCKED_SETTINGS
 from helix.domain.models import BuildKind
 from helix.domain.vocabulary import kind_label
 from helix.logging_setup import get_logger
+from helix.services.camera import read_layout
 from helix.services.connections import CONNECTABLE
 
 _LOG = get_logger("webserver")
@@ -279,17 +280,38 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         shell.camera_cancel(cam_id, keep_open=keep_open)
         return {"ok": True}
 
+    @app.post("/api/camera/{cam_id}/measure")
+    async def camera_measure(cam_id: str, request: Request):
+        """The ruler's Send — MAKER_FLOW §5: {"mm_per_px", "reference", "items": [{"kind": "box",
+        "label", "w_mm", "h_mm"} | {"kind": "distance", "label", "mm"}]} — answered with the plain
+        line HELIX received; or {"cancel": true} to answer a parked measure ask with the cancel
+        line (✕ on the banner). `ok` is False when the panel id is stale or nothing was measurable."""
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — a bare POST measures nothing
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        if body.get("cancel"):
+            return {"ok": bool(shell.camera_measure_cancel(cam_id)), "line": ""}
+        line = shell.camera_measured(cam_id, body)
+        return {"ok": bool(line), "line": line}
+
     @app.get("/api/camera/holograms")
     def camera_holograms():
-        """The holograms the panel can project: MODEL builds that have a baked mesh."""
+        """The holograms the panel can project: MODEL builds that have a baked mesh — each with its
+        component layout (assets/layout.json, the §6 shape) when design_enclosure wrote one, else
+        null, so the panel can draw ghost pockets inside the projected shell."""
         rows = []
         for a in c.builds.list():
             if a.build_kind != BuildKind.MODEL:
                 continue
-            mesh = c.builds.workspace(a.slug) / "assets" / "model.stl"
+            ws = c.builds.workspace(a.slug)
+            mesh = ws / "assets" / "model.stl"
             if mesh.is_file():
                 rows.append({"slug": a.slug, "name": a.name,
-                             "stl": f"/builds/{a.slug}/assets/model.stl"})
+                             "stl": f"/builds/{a.slug}/assets/model.stl",
+                             "layout": read_layout(ws)})
         return {"holograms": rows}
 
     # ----- the Amazon cart panel -----
@@ -550,7 +572,21 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
             "params": [dataclasses.asdict(p) for p in cadpy.parse_params(source)],
             "files": files, "meta": meta, "engine": c.cad.version() or "",
             "source": source,
+            # The maker flow (MAKER_FLOW §7): the component layout design_enclosure wrote beside
+            # the mesh (null for a hologram the coder drew) and the P1S print sheet.
+            "layout": read_layout(ws),
+            "print_sheet": _print_sheet(slug),
         }
+
+    def _print_sheet(slug: str) -> str:
+        maker = getattr(c, "maker", None)
+        if maker is None:
+            return ""
+        try:
+            return maker.print_sheet(slug) or ""
+        except Exception:  # noqa: BLE001 — the sheet is a courtesy; the studio still opens
+            _LOG.warning("print sheet failed for %s", slug, exc_info=True)
+            return ""
 
     @app.get("/api/holograms/{slug}")
     def hologram(slug: str):
@@ -558,6 +594,18 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         if payload is None:
             return JSONResponse({"error": "not a hologram"}, status_code=404)
         return payload
+
+    @app.post("/api/holograms/{slug}/project")
+    def hologram_project(slug: str):
+        """The studio's 'Check fit on camera': the maker brain raises the camera panel when none is
+        open and projects this hologram with its component layout through the shell's own camera
+        command path (the same path check_fit takes), so the ghosts and the 1:1 scale ride along.
+        `line` is the plain sentence the model would have read."""
+        maker = getattr(c, "maker", None)
+        if maker is None:
+            return JSONResponse({"error": "the maker flow isn't wired"}, status_code=501)
+        ok, line = maker.project(slug)
+        return {"ok": bool(ok), "line": line}
 
     @app.post("/api/holograms/{slug}/preview")
     async def hologram_preview(slug: str, request: Request):

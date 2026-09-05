@@ -96,3 +96,62 @@ def test_the_store_round_trips_through_plain_json_shapes():
     b = PartsService(store, clock=lambda: "t2")  # a fresh service over the same file
     r = b.rows("P")[0]
     assert (r.name, r.quantity, r.asin, r.price, r.note, r.updated) == ("screws", 4, "B08N5WRWNW", 3.5, "M3", "t1")
+
+
+# ----- physical fields (MAKER_FLOW §3) -----
+def test_physical_fields_round_trip_and_resolve_the_library_key():
+    s = _svc()
+    out = s.save("IronEye", [
+        {"name": "Camera brain", "component": "xiao s3 sense", "face": "front"},
+        {"name": "LiPo", "spec": "603048", "on_lid": True, "length": "48 mm", "width": 30, "height": 6.0},
+        {"name": "Mystery amp", "component": "flux capacitor", "face": "sideways", "length": -3},
+        {"name": "Plain"},
+    ])
+    assert "[xiao_esp32s3_sense]" in out
+    assert "'flux capacitor' isn't a library part" in out and "face 'sideways' isn't one of" in out
+    rows = {r.name: r for r in s.rows("IronEye")}
+    cam, lipo, amp, plain = rows["Camera brain"], rows["LiPo"], rows["Mystery amp"], rows["Plain"]
+    assert cam.component == "xiao_esp32s3_sense" and cam.face == "front" and not cam.on_lid and cam.dims is None
+    assert lipo.on_lid and lipo.dims == (48.0, 30.0, 6.0)
+    assert amp.component == "flux capacitor" and amp.face == "" and amp.length is None
+    assert plain.component == "" and plain.face == "" and plain.on_lid is False and plain.dims is None
+    # a fresh service over the same store reads them back; older rows without the fields still load
+    store = s._store
+    store.d["projects"]["IronEye"].append({"name": "Old row", "quantity": 2})
+    fresh = PartsService(store, clock=lambda: "t2")
+    again = {r.name: r for r in fresh.rows("IronEye")}
+    assert again["Camera brain"].component == "xiao_esp32s3_sense" and again["LiPo"].dims == (48.0, 30.0, 6.0)
+    assert again["Old row"].quantity == 2 and again["Old row"].dims is None and again["Old row"].component == ""
+    # an update that omits the physical fields keeps them; an explicit empty clears them
+    s.save("iron eye", [{"name": "camera brain", "quantity": 2}])
+    assert s.rows("IronEye")[0].component == "xiao_esp32s3_sense" and s.rows("IronEye")[0].face == "front"
+    s.save("iron eye", [{"name": "camera brain", "component": "", "face": "", "on_lid": False}])
+    assert s.rows("IronEye")[0].component == "" and s.rows("IronEye")[0].face == ""
+
+
+def test_show_prints_the_physical_fields_when_set():
+    s = _svc()
+    s.save("P", [{"name": "cam", "component": "xiao s3 sense", "face": "front", "length": 21, "width": 17.8, "height": 15},
+                 {"name": "cell", "on_lid": True}, {"name": "odd", "component": "unobtainium"}, {"name": "plain"}])
+    text = s.show("P")
+    assert "cam — qty 1; still needed; library part xiao_esp32s3_sense; 21 × 17.8 × 15 mm; reaches the front wall" in text
+    assert "cell — qty 1; still needed; on the lid" in text
+    assert "odd — qty 1; still needed; part 'unobtainium' (not in the library)" in text
+    assert "4. plain — qty 1; still needed\n" in text
+    for fenced in ("stage_parts", "add_to_cart", "open_cart", "save_parts", "design_enclosure", "camera_measure"):
+        assert fenced not in text
+
+
+def test_set_dims_records_measured_millimetres():
+    s = _svc()
+    s.save("IronEye", [{"name": "XIAO board", "note": "the camera one"}, {"name": "Speaker"}])
+    assert s.set_dims("iron eye", "xiao", 4, "21.1 mm", 17.6)          # sorted L >= W >= H, text tolerated
+    r = s.rows("IronEye")[0]
+    assert r.dims == (21.1, 17.6, 4.0) and r.note == "the camera one dims measured" and r.updated == "2026-09-04T12:03"
+    assert s.set_dims("IronEye", "speaker", 28, 28, 5, source="listing")
+    assert s.rows("IronEye")[1].note == "dims listing"
+    assert s.set_dims("IronEye", "xiao", 21.1, 17.6, 4.2)               # again: the note doesn't repeat
+    assert s.rows("IronEye")[0].note == "the camera one dims measured" and s.rows("IronEye")[0].height == 4.2
+    assert not s.set_dims("IronEye", "nothing like it", 1, 2, 3)
+    assert not s.set_dims("NoSuch", "xiao", 1, 2, 3)
+    assert not s.set_dims("IronEye", "xiao", 0, 2, 3) and not s.set_dims("IronEye", "xiao", "wide", 2, 3)

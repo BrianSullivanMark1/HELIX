@@ -545,7 +545,7 @@ def test_a_hologram_projects_only_once_it_has_a_mesh(rig, tmp_path):
     assert reply.startswith("Projected Iron Eye")
     ev = _ev(events, "camera.hologram")[-1]
     assert ev == {"t": "camera.hologram", "id": cid, "slug": "iron-eye", "name": "Iron Eye",
-                  "stl": "/builds/iron-eye/assets/model.stl"}
+                  "stl": "/builds/iron-eye/assets/model.stl", "layout": None}  # no layout.json yet
     assert "off" in _command(sh, "hologram", {"remove": True})
     assert _ev(events, "camera.hologram")[-1]["remove"] is True
 
@@ -743,7 +743,8 @@ def test_served_images_and_the_hologram_list(tmp_path):
     status, raw = _call(app, "GET", "/api/camera/holograms")
     assert status == 200
     assert json.loads(raw) == {"holograms": [{"slug": "iron-eye", "name": "Iron Eye",
-                                              "stl": "/builds/iron-eye/assets/model.stl"}]}
+                                              "stl": "/builds/iron-eye/assets/model.stl",
+                                              "layout": None}]}  # ghosts need a layout.json
 
 
 def test_camera_preferences_are_settings_with_defaults():
