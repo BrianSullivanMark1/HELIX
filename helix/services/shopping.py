@@ -155,12 +155,26 @@ class ShoppingService:
             _LOG.warning("amazon search failed: %s", exc)
             return (f"Amazon didn't answer HELIX's own search just now ({exc}). Fall back to your web "
                     "search for the product on amazon.com and stage it by its product LINK; the "
-                    "listing is still verified before staging.")
+                    "listing is still verified before staging. Until a listing is read, quote no "
+                    "product name or price — say the search couldn't be completed rather than "
+                    "answer from memory.")
         cap = read_price(budget) if budget is not None else None
+        over = 0
         if cap is not None:
             within = [r for r in rows if r.price is None or r.price <= cap]
             over = len(rows) - len(within)
             rows = within
+        if not rows:
+            if over:
+                return (f"Every listing the live Amazon search found for '{q}' is over the "
+                        f"${cap:,.2f} budget ({over} left out) — nothing within budget to quote.")
+            # Nothing was fetched — the honest miss. Names or prices said now would be memory,
+            # the exact failure behind the 09-05 night-vision ESP32-CAM search.
+            return (f"Couldn't find a listing: Amazon's live search for '{q}' came back with no "
+                    "product cards. Tell the user that plainly — never fill the gap with product "
+                    "names or prices from memory; only a listing fetched this session can be "
+                    "quoted. Different words may land (a part number, the maker's name, or a "
+                    "plainer description).")
         for r in rows:
             self._catalog[r.asin] = {"title": r.title, "price": r.price, "image": r.image,
                                      "rating": r.rating, "reviews": r.reviews, "prime": r.prime}
@@ -182,7 +196,9 @@ class ShoppingService:
             listing = self._web.listing(asin)
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("amazon lookup failed: %s", exc)
-            return f"Amazon didn't answer the product read just now ({exc}); try again in a moment."
+            return (f"Amazon didn't answer the product read just now ({exc}) — nothing was fetched, "
+                    "so there's no listing to quote; don't describe the product from memory. Try "
+                    "again in a moment.")
         if listing is None:
             return (f"Amazon has no product page for {asin} — the id is wrong or the listing is gone. "
                     "Don't stage it; search_amazon for the product instead.")
@@ -207,33 +223,40 @@ class ShoppingService:
             _LOG.warning("products event failed", exc_info=True)
 
     # ----- verification (the listing is read before an id is accepted) -----
-    def _verify(self, asin: str) -> tuple[bool, dict]:
-        """(ok, facts). ok=False means Amazon says there is no such product page — refuse it.
-        facts: title/price/image/can_add when read; 'note' when the read couldn't happen."""
+    def _verify(self, asin: str) -> tuple[str, dict]:
+        """('ok'|'gone'|'unread', facts). Grounding: 'ok' means the name/price about to be quoted
+        traces to a page FETCHED this session (this turn's read, or the session catalog built only
+        from real reads). 'gone' means Amazon says there is no such product page. 'unread' means
+        nothing could be fetched — the id is refused rather than staged on the model's word (a
+        remembered ASIN with a remembered title is the failure this guards against)."""
         hit = self._catalog.get(asin)
         if hit is not None and hit.get("title"):
-            return True, dict(hit)
+            return "ok", dict(hit)
         if self._web is None:
-            return True, {}
+            # No Amazon eyes on this build: the documented fallback is staging by the USER'S link,
+            # so it stays possible — but the line quoted back carries the caveat.
+            return "ok", {"note": "unverified: staged without a listing read (no Amazon reads on "
+                                  "this build)"}
         try:
             listing = self._web.listing(asin)
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("verify %s: %s", asin, exc)
-            return True, {"note": "unverified: Amazon didn't answer the listing read"}
+            return "unread", {}
         if listing is None:
-            return False, {}
+            return "gone", {}
         facts = {"title": listing.title, "price": listing.price, "image": listing.image,
                  "can_add": listing.can_add, "rating": listing.rating, "reviews": listing.reviews,
                  "prime": listing.prime}
         self._catalog[asin] = dict(facts)
-        return True, facts
+        return "ok", facts
 
     # ----- staging -----
     def add(self, raw_items, *, project: str = "") -> str:
         """Stage items the model resolved. Each entry: {"name": …, "asin": …, "quantity": …,
         "price": …} — asin may be a bare id or an Amazon link. Every id is checked against the
         live listing (cached from this session's search when possible): a dead id is refused by
-        name, and the price recorded is the one READ off Amazon when there is one."""
+        name, one whose listing couldn't be fetched this session is refused too (never staged on
+        memory alone), and the price recorded is the one READ off Amazon when there is one."""
         if not isinstance(raw_items, list) or not raw_items:
             return "Nothing staged — pass each item with its name and its ASIN (or Amazon link)."
         proj = " ".join(str(project or "").split())[:60]
@@ -252,9 +275,14 @@ class ShoppingService:
                 if asin is None:
                     rejected.append(label or str(entry.get("asin") or "")[:60] or "an unnamed item")
                     continue
-                ok, facts = self._verify(asin)
-                if not ok:
+                status, facts = self._verify(asin)
+                if status == "gone":
                     rejected.append(f"{label or asin} — Amazon has no product page for {asin}")
+                    continue
+                if status == "unread":
+                    rejected.append(f"{label or asin} — couldn't find a listing for {asin} this "
+                                    "session (Amazon didn't answer the read), so nothing is staged "
+                                    "or quoted from memory; try again in a moment")
                     continue
                 quantity = clamp_quantity(entry.get("quantity", 1))
                 read = facts.get("price")

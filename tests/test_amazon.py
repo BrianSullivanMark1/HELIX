@@ -208,6 +208,26 @@ def test_a_robot_wall_is_unavailable_not_an_empty_result():
         web.search("x")
 
 
+def test_an_unreadable_answer_is_unavailable_never_a_grounded_no_results():
+    # Grounding: [] from search() must always mean a REAL results page held no product cards.
+    # A page that isn't a results page at all (an interstitial, an outage body, a 404) raises —
+    # otherwise a swallowed read failure looks like "no results" and memory fills the void.
+    web, _, _, _ = _web({"https://www.amazon.com/s?k=x": "<html><body>something else</body></html>"})
+    with pytest.raises(AmazonUnavailable):
+        web.search("x")
+    # A genuine zero-hit results page is an honest empty answer.
+    no_hits = ('<html><body><div class="s-main-slot"><span>No results for x. Your search '
+               '"x" did not match any products.</span></div></body></html>')
+    web2, _, _, _ = _web({"https://www.amazon.com/s?k=x": no_hits})
+    assert web2.search("x") == []
+    # Cards present but unreadable (markup moved) is a read failure to say out loud, not a miss.
+    broken = ('<html><body><div class="s-main-slot"><div data-component-type="s-search-result" '
+              'data-asin="B0FKFR1WFX"><h2></h2></div></div></body></html>')
+    web3, _, _, _ = _web({"https://www.amazon.com/s?k=x": broken})
+    with pytest.raises(AmazonUnavailable):
+        web3.search("x")
+
+
 def test_redirects_stay_on_amazon():
     h = _AmazonOnlyRedirects()
     req = urllib.request.Request("https://www.amazon.com/dp/B0C49RZ9WJ")

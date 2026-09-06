@@ -110,9 +110,24 @@ def test_search_honours_a_budget_and_says_what_it_dropped():
 def test_search_failure_falls_back_honestly_and_never_pretends_nothing_matched():
     text = _svc(web=_Web(fail=True)).search("mic")
     assert "Amazon didn't answer HELIX's own search" in text and "robot check" in text
-    assert "web search" in text
+    assert "web search" in text and "quote no product name or price" in text
     assert "aren't wired" in _svc().search("mic")
     assert "What should I search" in _svc(web=_Web()).search("  ")
+
+
+def test_search_with_no_results_is_an_honest_miss_never_an_invented_title():
+    # 09-05: the night-vision ESP32-CAM search — the fetch found nothing and the model filled
+    # the gap with remembered product names. Zero fetched listings must READ as a miss.
+    text = _svc(web=_Web(results=[])).search("night vision ESP32-CAM")
+    assert "Couldn't find a listing" in text
+    assert "memory" in text and "this session" in text
+    assert "ASIN" not in text  # no product line for the model to riff on
+
+
+def test_search_where_the_budget_filters_everything_stays_grounded():
+    text = _svc(web=_Web(results=RESULTS)).search("mic", budget=1)
+    assert "over the $1.00 budget" in text and "3 left out" in text
+    assert "ASIN" not in text and "Couldn't find a listing" not in text  # found, just over budget
 
 
 def test_lookup_reads_one_listing_and_refuses_dead_ids():
@@ -149,10 +164,22 @@ def test_add_uses_the_search_catalog_instead_of_refetching():
     assert "at $11.69 (live)" in out and web.calls == ["search:mic"]  # no listing fetch needed
 
 
-def test_add_stages_unverified_when_amazon_wont_answer_and_says_so():
+def test_add_refuses_to_stage_from_memory_when_nothing_was_fetched():
+    # Amazon's eyes are wired but won't answer: the id can't be traced to a fetched listing, so
+    # it is refused — not staged under a model-given name and price that might be memory.
     s = _svc(web=_Web(fail=True))
     out = s.add([{"name": "screws", "asin": "B08N5WRWNW", "price": "3.50"}])
-    assert "Staged: screws x1 at $3.50 (as given) [unverified: Amazon didn't answer" in out
+    assert "couldn't find a listing for B08N5WRWNW this session" in out
+    assert "Staged:" not in out and s._items == []
+
+
+def test_no_eyes_build_still_stages_by_link_but_says_unverified():
+    # Without Amazon reads at all, the user's own link is the documented fallback — the staged
+    # line must carry the caveat instead of reading like a verified listing.
+    s = _svc()
+    out = s.add([{"name": "screws", "asin": "B08N5WRWNW", "price": "3.50"}])
+    assert "Staged: screws x1 at $3.50 (as given)" in out
+    assert "unverified: staged without a listing read" in out
     assert s._items[0].note.startswith("unverified")
 
 

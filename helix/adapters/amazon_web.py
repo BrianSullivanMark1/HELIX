@@ -10,6 +10,13 @@ Polite by construction: reads are paced (one every ~1.2s at most), cached for a 
 model iterates on the same search within a turn), and Amazon's automation wall is detected and
 reported as "unavailable" rather than parsed as an empty page — the service then falls back to the
 model's web search and says so, instead of pretending nothing matched.
+
+Grounded by construction: search() answers an empty list ONLY when Amazon really showed a results
+page with no readable product cards. A page that doesn't look like a results page at all — or one
+whose cards couldn't be parsed (markup moved) — raises AmazonUnavailable instead, so a read failure
+is never mistaken for "no such product" and the void is never left for remembered names to fill.
+(The 09-05 night-vision ESP32-CAM search failed exactly there: nothing was fetched, and the answer
+came from model memory.)
 """
 from __future__ import annotations
 
@@ -41,6 +48,9 @@ _HEADERS = {
     "Sec-Fetch-User": "?1",
 }
 _TIMEOUT_S = 20.0
+# A real results page carries at least one of these even when zero products matched; a page with
+# none of them is a page we couldn't read, never a "no results" answer.
+_RESULT_PAGE_MARKS = ("did not match any products", "s-main-slot", "s-result-list")
 _MAX_BYTES = 6_000_000  # a search page is ~1.5 MB; a product page ~2 MB
 _MIN_GAP_S = 1.2        # pacing between real fetches
 _CACHE_TTL_S = 600.0    # a search repeated within a turn (or a quick "and the 3-pack?") costs nothing
@@ -134,11 +144,21 @@ class AmazonWeb:
 
     # ----- reads -----
     def search(self, query: str, *, limit: int = 10) -> list[Product]:
-        """The result cards for `query`. Raises AmazonUnavailable when Amazon won't answer."""
+        """The result cards for `query`. Raises AmazonUnavailable when Amazon won't answer — or
+        answers with a page that isn't a readable results page, so an empty list always means a
+        REAL results page held no product cards (a grounded miss, not a swallowed read failure)."""
         q = " ".join((query or "").split())
         if not q:
             return []
-        return parse_search(self._get(self.search_url(q)), limit=limit)
+        html = self._get(self.search_url(q))
+        rows = parse_search(html, limit=limit)
+        if not rows:
+            if "s-search-result" in html:
+                raise AmazonUnavailable("Amazon's result cards couldn't be read (the page's markup "
+                                        "has changed)")
+            if not any(mark in html for mark in _RESULT_PAGE_MARKS):
+                raise AmazonUnavailable("Amazon's answer wasn't a readable results page")
+        return rows
 
     def listing(self, asin: str) -> Listing | None:
         """The product page for `asin`, or None when Amazon has no such product page (404, or a
