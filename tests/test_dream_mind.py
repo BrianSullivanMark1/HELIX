@@ -1171,6 +1171,33 @@ def test_a_long_research_reply_still_yields_its_findings_from_the_tail():
     assert len(rec["findings"]) == 2 and rec["findings"][0]["verified"] is True and rec["facts_noted"] == 1
 
 
+def test_an_early_capped_turn_still_journals_the_facts_noted_before_the_cap():
+    """The adapter's 8-turn agentic cap can end a research turn before the FINDINGS shape is ever
+    written. The instructions therefore demand noting as you go — one fact at a time, at most three
+    pages, note_verified_fact right after the read that verified it — and a turn that followed them
+    before the cap bit still journals its fact, counted from the verified store, not the shape."""
+    for phrase in ("one fact at a time", "at most three pages", "immediately, before the next read"):
+        assert phrase.lower() in " ".join(DREAM_RESEARCH_SYSTEM.lower().split()), phrase
+    assert "two to five" not in DREAM_RESEARCH_SYSTEM  # the budget the cap could never fit
+    clock = _Clock()
+    verified = _Verified(clock)
+    research = _Research()
+
+    def on_turn(n, prompt):
+        # The model works the new order — search, read, note — and then the cap ends the turn.
+        research.trail.append("searched: XIAO ESP32S3 Sense PSRAM (8 hits)")
+        research.trail.append("read: https://wiki.seeedstudio.com/xiao_esp32s3/ (5000 chars)")
+        verified.note("XIAO ESP32S3 Sense PSRAM", "8 MB", "https://wiki.seeedstudio.com/xiao_esp32s3/")
+
+    # What a capped turn hands back: the last partial words, no FINDINGS shape at all.
+    conv = _Conversation("I was still reading when the turn ended.", clock=clock, on_turn=on_turn)
+    mind = _mind(clock, conversation=conv, verified=verified, research=research)
+    rec = mind._research_turn(_Hooks().hooks, mind_mod.ResearchQuestion("q", "why"), set())
+    assert rec["status"] == "ok" and rec["findings"] == []
+    assert rec["facts_noted"] == 1
+    assert rec["facts"][0]["url"] == "https://wiki.seeedstudio.com/xiao_esp32s3/"
+
+
 def test_a_contradicted_claim_with_no_stored_fact_is_not_told_that_a_record_stands():
     clock = _Clock()
     reflection = "AGENDA:\nRESEARCH:\nVERIFY:\n- build123d installs via winget\nEXPERIMENT:\nIMPROVE:\n"
