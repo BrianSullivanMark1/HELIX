@@ -190,6 +190,17 @@ def test_the_allowlist_suffix_matches_registrable_hosts_with_subdomains():
         assert spec_host in READ_HOSTS, spec_host
 
 
+def test_cubemars_and_access_board_pass_the_read_host_check():
+    # AK-series actuator datasheets/prices verify at the manufacturer; ADA force and clearance
+    # numbers verify at the source.
+    assert "cubemars.com" in READ_HOSTS
+    assert "access-board.gov" in READ_HOSTS
+    web, _, _, _ = _web({})
+    assert web.readable("https://www.cubemars.com/goods-1141-AK70-10.html")
+    assert web.readable("https://www.access-board.gov/ada/guides/chapter-4-ramps-and-curb-ramps/")
+    assert not web.readable("https://random-unlisted-host.net/datasheet")
+
+
 @pytest.mark.parametrize("url, fragment", [
     ("https://github.com.evil.net/repo", "I don't read github.com.evil.net"),
     ("https://evil-adafruit.com/learn", "I don't read evil-adafruit.com"),
