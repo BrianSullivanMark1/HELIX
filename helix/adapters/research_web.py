@@ -58,7 +58,9 @@ READ_HOSTS: tuple[str, ...] = (
     "espressif.com", "arduino.cc", "seeedstudio.com", "adafruit.com", "sparkfun.com",
     "raspberrypi.com", "raspberrypi.org", "ti.com", "st.com", "microchip.com", "nordicsemi.com",
     "analog.com", "bosch-sensortec.com", "invensense.com", "tdk.com", "nxp.com", "infineon.com",
-    "sensirion.com", "ams-osram.com", "omnivision.com",
+    "sensirion.com", "ams-osram.com", "omnivision.com", "cubemars.com",
+    # standards bodies (ADA force and clearance numbers verify at the source)
+    "access-board.gov",
     # distributors
     "digikey.com", "mouser.com",
     # printing and making
