@@ -1919,7 +1919,10 @@ class ToolRegistry:
                     description=(
                         "READ-ONLY: a saved parts list (or every list when no project is named) — "
                         "rows with quantities, ASINs, prices, what's on hand vs. still needed, and the "
-                        "recent handoffs to Amazon with estimated spend (the expense trail)."
+                        "recent handoffs to Amazon with estimated spend (the expense trail). When the "
+                        "user asks for a project's BOM/table again ('put the table in the chat'), read "
+                        "it from HERE — never re-derive it from memory of the conversation. Staging "
+                        "with project set writes rows here too, so a staged cart's BOM is always saved."
                     ),
                     input_schema={
                         "type": "object",
