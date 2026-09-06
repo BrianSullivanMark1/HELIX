@@ -33,7 +33,7 @@ MOUNTS = ("standoff", "rails", "pocket", "clip", "strap", "adhesive")
 SIDES = ("front", "back", "left", "right")
 FACES = ("top", "bottom", "front", "back", "left", "right")
 TAGS = ("vision", "hearing", "speaking", "compute", "power", "charging", "sensing", "display",
-        "motion", "storage", "wireless", "lighting", "input")
+        "motion", "actuation", "storage", "wireless", "lighting", "input")
 PORT_KINDS = ("usb_c", "micro_usb", "usb_a", "barrel_5_5", "jst_ph", "jst_xh", "sd", "hdmi",
               "audio_3_5", "header", "antenna", "other")
 APERTURE_KINDS = ("lens", "mic", "speaker", "led", "screen", "button", "sensor", "vent", "shaft",
@@ -93,6 +93,12 @@ class Component:
     confidence: float = 0.9        # 1.0 official drawing … < 0.7 = approx (leave 0.5 mm more room)
     tags: tuple[str, ...] = ()
     notes: str = ""
+    # Actuator/electrical spec (0 / "" = not stated). Additive — every original schema name above
+    # is unchanged (MAKER_FLOW §2); an enclosure never reads these, a joint or gimbal build does.
+    torque_kg_cm: float = 0.0      # stall torque at the nominal voltage
+    voltage: str = ""              # nominal operating voltage as sourced ("7.4 V")
+    encoder: str = ""              # position feedback ("12-bit magnetic (360°)")
+    price_usd: float = 0.0         # rough single-unit listing price
 
     @property
     def approx(self) -> bool:
@@ -206,6 +212,8 @@ def from_json(d: dict) -> Component:
         aliases=tuple(d.get("aliases") or ()), search=str(d.get("search") or ""),
         source=str(d.get("source") or "datasheet"), confidence=float(d.get("confidence", 0.9)),
         tags=tuple(d.get("tags") or ()), notes=str(d.get("notes") or ""),
+        torque_kg_cm=float(d.get("torque_kg_cm", 0.0)), voltage=str(d.get("voltage") or ""),
+        encoder=str(d.get("encoder") or ""), price_usd=float(d.get("price_usd", 0.0)),
     )
 
 
@@ -1212,6 +1220,33 @@ _add(Component(
           "49.5 × 10 pattern (Ø4.3) — not placed here; cutout 41 × 20.5. Shaft ~10 mm from one end.",
 ))
 _add(Component(
+    key="servo_sts3215_c001", name="Feetech STS3215 bus servo, 7.4 V (C001)", category="motor",
+    length=45.2, width=24.7, height=35.0, mount="pocket", clearance=0.3,
+    apertures=(_A("shaft", 11.5, 12.35, d=8.0, face="top"),),  # output gear ~11.5 from the tab end (approx)
+    aliases=("sts3215", "sts 3215", "feetech sts3215", "sts3215 servo", "sts3215 7.4v",
+             "sts3215 c001", "feetech bus servo"),
+    search="Feetech STS3215 serial bus servo 7.4V 19.5kg", source="datasheet", confidence=0.85,
+    tags=("actuation", "motion"),
+    torque_kg_cm=19.5, voltage="7.4 V", encoder="12-bit magnetic (360°, 4096 steps)", price_usd=14.0,
+    notes="Body 45.2 × 24.7 × 35 (Feetech drawing; the horn adds ~5). 19.5 kg·cm stall at 7.4 V (2S), "
+          "TTL serial bus, daisy-chainable, 12-bit magnetic encoder — the SO-ARM100/101 arm joint. "
+          "Roughly US$14 on the Seeed listing. Flange tab holes exist but aren't placed here — pocket, "
+          "or screw the tabs to a wall. The 12 V / 30 kg·cm variant is servo_sts3215_c047.",
+))
+_add(Component(
+    key="servo_sts3215_c047", name="Feetech STS3215 bus servo, 12 V (C047)", category="motor",
+    length=45.2, width=24.7, height=35.0, mount="pocket", clearance=0.3,
+    apertures=(_A("shaft", 11.5, 12.35, d=8.0, face="top"),),  # output gear ~11.5 from the tab end (approx)
+    aliases=("sts3215 c047", "sts3215 12v", "sts3215 high voltage", "feetech sts3215 12v",
+             "sts3215 30kg"),
+    search="Feetech STS3215 serial bus servo 12V 30kg", source="datasheet", confidence=0.85,
+    tags=("actuation", "motion"),
+    torque_kg_cm=30.0, voltage="12 V", encoder="12-bit magnetic (360°, 4096 steps)", price_usd=16.0,
+    notes="Same 45.2 × 24.7 × 35 body as the 7.4 V C001; the 12 V winding stalls at 30 kg·cm — the "
+          "follower-arm / heavy-joint pick. TTL serial bus, daisy-chainable, 12-bit magnetic encoder. "
+          "Roughly US$16 on the Seeed listing. Needs a 12 V (3S) rail, not the 2S pack the C001 shares.",
+))
+_add(Component(
     key="nema17", name="NEMA 17 stepper motor (42 mm, 40 long)", category="motor",
     length=42.3, width=42.3, height=40.0,
     holes=(_H(5.65, 5.65, 3.2), _H(36.65, 5.65, 3.2), _H(5.65, 36.65, 3.2), _H(36.65, 36.65, 3.2)),
@@ -1669,6 +1704,8 @@ _NEED_TAGS: dict[str, str] = {
     "display": "display", "screen": "display", "oled": "display", "lcd": "display", "readout": "display",
     "motion": "motion", "servo": "motion", "motor": "motion", "move": "motion", "stepper": "motion",
     "fan": "motion", "vibrate": "motion", "haptic": "motion",
+    "actuation": "actuation", "actuator": "actuation", "joint": "actuation", "robot joint": "actuation",
+    "robot arm": "actuation", "gimbal": "actuation", "bus servo": "actuation",
     "sensing": "sensing", "sensor": "sensing", "temperature": "sensing", "distance": "sensing",
     "humidity": "sensing", "pressure": "sensing", "gps": "sensing", "location": "sensing", "imu": "sensing",
     "thermal": "sensing", "gas": "sensing", "pir": "sensing", "presence": "sensing", "rfid": "sensing",
@@ -1720,6 +1757,10 @@ _NEED_PREFER: dict[str, tuple[str, ...]] = {
     "screen": ("oled_096_ssd1306", "st7789_154_adafruit", "lcd_1602"), "display": ("oled_096_ssd1306", "lcd_1602"),
     "oled": ("oled_096_ssd1306", "oled_13_sh1106"), "lcd": ("lcd_1602", "lcd_2004"), "readout": ("oled_096_ssd1306", "tm1637_4digit"),
     "servo": ("servo_sg90", "servo_mg996r"), "stepper": ("nema17", "stepper_28byj48"), "motor": ("servo_sg90", "motor_tt_gear"),
+    "actuation": ("servo_sts3215_c001", "servo_sts3215_c047"), "actuator": ("servo_sts3215_c001", "servo_sts3215_c047"),
+    "joint": ("servo_sts3215_c001", "servo_sts3215_c047"), "robot joint": ("servo_sts3215_c001", "servo_sts3215_c047"),
+    "robot arm": ("servo_sts3215_c001", "servo_sts3215_c047"), "gimbal": ("servo_sts3215_c001", "servo_sts3215_c047"),
+    "bus servo": ("servo_sts3215_c001", "servo_sts3215_c047"),
     "fan": ("fan_30mm", "fan_40mm"), "vibrate": ("vibration_motor_10mm",), "haptic": ("vibration_motor_10mm",),
     "move": ("servo_sg90",), "motion": ("servo_sg90", "mpu6050_gy521"),
     "temperature": ("dht22", "bme280_gy", "ds18b20_probe"), "humidity": ("dht22", "bme280_gy"),

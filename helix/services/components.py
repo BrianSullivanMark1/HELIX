@@ -27,7 +27,8 @@ _MAX_PER_ROLE = 3
 _ROLE_TITLES = {
     "vision": "Vision (camera)", "hearing": "Hearing (microphone)", "speaking": "Speaking (amp + speaker)",
     "compute": "Brain (microcontroller)", "power": "Power (battery)", "charging": "Charging",
-    "sensing": "Sensing", "display": "Display", "motion": "Motion", "storage": "Storage",
+    "sensing": "Sensing", "display": "Display", "motion": "Motion", "actuation": "Actuation (robot joints)",
+    "storage": "Storage",
     "wireless": "Wireless", "lighting": "Lighting", "input": "Input (buttons, knobs)",
 }
 # The one-line "why" a friend would give. Falls back to the catalog note's first sentence.
@@ -345,7 +346,8 @@ def _dims(dims) -> tuple[float, float, float] | None:
 _ROLE_CATEGORIES: dict[str, tuple[str, ...]] = {
     "vision": ("camera", "mcu"), "hearing": ("mic", "mcu"), "speaking": ("amp", "speaker"),
     "compute": ("mcu",), "power": ("battery",), "charging": ("charger",), "sensing": ("sensor",),
-    "display": ("display",), "motion": ("motor",), "storage": ("storage", "mcu"), "wireless": ("comm", "mcu"),
+    "display": ("display",), "motion": ("motor",), "actuation": ("motor",),
+    "storage": ("storage", "mcu"), "wireless": ("comm", "mcu"),
     "lighting": ("led",), "input": ("button", "switch"),
 }
 _SPREAD_ROLES = frozenset({"vision", "hearing", "speaking", "storage", "input"})
