@@ -190,6 +190,34 @@ def test_kit_for_maps_need_words_to_ranked_roles_and_keeps_unknowns():
     assert kit["vision"][0].key != "ir_led_850nm"
 
 
+def test_actuation_role_returns_the_sts3215_family_with_sourced_specs():
+    """A robot-joint or gimbal build gets a real, sourced actuator: the Feetech STS3215 family
+    (Seeed listing) under the "actuation" role, with torque / voltage / encoder / price populated."""
+    assert "actuation" in TAGS
+    for need in ("actuation", "joint", "robot arm", "gimbal", "bus servo"):
+        assert lib.need_tag(need) == "actuation", need
+    kit = kit_for(["actuation"])
+    keys = {c.key for c in kit["actuation"]}
+    assert {"servo_sts3215_c001", "servo_sts3215_c047"} <= keys
+    for c in kit["actuation"]:
+        assert isinstance(c, Component) and "actuation" in c.tags
+    for key in ("servo_sts3215_c001", "servo_sts3215_c047"):
+        c = CATALOG[key]
+        assert c.category == "motor" and c.tags[0] == "actuation"
+        assert c.torque_kg_cm > 0 and c.voltage and c.encoder and c.price_usd > 0, key
+        assert "magnetic" in c.encoder
+        assert from_json(to_json(c)) == c    # the new spec fields round-trip
+    c001, c047 = CATALOG["servo_sts3215_c001"], CATALOG["servo_sts3215_c047"]
+    assert c001.torque_kg_cm == 19.5 and c001.voltage == "7.4 V" and c001.price_usd == 14.0
+    assert c047.torque_kg_cm == 30.0 and c047.voltage == "12 V" and c047.price_usd == 16.0
+    assert (c001.length, c001.width, c001.height) == (45.2, 24.7, 35.0) == (c047.length, c047.width, c047.height)
+    # spoken lookups: the bare name means the common 7.4 V servo; the variants stay distinct
+    assert find("sts3215") is c001 and find("STS3215 C047") is c047 and find("feetech sts3215") is c001
+    # a plain part (no spec stated) still reads as before — the fields default to empty
+    bare = from_json({"key": "thing", "length": 10, "width": 5, "height": 2})
+    assert bare.torque_kg_cm == 0.0 and bare.voltage == "" and bare.encoder == "" and bare.price_usd == 0.0
+
+
 # ----- catalog invariants -----
 def test_catalog_size_and_verified_share():
     assert len(CATALOG) >= 90
