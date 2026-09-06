@@ -146,6 +146,19 @@ def test_success_subtype_is_success_even_on_a_nonzero_exit(monkeypatch):
     assert kills == [] and proc.bare_kills == 0
 
 
+def test_success_subtype_returns_its_content_with_no_error(monkeypatch):
+    """The acceptance case verbatim: a result whose subtype is "success" must come back as success
+    with its content — never as "returned an error result: success" followed by the API fallback
+    dying on MissingApiKey while the Slack and SAM.gov watchers sit blind overnight."""
+    proc = _FakeProc(['{"type":"result","subtype":"success","result":"the watcher report"}\n'])
+    res, kills = _run(monkeypatch, proc)
+
+    assert res.ok
+    assert res.error is None
+    assert res.summary == "the watcher report"
+    assert kills == []
+
+
 def test_success_subtype_overrides_a_stray_is_error_flag(monkeypatch):
     proc = _FakeProc(['{"type":"result","subtype":"success","is_error":true,"result":"done"}\n'])
     res, kills = _run(monkeypatch, proc)
