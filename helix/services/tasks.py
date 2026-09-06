@@ -150,19 +150,23 @@ class TaskService:
             env[KNOWLEDGE_OUTBOX_ENV] = str(outbox)
         except OSError:
             pass
-        stdout = stderr = None
+        # None is safe ONLY for a console task: CREATE_NEW_CONSOLE attaches the child's std handles to
+        # its own fresh console, not to this (windowless) process's — whose handles can be invalid and
+        # kill an inheriting child at spawn (WinError 50). A headless child gets explicit handles.
+        stdin = stdout = stderr = None
         flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
         if headless:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no console window — shown inside HELIX
+            stdin = subprocess.DEVNULL
             try:
                 stdout = open(ws / "server.log", "w", encoding="utf-8", errors="replace")
                 stderr = subprocess.STDOUT
             except OSError:
-                stdout = stderr = None
+                stdout = stderr = subprocess.DEVNULL
         try:
             proc = subprocess.Popen(
                 [_python(), app.entry_point], cwd=str(ws), env=env,
-                stdout=stdout, stderr=stderr, creationflags=flags,
+                stdin=stdin, stdout=stdout, stderr=stderr, creationflags=flags,
             )
             with self._lock:
                 self._procs[slug] = proc

@@ -23,5 +23,9 @@ class Restarter:
         # and then takes over, instead of treating us (still shutting down) as a rival and bouncing off.
         cmd.append("--relaunch")
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        subprocess.Popen(cmd, cwd=str(self._root), close_fds=True, creationflags=creationflags)
+        # Explicit std handles: the new process must not inherit this (dying) one's descriptors — a
+        # corrupted inherited handle kills a Windows child at spawn (WinError 50), which here would
+        # mean HELIX quits and never comes back.
+        subprocess.Popen(cmd, cwd=str(self._root), close_fds=True, creationflags=creationflags,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # The caller (UI) quits the current app; the freshly spawned process loads the new code.

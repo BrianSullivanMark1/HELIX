@@ -25,6 +25,9 @@ from helix.logging_setup import get_logger
 
 _LOG = get_logger("speech")
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# Every spawn below passes EXPLICIT stdin/stdout/stderr (PIPE or DEVNULL) — never the parent's. A
+# windowless PyQt process can hold invalid/corrupted std handles, and a child that inherits one dies
+# at startup with WinError 50 ("TTS failed: [WinError 50]" in helix.log was exactly this).
 
 DEFAULT_STT_MODEL = "small.en"   # accuracy-first default: far better on the wake word + short commands
                                  # than base.en, still CPU-friendly (~1s/utterance). Weights live in the
@@ -202,11 +205,15 @@ class OsSpeechOut:
                     )
                     proc = subprocess.Popen(
                         ["powershell", "-NoProfile", "-Command", script],
-                        stdin=subprocess.PIPE, text=True, encoding="utf-8", creationflags=_NO_WINDOW,
+                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        text=True, encoding="utf-8", creationflags=_NO_WINDOW,
                     )
                     self._proc = proc
                 elif system == "Darwin":
-                    proc = subprocess.Popen(["say", "-r", "150", text] if soft else ["say", text])
+                    proc = subprocess.Popen(
+                        ["say", "-r", "150", text] if soft else ["say", text],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
                     self._proc = proc
             if proc is not None and system == "Windows" and proc.stdin is not None:
                 proc.stdin.write(text)
@@ -391,7 +398,7 @@ class _WarmMediaPlayer:
         if self._proc is None or self._proc.poll() is not None:
             self._proc = subprocess.Popen(
                 ["powershell", "-NoProfile", "-STA", "-Command", self._SCRIPT],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, encoding="utf-8", bufsize=1, creationflags=_NO_WINDOW,
             )
         return self._proc
