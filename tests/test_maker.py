@@ -208,6 +208,19 @@ def test_lid_and_mount_words_normalise_and_unknown_mounts_are_not_guessed():
 
 # ---- design_enclosure: the happy path -----------------------------------------------------------
 
+def test_an_enclosure_files_itself_under_its_parts_list_and_a_user_folder_stands(tmp_path):
+    # The shell and its BOM read as ONE project on the menu: the build is shelved under the parts
+    # list's own spelling. A folder the user chose is theirs — a re-design never moves it back.
+    rig = _rig(tmp_path, cad=_Cad())
+    rig.maker.design_enclosure("iron eye")
+    assert rig.builds.project_of("ironeye-enclosure") == "IronEye"
+    grouped = [(f, [a.slug for a in apps]) for f, apps in rig.builds.grouped(rig.builds.list())]
+    assert grouped == [("IronEye", ["ironeye-enclosure"])]
+    rig.builds.set_project("ironeye-enclosure", "Wearables")
+    rig.maker.design_enclosure("IronEye", lid="snap")
+    assert rig.builds.project_of("ironeye-enclosure") == "Wearables"
+
+
 def test_design_enclosure_writes_the_build_publishes_it_and_reports_the_fit(tmp_path):
     rig = _rig(tmp_path, cad=_Cad())
     progress: list[str] = []

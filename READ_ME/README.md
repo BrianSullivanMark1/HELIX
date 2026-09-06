@@ -73,7 +73,7 @@ A packaged install is built with `python build.py --with-voice`; the frozen app 
   talking — written as Python on the build123d CAD kernel, shown in a live STUDIO with parameter
   sliders that recompile in about a second, exportable as STEP/STL/3MF tuned for a Bambu P1S; the
   parts library knows real Arduino/ESP32/Pi/relay footprints so an enclosure comes out FITTING; also
-  360° scenes), and a **Vault** (your searchable notes and documents). Every creation is its own
+  360° scenes; shelved into project folders on the menu), and a **Vault** (your searchable notes and documents). Every creation is its own
   versioned project.
 - **Reach your world (read-only)** — your files, Gmail, calendar, and connected services (Slack,
   GitHub, Alpaca, SAM.gov) answer questions; it never sends, posts, or trades. Connections happen

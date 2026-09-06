@@ -405,6 +405,17 @@ page on `render_kit.py`. Retired engines migrate on their next edit: the primiti
 (`materials.py`) and now the OpenSCAD engine (`model.scad`) both read as "redraw this as model.py" in
 the same build's repair pass, while their old generated pages keep working untouched.
 
+**Project folders.** A hologram can be shelved under a project name on the menu — "put the case in the
+wall camera project" (`file_hologram`, fenced in `BUILD_TOOLS` like `rename_build`), the 📁 button on a
+card, or nothing at all: an enclosure `design_enclosure` makes from a parts list files itself under that
+list's name, so the shell and its BOM read as one project. A folder is only a name — the first hologram
+filed under it creates it, the last one leaving ends it — and the tag lives in ONE sidecar at the builds
+root (`builds/.helixprojects.json`; `BuildService.set_project / projects / rename_project / grouped`),
+never in the manifest: the manifest is committed with every version of the design, so a revert or a
+failed edit's `reset --hard` would otherwise knock a build out of its folder. Builds stay flat on disk
+(nothing that serves `/builds/<slug>/…` changes); both faces group through `BuildService.grouped` and
+regroup on `BuildFiled`.
+
 ### 7b. The web shell — how the React face talks to the brain
 
 `helix/api/` plays the role `helix/ui/` plays for Qt — it calls services, marshals events, owns no
@@ -743,6 +754,8 @@ first launch of a new build). `build.py` preserves live data across a rebuild.
   `assets/preview.png` (what the critic looked at), `assets/model.stl.js` (the STL as a `file://`-safe
   `<script>` sidecar), `assets/three.min.js` (the vendored viewer library) and `index.html` (the generated
   viewer, stamped with a sentinel so a hand-authored animated page is never overwritten).
+- `builds/.helixprojects.json` — the project folders: `{slug: folder}` for every build shelved on the
+  menu (§7a). One sidecar, outside every build's git history, so a revert never un-files a hologram.
 - `scad_libraries/` — on `OPENSCADPATH` for every compile; drop BOSL2 (or any library) here and
   `include <…>` just works. Need not exist.
 - `helix.log` — rotating log.

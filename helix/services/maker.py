@@ -387,6 +387,16 @@ class MakerService:
             _LOG.warning("finalize/commit failed for %s", app.slug, exc_info=True)
             notes.append(f"The version commit didn't go through ({exc}); the files are on disk and the hologram opens.")
             self._builds.clear_building(app.slug)
+        # A design from a parts list belongs to that project: file it under the list's name, so the
+        # enclosure and its BOM read as one thing on the menu — unless the user already shelved this
+        # hologram somewhere themselves (their folder stands).
+        if not (prior is not None and getattr(prior, "project", "")):
+            try:
+                filed = self._builds.set_project(app.slug, canonical)
+                if filed is not None:
+                    app.project = filed.project
+            except Exception:  # noqa: BLE001 — a folder tag is a courtesy, never the build's fate
+                _LOG.warning("could not file %s under %s", app.slug, canonical, exc_info=True)
         if self._bus is not None:
             self._bus.publish(BuildIterated(app) if iterating else BuildCreated(app))
         return self._fit_report(app, layout, problems, meta, notes, skipped, iterating)

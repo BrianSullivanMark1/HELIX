@@ -76,7 +76,7 @@ One screen. Its signature element is the **Presence** — a living orb that *is*
 Console is orb-only: no nav, no clutter. You talk to the orb; the conversation floats beneath it; the
 navigation reveals on a top-edge hover.
 
-- **Menu** — your creations as cards: **Apps**, **Protocols**, **Agents**, **Holograms**, and the
+- **Menu** — your creations as cards: **Apps**, **Protocols**, **Agents**, **Holograms** (grouped into project folders), and the
   **Vault**, plus a **Suggested** strip that surfaces what you reach for. Everything here is conjured,
   changed, and removed by talking.
 - **⚙ Settings** — connect Claude (subscription token or API key), voice + devices, a compact

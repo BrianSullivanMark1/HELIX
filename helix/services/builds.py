@@ -17,6 +17,22 @@ _LOG = get_logger("builds")
 
 MANIFEST = ".helixbuild.json"
 BUILDING = ".building"  # in-progress marker: present while a build runs, cleared on finalize
+# THE PROJECT FOLDERS sidecar, at the builds root: {"version": 1, "folders": {slug: "Wall Camera"}}.
+# A hologram (any build, really) can sit in a named PROJECT FOLDER on the menu — "put the case in
+# the wall camera project". A folder is a name and nothing more: the first build filed under a new
+# name makes it, the last one leaving ends it. The map lives HERE, in one file, rather than in each
+# manifest: the manifest is committed with every version of the design, so a version revert, a
+# failed edit's reset --hard, or a rebuild would all quietly knock a build out of its folder — and
+# organization is not a version of the thing. Builds stay flat on disk (data/builds/<slug>/), so
+# everything that serves /builds/<slug>/… keeps working; the "folder" is a tag, and the menu does
+# the grouping.
+PROJECTS = ".helixprojects.json"
+_PROJECT_MAX = 60  # like a parts list's name: a folder is spoken, so it stays short
+
+
+def normalize_project(name: str) -> str:
+    """A folder name as the user said it — whitespace collapsed, capped; '' for nothing."""
+    return " ".join(str(name or "").split())[:_PROJECT_MAX].strip()
 
 
 def _force_remove(func, path, _exc) -> None:
@@ -97,12 +113,13 @@ class BuildService:
             app.kind, app.entry_point = self._detect_entry(ws)
         self._write_manifest(ws, app)
         self._repo.commit_all(ws, f"build: {app.name}")
-        return app
+        return self._stamp(app)
 
     def list(self) -> list[App]:
         if not self._dir.exists():
             return []
         apps: list[App] = []
+        folders = self._read_projects()  # once per listing, not once per build
         for child in sorted(self._dir.iterdir()):
             if child.name.endswith(".helixdel"):
                 continue  # a move-aside dir from an in-progress/failed delete — not a real build
@@ -111,7 +128,7 @@ class BuildService:
                 # One truncated/corrupt manifest must never empty the whole menu — skip just that build
                 # (it stays on disk for repair) and keep listing the rest.
                 try:
-                    apps.append(self._read_manifest(manifest))
+                    apps.append(self._stamp(self._read_manifest(manifest), folders))
                 except (OSError, ValueError, KeyError):
                     _LOG.warning("skipping build with unreadable manifest: %s", manifest)
         return apps
@@ -148,7 +165,13 @@ class BuildService:
         # git marks loose object files read-only, so a plain rmtree silently leaves .git behind on
         # Windows. Clear the read-only bit on any file that refuses to go, then retry the unlink.
         shutil.rmtree(aside, onerror=_force_remove)
-        return not ws.exists()
+        gone = not ws.exists()
+        if gone:
+            # The folder tag goes with the build — a later build on the same slug starts loose.
+            folders = self._read_projects()
+            if folders.pop(slug, None) is not None:
+                self._write_projects(folders)
+        return gone
 
     def rename(self, slug: str, new_name: str) -> App | None:
         """Give a build a new display name, keeping name↔slug consistent so conversational iteration
@@ -182,10 +205,14 @@ class BuildService:
             except OSError:
                 return None  # locked (open / mid-build) or cross-volume — leave it untouched
             ws = target
+            folders = self._read_projects()
+            if slug in folders:  # the folder tag follows the build to its new slug
+                folders[new_slug] = folders.pop(slug)
+                self._write_projects(folders)
         app.name = new_name
         app.slug = new_slug
         self._write_manifest(ws, app)
-        return app
+        return self._stamp(app)
 
     def versions(self, slug: str, limit: int = 5) -> list:
         """The build's recent versions (git commits, newest first) — for the tile's version dropdown. Each
@@ -211,9 +238,116 @@ class BuildService:
         except Exception:  # noqa: BLE001 - locked/open workspace or bad ref → honest failure
             return None
         try:
-            return self._read_manifest(manifest)
+            return self._stamp(self._read_manifest(manifest))
         except (OSError, ValueError, KeyError):
             return None
+
+    # ----- project folders -----
+    def project_of(self, slug: str) -> str:
+        """The folder a build sits in ('' = loose)."""
+        return self._read_projects().get(slug, "")
+
+    def projects(self) -> list[str]:
+        """Every folder with at least one build still in it, A–Z (case-insensitive). A tag left
+        behind by a build removed some other way (a folder deleted by hand) names no folder."""
+        live = {a.slug for a in self.list()}
+        names: dict[str, str] = {}
+        for slug, folder in self._read_projects().items():
+            if slug in live:
+                names.setdefault(folder.casefold(), folder)
+        return sorted(names.values(), key=str.casefold)
+
+    def resolve_project(self, name: str) -> str:
+        """A folder's name as it already exists ('wall camera' → 'Wall Camera'), else the name as
+        given, normalized. '' for nothing."""
+        want = normalize_project(name)
+        if not want:
+            return ""
+        return next((f for f in self.projects() if f.casefold() == want.casefold()), want)
+
+    def set_project(self, slug: str, project: str) -> App | None:
+        """Put a build in a folder ('' takes it out). Returns the build as it now reads, or None
+        when there is no such build. Nothing on disk moves — the tag is the whole change."""
+        manifest = self.workspace(slug) / MANIFEST
+        if not manifest.exists():
+            return None
+        try:
+            app = self._read_manifest(manifest)
+        except (OSError, ValueError, KeyError):
+            return None
+        folder = self.resolve_project(project)
+        folders = self._read_projects()
+        if folder:
+            folders[slug] = folder
+        else:
+            folders.pop(slug, None)
+        self._write_projects(folders)
+        app.project = folder
+        return app
+
+    def rename_project(self, project: str, new_name: str) -> int:
+        """Rename a folder — every build in it moves. Returns how many moved (0: no such folder, or
+        a blank new name). Renaming onto an existing folder merges into it, keeping that folder's
+        spelling; a case-only change ('rover' → 'Rover') keeps the new spelling."""
+        want = normalize_project(project).casefold()
+        new = normalize_project(new_name)
+        if not want or not new:
+            return 0
+        if new.casefold() != want:
+            new = self.resolve_project(new)
+        folders = self._read_projects()
+        moved = 0
+        for slug, folder in folders.items():
+            if folder.casefold() == want:
+                folders[slug] = new
+                moved += 1
+        if moved:
+            self._write_projects(folders)
+        return moved
+
+    @staticmethod
+    def grouped(apps: list[App]) -> list[tuple[str, list[App]]]:
+        """The menu's grouping: (folder, builds) pairs — folders A–Z first, then ('', the loose
+        ones) last. With nothing filed there is exactly one ('', all) group, so an unfiled menu
+        looks as it always did. Grouping lives here, never in a view, so both faces shelve alike."""
+        by: dict[str, list[App]] = {}
+        spelling: dict[str, str] = {}
+        for app in apps:
+            folder = getattr(app, "project", "") or ""
+            key = folder.casefold()
+            spelling.setdefault(key, folder)
+            by.setdefault(key, []).append(app)
+        out = [(spelling[k], by[k]) for k in sorted(k for k in by if k)]
+        loose = by.get("", [])
+        if loose or not out:
+            out.append(("", loose))
+        return out
+
+    def _read_projects(self) -> dict[str, str]:
+        """The sidecar, or {} — a missing, truncated, or hand-mangled file reads as 'nothing filed',
+        never as a broken menu."""
+        try:
+            data = json.loads((self._dir / PROJECTS).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        folders = data.get("folders") if isinstance(data, dict) else None
+        if not isinstance(folders, dict):
+            return {}
+        return {
+            str(slug): normalize_project(folder)
+            for slug, folder in folders.items()
+            if isinstance(slug, str) and isinstance(folder, str) and normalize_project(folder)
+        }
+
+    def _write_projects(self, folders: dict[str, str]) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({"version": 1, "folders": folders}, indent=2)
+        self._atomic_write(self._dir / PROJECTS, payload)
+
+    def _stamp(self, app: App, folders: dict[str, str] | None = None) -> App:
+        """Give a freshly read build its folder tag."""
+        app.project = (self._read_projects() if folders is None else folders).get(app.slug, "")
+        return app
 
     # ----- helpers -----
     def _detect_entry(self, ws: Path) -> tuple[AppKind, str | None]:

@@ -81,6 +81,8 @@ _TOOL_PHRASES: dict[str, str] = {
     "create_agent": "Setting up that agent",
     "delete_build": "Removing that",
     "rename_build": "Renaming that",
+    # A hologram into a project folder on the menu (file_hologram) — "filing", the office word.
+    "file_hologram": "Filing the hologram",
     "open_build": "Opening it",
     "run_task": "Running that protocol",
     "run_agent": "Running that agent",
@@ -174,6 +176,7 @@ _NAMED_VERBS: dict[str, str] = {
     "create_agent": "Saving",
     "delete_build": "Removing",
     "rename_build": "Renaming",
+    "file_hologram": "Filing",
 }
 
 

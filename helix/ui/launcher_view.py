@@ -4,7 +4,10 @@
   • Protocols — built scripts that *do a thing* when run (Run / Rename / Remove).
   • Agents    — saved goals HELIX runs on demand (Run / Rename / Remove).
   • Holograms — 3D models the user designs by talking (drafted in OpenSCAD, shown as an engineering-style
-                drawing; build_3d_model) (Open / Rename / Remove).
+                drawing; build_3d_model) (Open / Rename / Remove), shelved under PROJECT FOLDERS: a
+                card's 📁 button files it, a folder header renames the folder. The grouping is
+                BuildService.grouped (a tag in its sidecar, nothing moves on disk), so the web face
+                shelves identically.
   • Vault     — searchable collections of the user's own notes/documents (Open / Rename / Remove).
 
 Builds are data, not shell: they're freely removable. The tabs and New app are the immutable shell
@@ -31,6 +34,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from helix.domain.models import BuildKind
 from helix.services.agents import AgentService
 from helix.services.builds import BuildService
 from helix.services.tasks import TaskService
@@ -264,8 +268,10 @@ class LauncherView(QWidget):
         self._fill_grid(
             self._apps_grid, self._apps_empty, [self._openable_card(a) for a in cat["apps"]]
         )
-        self._fill_grid(
-            self._models_grid, self._models_empty, [self._openable_card(a) for a in cat["models"]]
+        # Holograms shelve under project folders (a header per folder, the loose ones last); with
+        # nothing filed there is one nameless group and the tab looks as it always did.
+        self._fill_grouped(
+            self._models_grid, self._models_empty, self._builds.grouped(cat["models"])
         )
         self._fill_grid(
             self._knowledge_grid, self._knowledge_empty,
@@ -420,6 +426,8 @@ class LauncherView(QWidget):
         remove = QPushButton("✕ Remove")
         remove.clicked.connect(lambda _c=False, s=app.slug, n=app.name: self._remove_build(s, n))
         actions = [open_btn, edit]
+        if app.build_kind == BuildKind.MODEL:
+            actions.append(self._folder_button(app))
         connect = self._connect_button(app)
         if connect is not None:
             actions.append(connect)
@@ -427,6 +435,37 @@ class LauncherView(QWidget):
         card.add_actions(*actions)
         card.apply_status(self._status_provider(app.slug))
         return card
+
+    def _folder_button(self, app) -> QPushButton:
+        """'📁 Folder' on a hologram card — put it in a project folder, move it, or take it out."""
+        current = getattr(app, "project", "") or ""
+        btn = QPushButton("📁 Folder")
+        btn.setToolTip(
+            f"In “{current}” — click to move it to another folder or take it out"
+            if current else "Put this hologram in a project folder"
+        )
+        btn.clicked.connect(
+            lambda _c=False, s=app.slug, n=app.name, p=current: self._file_build(s, n, p)
+        )
+        return btn
+
+    def _folder_header(self, folder: str, count: int) -> QWidget:
+        """A folder's heading over its cards: name and count, plus a rename for a named folder."""
+        host = QWidget()
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(0, 8, 0, 0)
+        lay.setSpacing(10)
+        label = QLabel(f"📁 {folder}  ·  {count}" if folder else "Not in a folder")
+        label.setTextFormat(Qt.TextFormat.PlainText)  # a folder name is the user's text: never rich
+        label.setStyleSheet(f"color:{CYAN if folder else MUTED};font-size:13px;font-weight:600;")
+        lay.addWidget(label)
+        if folder:
+            rename = QPushButton("✎ Rename folder")
+            rename.setToolTip("Rename this project folder — every hologram in it moves with it")
+            rename.clicked.connect(lambda _c=False, f=folder: self._rename_project(f))
+            lay.addWidget(rename)
+        lay.addStretch(1)
+        return host
 
     def _knowledge_card(self, app) -> _Card:
         """A card for a vault — Open (manage its docs) / Rename / Remove. The subtitle shows how much
@@ -445,15 +484,36 @@ class LauncherView(QWidget):
         card.apply_status(self._status_provider(app.slug))
         return card
 
-    def _fill_grid(self, grid: QGridLayout, empty: QLabel, cards: list[QWidget]) -> None:
+    @staticmethod
+    def _clear_grid(grid: QGridLayout) -> None:
         while grid.count():
             item = grid.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+
+    def _fill_grid(self, grid: QGridLayout, empty: QLabel, cards: list[QWidget]) -> None:
+        self._clear_grid(grid)
         empty.setVisible(not cards)
         for i, card in enumerate(cards):
             grid.addWidget(card, i // 2, i % 2)
+
+    def _fill_grouped(self, grid: QGridLayout, empty: QLabel, groups) -> None:
+        """Cards under folder headers (BuildService.grouped's order: folders A–Z, the loose ones
+        last). Headers appear only once a folder exists, so an unfiled tab is the plain grid."""
+        self._clear_grid(grid)
+        shelved = any(folder for folder, _apps in groups)
+        row = 0
+        total = 0
+        for folder, apps in groups:
+            if shelved:
+                grid.addWidget(self._folder_header(folder, len(apps)), row, 0, 1, 2)
+                row += 1
+            for i, app in enumerate(apps):
+                grid.addWidget(self._openable_card(app), row + i // 2, i % 2)
+            row += (len(apps) + 1) // 2
+            total += len(apps)
+        empty.setVisible(total == 0)
 
     # ----- actions -----
     def _add_agent(self) -> None:
@@ -511,6 +571,35 @@ class LauncherView(QWidget):
                 "building right now — close it (or wait a moment) and try again.",
             )
             return
+        self.refresh()
+
+    def _file_build(self, slug: str, name: str, current: str) -> None:
+        """Pick (or type) the project folder for a hologram; blank takes it out of its folder."""
+        folders = self._builds.projects()
+        if current and current not in folders:
+            folders = [current] + folders
+        text, ok = QInputDialog.getItem(
+            self, "Project folder",
+            f"Put “{name}” in a project folder — pick or type one (blank takes it out):",
+            folders, folders.index(current) if current in folders else 0, True,
+        )
+        if not ok:
+            return
+        text = " ".join(text.split())
+        if text == current:
+            return
+        if self._builds.set_project(slug, text) is None:
+            QMessageBox.warning(
+                self, "Project folder", f"Couldn’t file “{name}” — it may have just been removed."
+            )
+        self.refresh()
+
+    def _rename_project(self, folder: str) -> None:
+        new_name = self._ask_new_name(folder)
+        if new_name is None:
+            return
+        if not self._builds.rename_project(folder, new_name):
+            QMessageBox.warning(self, "Rename folder", f"Couldn’t rename the folder “{folder}”.")
         self.refresh()
 
     def _rename_agent(self, current: str) -> None:

@@ -25,6 +25,7 @@ from helix.domain.events import (
     AgentsChanged,
     BuildCreated,
     BuildDeleted,
+    BuildFiled,
     BuildDeleteRequested,
     CameraRequested,
     ConnectRequested,
@@ -207,6 +208,7 @@ class HelixMainWindow(QMainWindow):
         container.bus.subscribe(BuildCreated, self._buildSignal.emit)
         container.bus.subscribe(BuildIterated, self._buildSignal.emit)
         container.bus.subscribe(BuildRenamed, self._buildSignal.emit)  # orb-driven rename refreshes menu
+        container.bus.subscribe(BuildFiled, self._buildSignal.emit)  # filed in a folder: regroup
         container.bus.subscribe(BuildDeleted, self._buildSignal.emit)  # cleanup after a stopped build
         container.bus.subscribe(AgentsChanged, self._buildSignal.emit)  # orb-driven agent change refreshes
         self._buildSignal.connect(self._on_build)
@@ -380,6 +382,8 @@ class HelixMainWindow(QMainWindow):
             if old:
                 self._board.remove(old)
         self._refresh_build_ui()
+        if isinstance(event, BuildFiled):
+            return  # only the menu's shelving changed — an open viewer has nothing new to show
         # Keep an open Knowledge base in sync when it changes underneath the manager (the orb saved a note
         # into it, it was renamed, or it was deleted from elsewhere).
         self._sync_knowledge_view(event)

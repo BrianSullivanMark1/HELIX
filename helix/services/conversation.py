@@ -48,6 +48,9 @@ BUILD_TOOLS = frozenset(
     {
         "build_app", "build_task", "build_3d_model", "create_agent", "delete_build",
         "improve_helix", "rename_build", "run_task", "run_agent",
+        # file_hologram only re-shelves a hologram on the menu, but it is still a change to the
+        # user's things made from text — an email must never reorganize their projects.
+        "file_hologram",
         # Workflows compose + launch autonomous agent runs — an unattended agent must not create or fire
         # one (an email saying "run the deploy workflow" must not make a watcher run it).
         "create_workflow", "run_workflow",
@@ -672,10 +675,11 @@ class ConversationService:
         build's name when the call carries one (so 'Building Tip Calculator…' beats 'Building that')."""
         name = str(args.get("name") or "").strip()
         if name and tool in ("build_app", "build_task", "build_3d_model", "create_agent",
-                             "delete_build", "rename_build"):
+                             "delete_build", "rename_build", "file_hologram"):
             verb = {
                 "build_app": "Building", "build_task": "Building", "build_3d_model": "Projecting",
                 "create_agent": "Saving", "delete_build": "Removing", "rename_build": "Renaming",
+                "file_hologram": "Filing",
             }[tool]
             return f"{verb} {name}…"
         label = friendly_tool_label(tool)

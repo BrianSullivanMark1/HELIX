@@ -8,6 +8,7 @@ from helix.domain.errors import BuildError
 from helix.domain.events import (
     BuildDeleteRequested,
     BuildOpenRequested,
+    BuildFiled,
     BuildRenamed,
     CameraCommandRequested,
     CameraRequested,
@@ -530,6 +531,35 @@ class ToolRegistry:
                         "new_name": {"type": "string", "description": "The new name to give it."},
                     },
                     "required": ["name", "new_name"],
+                    "additionalProperties": False,
+                },
+            ),
+            ToolSpec(
+                name="file_hologram",
+                description=(
+                    "Put a HOLOGRAM into a PROJECT FOLDER on the menu, by name — 'put the case in "
+                    "the wall camera project', 'file the bracket under Greenhouse', 'move it into "
+                    "the Rover folder'. A folder is just a name: the first hologram filed under a "
+                    "new name creates it, and it disappears when the last one leaves. Leave "
+                    "project empty to take a hologram OUT of its folder ('take it out of the "
+                    "folder'). "
+                    "Nothing about the hologram itself changes — only where it sits on the menu. "
+                    "Holograms only: apps, protocols and agents aren't filed."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "The hologram to file."},
+                        "project": {
+                            "type": "string",
+                            "description": (
+                                "The project folder to put it in — an existing folder's name "
+                                "(any spelling; HELIX matches it), or a new one. Empty takes the "
+                                "hologram out of its folder."
+                            ),
+                        },
+                    },
+                    "required": ["name"],
                     "additionalProperties": False,
                 },
             ),
@@ -2688,14 +2718,27 @@ class ToolRegistry:
                 return " ".join(text.split())[:140]
 
             # Include each build's kind (as its V3 display word) so the model reuses the matching
-            # build_* verb to iterate and never forks a near-duplicate by guessing the wrong kind.
-            return "\n".join(
-                f"- {a.name} [{kind_label(a.build_kind.value)}]: {clean(a.request)}" for a in apps
-            )
+            # build_* verb to iterate and never forks a near-duplicate by guessing the wrong kind —
+            # and the project folder a hologram sits in, so "the ones in the rover project" resolves.
+            def where(a) -> str:
+                folder = getattr(a, "project", "") or ""
+                return f", in {folder}" if folder else ""
+
+            lines = [
+                f"- {a.name} [{kind_label(a.build_kind.value)}{where(a)}]: {clean(a.request)}"
+                for a in apps
+            ]
+            shelved = {getattr(a, "project", "") for a in apps if getattr(a, "project", "")}
+            folders = sorted(shelved, key=str.casefold)
+            if folders:
+                lines.append("Project folders: " + ", ".join(folders) + ".")
+            return "\n".join(lines)
         if name == "open_build":
             return self._request_open(args["name"])
         if name == "rename_build":
             return self._rename(args["name"], args.get("new_name", ""))
+        if name == "file_hologram":
+            return self._file_hologram(args.get("name", ""), args.get("project", ""))
         if name == "run_task" and self._tasks is not None:
             task = self._tasks.find(args["name"])
             if task is None:
@@ -2963,6 +3006,61 @@ class ToolRegistry:
                     return f"Couldn't rename the workflow '{wf.name}' — that name may already be in use."
                 return f"Renamed the workflow '{wf.name}' to '{renamed_wf.name}'."
         return f"I couldn't find anything called '{name}' to rename."
+
+    # Words a model reaches for when told "take it out of the folder" — the tool says empty, but
+    # a spoken instruction becomes a word more often than a blank.
+    _NO_FOLDER = frozenset({"", "none", "no folder", "nothing", "loose", "unfiled", "out", "-"})
+
+    def _file_hologram(self, name: str, project: str) -> str:
+        """Put a hologram in a project folder, or take it out. The folder is a tag in BuildService's
+        sidecar — nothing on disk moves — and the menu regroups on BuildFiled."""
+        target = (name or "").strip().lower()
+        slug = slugify(name or "")
+        builds = self._builds.list()
+        exact = next(
+            (a for a in builds if a.slug == slug or a.name.strip().lower() == target), None)
+        if exact is not None and exact.build_kind != BuildKind.MODEL:
+            what = kind_label(exact.build_kind.value)
+            article = "an" if what[:1] in "aeiou" else "a"
+            return f"'{exact.name}' is {article} {what} — only holograms go in project folders."
+        models = [a for a in builds if a.build_kind == BuildKind.MODEL]
+        app = exact if exact is not None else next(
+            (a for a in models if target and target in a.name.strip().lower()), None)
+        if app is None:
+            return f"I don't see a hologram called '{name}' — say list apps to see what's here."
+        current = getattr(app, "project", "") or ""
+        folder = " ".join((project or "").split())
+        if folder.lower() in self._NO_FOLDER:
+            if not current:
+                return f"'{app.name}' isn't in a folder."
+            filed = self._builds.set_project(app.slug, "")
+            if filed is None:
+                return f"Couldn't move '{app.name}' — it may have just been removed."
+            if self._bus is not None:
+                self._bus.publish(BuildFiled(filed, project=""))
+            return f"Took '{app.name}' out of the '{current}' folder."
+        # An existing folder's spelling wins ('wall camera' → 'Wall Camera'); failing that, the
+        # parts list's, so an enclosure and its BOM read as one project; failing that, the words
+        # as said.
+        known = self._builds.projects()
+        folder = self._builds.resolve_project(folder)
+        existed = folder.casefold() in {k.casefold() for k in known}
+        if not existed and self._parts is not None:
+            try:
+                listed = self._parts.projects()
+                folder = next((p for p in listed if p.casefold() == folder.casefold()), folder)
+            except Exception:  # noqa: BLE001 — a spelling courtesy, never the filing's fate
+                pass
+        if current and current.casefold() == folder.casefold():
+            return f"'{app.name}' is already in the '{current}' folder."
+        filed = self._builds.set_project(app.slug, folder)
+        if filed is None:
+            return f"Couldn't file '{app.name}' — it may have just been removed."
+        if self._bus is not None:
+            self._bus.publish(BuildFiled(filed, project=filed.project))
+        moved = f" (out of '{current}')" if current else ""
+        tail = "." if existed else " — a new folder."
+        return f"Filed '{app.name}' under '{filed.project}'{moved}{tail}"
 
     # ----- self-change (apply / discard a drafted improvement to HELIX itself) -----
     def _resolve_change(self, which, pending):

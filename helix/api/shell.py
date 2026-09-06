@@ -28,6 +28,7 @@ from helix.domain.events import (
     BuildCreated,
     BuildDeleted,
     BuildDeleteRequested,
+    BuildFiled,
     BuildFinished,
     BuildIterated,
     BuildOpenRequested,
@@ -167,6 +168,7 @@ class ShellSession:
         for etype, handler in (
             (BuildCreated, self._on_build_changed), (BuildIterated, self._on_build_changed),
             (BuildRenamed, self._on_build_renamed), (BuildDeleted, self._on_build_deleted),
+            (BuildFiled, self._on_build_changed),  # filed in a project folder — regroup the menu
             (AgentsChanged, self._on_build_changed),
             (BuildStarted, self._on_build_started), (BuildProgress, self._on_build_progress),
             (BuildFinished, self._on_build_finished),

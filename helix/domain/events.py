@@ -45,6 +45,15 @@ class BuildDeleted(Event):
 
 
 @dataclass(frozen=True)
+class BuildFiled(Event):
+    """A build was put into (or taken out of) a PROJECT FOLDER on the menu — the menu regroups.
+    Nothing on disk moved; `project` is the folder it now sits in ('' = loose)."""
+
+    app: App
+    project: str = ""
+
+
+@dataclass(frozen=True)
 class AgentsChanged(Event):
     """An agent was created, renamed, or removed — the menu's Agents tab should refresh."""
 

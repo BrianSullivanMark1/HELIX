@@ -436,6 +436,8 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
                     "needs_keys": c.connections.needs_connection(slug),
                     "missing_keys": bool(c.connections.missing(slug)),
                     "docs": c.knowledge.count(slug) if a.build_kind == BuildKind.KNOWLEDGE else 0,
+                    # the project folder it sits in ('' = loose)
+                    "project": getattr(a, "project", "") or "",
                 })
             out[cat] = rows
         agents = [{"name": a.name, "goal": a.goal, "enabled": a.enabled,
@@ -445,7 +447,11 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
                          for s in c.recommend.suggestions(c.builds.list())]
         except Exception:  # noqa: BLE001
             suggested = []
-        return {"builds": out, "agents": agents, "suggested": suggested,
+        try:
+            projects = list(c.builds.projects())  # every folder with something in it, A–Z
+        except Exception:  # noqa: BLE001
+            projects = []
+        return {"builds": out, "agents": agents, "suggested": suggested, "projects": projects,
                 "legend": shell.board.legend()}
 
     @app.post("/api/builds/{slug}/open")
@@ -510,6 +516,32 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         if out is None:
             return JSONResponse({"error": "rename refused"}, status_code=409)
         return {"ok": True, "slug": out.slug}
+
+    @app.post("/api/builds/{slug}/project")
+    async def file_build(slug: str, request: Request):
+        """Put a build in a PROJECT FOLDER on the menu (an empty project takes it out). A tag in
+        BuildService's sidecar — nothing on disk moves; the menu regroups on BuildFiled."""
+        body = await request.json()
+        out = c.builds.set_project(slug, str(body.get("project") or ""))
+        if out is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        from helix.domain.events import BuildFiled
+
+        c.bus.publish(BuildFiled(out, project=out.project))
+        return {"ok": True, "project": out.project}
+
+    @app.post("/api/projects/rename")
+    async def rename_project(request: Request):
+        """Rename a project folder — every build in it moves (onto an existing folder = merge)."""
+        body = await request.json()
+        project = str(body.get("project") or "").strip()
+        new = str(body.get("name") or "").strip()
+        if not project or not new:
+            return JSONResponse({"error": "empty name"}, status_code=400)
+        moved = c.builds.rename_project(project, new)
+        if moved:
+            shell.push({"t": "builds"})  # every face regroups, not only the one that asked
+        return {"ok": bool(moved), "moved": moved}
 
     @app.delete("/api/builds/{slug}")
     def delete_build(slug: str):

@@ -195,7 +195,11 @@ How you work:
 - The user manages everything they've made just by talking. To OPEN something they built ("open it",
   "show me the tip calculator", "pull up the garden hologram"), call open_build with its name — it opens
   exactly as a menu click would, instantly and read-only. To RENAME any app, protocol, hologram, or
-  agent, call rename_build with its name and the new name. To RUN a protocol, call run_task; to RUN a
+  agent, call rename_build with its name and the new name. To PUT a hologram in a PROJECT FOLDER on
+  the menu ("put the case in the wall camera project", "file it under Greenhouse"), call
+  file_hologram with its name and the folder — a new name makes the folder, an empty one takes it
+  out, and an enclosure HELIX designs from a parts list files itself under that project. To RUN a
+  protocol, call run_task; to RUN a
   saved agent, call run_agent and then relay briefly what it found. To DELETE one, call delete_build —
   HELIX shows the user one confirm button before anything is removed, so it's safe to call the moment
   they ask to remove something (you don't need to extract a second spoken yes first).

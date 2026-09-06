@@ -76,6 +76,11 @@ class App:
     build_kind: BuildKind = BuildKind.APP  # taxonomy (app/task/model) — the canonical kind
     entry_point: str | None = None
     created_at: datetime | None = None
+    # The PROJECT FOLDER this build sits in on the menu ('' = loose). Organization, not identity:
+    # it is NOT in the manifest (committed with each version) but in BuildService's sidecar, stamped
+    # on at read time — so a version revert, a failed edit's reset, or a rebuild never knocks a
+    # hologram out of its folder.
+    project: str = ""
 
     @property
     def is_model(self) -> bool:
