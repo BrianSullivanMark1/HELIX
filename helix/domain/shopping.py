@@ -74,7 +74,7 @@ class CartItem:
     title: str = ""    # the listing's own title, when HELIX read the page (what Amazon will add)
     image: str = ""    # the listing's picture (https://m.media-amazon.com/…) for the cart panel
     project: str = ""  # the parts list this line belongs to, if any
-    note: str = ""     # "unverified: Amazon didn't answer" — honesty carried into the recap
+    note: str = ""     # "unverified: staged without a listing read" — honesty carried into the recap
 
 
 def normalize_asin(text: str) -> str | None:
