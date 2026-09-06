@@ -330,3 +330,15 @@ to show:
   held_for, summary, request, branch, reason, origin}; `applied[]`; `counts`; `rebuild`;
   `restart_needed`; `report`; `report_delivered`; `limit`; `limit_log[]`; `weekly_digest` (every 7th
   night).
+
+
+## Evolve retired (2026-09-05)
+
+The one-proposal `EvolveService` this spec built on is gone: dreaming is the one way HELIX improves
+itself at night. What the dream needed of it — the user's queued ideas and the night's material — is
+`services/backlog.py` (`Backlog`: `add`, `items`, `take`, `material`; data/helix_backlog.json, with a
+one-time fold of `evolve_backlog.json`). `evolve_enabled`, `evolve_report` and Evolve's journal mirror
+are gone; the `dream_status` recap names what is still queued. The constructor is now
+`DreamService(chat, lane, selfdev, backlog, settings, clock, bus, …)`; `covers_tonight` and
+`mark_night_covered` went with the pass. Two things joined the same day: rounds until the window closes
+(READ_ME/DREAM_MIND.md §15) and sleep-talk (§14). References above to Evolve describe the history.

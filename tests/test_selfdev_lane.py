@@ -113,7 +113,7 @@ def test_lane_cancel_reports_stopped():
 
 # ----- attended vs unattended: the same lane, at 3 PM and at 3 AM -----
 def test_an_overnight_draft_marks_every_announcement_unattended():
-    # Growth narration is deliberately spoken even through a sleeping mic, so the overnight Evolve
+    # Growth narration is deliberately spoken even through a sleeping mic, so the overnight dream
     # pass reusing this lane would read every coder step aloud into a dark house. The flag has to ride
     # on EVERY event: marked halfway, the night would whisper and then shout its ending at 4 AM.
     bus = _Bus()

@@ -33,11 +33,11 @@ class SelfDevLane:
 
     def start(self, request: str, model: str | None = None, unattended: bool = False) -> bool:
         """Begin drafting in the background. Returns False if a draft is already running (one at a
-        time). `model` optionally pins the coder model for this draft — Evolve's Fable-5 proposal sizes
+        time). `model` optionally pins the coder model for this draft — the dream session's plan names
         it to the task (deep=Fable 5, standard=Opus 4.8 floor); None keeps the growth coder's default.
 
         `unattended` says nobody asked for this draft and nobody is in the room: it rides on every
-        event this lane publishes so the console can keep the overnight Evolve pass SILENT. It has to
+        event this lane publishes so the console can keep the overnight dream draft SILENT. It has to
         be decided here, by the caller, because by the time the console sees a line there is nothing
         left to tell a 3 AM pass apart from a draft the user is watching — both look identical on the
         bus. Defaulted False so improve_helix, which the user asked for and is sitting through, keeps

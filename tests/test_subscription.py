@@ -618,14 +618,13 @@ def container(_qt_app, tmp_path, monkeypatch):
 
 
 def test_the_unattended_services_are_wired_to_a_web_less_chat(container):
-    """The distillers and Evolve think with NOBODY watching, over text HELIX didn't write (a Slack
+    """The distillers think with NOBODY watching, over text HELIX didn't write (a Slack
     thread pasted into the transcript, an email body, the log tail). ConversationService sheds the web
     per turn for its agent runs; these have no human turn to distinguish, so the container must hand
     them the shed twin at wiring time. It handed them the web-enabled `self.chat` instead."""
     unattended = {
         "profile": container.profile, "lessons": container.lessons,
         "user_memory": container.user_memory, "voice_id": container.voice_id,
-        "evolve": container.evolve,
     }
     open_fence = [
         name for name, svc in unattended.items()

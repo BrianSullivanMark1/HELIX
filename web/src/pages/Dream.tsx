@@ -67,6 +67,9 @@ interface Draft {
 
 interface Rebuild { ok: boolean | null; restored: boolean; message: string; at: string }
 
+/** One line of sleep-talk, as the night recorded it (services/murmur.py). */
+interface Said { at?: string; text?: string; kind?: string }
+
 /** One night, as GET /api/dream/journal hands it over (DreamService.journal_entries). */
 interface Night {
   id: string;
@@ -96,6 +99,8 @@ interface Night {
   report_delivered: boolean;
   limit: string;
   weekly_digest?: string;
+  rounds?: number;
+  murmurs?: Said[];
   in_progress: boolean;
 }
 
@@ -252,6 +257,8 @@ function NightCard({ night }: { night: Night }) {
   const research = night.research || [];
   const verify = night.verify || [];
   const remaining = night.agenda_remaining || [];
+  const murmurs = night.murmurs || [];
+  const rounds = night.rounds || 1;
   const nothing = !night.discoveries?.length && !night.facts?.length && !night.experiments?.length
     && !applied.length && !otherDrafts.length && !night.report;
   const when = [timeOf(night.started), timeOf(night.ended)].filter(Boolean).join("–") || night.window;
@@ -264,6 +271,7 @@ function NightCard({ night }: { night: Night }) {
           {when}
           {night.kind === "now" ? " · started by hand" : ""}
           {night.model ? ` · drafted on ${night.model}` : ""}
+          {rounds > 1 ? ` · ${rounds} rounds` : ""}
           {night.in_progress ? " · in progress" : ""}
         </span>
         {night.theme && <span className="text-xs" style={MUTED}>· {night.theme}</span>}
@@ -387,13 +395,14 @@ function NightCard({ night }: { night: Night }) {
         </div>
       )}
 
-      {(research.length > 0 || verify.length > 0 || remaining.length > 0) && (
+      {(research.length > 0 || verify.length > 0 || remaining.length > 0 || murmurs.length > 0) && (
         <div className="mt-3">
           <button className="btn text-xs" onClick={() => setOpen((o) => !o)}>
             {open ? "Hide the night's notes" : "The night's notes"}
             {!open && ` · ${[research.length && plural(research.length, "question"),
               verify.length && plural(verify.length, "check"),
-              remaining.length && `${remaining.length} carried over`].filter(Boolean).join(", ")}`}
+              remaining.length && `${remaining.length} carried over`,
+              murmurs.length && plural(murmurs.length, "murmur")].filter(Boolean).join(", ")}`}
           </button>
           {open && (
             <div className="mt-3 space-y-3">
@@ -447,6 +456,19 @@ function NightCard({ night }: { night: Night }) {
                   <div className="text-xs mb-1 tracking-wide" style={MUTED}>CARRIED TO THE NEXT NIGHT</div>
                   <ul className="space-y-1 pl-4 list-disc">
                     {remaining.map((r, i) => <li key={i} className="text-[13px] leading-snug">{r}</li>)}
+                  </ul>
+                </div>
+              )}
+              {murmurs.length > 0 && (
+                <div>
+                  <div className="text-xs mb-1 tracking-wide" style={MUTED}>SAID IN ITS SLEEP</div>
+                  <ul className="space-y-0.5 pl-1" style={{ listStyle: "none" }}>
+                    {murmurs.map((m, i) => (
+                      <li key={i} className="text-[13px] leading-snug" style={{ fontStyle: "italic" }}>
+                        <span className="text-xs mr-2" style={{ ...MUTED, fontStyle: "normal" }}>{m.at}</span>
+                        {m.text}
+                      </li>
+                    ))}
                   </ul>
                 </div>
               )}

@@ -745,6 +745,31 @@ class WebVoice:
 
         threading.Thread(target=go, daemon=True, name="helix-voice-narrate").start()
 
+    def murmur(self, text: str) -> None:
+        """Sleep-talk, whispered (services/murmur.py, READ_ME/DREAM_MIND.md §14): only while the
+        voice is idle — never over a reply, a progress note or a listening mic — and never while
+        muted (the user asked for quiet). The TTS's own murmur() is the same voice quieter and
+        slower; a backend without one stays silent. Runs on its own thread; the echo shield
+        compares overheard speech to it exactly as it does a narration note."""
+        if not self.enabled() or self._muted or self._narrating or self._state != "idle":
+            return
+        fn = getattr(self._tts, "murmur", None)
+        text = speakable(text)
+        if not text or not callable(fn) or not self._tts.available():
+            return
+        self._speaking_text = text
+        self._narrating = True
+
+        def go() -> None:
+            try:
+                fn(text)
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                self._narrating = False
+
+        threading.Thread(target=go, daemon=True, name="helix-voice-murmur").start()
+
     def idle(self) -> None:
         self._set_state("idle")
 

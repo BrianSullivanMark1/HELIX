@@ -147,11 +147,6 @@ export default function Settings() {
                 onChange={(e) => setSecretEdits((s) => ({ ...s, claude_api_key: e.target.value }))} />
             </div>
             <div className="text-[13px]" style={{ color: brainColor }}>{data.brain.line}</div>
-            <label className="flex items-center gap-2 text-[13px]">
-              <input type="checkbox" checked={Boolean(val("evolve_enabled") ?? true)}
-                onChange={(e) => setVal("evolve_enabled", e.target.checked)} />
-              Evolve — draft one self-improvement overnight (never applies itself)
-            </label>
           </div>
         </section>
 
@@ -161,7 +156,7 @@ export default function Settings() {
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={Boolean(val("dream_enabled"))}
                 onChange={(e) => setVal("dream_enabled", e.target.checked)} />
-              Dream nightly — a session of non-stop self-improvement while you sleep (replaces Evolve's one draft on those nights)
+              Dream nightly — a session of non-stop self-improvement while you sleep
             </label>
             <div className="flex items-center gap-3">
               <span className="w-44">Window</span>
@@ -189,10 +184,15 @@ export default function Settings() {
               Rebuild and relaunch after applying (the previous build is kept and restored if the new one fails)
             </label>
             <div className="flex items-center gap-3">
-              <span className="w-44">Drafts per night, at most</span>
+              <span className="w-44">Drafts per round, at most</span>
               <input type="number" min={1} max={30} step={1} className="w-20"
                 value={Number(val("dream_max_drafts") ?? 10)}
                 onChange={(e) => setVal("dream_max_drafts", Number(e.target.value))} />
+            </div>
+            <div className="text-xs pl-6" style={{ color: "var(--muted)" }}>
+              A night runs in rounds until its window closes: each round reflects again on what the night
+              has found so far and goes deeper. While it dreams the orb sleeps and HELIX talks in its sleep —
+              the murmurs drift past the orb, and are whispered aloud only when you're there to hear them.
             </div>
             <div style={{ color: "var(--muted)" }}>
               Plans and drafts on Fable — the growth model{dream?.model ? ` (${dream.model})` : ""}.

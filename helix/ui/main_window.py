@@ -532,7 +532,7 @@ class HelixMainWindow(QMainWindow):
     def _on_self_change_progress(self, ev: object) -> None:
         # `unattended` has to travel the whole way here: the console decides the 3-6 AM silence, but it
         # can only decide it if the shell hands the fact over. Dropping the flag at this bridge is what
-        # made the overnight Evolve pass narrate every coder step aloud into a dark house. getattr with
+        # made the overnight dream draft narrate every coder step aloud into a dark house. getattr with
         # a False default keeps the bridge tolerant of an older event shape (a replayed/queued event
         # from a previous build) rather than taking the whole shell down with an AttributeError.
         self.console.on_self_change_progress(ev.line, getattr(ev, "unattended", False))
@@ -583,10 +583,6 @@ class HelixMainWindow(QMainWindow):
             self.console.maybe_suggest()  # ANTICIPATE — the console rate-limits + dedupes internally
         except Exception:
             _LOG.exception("suggestion check failed")
-        try:
-            self._c.evolve.tick()  # EVOLVE — returns instantly except one nightly background pass
-        except Exception:
-            _LOG.exception("evolve tick failed")
         try:
             due = self._c.reminders.pop_due()
             if due:

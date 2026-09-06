@@ -43,9 +43,9 @@ from helix.domain.events import (
 )
 
 try:  # the dream engine's own start/end announcement; without it the heartbeat polls (DREAM.md §7)
-    from helix.domain.events import DreamStateChanged
+    from helix.domain.events import DreamMurmur, DreamStateChanged
 except ImportError:  # pragma: no cover — an events module without it: polling only
-    DreamStateChanged = None
+    DreamStateChanged = DreamMurmur = None
 from helix.logging_setup import get_logger
 from helix.services import attachments
 from helix.services import images as imagesvc
@@ -66,6 +66,7 @@ _LOG = get_logger("webshell")
 
 _NOTHING_TO_SLEEP = "Voice isn't listening right now, so there's nothing to put to sleep."
 _HEARTBEAT_S = 15.0
+_MURMUR_PRESENCE_S = 600.0  # sleep-talk is whispered aloud only this soon after the user's last turn
 _SUGGEST_EVERY_S = 25 * 60.0
 _ANNOUNCE_BUFFER_S = 0.9
 _GREEN_FLASH_S = 2.5
@@ -157,6 +158,7 @@ class ShellSession:
         # pushed to the face (so a start/end is pushed once), and the last morning report told
         # (the Settings card shows it).
         self._last_activity = time.monotonic()
+        self._murmur_last: dict | None = None  # the last line of sleep-talk this session
         self._dream_running = False
         self._dream_line = ""
         self._dream_report_last = ""
@@ -182,6 +184,8 @@ class ShellSession:
             bus.subscribe(etype, handler)
         if DreamStateChanged is not None:
             bus.subscribe(DreamStateChanged, self._on_dream_state)
+        if DreamMurmur is not None:
+            bus.subscribe(DreamMurmur, self._on_dream_murmur)
         self._wire_dream()
 
         self._heartbeat = threading.Timer(_HEARTBEAT_S, self._tick)
@@ -322,6 +326,8 @@ class ShellSession:
             "cart": self.cart_state(),
             # The dream session's state, so a reloaded page shows the "◐ dreaming" chip at once.
             "dream": self.dream_state(),
+            # The last line of sleep-talk, so a reloaded page mid-session shows the star's murmur.
+            "murmur": self._murmur_last,
         }
         if not self._greeted:
             self._greeted = True
@@ -1531,10 +1537,6 @@ class ShellSession:
         except Exception:  # noqa: BLE001
             pass
         try:
-            self.c.evolve.tick()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
             dream = self._dream()
             if dream is not None:
                 dream.tick()  # the nightly session's heartbeat: start a due one, wind one down
@@ -1688,6 +1690,46 @@ class ShellSession:
         the heartbeat poll then finds nothing new to say."""
         self._set_dream_state(bool(getattr(ev, "running", False)),
                               self._first_line(str(getattr(ev, "line", "") or "")))
+        if not getattr(ev, "running", False):
+            self._murmur_last = None
+
+    # ----- sleep-talk (services/murmur.py, READ_ME/DREAM_MIND.md §14) -----
+    def _on_dream_murmur(self, ev) -> None:
+        """DreamMurmur from the engine: one line of sleep-talk. The face gets it at once (it drifts
+        past the orb and the star flickers); it is whispered aloud only when someone is there to
+        hear — the user asked for this session themselves, or spoke to HELIX in the last ten minutes
+        — and only through the voice's own gate (idle, unmuted), so a murmur never talks over a
+        reply or into a listening mic."""
+        text = " ".join(str(getattr(ev, "text", "") or "").split())
+        if not text:
+            return
+        self._murmur_last = {"text": text, "kind": str(getattr(ev, "kind", "") or "note"),
+                             "at": time.strftime("%H:%M")}
+        self.push({"t": "murmur", **self._murmur_last})
+        if self._murmur_aloud():
+            self._whisper(text)
+
+    def _murmur_aloud(self) -> bool:
+        """Is anyone there to hear? A manual session (the user asked for it, so they are at the
+        keyboard by definition) or a user who spoke in the last ten minutes. Overnight, with the
+        house asleep, the murmurs stay on the face and in the journal."""
+        dream = self._dream()
+        kind = ""
+        try:
+            fn = getattr(dream, "session_kind", None)
+            kind = str(fn() or "") if callable(fn) else ""
+        except Exception:  # noqa: BLE001
+            kind = ""
+        return kind == "now" or self.seconds_since_activity() < _MURMUR_PRESENCE_S
+
+    def _whisper(self, text: str) -> None:
+        fn = getattr(self.voice, "murmur", None)
+        if self.voice is None or not callable(fn):
+            return
+        try:
+            fn(text)
+        except Exception:  # noqa: BLE001 — a failed whisper is silence, never a broken session
+            _LOG.warning("could not whisper the murmur", exc_info=True)
 
     def _take_morning_report(self) -> str:
         """The undelivered morning report, taken exactly once (the engine clears its pending flag

@@ -140,27 +140,26 @@ class _SelfDev:
         return True, "1 passed"
 
 
-class _Evolve:
-    def __init__(self):
-        self.lines: list[str] = []
-        self.taken: list[str] = []
-        self.covered: list = []
-        self.backlog: list[str] = []
-        self._growth_model = _GrowthModel()
+class _Backlog:
+    """services/backlog.py's surface as the session sees it: the queue, the material, take."""
 
-    def add_backlog(self, text):
+    def __init__(self):
+        self.taken: list[str] = []
+        self.backlog: list[str] = []
+
+    def add(self, text):
         if text not in self.backlog:
             self.backlog.append(text)
         return True
+
+    def items(self):
+        return list(self.backlog)
 
     def material(self):
         return ("IMPROVEMENT BACKLOG (…):\n- teach the studio to rotate parts\n\nLESSONS (…):\n"
                 "[brian] Keep replies short\n\nLOG TAIL (…):\nERROR reminders: fired twice")
 
-    def journal(self, line):
-        self.lines.append(line)
-
-    def take_backlog(self, item):
+    def take(self, item):
         self.taken.append(item)
 
     def mark_night_covered(self, day):
@@ -229,7 +228,7 @@ def _fast(monkeypatch):
 
 class _Rig:
     def __init__(self, tmp_path, *, chat=None, settings=None, clock=None, lane=None, selfdev=None,
-                 evolve=None, paths=None, rebuilder=None, activity=None, suite=None, mind=None,
+                 backlog=None, paths=None, rebuilder=None, activity=None, suite=None, mind=None,
                  subscription=None, growth_model=None, **lane_kw):
         self.bus = SignalBus()
         self.chat = chat or _Chat(PLAN)
@@ -237,7 +236,7 @@ class _Rig:
         self.clock = clock or _Clock()
         self.lane = lane or _Lane(self.bus, self.clock, **lane_kw)
         self.selfdev = selfdev or _SelfDev()
-        self.evolve = evolve or _Evolve()
+        self.backlog = backlog or _Backlog()
         self.paths = paths or _paths(tmp_path)
         self.rebuilder = rebuilder
         self.states: list[DreamStateChanged] = []
@@ -245,7 +244,7 @@ class _Rig:
         self.bus.subscribe(DreamStateChanged, self.states.append)
         self.bus.subscribe(RebuildRequested, self.rebuilds.append)
         self.dream = DreamService(
-            self.chat, self.lane, self.selfdev, self.evolve, self.settings, self.clock, self.bus,
+            self.chat, self.lane, self.selfdev, self.backlog, self.settings, self.clock, self.bus,
             paths=self.paths, suite_runner=suite, rebuilder=rebuilder, activity=activity,
             growth_model=growth_model or _GrowthModel(), mind=mind, subscription=subscription,
         )
@@ -334,7 +333,7 @@ def test_a_frozen_build_without_a_source_root_refuses_and_says_why_once(tmp_path
     rig.dream.tick()
     rig.dream.tick()
     assert rig.chat.prompts == []
-    assert sum("not dreaming tonight" in ln for ln in rig.evolve.lines) == 1  # journaled ONCE
+    assert rig.journal()["refused"]["reason"] == why  # journaled ONCE, on the dream's own record
     text = rig.dream.status()
     assert text.count(why) == 1  # the open-window line carries it; not said twice
     # It says where the value LIVES: there is no Settings field for it (the card says the same).
@@ -354,13 +353,6 @@ def test_a_frozen_build_with_a_source_root_dreams(tmp_path):
     assert len(rig.lane.requests) == 3
 
 
-def test_covers_tonight_follows_the_toggle_and_a_running_session(tmp_path):
-    rig = _Rig(tmp_path)
-    assert rig.dream.covers_tonight() is True
-    rig.settings.d["dream_enabled"] = False
-    assert rig.dream.covers_tonight() is False
-
-
 # ----------------------------------------------------------------------------- dream_now
 def test_dream_now_runs_at_once_even_while_nightly_dreaming_is_off_and_never_eats_the_night(tmp_path):
     # An explicit ask skips the enabled/window/stamp gates — "dream for half an hour now" works
@@ -373,7 +365,6 @@ def test_dream_now_runs_at_once_even_while_nightly_dreaming_is_off_and_never_eat
     assert "dream_last_session" not in rig.settings.d  # the scheduled night is still to come
     s = rig.last()
     assert s["kind"] == "now" and s["window_end"] == "2026-09-04T14:30:00"
-    assert rig.evolve.covered == []  # a manual session is not "the night" for Evolve
     assert rig.dream.morning_report().startswith("In the session you asked for I drafted 3")
 
 
@@ -575,11 +566,11 @@ def test_drafts_run_in_rank_order_sized_by_effort_crossing_off_the_backlog(tmp_p
     # Fable or nothing at night (DREAM_MIND.md §13): a "standard" effort never drops below Fable.
     assert rig.lane.models == ["claude-fable-5", "claude-fable-5", "claude-fable-5"]
     assert rig.lane.requests[1].startswith("Teach the studio")
-    assert rig.evolve.taken == ["teach the studio to rotate parts"]
+    assert rig.backlog.taken == ["teach the studio to rotate parts"]
     s = rig.last()
     assert [d["outcome"] for d in s["drafts"]] == ["drafted"] * 3
     assert [d["branch"] for d in s["drafts"]] == ["selfdev/d1", "selfdev/d2", "selfdev/d3"]
-    assert any(ln.startswith("dream: drafted selfdev/d1") for ln in rig.evolve.lines)  # mirrored
+    assert any("drafted selfdev/d1" in n for n in s["notes"])
     assert s["applied"] == [] and rig.selfdev.approved == []  # auto-apply is OFF by default
 
 
@@ -670,7 +661,7 @@ def test_auto_apply_merges_only_a_green_draft(tmp_path):
     assert [d["outcome"] for d in s["drafts"]] == ["applied", "held", "applied"]
     assert s["drafts"][1]["reason"] == "tests failed (1 failed, first: tests/test_x.py::test_y)"
     assert [a["branch"] for a in s["applied"]] == ["selfdev/d1", "selfdev/d3"]
-    assert any("held selfdev/d2: tests failed" in ln for ln in rig.evolve.lines)
+    assert any("held selfdev/d2: tests failed" in n for n in rig.last()["notes"])
     report = rig.dream.morning_report()
     assert report.startswith("Last night I drafted 3 improvements and applied 2 (did thing 1; did thing 3).")
     assert "One is waiting for your review — one of them held because its tests failed." in report
@@ -693,7 +684,7 @@ def test_a_stop_that_lands_during_verification_holds_the_green_draft(tmp_path):
     d = rig.last()["drafts"][0]
     assert d["outcome"] == "held" and d["reason"] == "the session was stopped before it could be applied"
     assert rig.last()["stopped_reason"] == "the user asked" and len(rig.lane.requests) == 1
-    assert any("held selfdev/d1: the session was stopped" in ln for ln in rig.evolve.lines)
+    assert any("held selfdev/d1: the session was stopped" in n for n in rig.last()["notes"])
 
 
 def test_a_refused_approve_holds_the_draft_with_the_reason(tmp_path):
@@ -774,8 +765,7 @@ def test_wind_down_journals_stamps_and_tells_the_report_once(tmp_path):
     assert data["report_pending"] is True and len(data["sessions"]) == 1
     s = data["sessions"][0]
     assert s["day"] == "2026-09-04" and s["ended"] and s["stopped_reason"] == "the plan was done"
-    assert rig.evolve.covered == [datetime(2026, 9, 5).date()]  # Evolve is told the night is done
-    assert any(ln.startswith("dream: session ended") for ln in rig.evolve.lines)
+    assert any("session ended" in n for n in s["notes"])
     peek = rig.dream.pending_report()  # the Settings card may LOOK without telling it
     assert peek and peek.startswith("Last night I drafted 3 improvements.")
     assert rig.settings.d["dream_report_pending"] is True and rig.dream.pending_report() == peek
@@ -841,7 +831,7 @@ def test_a_session_helix_died_in_is_closed_on_the_next_start_with_a_report(tmp_p
     assert report.startswith("Last night I drafted 1 improvement and applied 1 (did a).")
     assert "One was cut short when the session stopped (HELIX closed mid-session)." in report
     assert "They'll load at the next rebuild." in report and report.endswith("Its theme: Reminders that fire once.")
-    assert any("session ended (HELIX closed mid-session)" in ln for ln in rig.evolve.lines)
+    assert any("session closed after a restart" in n for n in s["notes"])
     assert "Last session (2026-09-04): 1 draft, 1 applied, 1 cut short." in rig.dream.status()
     rig.dream.tick()  # idempotent: a closed session stays closed
     assert rig.dream.morning_report() is None
@@ -1164,21 +1154,30 @@ class _Mind:
     the user's presence, hands its requests to improve — and returns the NightSummary it was built
     with. `script(mind, hooks)` runs mid-night: the test's hand inside the session thread."""
 
-    def __init__(self, *, requests=MIND_REQUESTS, summary=None, script=None, raises=None):
+    def __init__(self, *, requests=MIND_REQUESTS, summary=None, script=None, raises=None, rounds=1):
         self.requests = list(requests)
         self.summary = summary
         self.script = script
         self.raises = raises
+        self.rounds = rounds  # rounds with work in them; a later round reflects and finds nothing (QUIET)
         self.calls: list[tuple] = []
         self.hooks: NightHooks | None = None
         self.seen: dict = {}
         self.drafts: list[dict] = []
+        self.rounds_run: list[int] = []
 
     def run_night(self, deadline, budget, *, hooks=None):
         self.calls.append((deadline, budget))
         self.hooks = hooks
         if self.raises is not None:
             raise self.raises
+        round_no = int(getattr(hooks, "round_no", 1) or 1)
+        self.rounds_run.append(round_no)
+        if round_no > self.rounds:
+            # The real mind's later round: it reflects on tonight's own entry and, with nothing
+            # more worth a pass, answers QUIET — one journal line, no work.
+            hooks.note("a quiet night — the reflection found nothing worth doing")
+            return NightSummary(reason="a quiet night")
         hooks.record({"cycles": [{"name": "research", "started": "2026-09-04T23:05:00", "ended": None}]})
         hooks.note("reflected — 1 to research, 0 to verify, 1 to try, 2 to change")
         self.seen = {"nights": hooks.nights(7), "rail": hooks.rail_problem(),
@@ -1280,7 +1279,9 @@ def test_a_wired_mind_runs_the_night_through_the_hooks_and_the_report_leads_with
     # end and the drafts ceiling; its requests went through the lane — Fable, unattended, the
     # research-derived one first with its origin on the record, the "standard" one on Fable anyway.
     assert rig.chat.prompts == []
-    assert mind.calls == [(datetime(2026, 9, 5, 7, 0), 10)]
+    # Rounds (§15): the first pass did work and left hours of window, so the mind was asked again;
+    # its second reflection found nothing more and the night ended the way the first round did.
+    assert mind.calls == [(datetime(2026, 9, 5, 7, 0), 10)] * 2 and mind.rounds_run == [1, 2]
     assert rig.lane.requests == [r.text for r in MIND_REQUESTS] and all(rig.lane.unattended)
     assert rig.lane.models == ["claude-fable-5", "claude-fable-5"]
     s = rig.last()
@@ -1356,7 +1357,7 @@ def test_the_minds_leftover_agenda_survives_and_the_improve_loop_names_why_it_st
     s = rig.last()
     assert len(rig.lane.requests) == 1 and s["stopped_reason"] == "the draft ceiling was reached"
     assert s["agenda_remaining"] == [MIND_REQUESTS[1].text, "An idea the mind had no time to hand over."]
-    assert rig.evolve.backlog == []  # no limit tonight: the journal keeps it; the backlog stays the user's
+    assert rig.backlog.items() == []  # no limit tonight: the journal keeps it; the backlog stays the user's
     # The window closing mid-improve: the first draft fits, the second is too late.
     late = _Rig(tmp_path, mind=_Mind(), clock=_Clock(hour=6, minute=35, day=5))
     late.dream.tick()
@@ -1451,11 +1452,11 @@ def test_a_limit_from_the_lane_pauses_the_night_probes_on_the_backoff_and_resume
                for n in notes)
     assert any("still paused at 23:25 — Rate limit still in effect; next probe in 30 minutes" in n for n in notes)
     assert any(n.endswith("resumed at 23:55 — the plan is answering again") for n in notes)
-    # The chip, the status and Evolve's journal said so while it lasted.
+    # The chip, the status and the night's notes said so while it lasted.
     assert (True, "dreaming — paused for the plan's limit") in [(st.running, st.line) for st in rig.states]
     assert seen[0].startswith("Dreaming — paused for the plan's limit since 23:05 (resets at 3am); "
                               "the window runs until 07:00.")
-    assert any(ln.startswith("dream: paused for the plan's limit at 23:05") for ln in rig.evolve.lines)
+    assert any("paused at 23:05" in n for n in rig.last()["notes"])
     # The morning: a limited attempt is not a draft, and the pause is told plainly.
     assert rig.dream.morning_report() == (
         "Last night I drafted 3 improvements. 3 are waiting for your review. The plan's limit was reached "
@@ -1477,7 +1478,7 @@ def test_the_window_closing_while_paused_winds_down_and_carries_the_agenda(tmp_p
     assert s["limit_log"][0]["resumed_at"] is None and rig.states[-1].running is False
     # Nothing is lost: the whole plan is journaled and queued for tomorrow night.
     assert s["agenda_remaining"] == [r.text for r in parse_plan(PLAN, 10)[0]]
-    assert rig.evolve.backlog == s["agenda_remaining"]
+    assert rig.backlog.items() == s["agenda_remaining"]
     assert any("3 remaining improvements saved to the backlog for tomorrow night" in n for n in s["notes"])
     assert rig.dream.morning_report() == (
         "Last night I planned 3 improvements but didn't get to start one (the window closed). The plan's "
@@ -1500,7 +1501,7 @@ def test_three_limit_pauses_end_the_night_early_and_say_so(tmp_path):
     assert s["stopped_reason"] == "the plan's limit was reached three times"
     assert len(s["drafts"]) == 4 and all(d["held_for"] == "limit" for d in s["drafts"])
     assert any("three pauses tonight already, so I'm ending the session early" in n for n in s["notes"])
-    assert rig.lane.requests == [] and len(s["agenda_remaining"]) == 3 and rig.evolve.backlog == s["agenda_remaining"]
+    assert rig.lane.requests == [] and len(s["agenda_remaining"]) == 3 and rig.backlog.items() == s["agenda_remaining"]
     assert rig.dream.morning_report() == (
         "Last night I planned 3 improvements but the plan's limit stopped every attempt. The plan's limit "
         "was hit three times (first at 23:05), so I ended the night early; what was left is saved for "
@@ -1558,7 +1559,7 @@ def test_fable_or_nothing_a_sub_fable_growth_model_never_starts_a_night(tmp_path
     rig.dream.tick()
     rig.dream.tick()
     assert rig.chat.prompts == [] and rig.lane.requests == [] and "dream_last_session" not in rig.settings.d
-    assert sum(ln == "dream: not dreaming tonight — " + why for ln in rig.evolve.lines) == 1  # said once
+    assert rig.journal()["refused"]["reason"] == why  # said once, on the dream's own record
     text = rig.dream.status()
     assert text.startswith("Dreaming is paused: Fable isn't available on this plan right now.")
     assert "I only dream on Fable — never on a weaker model." in text and "Opus" not in text
@@ -1899,7 +1900,7 @@ def test_the_container_wires_the_dream_and_points_the_gate_at_the_source(tmp_pat
 
     c = Container()
     assert isinstance(c.dream, DreamService) and c.rebuilder is not None
-    assert c.evolve._dream is c.dream, "Evolve must defer to the dream it was handed"
+    assert c.dream._backlog is c.backlog and c.dream_mind._backlog is c.backlog, "the night must mine the one backlog"
     assert c.selfdev._root == c.paths.source_root == root
     assert c.selfdev._python == sys.executable
     assert c.dream._suite_runner == c.selfdev.verify
@@ -1914,3 +1915,87 @@ def test_the_container_wires_the_dream_and_points_the_gate_at_the_source(tmp_pat
     assert isinstance(c.dream_mind, DreamMind) and c.dream._mind is c.dream_mind
     assert c.dream._subscription is c.subscription
     assert c.dream_mind._conversation is c.conversation and c.conversation._verified is c.verified
+
+
+# ----------------------------------------------------------------------------- rounds (§15) and sleep-talk (§14)
+def test_a_night_runs_in_rounds_until_the_window_closes_and_the_record_is_their_sum(tmp_path):
+    """A pass that finishes with hours of window left is followed by another: the mind is asked
+    again with the round number, its lists land ON TOP of the earlier rounds' (never replacing
+    them), the draft ceiling is per round, and a later round that finds nothing ends the night the
+    way the last working round did."""
+    mind = _Mind(rounds=3)
+    rig = _Rig(tmp_path, mind=mind, settings=_Settings({"dream_max_drafts": 1}))
+    rig.dream.tick()
+    s = rig.last()
+    assert mind.rounds_run == [1, 2, 3, 4]  # three working rounds, then one that reflected and found nothing
+    assert s["rounds"] == 4
+    assert len(rig.lane.requests) == 3  # one draft per round: the ceiling bounds a ROUND, the window the night
+    assert len(s["research"]) == 3 * len(RESEARCH) and s["facts_noted"] == 6
+    assert len(s["discoveries"]) == len(DISCOVERIES)  # deduped by text across rounds
+    assert len(s["drafts"]) == 3 and s["stopped_reason"] == "the draft ceiling was reached"
+    assert s["agenda_remaining"] == [MIND_REQUESTS[1].text]
+    assert s["theme"] == "Verified parts for IronEye" and s["self_model_delta"]["added"] == {"capable": ["sees"]}
+    assert any(n.endswith("round 2 — reflecting again on what tonight found") for n in s["notes"])
+    assert rig.dream.journal_entries(1)[0]["rounds"] == 4
+    report = rig.dream.morning_report()
+    assert "researched 3 questions" in report and "verified 6 facts" in report and "3 experiments" in report
+
+
+def test_the_round_fuse_ends_a_night_that_never_runs_out_of_work(tmp_path):
+    mind = _Mind(rounds=99)
+    rig = _Rig(tmp_path, mind=mind)
+    rig.dream.tick()
+    s = rig.last()
+    assert mind.rounds_run == list(range(1, 13)) and s["rounds"] == 12
+    assert any("12 rounds tonight — enough" in n for n in s["notes"])
+    assert s["stopped_reason"] == "the night's work was done"
+
+
+def test_no_new_round_starts_inside_the_windows_last_45_minutes(tmp_path):
+    mind = _Mind(rounds=5)
+    rig = _Rig(tmp_path, mind=mind, clock=_Clock(hour=6, minute=0))  # tonight's window closes at 07:00
+    rig.dream.tick()
+    s = rig.last()
+    assert mind.rounds_run == [1, 2]  # 06:00 → 06:10 → 06:20: forty minutes left is too few for a third
+    assert any("no time left for another round — 40 minutes" in n for n in s["notes"])
+
+
+def test_the_night_talks_in_its_sleep_paced_on_its_clock_and_the_face_hears_every_line(tmp_path):
+    """Template murmurs come from the session's own notes — one per moment, never two inside the
+    same twenty seconds of the night's clock (a burst of notes is one breath) — and each is
+    published to the face the moment it is said. The plain draft loop: started, three drafts
+    (five clock-minutes apart), ended."""
+    from helix.domain.events import DreamMurmur
+
+    rig = _Rig(tmp_path)
+    heard: list[DreamMurmur] = []
+    rig.bus.subscribe(DreamMurmur, heard.append)
+    rig.dream.tick()
+    s = rig.last()
+    assert [m["text"] for m in s["murmurs"]] == [m.text for m in heard]
+    # Roughly a dozen notes over the night became a handful of murmurs: the first at the session's
+    # start, never two inside one twenty-second breath, every one a template ("note").
+    assert 4 <= len(s["murmurs"]) <= 6 and all(m["kind"] == "note" for m in s["murmurs"])
+    assert all(m["text"] == m["text"].lower() and m["text"].endswith(("…", ".")) for m in s["murmurs"])
+    assert s["murmurs"][0]["at"] == "23:05" and s["murmurs"][0]["text"] in (
+        "mm… lights out… let's see what the day left behind…",
+        "closing my eyes… the log is still warm…",
+        "quiet now… drifting… what did he ask for today…")
+    notes_at_start = [n for n in s["notes"] if n.startswith("23:05 ")]
+    assert len(notes_at_start) >= 2  # several notes in that first second; one breath
+    assert rig.dream.journal_entries(1)[0]["murmurs"] == s["murmurs"]
+
+
+def test_the_minds_own_murmur_always_lands_and_is_kept_apart_from_the_templates(tmp_path):
+    def script(mind, hooks):
+        hooks.murmur("eight megabytes… room enough for the whole song…")
+        hooks.murmur("the page says 3.3 volts… I was sure it was five…")  # the same clock second: still said
+
+    mind = _Mind(script=script)
+    rig = _Rig(tmp_path, mind=mind)
+    rig.dream.tick()
+    s = rig.last()
+    said = [(m["kind"], m["text"]) for m in s["murmurs"]]
+    assert ("mind", "eight megabytes… room enough for the whole song…") in said
+    assert ("mind", "the page says 3.3 volts… I was sure it was five…") in said
+    assert said[0][0] == "note"  # the session's own first words came first

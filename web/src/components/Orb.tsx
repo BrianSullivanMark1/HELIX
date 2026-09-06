@@ -15,6 +15,14 @@
 // is not. Temperature still carries state (blue-cyan attention, amber computation, green
 // resolution, red fault — frequency up, never brightness), and the Reinhard fold keeps the whole
 // additive stack from ever blowing out to white.
+//
+// DREAMING (uDream): the star SLEEPS. It cools to indigo-violet, the storm goes all but still (no
+// strikes, the tendrils asleep), the breath slows and deepens, the corona folds inward, and an
+// AURORA — a separate, slow field of teal-green light on its own clock — drifts through the plasma
+// like weather from another sky. Each time HELIX talks in its sleep (a murmur from the dream
+// session) a rose REM flicker (uRem) washes the interior for a breath and the glass catches it;
+// a rarer one comes on its own. Any state that wakes it (listening, thinking, speaking, a build
+// hue) takes over at once, exactly as before.
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
@@ -27,12 +35,26 @@ export const STATE_LOOK: Record<string, { color: [number, number, number]; glow:
   transcribing: { color: [0.3, 0.8, 1.0], glow: 0.95, speed: 2.2 },
   thinking: { color: [1.0, 0.62, 0.16], glow: 0.72, speed: 1.6 },
   speaking: { color: [1.0, 0.74, 0.24], glow: 1.0, speed: 1.3 },
+  // Asleep: indigo-violet, dim, slow — the aurora and the REM flicker are separate uniforms.
+  dreaming: { color: [0.4, 0.26, 0.96], glow: 0.34, speed: 0.22 },
 };
 export const HUE_LOOK: Record<string, [number, number, number]> = {
   working: [1.0, 0.78, 0.2],
   done: [0.22, 0.92, 0.42],
   error: [1.0, 0.3, 0.32],
 };
+/** The aurora that drifts through a sleeping star, and the rose of its REM flicker. */
+export const DREAM_AURORA: [number, number, number] = [0.12, 0.92, 0.72];
+export const DREAM_REM: [number, number, number] = [1.0, 0.48, 0.78];
+
+/** Is the star asleep right now? A dream session runs and nothing has woken the orb. */
+export function isDreaming(s: { dream: { running: boolean } | null; orb: string; hue: string }): boolean {
+  return Boolean(s.dream?.running) && s.orb === "idle" && s.hue === "none";
+}
+/** The look the orb (and the HUD through StateColor) shows for the current state. */
+export function baseLook(s: { dream: { running: boolean } | null; orb: string; hue: string }) {
+  return isDreaming(s) ? STATE_LOOK.dreaming : (STATE_LOOK[s.orb] ?? STATE_LOOK.idle);
+}
 
 const NOISE_GLSL = /* glsl */ `
   float hash13(vec3 p){ p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
@@ -86,6 +108,10 @@ const CORE_FRAG = /* glsl */ `
   uniform float uStrike;
   uniform float uStrikeSeed;
   uniform float uAttend;
+  uniform float uDream;
+  uniform vec3 uAurora;
+  uniform float uRem;
+  uniform vec3 uRemColor;
   uniform vec3 uCamLocal;
   uniform sampler2D uBandTex;
   ${NOISE_GLSL}
@@ -102,7 +128,7 @@ const CORE_FRAG = /* glsl */ `
     // Household flicker: the tendrils breathe at mains-hum speed even between strikes.
     float flick = 0.72 + 0.28 * sin(uTime * 21.0 + sin(uTime * 47.0));
     vec3 camDir = normalize(uCamLocal);
-    float glowAcc = 0.0, haze = 0.0, arcAcc = 0.0;
+    float glowAcc = 0.0, haze = 0.0, arcAcc = 0.0, aurAcc = 0.0;
     for (int i = 0; i < MARCH; i++) {
       float t = chord * (float(i) + 0.5) / float(MARCH);
       vec3 p = ro + rd * t;
@@ -112,6 +138,12 @@ const CORE_FRAG = /* glsl */ `
       float depthFade = exp(-t * 1.3);
       haze    += w * depthFade * 0.21;
       glowAcc += fil * fil * depthFade * 0.78;
+      // ---- THE AURORA (dreaming): a slow, separate field of teal light threading the sleeping
+      // star — on its own clock, unrelated to the plasma's drift. Costs one fbm while asleep. ----
+      if (uDream > 0.01) {
+        float aur = smoothstep(0.56, 0.84, fbm(p * 1.7 + vec3(uTime * 0.05, -uTime * 0.035, 1.7)));
+        aurAcc += aur * depthFade;
+      }
       // ---- TENDRILS: two ridged octaves multiplied — their crease intersections are thin
       // branching filaments in 3D, not sheets. pow sharpens them to wire thickness. ----
       float r1 = 1.0 - abs(2.0 * vnoise(p * 3.3 + arcDrift) - 1.0);
@@ -121,12 +153,15 @@ const CORE_FRAG = /* glsl */ `
       arc *= 1.0 + uAttend * max(0.0, dot(normalize(p), camDir)) * 1.2;
       arcAcc += arc * depthFade;
     }
-    // Voltage gates the whole storm; a strike overdrives it for ~150 ms.
-    arcAcc *= uVolt * flick * 2.4 + uStrike * 3.4;
+    // Voltage gates the whole storm; a strike overdrives it for ~150 ms. Asleep, the storm rests.
+    arcAcc *= (uVolt * flick * 2.4 + uStrike * 3.4) * (1.0 - 0.92 * uDream);
     // Arc color: violet-blue fringe folding to near-white at the hot core of each filament.
     vec3 arcCol = mix(vec3(0.45, 0.55, 1.0), vec3(1.0), clamp(arcAcc * 1.4, 0.0, 1.0));
     vec3 interior = uColor * haze * 1.15 + mix(uColor, vec3(1.0), 0.55) * glowAcc * (0.7 + uGlow)
                   + arcCol * arcAcc;
+    // Dreaming: the aurora threads the interior; a REM flicker washes it rose for a breath.
+    interior += uAurora * aurAcc * uDream * 0.95;
+    interior += uRemColor * (haze * 0.8 + glowAcc * 0.5) * uRem * 1.1;
 
     // ---- stacked-fresnel glass + limb darkening (the volume read) ----
     float ndv = clamp(dot(normalize(vNormal), normalize(vView)), 0.0, 1.0);
@@ -138,6 +173,8 @@ const CORE_FRAG = /* glsl */ `
       + uColor * 0.10 * shellA
       + mix(uColor, vec3(1.0), 0.35) * 0.50 * shellB * uGlow
       + vec3(1.0) * 0.90 * shellC * uGlow;
+    // Asleep, the glass catches the aurora at its rim; a REM flicker glances off it in rose.
+    col += uAurora * 0.16 * shellB * uDream + uRemColor * 0.35 * shellB * uRem;
 
     // ---- STRIKE on the glass: a brief Lichtenberg web crawling the inside of the shell where
     // the arc landed, plus a violet flash on the rim — the shell is BARELY containing this. ----
@@ -177,6 +214,8 @@ const CORONA_FRAG = /* glsl */ `
   uniform float uAttend;
   uniform float uVolt;
   uniform float uStrike;
+  uniform float uDream;
+  uniform vec3 uAurora;
   uniform vec3 uCamDir;
   ${NOISE_GLSL}
 
@@ -186,10 +225,11 @@ const CORONA_FRAG = /* glsl */ `
     float rim = pow(1.0 - cndv, 2.2);
     float reach = fbm(n * 3.0 + vec3(0.0, uTime * 0.18, 0.0));
     reach *= 1.0 + 0.7 * uAttend * max(0.0, dot(n, uCamDir));  // eye contact while listening
+    reach *= 1.0 - 0.45 * uDream;                               // asleep, the wisps fold in
     float crawl = fbm(n * 5.0 - vec3(0.0, 0.0, uTime * 0.5));
     float wisp = smoothstep(0.35, 0.75, reach * crawl + rim * 0.35) * rim;
     float alpha = min(wisp * (0.35 + uGlow * 0.5 + uEnergy * 0.6 + uVolt * 0.25), 0.8);
-    vec3 cor = mix(uColor, vec3(1.0), 0.25) * alpha;
+    vec3 cor = mix(mix(uColor, uAurora, 0.5 * uDream), vec3(1.0), 0.25) * alpha;
     float ring = smoothstep(0.06, 0.0, abs((1.0 - cndv) - (1.0 - uPulse) * 0.9));
     cor += uColor * ring * uPulse * 2.0;
     // The strike's shudder: one THIN cold ring racing outward on the strike envelope — faster
@@ -214,6 +254,8 @@ function makeHaloTexture(): THREE.Texture {
 }
 
 const CAM_SCRATCH = new THREE.Vector3();
+const AURORA_COLOR = new THREE.Color(...DREAM_AURORA);
+const REM_COLOR = new THREE.Color(...DREAM_REM);
 
 function OrbScene() {
   const look = useRef({ color: new THREE.Color(0.16, 0.55, 1.0), glow: 0.42, speed: 0.55, energy: 0 });
@@ -226,6 +268,9 @@ function OrbScene() {
   // The storm's own state: eased voltage, the strike envelope, and the countdown to the next
   // strike (wall-ish time, compressed by voltage — a thinking orb cracks far more often).
   const storm = useRef({ volt: 0.25, strike: 0, next: 3 + Math.random() * 8, seed: 1 });
+  // Sleep: the eased dream level, the REM flicker envelope, the countdown to a spontaneous one,
+  // and the last murmur seen (each new murmur is a flicker).
+  const dream = useRef({ level: 0, rem: 0, next: 30 + Math.random() * 40, seenSeq: 0 });
   const prevHue = useRef("none");
   const easedBands = useRef(new Float32Array(16));
   const frameProbe = useRef({ n: 0, total: 0, degraded: false });
@@ -252,6 +297,10 @@ function OrbScene() {
       uVolt: { value: 0.25 },
       uStrike: { value: 0 },
       uStrikeSeed: { value: 1.0 },
+      uDream: { value: 0 },
+      uAurora: { value: new THREE.Color(...DREAM_AURORA) },
+      uRem: { value: 0 },
+      uRemColor: { value: new THREE.Color(...DREAM_REM) },
     }),
     [],
   );
@@ -299,7 +348,8 @@ function OrbScene() {
   useFrame(({ camera }, dtRaw) => {
     const dt = Math.min(dtRaw, 0.05);
     const s = useHelix.getState();
-    const base = STATE_LOOK[s.orb] ?? STATE_LOOK.idle;
+    const dreaming = isDreaming(s);
+    const base = baseLook(s);
     const hue = s.hue !== "none" ? HUE_LOOK[s.hue] : null;
     const target = hue ?? base.color;
     const err = s.hue === "error";
@@ -351,11 +401,13 @@ function OrbScene() {
       : s.orb === "transcribing" ? 0.8
       : s.orb === "speaking" ? 0.45 + L.energy * 0.55
       : s.orb === "listening" ? 0.55
+      : dreaming ? 0.05
       : 0.28;
     V.volt += (voltTarget - V.volt) * 0.07;
     // ---- STRIKES: nothing, nothing, CRACK. Voltage compresses the wait (idle ≈ every 6-16 s,
-    // thinking ≈ every 2-5 s); the envelope decays in ~150 ms and the core jumps with it. ----
-    V.next -= dt * (0.4 + V.volt * 2.3);
+    // thinking ≈ every 2-5 s); the envelope decays in ~150 ms and the core jumps with it. Asleep,
+    // a strike is a once-in-minutes thing. ----
+    V.next -= dt * (dreaming ? 0.03 : 0.4 + V.volt * 2.3);
     if (V.next <= 0) {
       V.strike = 1;
       V.seed = 1 + Math.random() * 59;
@@ -366,9 +418,28 @@ function OrbScene() {
     shared.uStrike.value = V.strike;
     shared.uStrikeSeed.value = V.seed;
 
-    // Motion.
-    phase.current += dt * 1.6;
-    const scale = 1 + 0.035 * Math.sin(phase.current) + L.energy * 0.1 + V.strike * 0.045;
+    // ---- DREAMING: the eased sleep level drives the aurora and the stilled storm; a murmur
+    // (a new seq on the store) is a REM flicker, and a rarer one comes on its own. ----
+    const D = dream.current;
+    D.level += ((dreaming ? 1 : 0) - D.level) * 0.03;
+    const seq = s.murmur?.seq ?? 0;
+    if (seq !== D.seenSeq) {
+      D.seenSeq = seq;
+      if (dreaming) D.rem = 1;
+    }
+    D.next -= dt;
+    if (dreaming && D.next <= 0) {
+      D.rem = Math.max(D.rem, 0.55);
+      D.next = 40 + Math.random() * 50;
+    }
+    D.rem *= Math.exp(-dt * 0.9);
+    shared.uDream.value = D.level;
+    shared.uRem.value = D.rem;
+
+    // Motion. Asleep, the breath slows and deepens.
+    phase.current += dt * (1.6 - 1.15 * D.level);
+    const scale = 1 + (0.035 + 0.03 * D.level) * Math.sin(phase.current) + L.energy * 0.1
+      + V.strike * 0.045 + D.rem * 0.012;
     core.current.scale.setScalar(scale);
     core.current.rotation.y += dt * 0.1 * (1 + L.speed * 0.6);
     gyro.current.rotation.y += dt * 0.132 * (1 + L.speed * 0.5);
@@ -384,13 +455,13 @@ function OrbScene() {
 
     // Dressing.
     const low = (e[0] + e[1] + e[2] + e[3]) / 4;
-    halo.current.material.color.copy(L.color);
-    halo.current.material.opacity = 0.14 + L.glow * 0.26 + low * 0.25 + V.strike * 0.22;
+    halo.current.material.color.copy(L.color).lerp(AURORA_COLOR, 0.35 * D.level).lerp(REM_COLOR, 0.5 * D.rem);
+    halo.current.material.opacity = 0.14 + L.glow * 0.26 + low * 0.25 + V.strike * 0.22 + D.rem * 0.12;
     halo.current.scale.setScalar(3.1 + low * 0.9);
     const sparkMat = sparks.current.material as THREE.PointsMaterial;
     sparkMat.color.copy(L.color);
     sparkMat.size = 0.01 + L.energy * 0.012;
-    sparkMat.opacity = 0.22 + L.glow * 0.3 + L.energy * 0.25;
+    sparkMat.opacity = (0.22 + L.glow * 0.3 + L.energy * 0.25) * (1 - 0.5 * D.level);
     gyro.current.children.forEach((child, i) => {
       const m = (child as THREE.Mesh).material as THREE.MeshBasicMaterial;
       m.color.copy(L.color);

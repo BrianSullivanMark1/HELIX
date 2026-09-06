@@ -9,7 +9,7 @@ Qt widgets interleaved. V2 kept the *ideas* and discarded the *structure*, growi
 into a full voice-first assistant with the same discipline. V3 keeps the machine and redesigns the
 surface: the presentation-only vocabulary (App · Protocol · Agent · Hologram · Vault), sight
 (`view_screen`, the `view_camera` show-me window + visual memory), just-in-time connections, and the
-nightly Evolve drafter.
+nightly dream session.
 
 **The V3 overhaul (Sept 2026) moved the face to the web.** The brain did not move: services, ports,
 adapters, domain — all unchanged in role. What changed: the default shell is now a **React app served
@@ -132,7 +132,7 @@ helix/
     tools.py           #   ToolRegistry — maps model tool-calls to service methods (the model's "hands")
     prompts.py         #   the system + coder prompts, in one place
     forge.py · builds.py · build_queue.py · build_status.py · sandbox.py · cancel.py   # the maker + build lifecycle
-    selfdev.py · selfdev_lane.py · evolve.py    # improve HELIX itself (gated) + the nightly Evolve drafter
+    selfdev.py · selfdev_lane.py · backlog.py   # improve HELIX itself (gated) + the improvement backlog the night mines
     model_baker.py     #   the hologram baker: lints, compiles model.scad through the CadEngine, renders the preview,
                        #     asks the vision critic once, writes the exports + the self-contained technical viewer
     render_kit.py      #   the Three.js stage an ANIMATED hologram's hand-authored index.html runs on (embedded JS)
@@ -422,7 +422,7 @@ business logic, and **never imports helix.ui** (no Qt loads in the web process):
   no-credential hold), the turn lifecycle with queued follow-ups, the stop contract, the 900 ms
   coalescing build announcer, cleanup-offer queue, delete confirmation as action buttons, the
   ANTICIPATE chip with its attempt-charged limiter, the QUIET sentinel, the situation/speaker
-  blocks, the camera hand-off, the JIT connect panel, and the 15 s heartbeat (evolve, reminders as
+  blocks, the camera hand-off, the JIT connect panel, and the 15 s heartbeat (the dream, reminders as
   ONE spoken line, one scheduled run per tick). Everything the user sees rides `push()`; everything
   they do arrives as a method call from the routes. `tests/test_webshell.py` pins the contracts.
 - **`voice_loop.py` (`WebVoice`)** — the VoiceController state machine ported off Qt onto
@@ -593,15 +593,16 @@ approve time) → revertible `--no-ff` merge → restart. A fingerprint over the
 autonomous self-editing if the laws are tampered with. Drafting runs in a background lane so the orb
 isn't frozen. Built apps are sandboxed to their own workspace and told never to reach outside it.
 
-**Evolve** (`services/evolve.py`) is a *client* of this same gate, never a bypass: nightly it mines
-what the day produced (lessons from corrections, logged errors, failed builds, slow turns), picks the
-one most worthwhile improvement, and drafts it through the identical `improve_helix` pipeline — branch,
-smoke-check, constitution scan. It never applies anything itself; the draft waits for the user's
-explicit approval like any other self-change.
+**The improvement backlog** (`services/backlog.py`, `Backlog`, data/helix_backlog.json — volatile) is
+the queue of ideas the user asked for on purpose (`note_improvement`, human-driven; the dream mind also
+queues research-found ideas) and the night's labelled material — that queue, every speaker's lessons,
+the log tail — which every REFLECT mines first. It is what remained of **Evolve**, the one-proposal
+nightly pass, when that pass was retired on 2026-09-05: dreaming is the one way HELIX improves itself
+at night, and a draft still never applies itself unless the user has switched on green-only merging.
 
 ## 8b. Dreaming — the nightly session (READ_ME/DREAM.md)
 
-**Dreaming** (`services/dream.py`, `DreamService`) is Evolve grown up: instead of one proposal a night, a
+**Dreaming** (`services/dream.py`, `DreamService`) is how HELIX improves itself at night: a
 *session* — a window the user sets (default 23:00 for 8 hours) in which HELIX plans on the growth model
 (Fable 5, auto-upscaling — the reflect/plan/digest calls and the coder; the research and verify turns run
 through `ConversationService.run_turn` on the conversation's own model, see the Dream Mind bullet below),
@@ -614,13 +615,40 @@ with the failure named. When a session applied changes and `dream_rebuild` is on
 `adapters/rebuild.py` + `scripts/rebuild_and_relaunch.py` (detached; the previous `dist/HELIX` is kept as
 `.prev` and restored if the new build fails to build or to answer) and quits gracefully. The frozen app
 drafts against the SOURCE repository it was built from (`AppPaths.source_root`, from `build_info.json`);
-without one the session refuses and says so. Evolve's `tick` defers to a dream that covers tonight, so
-the two never both draft. The user's activity pauses a session (no draft starts within ten minutes of
-their last turn), disabling it stops one within a heartbeat, and nothing merges red.
+without one the session refuses and says so. The user's activity pauses a session (no draft starts
+within ten minutes of their last turn), disabling it stops one within a heartbeat, and nothing merges red.
+
+**Rounds** (DREAM_MIND.md §15): a night is not one pass. When the mind's six cycles finish with at least
+45 minutes of window left — the agenda drained, or the round's draft ceiling (`dream_max_drafts`, now per
+ROUND) reached — the session asks the mind again with `NightHooks.round_no` climbing: the reflect prompt
+says which round it is and that tonight's own journal entry (in progress, saved as it goes) holds the
+earlier rounds' work, never to be repeated. Each round's lists land ON TOP of the earlier rounds'
+(`_record_round` appends research / verify / experiments / facts / discoveries — deduped by text — and
+cycles; counts add; the first round's theme and the weekly digest stand); a later round that reflects and
+finds nothing ends the night with the LAST WORKING round's reason. A stop, the window, drafts that kept
+failing, or the twelve-round fuse end it as they always did. The status line and the journal card say
+"round N".
+
+**Sleep-talk** (`services/murmur.py`, DREAM_MIND.md §14): HELIX talks in its sleep. Every big model call
+the night makes — REFLECT, each research and verify turn, the plan fold — ends with one extra line,
+`MURMUR: …`, which `take_murmur` lifts off the reply before any parser sees it (a parser would glue an
+unmarked trailing line onto the last bullet); a step's start and the session's own moments (a draft
+starting, landing, held; a limit pause; the user walking in; a new round) get deterministic template
+murmurs from the session's notes (`murmur_for_note`, paced to one per twenty seconds of the night's
+clock; the mind's own words always land). Each murmur is kept on the night's record (`murmurs`, shown
+under the journal card's notes as SAID IN ITS SLEEP), published as `DreamMurmur`, pushed to the face as
+`{"t": "murmur"}` (and carried by the snapshot), and whispered through `WebVoice.murmur` →
+`EdgeSpeechOut.murmur` (the user's own voice a fifth slower, well under half the volume, a touch lower;
+never the OS fallback) only when someone is there to hear — a manual "dream now", or a user who spoke
+in the last ten minutes — and only while the voice is idle and unmuted. On the face the star SLEEPS
+(`Orb.tsx`: `STATE_LOOK.dreaming`, indigo-violet, the storm stilled, a teal aurora drifting through the
+plasma on its own clock, slow deep breathing, the corona folded in) and each murmur is a rose REM
+flicker; `StateColor` tints the HUD with it; the murmur itself drifts up past the pill (`SleepTalk`
+in `Console.tsx`).
 
 Its face — tools, voice, shell, routes, card:
 
-- **Tools** (`services/tools.py`, late-bound via `attach_dream`, like Evolve): `dream_schedule(start?,
+- **Tools** (`services/tools.py`, late-bound via `attach_dream`, like the backlog): `dream_schedule(start?,
   hours?, enabled?)`, `dream_now(minutes?)`, `stop_dreaming()` — all three fenced in
   `conversation.BUILD_TOOLS` (hours of unattended self-editing are booked or cut short only by the human)
   — and `dream_status()`, a read that watchers may make and whose text never names a fenced tool (the
@@ -629,7 +657,7 @@ Its face — tools, voice, shell, routes, card:
   tonight from eleven for eight hours", "no dreaming tonight", "stop dreaming", "dream for an hour now",
   "how did you sleep?" / "what did you dream?" — and the morning-report rule (told once, never mid-task).
 - **The shell** (`api/shell.py`): hands the engine `dream.activity` (seconds since the user's last
-  submission, tap, or stop), beats `dream.tick()` from the 15-second heartbeat beside `evolve.tick()`,
+  submission, tap, or stop), beats `dream.tick()` from the 15-second heartbeat,
   and pushes `{"t": "dream", "running", "line"}` when a session starts or ends — from the engine's
   `DreamStateChanged` event when it publishes one, else by noticing `dream.running` flip on the heartbeat
   (one state, so the face never hears the same change twice) — and the console shows a small "◐ dreaming"
@@ -656,7 +684,7 @@ Its face — tools, voice, shell, routes, card:
   `DreamMind`): the container builds it after the conversation (`ConversationService(…,
   verified=self.verified)`) and the agents — `DreamMind(chat=growth_chat, conversation, selfdev, verified,
   research, parts, builds, tools_registry, store=JsonSettings(data/helix_self.json), settings, clock,
-  log_tail, evolve, agents, source_root)` — and hands it to `DreamService(…, mind=, subscription=)`; a
+  log_tail, backlog, agents, source_root)` — and hands it to `DreamService(…, mind=, subscription=)`; a
   night runs REFLECT → RESEARCH → VERIFY → EXPERIMENT → IMPROVE → RECORD through
   `NightHooks(improve, note, record, should_stop, nights, limit, rail_problem, activity)`, the session
   keeping the window, the lane, the stop flag, the limit pause and the user's presence. Rail and model:

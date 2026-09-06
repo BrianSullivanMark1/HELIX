@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import VisualBlock from "../components/Chart";
 import { api, tokenUrl } from "../lib/api";
-import { useHelix, type Attachment, type Bubble } from "../lib/store";
+import { useHelix, type Attachment, type Bubble, type Murmur } from "../lib/store";
 import { tablesToTabs } from "../lib/table";
 
 const STATE_LINES: Record<string, string> = {
@@ -15,6 +15,41 @@ const STATE_LINES: Record<string, string> = {
   thinking: "Thinking…",
   speaking: "Speaking…",
 };
+
+/**
+ * Sleep-talk: while HELIX dreams, each murmur (services/murmur.py) surfaces as one soft italic line
+ * above the status pill — it condenses in, drifts upward for a few seconds, and thins away. The
+ * newest murmur replaces the last; the star's own REM flicker (Orb.tsx) lands on the same beat.
+ */
+function SleepTalk() {
+  const murmur = useHelix((s) => s.murmur);
+  const dreaming = useHelix((s) => Boolean(s.dream?.running));
+  const [shown, setShown] = useState<Murmur | null>(null);
+  const [fading, setFading] = useState(false);
+  const seq = murmur?.seq ?? 0;
+  useEffect(() => {
+    if (!murmur || !dreaming) {
+      setShown(null);
+      return undefined;
+    }
+    setShown(murmur);
+    setFading(false);
+    const hold = window.setTimeout(() => setFading(true), 9000);
+    const gone = window.setTimeout(() => setShown(null), 11800);
+    return () => {
+      window.clearTimeout(hold);
+      window.clearTimeout(gone);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seq, dreaming]);
+  if (!shown) return null;
+  return (
+    <div key={shown.seq} className={`sleep-talk ${fading ? "fading" : ""}`} aria-live="polite"
+      title="HELIX, talking in its sleep">
+      {shown.text}
+    </div>
+  );
+}
 
 function BubbleView({ b, idx }: { b: Bubble; idx: number }) {
   const useAction = useHelix((s) => s.useAction);
@@ -269,6 +304,9 @@ export default function Console() {
           ))}
         </div>
       )}
+
+      {/* sleep-talk — the dreaming star's murmurs, above the pill */}
+      {!arFull && <SleepTalk />}
 
       {/* status pill — a plasma conduit carrying the star's color; the busy arc IS the spinner */}
       <div

@@ -72,6 +72,15 @@ export interface DreamState {
   line: string;
 }
 
+/** One line of sleep-talk from a dreaming HELIX (services/murmur.py): it drifts past the orb, the
+ *  star flickers, and the shell may whisper it. `seq` climbs so the same words twice still count. */
+export interface Murmur {
+  text: string;
+  kind: string; // "mind" — the model's own words; "note" — a template for a session moment
+  at: string;
+  seq: number;
+}
+
 export interface Attachment {
   id: string;
   name: string;
@@ -298,6 +307,7 @@ interface HelixStore {
   toast: string;
   cart: CartSnapshot | null; // the staged Amazon cart (null = nothing known yet)
   dream: DreamState | null; // the dream session (null = nothing known yet)
+  murmur: Murmur | null; // the latest sleep-talk (null = quiet)
 
   navigate: (page: Page) => void;
   addBubble: (b: Bubble) => void;
@@ -338,6 +348,7 @@ export const useHelix = create<HelixStore>((set) => ({
   hologram: null,
   cart: null,
   dream: null,
+  murmur: null,
   cameraCapture: null,
   attachView: readAttachView(),
   lightbox: "",
@@ -410,7 +421,20 @@ export function applyEvent(ev: Record<string, unknown>): void {
       s.set({ cart: (ev.cart as CartSnapshot) || null });
       break;
     case "dream":
-      s.set({ dream: { running: Boolean(ev.running), line: (ev.line as string) || "" } });
+      s.set({
+        dream: { running: Boolean(ev.running), line: (ev.line as string) || "" },
+        ...(ev.running ? {} : { murmur: null }), // a session ending takes its last words with it
+      });
+      break;
+    case "murmur":
+      s.set({
+        murmur: {
+          text: (ev.text as string) || "",
+          kind: (ev.kind as string) || "note",
+          at: (ev.at as string) || "",
+          seq: (s.murmur?.seq ?? 0) + 1,
+        },
+      });
       break;
     case "busy":
       s.set({ busy: Boolean(ev.on) });

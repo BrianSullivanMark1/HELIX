@@ -44,7 +44,7 @@ DEFAULT_PORT = 8737
 # stay locked (the Constitution), credentials are write-only (presence is reported, values never).
 _SETTING_KEYS = (
     "wake_word", "narration_mode", "proactive_speech", "trust_household_voice",
-    "file_write_access", "evolve_enabled", "model_detail", "tts_voice", "tts_rate",
+    "file_write_access", "model_detail", "tts_voice", "tts_rate",
     "voice_input_on", "remote_enabled", "remote_lan", "auto_deep_turns",
     # The camera panel's preferences: which camera (by its label — browser device ids are
     # per-origin and change), a mirrored preview, clip length, and whether a typed message

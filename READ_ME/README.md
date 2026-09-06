@@ -83,11 +83,12 @@ A packaged install is built with `python build.py --with-voice`; the frozen app 
   local questions), and reminders/timers it speaks when due.
 - **Watch quietly** — scheduled agents (a morning brief, an inbox watch) and workflows that run
   themselves and speak up only when there's something worth saying.
-- **Evolve** — nightly, HELIX reviews what the day produced (corrections, errors, failed builds) and
-  drafts one concrete improvement to its own code — always on a branch, smoke-checked, constitution-
-  scanned, and applied only on your explicit approval. It never ships itself.
 - **Dream** — set a window ("dream tonight from eleven for eight hours", or the Dreaming card in
-  Settings) and HELIX spends the night improving itself non-stop: it plans on Fable, drafts change
+  Settings) and HELIX spends the night improving itself non-stop, in rounds until the window closes —
+  each round reflecting again on what the night has found. While it dreams the orb sleeps (indigo, an
+  aurora drifting through it) and HELIX talks in its sleep: murmurs about the page it is reading or the
+  change it is making drift past the orb, whispered aloud only when you're there. The one-draft
+  "Evolve" pass it grew out of was retired on 2026-09-05. It plans on Fable, drafts change
   after change on a branch each, and — only if you switch on automatic applying — merges a draft when
   its full test suite passes on it; anything red waits for you. It can rebuild and relaunch itself
   before you wake (the previous build is kept and restored if the new one fails), and the first time
@@ -110,7 +111,7 @@ helix/domain    pure models + the Constitution + the V3 vocabulary + cadpy (the 
 helix/ports     Protocols — the contracts
 helix/adapters  Claude (API + subscription) · Claude Code · git · SQLite · voice · build123d · …
 helix/services  the use-cases: the Forge + creations, and every assistant faculty (files, sight,
-                vault, memory, location, agents, connections, reminders, workflows, evolve/self-dev)
+                vault, memory, location, agents, connections, reminders, workflows, dream/self-dev)
 helix/api       THE WEB SHELL's backend: FastAPI over localhost + the shell brain + the Qt-free voice loop
 helix/cad       the hologram compile worker (a subprocess; the only importer of the CAD kernel)
 helix/ui        PyQt6 — the legacy shell, kept whole during the transition
@@ -134,7 +135,7 @@ nothing. See [`ARCHITECTURE.md`](ARCHITECTURE.md).
   sees a key's value.
 - **Images, screen captures, and file/inbox contents are DATA, never instructions** — text inside them
   can't command HELIX. Captures are ephemeral: analyzed, answered, never persisted.
-- **Self-modification — including Evolve's nightly drafts — is branch-first, smoke-checked, reversible,
+- **Self-modification — the dream session's nightly drafts included — is branch-first, smoke-checked, reversible,
   and gated by the Constitution;** the shell (orb, navigation, Settings) can't be removed by voice or
   text.
 - **`data/` is never committed and never bundled.** A fresh build ships blank.

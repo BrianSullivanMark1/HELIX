@@ -2,7 +2,7 @@
 driven through the ToolRegistry against a fake DreamService.
 
 The engine (services/dream.py) is built by the other workstream; these pin the contract THIS side
-keeps: the four tools appear only once the engine is attached (late-bound, like Evolve), each one
+keeps: the four tools appear only once the engine is attached (late-bound, like the backlog), each one
 routes to the engine's method with the contract's arguments (partial schedules, coerced numbers),
 the three controls are fenced from autonomous runs, and the one readable tool never hands a
 watcher the name of a fenced tool — not even when the engine's own status text does.
@@ -54,7 +54,7 @@ def _registry(dream=None) -> ToolRegistry:
     return reg
 
 
-# ----- offered late-bound, like Evolve -----
+# ----- offered late-bound, like the backlog -----
 
 def test_the_dream_tools_appear_only_once_the_engine_is_attached():
     bare = _registry()

@@ -30,7 +30,7 @@ EXPECTED_SERVICES = (
     "paths", "settings", "store", "repo", "clock", "bus", "subscription", "chat", "coder",
     "growth_coder", "builds", "secrets", "model_baker", "forge", "build_queue", "selfdev",
     "selfdev_lane", "connections", "knowledge", "files", "user_memory", "tools", "profile",
-    "lessons", "evolve", "conversation", "agents", "scheduler", "workflows", "speech_in",
+    "lessons", "backlog", "conversation", "agents", "scheduler", "workflows", "speech_in",
     "speech_out", "voice_id", "cad", "parts", "verified", "research", "rebuilder", "dream",
     "dream_mind",
 )
@@ -109,7 +109,7 @@ def test_composing_does_not_drag_in_the_heavy_stacks(tmp_path):
 
 def test_the_dream_mind_is_built_on_the_real_collaborators_and_handed_to_the_session(container):
     """READ_ME/DREAM_MIND.md §11: the night's mind reflects over the tool registry, the builds and
-    agents, the parts lists and Evolve's material, researches through the conversation service on
+    agents, the parts lists and the backlog's material, researches through the conversation service on
     the DREAM tier, verifies into the verified store, experiments through the gate, and keeps its
     self-model in data/helix_self.json — and the session runs it with the plan's rail checked (§13).
     Every one of those is a constructor argument that could drift to None while dream_mind.py's own
@@ -133,7 +133,7 @@ def test_the_dream_mind_is_built_on_the_real_collaborators_and_handed_to_the_ses
     assert mind._selfdev is container.selfdev
     assert mind._verified is container.verified and mind._research is container.research
     assert mind._parts is container.parts and mind._builds is container.builds
-    assert mind._tools is container.tools and mind._evolve is container.evolve and mind._agents is container.agents
+    assert mind._tools is container.tools and mind._backlog is container.backlog and mind._agents is container.agents
     assert mind._settings is container.settings and mind._clock is container.clock
     assert mind._store._path.name == "helix_self.json", "the self-model must live in its own volatile store"
     assert mind._source_root == container.paths.source_root
@@ -182,7 +182,7 @@ class _RecordingConsole:
 def test_the_shell_forwards_unattended_to_the_console(monkeypatch):
     """The 3 AM silence is DECIDED in console_view, but it is only reachable if the shell passes the
     fact along. This is the line that was missing: the console's own pin passed while the overnight
-    Evolve pass still narrated every step aloud, because the bridge dropped the flag on the floor."""
+    overnight draft still narrated every step aloud, because the bridge dropped the flag on the floor."""
     from types import SimpleNamespace
 
     from helix.ui.main_window import HelixMainWindow
@@ -197,7 +197,7 @@ def test_the_shell_forwards_unattended_to_the_console(monkeypatch):
     )
 
     HelixMainWindow._on_self_change_finished(shell, SimpleNamespace(
-        ok=True, summary="a quieter orb", branch="evolve/quiet", error=None, stopped=False,
+        ok=True, summary="a quieter orb", branch="selfdev/quiet", error=None, stopped=False,
         unattended=True))
     assert console.finished[-1]["unattended"] is True, (
         "the finished bridge dropped `unattended` — 3 AM would hear the whole announcement"

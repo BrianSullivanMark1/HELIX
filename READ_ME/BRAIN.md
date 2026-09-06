@@ -160,3 +160,5 @@ the genome (the laws) and the brainstem's vital reflexes (the gate, containment,
   likewise editable but can only ever *rest* the mic (never build/spend/wake), and `go_to_sleep` is
   agent-fenced — so neither needs the constitution's protected status. The safety-critical pieces (the
   addressing gate in `domain/brain.py`, the voice wiring in `ui/`) ARE immutable (domain + shell).
+
+> **2026-09-05:** the Evolve loop named above was folded into the DREAM SESSION (READ_ME/DREAM.md, DREAM_MIND.md §14–§15): the growth layer's nightly work is the dream, in rounds, and its queue is `services/backlog.py`.

@@ -173,6 +173,14 @@ class OsSpeechOut:
         return platform.system() in ("Windows", "Darwin")
 
     def speak(self, text: str, allow_fallback: bool = True) -> None:
+        self._speak(text, soft=False)
+
+    def murmur(self, text: str) -> None:
+        """Sleep-talk in the local voice: the same synthesizer at a third of the volume and a slower
+        rate. Blocks until it ends; stop() cuts it like any utterance."""
+        self._speak(text, soft=True)
+
+    def _speak(self, text: str, *, soft: bool) -> None:
         text = (text or "").strip()
         if not text:
             self.stop()
@@ -183,13 +191,14 @@ class OsSpeechOut:
             with self._lock:  # kill any prior utterance and publish the new handle atomically
                 self._kill_locked()
                 if system == "Windows":
+                    tune = "$s.Volume=35;$s.Rate=-2;" if soft else ""
                     script = (
                         # Read stdin as UTF-8 — without this the fallback voice mangles em-dashes and
                         # accented names (the text is piped in as UTF-8 below).
                         "[Console]::InputEncoding=[System.Text.Encoding]::UTF8;"
                         "Add-Type -AssemblyName System.Speech;"
-                        "(New-Object System.Speech.Synthesis.SpeechSynthesizer)"
-                        ".Speak([Console]::In.ReadToEnd())"
+                        "$s=(New-Object System.Speech.Synthesis.SpeechSynthesizer);" + tune +
+                        "$s.Speak([Console]::In.ReadToEnd())"
                     )
                     proc = subprocess.Popen(
                         ["powershell", "-NoProfile", "-Command", script],
@@ -197,7 +206,7 @@ class OsSpeechOut:
                     )
                     self._proc = proc
                 elif system == "Darwin":
-                    proc = subprocess.Popen(["say", text])
+                    proc = subprocess.Popen(["say", "-r", "150", text] if soft else ["say", text])
                     self._proc = proc
             if proc is not None and system == "Windows" and proc.stdin is not None:
                 proc.stdin.write(text)
@@ -251,6 +260,22 @@ def edge_available() -> bool:
         return True
     except Exception:
         return False
+
+
+# Sleep-talk's tuning (adapters/speech.EdgeSpeechOut.murmur): a fifth slower than the user's own
+# rate, well under half the volume, a little lower — the same voice, asleep.
+_MURMUR_SLOW = 0.82
+_MURMUR_VOLUME = "-45%"
+_MURMUR_PITCH = "-8Hz"
+
+
+def _rate_multiplier(value: object) -> float:
+    """The user's tts_rate setting as a number (1.0 = natural); anything unreadable is natural."""
+    try:
+        mult = float(value) if value not in (None, "") else 1.0  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1.0
+    return mult if mult > 0 else 1.0
 
 
 def _rate_string(multiplier: object) -> str:
@@ -465,6 +490,30 @@ class EdgeSpeechOut:
                 except OSError:
                     pass
 
+    def murmur(self, text: str) -> None:
+        """Sleep-talk (services/murmur.py): the same voice, quieter and slower and a touch lower —
+        edge-tts's own volume, rate and pitch controls — played once. Never the OS voice: a murmur
+        is optional, and silence beats a second voice in the night. Blocks until playback ends;
+        stop() cuts it like any utterance."""
+        text = (text or "").strip()
+        if not text:
+            return
+        with self._lock:
+            self._gen += 1
+            gen = self._gen
+        path = None
+        try:
+            path = self._synthesize(text, gen, slow=_MURMUR_SLOW, volume=_MURMUR_VOLUME, pitch=_MURMUR_PITCH)
+            if self._is_stopped(gen):
+                return
+            self._play(path, gen)
+        except Exception as exc:  # noqa: BLE001 — offline, WMP missing: the murmur is simply not heard
+            if not self._is_stopped(gen):
+                _LOG.info("murmur not spoken (%s)", exc)
+        finally:
+            if path:
+                self._reap([path])
+
     def speak_chunks(self, chunks: list[str], allow_fallback: bool = True) -> None:
         """Speak a reply as several sentence chunks with NO audible gap between them: every chunk is
         synthesized CONCURRENTLY up front, then played in order. The first (short) chunk is ready fast
@@ -549,17 +598,25 @@ class EdgeSpeechOut:
         except Exception:  # noqa: BLE001
             return None
 
-    def _synthesize(self, text: str, gen: int | None = None) -> str:
+    def _synthesize(self, text: str, gen: int | None = None, *, slow: float = 1.0,
+                    volume: str | None = None, pitch: str | None = None) -> str:
         import edge_tts
 
         gen = self._gen if gen is None else gen
         voice = (self._voice() or "").strip() or DEFAULT_TTS_VOICE
-        rate = _rate_string(self._rate())
+        rate = _rate_string(_rate_multiplier(self._rate()) * slow)
+        # A murmur is the user's own voice settings, scaled down: slower by `slow`, then edge-tts's
+        # volume and pitch offsets; a plain reply passes none of these.
+        tuning = {"rate": rate}
+        if volume:
+            tuning["volume"] = volume
+        if pitch:
+            tuning["pitch"] = pitch
         handle, path = tempfile.mkstemp(suffix=".mp3", prefix="helix_tts_")
         os.close(handle)
 
         async def _go() -> None:
-            await edge_tts.Communicate(text, voice, rate=rate).save(path)
+            await edge_tts.Communicate(text, voice, **tuning).save(path)
 
         # Retry transient network blips so a single failed request doesn't drop us to the OS voice — the
         # main cause of consecutive lines coming out in different voices during a build.

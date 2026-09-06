@@ -926,3 +926,81 @@ def test_dream_settings_are_held_to_the_contract(key, raw, want):
     from helix.api.server import dream_setting
 
     assert dream_setting(key, raw) == want
+
+
+# ===== sleep-talk (services/murmur.py, READ_ME/DREAM_MIND.md §14): the engine's murmurs reach the
+# face at once, ride the snapshot, and are whispered only when someone is there to hear.
+
+class _WhisperVoice(_TalkingVoice):
+    def __init__(self):
+        super().__init__()
+        self.murmured: list[str] = []
+
+    def murmur(self, text):
+        self.murmured.append(text)
+
+
+class _KindDream(_Dream):
+    def __init__(self, kind="nightly", **kw):
+        super().__init__(**kw)
+        self.kind = kind
+
+    def session_kind(self):
+        return self.kind
+
+
+def test_a_murmur_reaches_the_face_and_the_snapshot_and_a_session_ending_clears_it():
+    from helix.domain.events import DreamMurmur, DreamStateChanged
+
+    container = _DreamContainer(_KindDream("nightly"))
+    events: list[dict] = []
+    sh = ShellSession(container, events.append, voice=None)
+    try:
+        container.bus.publish(DreamMurmur(text="pages turning by themselves…", kind="mind"))
+        heard = [e for e in events if e.get("t") == "murmur"]
+        assert len(heard) == 1 and heard[0]["text"] == "pages turning by themselves…"
+        assert heard[0]["kind"] == "mind" and heard[0]["at"]
+        assert sh.snapshot()["murmur"]["text"] == "pages turning by themselves…"  # a reload mid-session isn't mute
+        container.bus.publish(DreamMurmur(text="", kind="note"))  # nothing to say is nothing pushed
+        assert len([e for e in events if e.get("t") == "murmur"]) == 1
+        container.bus.publish(DreamStateChanged(running=False, line=""))
+        assert sh.snapshot()["murmur"] is None  # the session's last words leave with it
+    finally:
+        sh.shutdown()
+
+
+def test_a_murmur_is_whispered_for_a_manual_session_or_a_user_who_just_spoke_never_into_a_sleeping_house():
+    from helix.domain.events import DreamMurmur
+
+    # Nightly, the house asleep for ten minutes: the face only.
+    container = _DreamContainer(_KindDream("nightly"))
+    voice = _WhisperVoice()
+    sh = ShellSession(container, lambda e: None, voice=voice)
+    try:
+        sh._last_activity -= 601
+        container.bus.publish(DreamMurmur(text="quiet now…", kind="note"))
+        assert voice.murmured == []
+        sh._last_activity = time.monotonic()  # …the user spoke a moment ago: whispered
+        container.bus.publish(DreamMurmur(text="someone's up… shh…", kind="note"))
+        assert voice.murmured == ["someone's up… shh…"]
+    finally:
+        sh.shutdown()
+    # A manual "dream now": the user asked for it, so they hear it even after a long silence.
+    container = _DreamContainer(_KindDream("now"))
+    voice = _WhisperVoice()
+    sh = ShellSession(container, lambda e: None, voice=voice)
+    try:
+        sh._last_activity -= 601
+        container.bus.publish(DreamMurmur(text="let me read…", kind="mind"))
+        assert voice.murmured == ["let me read…"]
+    finally:
+        sh.shutdown()
+    # A voice with no murmur() (an older backend) is simply not whispered through — never spoken loud.
+    container = _DreamContainer(_KindDream("now"))
+    plain = _TalkingVoice()
+    sh = ShellSession(container, lambda e: None, voice=plain)
+    try:
+        container.bus.publish(DreamMurmur(text="mm…", kind="note"))
+        assert plain.spoken == []
+    finally:
+        sh.shutdown()

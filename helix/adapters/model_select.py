@@ -1,7 +1,7 @@
 """Model resolver — HELIX grows on the strongest brain Anthropic offers (READ_ME/BRAIN.md, Growth).
 
 Everyday conversation runs on a fast model. But GROWTH reasoning — the deep reasoner (think_harder)
-and the nightly Evolve loop, where HELIX rewrites itself — must use the most capable model available.
+and the nightly dream session, where HELIX rewrites itself — must use the most capable model available.
 That is Fable 5 today; when a stronger model in the same line ships (a future Fable 6, or a higher
 Opus), HELIX should adopt it AUTOMATICALLY, no code change.
 

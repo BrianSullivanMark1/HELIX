@@ -128,3 +128,5 @@ Conversation → action or code → back to conversation, indefinitely.
 
 **The whole point:** make a genuinely capable assistant — one that can also build — feel like just a
 conversation.
+
+> **2026-09-05:** Evolve's one nightly draft became the DREAM SESSION (READ_ME/DREAM.md): a night of rounds, test-gated merges only when the user allows, and HELIX talking in its sleep.

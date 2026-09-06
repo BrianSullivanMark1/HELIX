@@ -435,7 +435,7 @@ def test_stop_during_a_protected_self_change_draft_does_not_claim_it_stopped(_ap
 
 
 def test_an_unattended_overnight_draft_never_narrates_a_word_aloud(_app):
-    # Evolve reuses the lane a user-requested draft uses, at 3 AM, with nobody in the room.
+    # The dream session reuses the lane a user-requested draft uses, at 3 AM, with nobody in the room.
     view, v = _voiced_console()
     narrated: list = []
     spoken: list = []

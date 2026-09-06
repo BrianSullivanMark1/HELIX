@@ -47,7 +47,7 @@ from helix.services.knowledge import KnowledgeService
 from helix.services.desktop import DesktopService
 from helix.services.dream import DreamService, SubscriptionOnlyChat
 from helix.services.dream_mind import SELF_MODEL_FILE, DreamMind
-from helix.services.evolve import EvolveService, _default_log_tail
+from helix.services.backlog import Backlog, default_log_tail
 from helix.services.reflexes import ReflexService
 from helix.services.lessons import LessonsService
 from helix.services.location import LocationService
@@ -336,7 +336,7 @@ class Container:
 
         # Model tiering (READ_ME/BRAIN.md): everyday conversation runs on a fast model (Sonnet —
         # thinking off, low effort) for snappy routing/confirming/chat. GROWTH reasoning — the deep
-        # reasoner (think_harder) and the nightly Evolve loop, where HELIX rewrites itself — runs on
+        # reasoner (think_harder) and the nightly dream session, where HELIX rewrites itself — runs on
         # the STRONGEST model available. The resolver queries the live model list and auto-upscales to
         # a future Fable 6 / higher Opus; the pinned floor is Fable 5. Builds use the most capable coder.
         self.growth_model = GrowthModelResolver(_key, clock=self.clock)
@@ -392,7 +392,7 @@ class Container:
         # Everything wired to THIS thinks with nobody watching, over content HELIX did not write: the
         # profile/lessons/long-term-memory distillers are fed the raw transcript, which contains
         # whatever an email, a Slack thread or a SAM.gov notice dragged in; the voice-identity notes
-        # distill spoken answers; Evolve reads the day's lessons and the log tail. A model-authored
+        # distill spoken answers; the dream session reads the day's lessons and the log tail. A model-authored
         # search or fetch from any of them is an outbound channel that walks straight around
         # call_api's host allowlist, redirect refusal and secret scrubbing — with no human at the orb
         # to notice. ConversationService keeps the WEB-ENABLED self.chat because it sheds per turn
@@ -400,9 +400,9 @@ class Container:
         # has that distinction to make, so it takes the fenced twin once, at wiring time.
         unattended_chat = self.chat.without_web()
         # The GROWTH chat: plain (no-tool) reasoning pinned to the strongest available model + high
-        # effort, subscription-first like self.chat. Evolve's nightly self-improvement pass runs on
+        # effort, subscription-first like self.chat. the dream session's planning runs on
         # this so HELIX always grows on its best brain (Fable 5 → a future Fable 6, resolved live).
-        # Fenced like the distillers: Evolve runs at night, unattended, on mined text — and it drafts
+        # Fenced like the distillers: the dream runs at night, unattended, on mined text — and it drafts
         # a change to HELIX's OWN code, so it is the last place to hand the model a free egress path.
         # (The deep reasoner keeps its web: think_harder is a human ASKING for a search, and it takes
         # the bare `deep_chat` below, not this.)
@@ -437,7 +437,7 @@ class Container:
         # Prefer the Claude Code CLI (most capable); fall back to the API coder (key-only, no CLI).
         self.coder = FallbackCoder(ClaudeCodeCli(_key, _oauth), ApiCoder(coder_chat, _key))
         # THE GROWTH CODER: when HELIX edits its OWN code (self-improvement), it drafts on the growth
-        # model by DEFAULT (Fable 5 today, auto-upscaling) — but Evolve's proposal can size it PER TASK
+        # model by DEFAULT (Fable 5 today, auto-upscaling) — a request could once size it PER TASK
         # via the EFFORT tier, dropping to the Opus 4.8 work floor for a small mechanical change or
         # holding at Fable 5 for a deep one (see GrowthModelResolver.work_model). Same CLI/subscription
         # path (the OAuth token is preferred over the API key inside ClaudeCodeCli). App and task builds
@@ -701,19 +701,15 @@ class Container:
         # cortex judged genuine becomes a fast brainstem reflex next time — dedicated guard-safe JSON
         # (like reminders/agents), so a reflex learned mid-build isn't byte-reverted with settings.
         self.reflexes = ReflexService(JsonSettings(self.paths.data / "helix_reflexes.json"))
-        # Evolve: the overnight self-improvement pass (V3). Mines the day's lessons + the log tail and
-        # DRAFTS one small change through the same selfdev lane improve_helix uses — approval-gated,
-        # never self-applying. The shell heartbeat calls tick(); the Settings toggle governs it.
-        self.evolve = EvolveService(
-            growth_chat, self.lessons, self.selfdev_lane, self.selfdev, self.settings, self.clock,
-            growth_model=self.growth_model,  # maps the proposal's EFFORT tier → coder model
-            data_dir=self.paths.data,        # the backlog + journal live beside the other data files
-        )
-        self.tools.attach_evolve(self.evolve)  # late-bind: the registry is built before Evolve is
+        # The improvement BACKLOG (services/backlog.py): the ideas the user queues on purpose
+        # (note_improvement) and the night's material (that queue, the lessons, the log tail) — what
+        # the dream session mines first. It replaced the one-draft Evolve pass on 2026-09-05.
+        self.backlog = Backlog(self.paths.data, lessons=self.lessons, log_tail=default_log_tail)
+        self.tools.attach_backlog(self.backlog)  # late-bind: the registry is built before this is
         # The rebuild-and-relaunch adapter the dream session hands its keys to at dawn (frozen only).
         self.rebuilder = Rebuilder(self.paths, self.settings, clock=self.clock)
         # The research faculty (READ_ME/DREAM_MIND.md §10): HELIX's own reads of documentation
-        # hosts on an allowlist, and the record of what it verified there. Late-bound like Evolve.
+        # hosts on an allowlist, and the record of what it verified there. Late-bound like the backlog.
         from helix.services.research import ResearchService
         from helix.services.verified import VerifiedStore
 
@@ -745,7 +741,7 @@ class Container:
         _seed_watchers(self.agent_store, self.agents)  # the sentinel: default watchers, once per version
         # THE DREAM MIND (READ_ME/DREAM_MIND.md §11): the night's thinking. Reflects on the growth
         # chat over the tool registry, the builds and agents, the parts lists, the week's user turns,
-        # Evolve's backlog and lessons, the log tail and the journal; researches and verifies through
+        # the backlog and lessons, the log tail and the journal; researches and verifies through
         # the conversation service on the DREAM tool tier (research_search / research_read on the
         # allowlist, note_verified_fact into the verified store, the research trail as the audit);
         # experiments through the gate's discardable scratch runs; keeps its self-model in
@@ -754,7 +750,7 @@ class Container:
         # limit pause and the user's presence (handed through NightHooks), the mind owns the thinking.
         # THE DREAM'S CHAT (DREAM_MIND.md §13, rule 1): the subscription rail ONLY, on the growth
         # model at high effort, with no API-key leg. growth_chat above is a PreferredChat whose
-        # fallback to the metered key is right for Evolve's one proposal and the distillers — for
+        # fallback to the metered key is right for the distillers — for
         # the night it is a silent downgrade that also swallows the limit text the pause needs. So
         # reflection, the plan fold, the digest and the resume probe all go through this one; an
         # inactive plan or an unnamed model raises RailUnavailable, which the mind treats as a limit.
@@ -763,28 +759,27 @@ class Container:
             chat=dream_chat, conversation=self.conversation, selfdev=self.selfdev,
             verified=self.verified, research=self.research, parts=self.parts, builds=self.builds,
             tools_registry=self.tools, store=JsonSettings(self.paths.data / SELF_MODEL_FILE),
-            settings=self.settings, clock=self.clock, log_tail=_default_log_tail,
+            settings=self.settings, clock=self.clock, log_tail=default_log_tail,
             activity=None,  # the session hands the mind the shell's presence probe (NightHooks.activity)
-            evolve=self.evolve, agents=self.agents, source_root=self.paths.source_root,
+            backlog=self.backlog, agents=self.agents, source_root=self.paths.source_root,
             # Fable or nothing for an experiment's coder too; and the seeded watchers are marked as
             # HELIX's own in the reflect material, never read as the user's project.
             growth_model=self.growth_model,
             default_agent_names=frozenset(name for name, _goal, _hint in _DEFAULT_WATCHERS),
         )
-        # THE DREAM SESSION (READ_ME/DREAM.md): the nightly long-form of Evolve — a user-set window in
+        # THE DREAM SESSION (READ_ME/DREAM.md): how HELIX improves itself at night — a user-set window in
         # which HELIX runs the mind's six cycles on the growth model (Fable, and only Fable: §13),
         # drafts through the same lane, merges only what the FULL suite proves green (when the user
         # allows), pauses for the plan's limit instead of degrading (the subscription rail is checked
         # before each step), and — frozen — rebuilds and relaunches itself at dawn through the
         # Rebuilder. The shell beats its heart (tick), hands it the user's presence (dream.activity =
-        # seconds since the last turn) and tells the morning report; Evolve defers to it for any
-        # night it covers, so the two never both draft.
+        # seconds since the last turn) and tells the morning report. Rounds until the window
+        # closes (DREAM_MIND.md §15); sleep-talk to the face and the voice (§14).
         self.dream = DreamService(
-            dream_chat, self.selfdev_lane, self.selfdev, self.evolve, self.settings, self.clock,
+            dream_chat, self.selfdev_lane, self.selfdev, self.backlog, self.settings, self.clock,
             self.bus, paths=self.paths, suite_runner=self.selfdev.verify, rebuilder=self.rebuilder,
             growth_model=self.growth_model, mind=self.dream_mind, subscription=self.subscription,
         )
-        self.evolve.set_dream(self.dream)
         _attach_dream = getattr(self.tools, "attach_dream", None)  # the registry's dream tools
         if callable(_attach_dream):
             _attach_dream(self.dream)

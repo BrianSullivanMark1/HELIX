@@ -119,7 +119,7 @@ activity pause between steps and returns a `NightSummary`):
    allow_builds=False, tool_names=DREAM_TOOLS, persist=False, speaker="dream")` with
    `DREAM_RESEARCH_SYSTEM` prepended to the prompt): search, read allowlisted pages, and END with
    `FINDINGS:` bullets each tagged `[verified: <url>]` or `[unverified]`, `FACTS NOTED: n`, `IDEAS:`
-   (capability ideas → the Evolve backlog via note_improvement, each with its source). The mind
+   (capability ideas → the improvement backlog via note_improvement, each with its source). The mind
    journals the question, the queries made (from the tool trail), and the findings. A hardware claim
    is `[verified]` only after a manufacturer/distributor page was read in that turn.
 3. **VERIFY** — for each stale fact and each `VERIFY:` claim: one research turn that re-reads the
@@ -194,7 +194,7 @@ any exception text from a research/reflect turn go through it. On a limit:
 - the window still rules: when it ends, the session winds down as usual, and the morning report says
   plainly "The plan's limit was reached at 02:14; I paused and resumed at 05:10 / did not get to
   resume — 2 of 6 planned improvements ran." Nothing is lost: the remaining agenda is written to the
-  journal and the Evolve backlog so tomorrow night starts from it;
+  journal and the improvement backlog so tomorrow night starts from it;
 - a draft that failed mid-way for a limit is journaled as "held: limit" (not as a failure of the
   idea) and its branch, if any, is discarded so a half-drafted change never waits for review;
 - three limit pauses in one night end the session early (journaled), so a broken plan never spins
@@ -203,3 +203,55 @@ Tests (F2): `looks_like_limit`/`reset_hint` matrix; a lane error that looks like
 backoff sequence with a fake clock, resume after a successful probe, wind-down at the window end while
 paused, the morning report wording, the remaining agenda preserved, three pauses end the night; the
 Fable-or-nothing gate with a resolver that reports a sub-Fable model; `EFFORT: standard` ignored.
+
+
+## 14. Sleep-talk — HELIX talks in its sleep (2026-09-05)
+
+A dreaming HELIX murmurs: short, half-formed, lowercase fragments about the exact moment it is in — the
+page it is reading, the part it is measuring in its head, the draft it is writing, the doubt it can't put
+down. `services/murmur.py`.
+
+- **Two sources, one voice.** Every big model call a night makes (REFLECT, each research and verify
+  turn, the plan fold) ends with one extra line, `MURMUR: …`, asked for by `MURMUR_INSTRUCTION`
+  (appended to the prompt; the research system prompt allows it after the FINDINGS shape). Zero extra
+  calls: the murmur is written by the same thinking it is about. `take_murmur` lifts it off the reply
+  before `parse_reflection`, `parse_findings` or `parse_plan` run (`Reflection.murmur`,
+  `Findings.murmur`). Moments with no model call — a step starting (`start_murmur`), a draft starting,
+  landing, held, failed; a limit pause; the user walking in; a new round; the session's start and end —
+  get deterministic templates from the session's notes (`murmur_for_note`; the variant is picked by a
+  hash of the line, so a night is reproducible). Bookkeeping notes stay silent.
+- **The session says it.** `DreamService._murmur` keeps each on the night's record (`murmurs`, capped at
+  120, with a clock stamp and its kind — "mind" or "note"), paces template murmurs to one per twenty
+  seconds of the session's clock (a burst of notes is one breath; the mind's own words always land),
+  and publishes `DreamMurmur`. The mind reaches the session through `NightHooks.murmur`.
+- **The face hears it.** The shell pushes `{"t": "murmur", text, kind, at}` and carries the last one on
+  the snapshot; `store.murmur` (a climbing `seq`) drives the `SleepTalk` line above the status pill and
+  the orb's REM flicker. The journal card lists them under its notes as SAID IN ITS SLEEP.
+- **Whispered only to someone who is there.** `ShellSession._murmur_aloud`: a manual "dream now" (the
+  user asked, so they are at the keyboard), or a user who spoke within the last ten minutes; then
+  `WebVoice.murmur` — only while idle and unmuted, never over a reply, a note or a listening mic — and
+  `EdgeSpeechOut.murmur`: the user's own voice a fifth slower, well under half the volume, a touch lower
+  (edge-tts rate / volume / pitch), once, never the OS fallback. The echo shield knows the words.
+- **Never a secret.** Every murmur is scrubbed (`limits.scrub_secrets`) before it leaves the engine.
+- **The sleeping star.** `Orb.tsx`: `STATE_LOOK.dreaming` (indigo-violet, dim, slow) whenever a session
+  runs and nothing has woken the orb; `uDream` stills the storm (no strikes, the tendrils asleep), slows
+  and deepens the breath, folds the corona in, and threads a teal AURORA (`DREAM_AURORA`) through the
+  plasma on its own clock; `uRem` (`DREAM_REM`, rose) flickers on each murmur and, rarely, on its own.
+
+## 15. Rounds — a night is several passes, each deeper (2026-09-05)
+
+A pass that finishes with time left is not the end of the night. When the six cycles return with at
+least 45 minutes of window left — the agenda drained, or the round's draft ceiling reached — the session
+asks the mind again (`NightHooks.round_no` = 2, 3, …). The reflect prompt names the round and points at
+tonight's own journal entry (saved as it goes, so it is in the DREAM JOURNAL material): never repeat the
+earlier rounds' questions, checks, experiments or requests; go deeper on what they found, or take the
+next most valuable thing; QUIET if nothing is worth another pass. `dream_max_drafts` bounds a ROUND; the
+window bounds the night (and a fuse of twelve rounds, whatever the clock says). Each round's lists land
+on top of the earlier rounds' — `_record_round` appends research, verify, experiments, facts and
+discoveries (deduped by text) and cycles, adds counts, keeps the first round's theme and the weekly
+digest (written on the first round only; the nights counter is bumped once) — so the morning report and
+the journal card read the whole night. A later round that reflects and finds nothing ends the night
+with the last WORKING round's reason; a stop, the window, or drafts that kept failing end it as before.
+The status line says "round N" while a later round runs; the journal card says "N rounds". The Evolve
+pass — one proposal a night, always human-approved — was retired the same day; its backlog and material
+live on in `services/backlog.py`.

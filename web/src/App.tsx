@@ -26,6 +26,7 @@ interface Snapshot {
   camera?: Record<string, unknown> | null;
   cart?: CartSnapshot | null;
   dream?: { running?: boolean; line?: string } | null;
+  murmur?: { text?: string; kind?: string; at?: string } | null;
 }
 
 export default function App() {
@@ -66,6 +67,15 @@ export default function App() {
             dream: snap.dream
               ? { running: Boolean(snap.dream.running), line: snap.dream.line || "" }
               : null,
+          });
+        }
+        // Mid-session, the star's last words come back with the page so it isn't mute on reload.
+        if (snap.murmur && snap.murmur.text) {
+          s.set({
+            murmur: {
+              text: snap.murmur.text, kind: snap.murmur.kind || "note", at: snap.murmur.at || "",
+              seq: (s.murmur?.seq ?? 0) + 1,
+            },
           });
         }
         if (snap.greeting) {

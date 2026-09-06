@@ -766,7 +766,7 @@ class ConsoleView(QWidget):
         # cleared when that draft ends, and when a new one begins (_selfdev_drafting spots that).
         self._selfdev_hushed = False
         self._selfdev_drafting = False
-        # Is the draft currently running one NOBODY asked for (the nightly Evolve pass, or a catch-up
+        # Is the draft currently running one NOBODY asked for (the nightly dream session's draft, or a catch-up
         # for a night the machine slept through)? It decides two things beyond silence: whether the mic
         # is taken away, and whether Stop is allowed to actually stop it. See _sync_working.
         self._selfdev_unattended = False
@@ -1931,7 +1931,7 @@ class ConsoleView(QWidget):
         and — unlike ordinary progress — the high-level steps are spoken ALOUD even when the mic is
         asleep, because the user wants to hear HELIX narrate what it's becoming.
 
-        UNATTENDED changes that completely. The Evolve pass reuses this same lane for a draft NOBODY
+        UNATTENDED changes that completely. The dream session reuses this same lane for a draft NOBODY
         asked for — overnight, or catching up a night the machine slept through, which means it can
         land at an hour when someone IS in the room. So it stays SILENT: the status line, the orb hue
         and the chat bubble are the whole record, exactly the "quiet suggestion you read in the
@@ -1960,7 +1960,7 @@ class ConsoleView(QWidget):
         unattended: bool = False,
     ) -> None:
         """A background self-change draft ended — announce whether it's ready to apply. An UNATTENDED
-        (overnight Evolve) draft lands silently: speak=False keeps the bubble and the status line as
+        (overnight dream) draft lands silently: speak=False keeps the bubble and the status line as
         the morning's record without waking the house at 3 AM to hear "Couldn't draft that change"."""
         QTimer.singleShot(0, self._sync_working)  # lift the mic shield once the draft lane is idle
         self._settle_orb_status()                 # drop the working hue back to blue (or yellow if building)

@@ -187,17 +187,8 @@ class SettingsView(QWidget):
         self._brain_status.setContentsMargins(2, 2, 2, 0)
         form.addWidget(self._brain_status)
         self._refresh_brain_status()
-        # Evolve — the overnight self-improvement drafter. It only ever DRAFTS; applying a change is
-        # always a separate, explicit approval, so the switch is safe to ship on by default.
-        self._evolve = QCheckBox(
-            "Evolve — draft one self-improvement overnight (never applies itself)"
-        )
-        form.addWidget(self._check_row(
-            self._evolve, "Evolve",
-            "Once a night, HELIX drafts ONE improvement to itself — a proposal you can read, then "
-            "approve or discard. It NEVER applies a change on its own; approving is always a "
-            "separate, explicit step. Turn this off to stop the overnight drafting entirely.",
-        ))
+        # Overnight self-improvement is the DREAM SESSION (READ_ME/DREAM.md), set on the web face's
+        # Settings page; the one-draft Evolve pass it grew out of was retired on 2026-09-05.
 
         # ── Connections — review-only. Keys are pasted into the just-in-time connect panel ──
         form.addSpacing(4)
@@ -1061,7 +1052,6 @@ class SettingsView(QWidget):
     def reload(self) -> None:
         self._load_text(self._oauth_token, self._settings.get("claude_code_oauth_token", "") or "")
         self._load_text(self._key, self._settings.get("claude_api_key", "") or "")
-        self._evolve.setChecked(bool(self._settings.get("evolve_enabled", True)))  # missing = ON
         detail = (self._settings.get("model_detail") or "balanced").lower()
         didx = self._detail.findData(detail)
         self._detail.setCurrentIndex(didx if didx >= 0 else 0)
@@ -1101,7 +1091,6 @@ class SettingsView(QWidget):
     def _save(self) -> None:
         self._settings.set("claude_code_oauth_token", self._oauth_token.text().strip())
         self._settings.set("claude_api_key", self._key.text().strip())
-        self._settings.set("evolve_enabled", self._evolve.isChecked())
         self._settings.set("model_detail", self._detail.currentData())
         self._settings.set("tts_voice", self._voice.currentData())
         self._settings.set("tts_rate", round(self._speed.value() / 10, 1))

@@ -1,21 +1,18 @@
-"""DreamService — HELIX's nightly dream session (READ_ME/DREAM.md).
+"""DreamService — HELIX's nightly DREAM SESSION (READ_ME/DREAM.md, READ_ME/DREAM_MIND.md).
 
-Evolve makes ONE proposal a night. Dreaming is the long form: for a window the user sets ("from 23:00
-for 8 hours"), HELIX plans a whole night of improvements on its strongest reasoning model (Fable, via
-the growth chat), drafts them one after another through the SAME background lane `improve_helix` and
-Evolve use (so every draft is worktree-isolated, constitution-scanned, and announced), and — only when
-the user has said so — merges a draft the moment the FULL test suite is green on it. Red never merges.
-A frozen build drafts against the SOURCE repository it was built from and, after a night that applied
-changes, hands a detached rebuild-and-relaunch job the keys and quits, so the new HELIX is the one
-that says good morning. The morning report is one plain paragraph, told once.
-
-Everything the session does is journaled to data/helix_dream.json (sessions with their plan, every
-draft's outcome, what applied, the rebuild result) and mirrored one line per event into Evolve's
-journal, so `evolve_report` still tells the story of the night. The service never raises into the
-heartbeat or a tool: a failure is journaled in plain words and the night goes on, or ends.
-
-Dependency rule: this is a service. It receives its edges — the growth chat, the lane, the gate, the
-Rebuilder adapter, the shell's activity callback — from the container and imports no adapter.
+For a window the user sets ("from 23:00 for 8 hours") HELIX improves itself without stopping: the
+dream mind (services/dream_mind.py) reflects, researches, verifies, experiments, improves and records,
+in ROUNDS until the window closes (§15) — each round reflecting again on what tonight already found.
+Every draft goes through the same SelfDevLane a spoken improve_helix uses (worktree-isolated,
+constitution-scanned, announced), and — only when the user has said so — merges a draft the moment
+the FULL test suite is green on it. Red never merges. Frozen, a night that applied changes hands its
+keys to the Rebuilder at dawn. The session owns the window, the lane, the stop flag, the limit pause
+(§13: Fable or nothing, never a downgrade), the user's presence, and the journal
+(data/helix_dream.json: every plan, draft outcome, discovery, murmur, the rebuild result). While it
+dreams HELIX talks in its sleep (services/murmur.py, §14): each murmur is recorded on the night and
+published to the face. The improvement BACKLOG (services/backlog.py) — the user's queued ideas and the
+night's material — is what a night mines first. The service never raises into the heartbeat; a night
+ends in a report, never a stack trace.
 """
 from __future__ import annotations
 
@@ -23,6 +20,7 @@ import json
 import math
 import re
 import threading
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,9 +32,14 @@ from helix.domain.events import DreamStateChanged, RebuildRequested, SelfChangeF
 from helix.domain.models import Role
 from helix.logging_setup import get_logger
 from helix.ports.llm import Text, Turn
-from helix.services.evolve import _default_log_tail
+from helix.services.backlog import default_log_tail as _default_log_tail
 from helix.services.limits import MAX_LIMIT_PAUSES, backoff_minutes, looks_like_limit, reset_hint
 from helix.services.prompts import _fenced
+
+from helix.domain.events import DreamMurmur
+from helix.services.murmur import KEEP as _MURMUR_KEEP
+from helix.services.murmur import MIN_GAP_S as _MURMUR_GAP_S
+from helix.services.murmur import murmur_for_note, take_murmur
 
 _LOG = get_logger("dream")
 
@@ -71,6 +74,13 @@ _SESSIONS_KEPT = 30                    # journaled sessions kept; older nights a
 _NOTES_CAP = 200                       # event lines kept per session
 _SUMMARY_CHARS = 90                    # how much of a summary the report/journal quotes
 _NOW_MIN_MINUTES, _NOW_MAX_MINUTES = 5.0, 12 * 60.0
+# ROUNDS (DREAM_MIND.md §15): a pass that finishes with at least this much window left is followed
+# by another — the mind reflects again on what tonight already found — until the window closes.
+_ROUND_MIN = timedelta(minutes=45)
+_MAX_ROUNDS = 12                       # a fuse: a night is never more passes than this, whatever the clock says
+# The session fields a round APPENDS to (the night is the sum of its rounds) — everything else on
+# the record is the latest round's word.
+_ROUND_LISTS = ("discoveries", "facts", "experiments", "research", "verify", "cycles")
 # Drafts that fail one after another are one problem, not many (an uncommitted source tree, a coder
 # that cannot start): after this many in a row the night ends with the reason instead of burning the
 # whole plan on it in seconds.
@@ -269,6 +279,10 @@ class NightHooks:
     activity() -> float | None: seconds since the user's last turn (None = unknown = idle) — the
         shell's presence probe, handed through the session so the mind holds a step while the user
         is at the machine exactly as a draft is held. None when the session has no probe.
+    murmur(text): one line of sleep-talk (services/murmur.py) — the mind's own MURMUR line off a
+        reply, or a step's start — recorded on the night and shown on the face. None = silent.
+    round_no: which pass of tonight this is (1 = the first). A later round reflects on what the
+        earlier ones found (tonight's own journal entry) and never repeats their work.
     """
 
     improve: Callable[[list], list]
@@ -279,15 +293,17 @@ class NightHooks:
     limit: Callable[[str], bool]
     rail_problem: Callable[[], str | None] = lambda: None
     activity: Callable[[], float | None] | None = None
+    murmur: Callable[[str], None] | None = None
+    round_no: int = 1
 
 
 def parse_plan(text: str, cap: int = DEFAULT_MAX_DRAFTS) -> tuple[list[Request], str]:
     """The planner's reply → (requests in rank order, the THEME sentence or ""). QUIET (alone, or as
     the first line) means an empty plan. A numbered list is split on its numbers; a reply with no
-    numbers is read as ONE request, the way Evolve reads a single proposal. TAKES/EFFORT lines are
+    numbers is read as ONE request. TAKES/EFFORT lines are
     read and removed from each request; a missing EFFORT defaults to deep (the safe choice for a
     program editing itself). Duplicates and empties are dropped; at most `cap` come back."""
-    text = (text or "").strip()
+    text, _murmur = take_murmur((text or "").strip())
     theme = ""
     m = _THEME_RE.search(text)
     if m is not None:
@@ -473,7 +489,7 @@ class DreamService:
         chat,
         lane,
         selfdev,
-        evolve,
+        backlog,
         settings,
         clock,
         bus,
@@ -490,7 +506,7 @@ class DreamService:
         self._chat = chat            # the growth chat (Fable, fenced) — plans and reflects
         self._lane = lane            # SelfDevLane — every draft goes through it, unattended
         self._selfdev = selfdev      # the gate — verify() + approve() for an unattended merge
-        self._evolve = evolve        # material (backlog + lessons + log), journal mirror, night stamps
+        self._backlog = backlog      # services/backlog.py: the queue of ideas + the night's material
         self._settings = settings
         self._clock = clock
         self._bus = bus
@@ -512,9 +528,9 @@ class DreamService:
         # The shell registers this: seconds since the user's last turn (None = unknown = idle). A
         # plain attribute on purpose — `container.dream.activity = shell.seconds_since_activity`.
         self.activity = activity
-        # The resolver that sizes the coder per request (deep = Fable, standard = the Opus floor).
-        # Falls back to Evolve's, which is the same object in the container.
-        self._growth_model = growth_model or getattr(evolve, "_growth_model", None)
+        # The resolver that names the Fable-class model every draft runs on (§13: Fable or nothing).
+        self._growth_model = growth_model
+        self._murmur_at: datetime | None = None  # when the last template murmur was said (pacing)
         self._lock = threading.RLock()
         self._files_lock = threading.Lock()
         self._stop = threading.Event()
@@ -541,11 +557,10 @@ class DreamService:
         with self._lock:
             return self._session is not None
 
-    def covers_tonight(self) -> bool:
-        """Does the dream own the night, so Evolve's one-proposal pass must stand down? Yes while
-        dreaming is enabled at all (the whole day belongs to the dream window, run or not) and
-        while any session — a manual one included — is on the lane."""
-        return self._enabled() or self.running
+    def session_kind(self) -> str:
+        """The running session's kind — "nightly", "now" (the user asked) — or "" when none runs."""
+        with self._lock:
+            return str(self._session.get("kind") or "") if self._session is not None else ""
 
     def tick(self) -> None:
         """Heartbeat (~15 s): flush held settings, start a due session, wind a running one down when
@@ -721,6 +736,9 @@ class DreamService:
                 )
             else:
                 doing = self._cycle_word(session)
+                rounds = int(session.get("rounds") or 1)
+                if rounds > 1:
+                    doing = f"{doing}, round {rounds}" if doing else f"round {rounds}"
                 parts.append(
                     f"{kind}{f' ({doing})' if doing else ''} — since {start:%H:%M}, until {end:%H:%M}: "
                     f"{_plural(len(drafts), 'draft')} so far, {applied} applied."
@@ -884,6 +902,8 @@ class DreamService:
             "limit": self._limit_sentence(s),
             "limit_log": limit_log,
             "weekly_digest": str(s.get("weekly_digest") or ""),
+            "rounds": max(1, int(s.get("rounds") or 1)),
+            "murmurs": [m for m in _records(s.get("murmurs")) if isinstance(m, dict) and m.get("text")],
             "in_progress": not s.get("ended"),
         }
 
@@ -1045,6 +1065,9 @@ class DreamService:
             # Limits (§13): the live pause, and every pause of the night for the morning report.
             "paused": None,
             "limit_log": [],
+            # Rounds (§15) and sleep-talk (§14).
+            "rounds": 1,
+            "murmurs": [],
         }
 
     def _launch(self, session: dict) -> None:
@@ -1078,7 +1101,6 @@ class DreamService:
             self._publish_state(True, f"Dreaming since {start:%H:%M}")
             self._note(session, f"session started ({session['kind']}) — {start:%H:%M} to {end:%H:%M}, "
                                 f"planning on {session['model']}")
-            self._evolve_line(f"session started ({session['kind']}, {start:%H:%M}–{end:%H:%M})")
             ceiling = self._max_drafts()
             if self._mind is not None:
                 reason = self._run_mind(session, end, ceiling)
@@ -1169,26 +1191,116 @@ class DreamService:
 
     # ------------------------------------------------------------------ the mind (Phase 2)
     def _run_mind(self, session: dict, end: datetime | None, ceiling: int) -> str:
-        """Phase 2's night (DREAM_MIND.md §11): the mind runs REFLECT → RESEARCH → VERIFY →
-        EXPERIMENT → IMPROVE → RECORD against the hooks below; the session keeps owning the journal,
-        the lane, the stop flag and the pause. Returns the reason the night ended."""
+        """Phase 2's night (DREAM_MIND.md §11) in ROUNDS (§15): the mind runs REFLECT → RESEARCH →
+        VERIFY → EXPERIMENT → IMPROVE → RECORD against the hooks below; when a pass finishes with
+        time left it reflects again on what tonight already found and runs another, until the
+        window closes. The session keeps owning the journal, the lane, the stop flag and the pause;
+        the night's record is the sum of its rounds. Returns the reason the night ended."""
         self._improve_stopped = ""
         # The user's presence holds a NIGHTLY session's steps (the mind waits for ten quiet minutes
         # exactly as a draft does). A manual "dream now" is the user's own ask — they are at the
         # keyboard by definition — so the mind gets no probe and starts at once, as Phase 1's draft
         # loop (_await_quiet) has always done for a manual session.
         activity = self._activity_seconds if session.get("kind") == "nightly" else None
-        hooks = NightHooks(
-            improve=lambda requests: self._improve(session, list(requests), ceiling),
-            note=lambda line: self._note(session, line),
-            record=lambda fields: self._record(session, fields),
-            should_stop=self._stop.is_set,
-            nights=self._recent_sessions,
-            limit=lambda text: self._pause_for_limit(session, text),
-            rail_problem=self._rail_problem,
-            activity=activity,
-        )
-        summary = self._mind.run_night(end, ceiling, hooks=hooks)
+        reason = "the night's work was done"
+        round_no = 0
+        while True:
+            round_no += 1
+            session["rounds"] = round_no
+            if round_no > 1:
+                self._note(session, f"round {round_no} — reflecting again on what tonight found")
+            last_reason = reason  # the last round that did work names the night's end (a quiet later round adds nothing)
+            base = self._round_base(session)
+            hooks = NightHooks(
+                improve=lambda requests: self._improve(session, list(requests), ceiling),
+                note=lambda line: self._note(session, line),
+                record=lambda fields, _base=base: self._record_round(session, _base, fields),
+                should_stop=self._stop.is_set,
+                nights=self._recent_sessions,
+                limit=lambda text: self._pause_for_limit(session, text),
+                rail_problem=self._rail_problem,
+                activity=activity,
+                murmur=lambda text: self._murmur(session, text, "mind"),
+                round_no=round_no,
+            )
+            summary = self._mind.run_night(end, ceiling, hooks=hooks)
+            self._fold_summary(session, base, summary)
+            reason = str(getattr(summary, "reason", "") or "the night's work was done")
+            if self._improve_stopped == "the draft ceiling was reached":
+                # The round's draft ceiling is a natural end (another round may follow); the
+                # session's own word for it wins over the mind's default.
+                reason = self._improve_stopped
+                self._improve_stopped = ""
+            elif self._improve_stopped:
+                reason = self._improve_stopped  # for cause: drafts kept failing, the window ending
+            if round_no > 1 and reason in ("a quiet night", "reflection failed"):
+                # A later round that finds nothing more is the night's work being done, not a
+                # quiet night — the earlier rounds were anything but. The night ends the way its
+                # last working round did (its ceiling, its drained agenda).
+                self._note(session, f"nothing more tonight after round {round_no - 1} — the night's work is done")
+                reason = last_reason
+                break
+            if not self._another_round(session, summary, end, reason, round_no):
+                break
+        if self._stop.is_set():
+            return self._stop_reason or "stopped"
+        if self._improve_stopped:
+            return self._improve_stopped
+        return reason
+
+    @staticmethod
+    def _round_base(session: dict) -> dict:
+        """What the night holds before a round starts — the lists a round appends to."""
+        base = {key: list(_records(session.get(key))) for key in _ROUND_LISTS}
+        base["facts_noted"] = int(session.get("facts_noted") or 0)
+        base["agenda"] = dict(session.get("agenda")) if isinstance(session.get("agenda"), dict) else {}
+        return base
+
+    def _record_round(self, session: dict, base: dict, fields: dict) -> None:
+        """The mind's record hook for one round: its lists land ON TOP of what earlier rounds left
+        (the mind writes each list whole, so the round's copy is added to the base, never to
+        itself); counts add; the agenda's lists concatenate; everything else is the round's word.
+        Discoveries are deduped by text across rounds."""
+        for key, value in dict(fields or {}).items():
+            key = str(key)
+            if key in _ROUND_LISTS:
+                merged = list(base.get(key) or []) + _records(value)
+                if key == "discoveries":
+                    seen: set[str] = set()
+                    unique = []
+                    for d in merged:
+                        text = " ".join(str(d.get("text") or "").split()).casefold() if isinstance(d, dict) else str(d)
+                        if text and text in seen:
+                            continue
+                        seen.add(text)
+                        unique.append(d)
+                    merged = unique
+                session[key] = merged
+            elif key == "facts_noted":
+                try:
+                    session[key] = int(base.get("facts_noted") or 0) + int(value or 0)
+                except (TypeError, ValueError):
+                    session[key] = int(base.get("facts_noted") or 0)
+            elif key == "agenda" and isinstance(value, dict):
+                merged_agenda = {k: list(v) for k, v in (base.get("agenda") or {}).items() if isinstance(v, list)}
+                for k, v in value.items():
+                    if isinstance(v, list):
+                        merged_agenda[k] = merged_agenda.get(k, []) + list(v)
+                    else:
+                        merged_agenda[k] = v
+                session[key] = merged_agenda
+            elif key == "theme" and session.get("theme"):
+                continue  # the first round's theme is the morning report's closing line
+            elif key == "weekly_digest" and not value and session.get("weekly_digest"):
+                continue  # the digest is written once a week, on the first round
+            elif key == "self_model_delta" and not value and session.get("self_model_delta"):
+                continue  # a quiet later round changed nothing about the self-model
+            else:
+                session[key] = value
+        self._save_session(session)
+
+    def _fold_summary(self, session: dict, base: dict, summary) -> None:
+        """A round's NightSummary onto the record, through the same merge its record hook used."""
         fields = {}
         for key in ("discoveries", "facts", "facts_noted", "experiments", "agenda", "self_model_delta",
                     "research", "verify", "weekly_digest"):
@@ -1217,12 +1329,39 @@ class DreamService:
         # start one" instead of "found nothing worth changing".
         if leftover and not _records(session.get("plan")) and not _records(session.get("drafts")):
             fields["plan"] = [{"request": text, "effort": "deep", "takes": "", "origin": ""} for text in leftover]
-        self._record(session, fields)
-        if self._stop.is_set():
-            return self._stop_reason or "stopped"
-        if self._improve_stopped:
-            return self._improve_stopped
-        return str(getattr(summary, "reason", "") or "the night's work was done")
+        self._record_round(session, base, fields)
+
+    @staticmethod
+    def _round_did_work(summary) -> bool:
+        for key in ("research", "verify", "experiments", "drafts", "discoveries"):
+            if list(getattr(summary, key, None) or []):
+                return True
+        return int(getattr(summary, "facts_noted", 0) or 0) > 0
+
+    def _another_round(self, session: dict, summary, end: datetime | None, reason: str,
+                       round_no: int = 1) -> bool:
+        """Does the night go on (§15)? Only after a round that did work and ended on its own — the
+        agenda drained or the round's draft ceiling reached — with the stop flag clear, no systemic
+        failure, at least _ROUND_MIN of window left, and fewer than _MAX_ROUNDS passes so far. A
+        quiet round, a stop, a closing window, or drafts that kept failing end the night as they
+        always did."""
+        if self._stop.is_set() or self._improve_stopped:
+            return False
+        if round_no >= _MAX_ROUNDS:
+            self._note(session, f"{round_no} rounds tonight — enough; the rest of the window is for the morning")
+            return False
+        if reason not in ("the night's work was done", "the draft ceiling was reached", "the plan was done"):
+            return False
+        if not self._round_did_work(summary):
+            return False
+        if end is None:
+            return False
+        left = end - self._clock.now()
+        if left < _ROUND_MIN:
+            self._note(session, f"no time left for another round — {max(0, int(left.total_seconds() // 60))} "
+                                "minutes to the window's end")
+            return False
+        return True
 
     def _activity_seconds(self) -> float | None:
         """Seconds since the user's last turn through the shell's probe (dream.activity), or None
@@ -1256,7 +1395,8 @@ class DreamService:
         made: list[dict] = []
         failures_in_a_row = 0
         stopped = ""
-        while queue and len(session["drafts"]) < ceiling:
+        start = len(session["drafts"])  # the ceiling is per ROUND (§15): the night is bounded by its window
+        while queue and len(session["drafts"]) - start < ceiling:
             if not self._await_quiet(session):
                 stopped = "the window was ending"  # (a stop's own reason wins over this, above)
                 break
@@ -1283,7 +1423,7 @@ class DreamService:
             if (record["outcome"] == "drafted" and self._auto_apply()
                     and not self._stop.is_set()):
                 self._apply(session, record)
-        if queue and not stopped and len(session["drafts"]) >= ceiling:
+        if queue and not stopped and len(session["drafts"]) - start >= ceiling:
             stopped = "the draft ceiling was reached"
         self._improve_stopped = stopped
         session["agenda_remaining"] = [r.text for r in queue]
@@ -1381,7 +1521,6 @@ class DreamService:
         session["paused"] = {"since": entry["at"], "hint": hint, "retries": 0}
         self._note(session, f"paused at {now:%H:%M} — the plan's limit was reached"
                             + (f" ({hint})" if hint else "") + "; waiting for it to reset")
-        self._evolve_line(f"paused for the plan's limit at {now:%H:%M}")
         self._publish_state(True, _PAUSED_LINE)
         end = _parse_iso(session["window_end"])
         retries = 0
@@ -1407,7 +1546,6 @@ class DreamService:
                     entry["resumed_at"] = now.isoformat(timespec="seconds")
                     session["paused"] = None
                     self._note(session, f"resumed at {now:%H:%M} — the plan is answering again")
-                    self._evolve_line(f"resumed at {now:%H:%M}")
                     start = _parse_iso(session["window_start"]) or now
                     self._publish_state(True, f"Dreaming since {start:%H:%M}")
                     return True
@@ -1517,7 +1655,7 @@ class DreamService:
         session["drafts"].append(record)
         if item.takes:
             try:
-                self._evolve.take_backlog(item.takes)
+                self._backlog.take(item.takes)
             except Exception:  # noqa: BLE001
                 pass
         self._note(session, f"drafting ({record['effort']}, {model or 'the growth coder'}): "
@@ -1571,10 +1709,8 @@ class DreamService:
         record["ended"] = self._stamp()
         if record["outcome"] == "drafted":
             self._note(session, f"drafted {record['branch']} — {_first_line(record['summary'] or item.text)}")
-            self._evolve_line(f"drafted {record['branch']}: {_first_line(item.text)}")
         else:
             self._note(session, f"{record['outcome']}: {record['reason']} — {_first_line(item.text)}")
-            self._evolve_line(f"{record['outcome']}: {record['reason']}")
         return record
 
     def _hold_for_limit(self, record: dict, branch: str) -> None:
@@ -1629,7 +1765,6 @@ class DreamService:
             record["reason"] = "tests failed" + self._failure_detail(tail)
             record["tail"] = (tail or "")[-1500:]
             self._note(session, f"held {branch}: {record['reason']}")
-            self._evolve_line(f"held {branch}: {record['reason']}")
             return
         if self._stop.is_set():
             # The suite can take twenty minutes; a "stop dreaming", a switch-off or the window's end
@@ -1637,7 +1772,6 @@ class DreamService:
             record["outcome"] = "held"
             record["reason"] = "the session was stopped before it could be applied"
             self._note(session, f"held {branch}: {record['reason']}")
-            self._evolve_line(f"held {branch}: {record['reason']}")
             return
         try:
             line = self._selfdev.approve(branch, verified=True)
@@ -1645,13 +1779,11 @@ class DreamService:
             record["outcome"] = "held"
             record["reason"] = "couldn't apply it — " + _first_line(str(exc), 200)
             self._note(session, f"held {branch}: {record['reason']}")
-            self._evolve_line(f"held {branch}: {record['reason']}")
             return
         record["outcome"] = "applied"
         session["applied"].append({"branch": branch, "summary": record["summary"],
                                    "request": record["request"]})
         self._note(session, f"applied {branch} — {line}")
-        self._evolve_line(f"applied {branch}: {_first_line(record['summary'] or record['request'])}")
 
     @staticmethod
     def _failure_detail(tail: str) -> str:
@@ -1682,12 +1814,12 @@ class DreamService:
     def _material(self, session: dict) -> str:
         parts: list[str] = []
         material = ""
-        fn = getattr(self._evolve, "material", None)
+        fn = getattr(self._backlog, "material", None)
         if callable(fn):
             try:
                 material = fn() or ""
             except Exception:  # noqa: BLE001
-                _LOG.warning("dream: could not read Evolve's material", exc_info=True)
+                _LOG.warning("dream: could not read the backlog's material", exc_info=True)
         if material:
             parts.append(material)
         else:
@@ -1777,21 +1909,12 @@ class DreamService:
             session["report_delivered"] = False
             counts = self._counts(session)
             self._note(session, f"session ended ({reason}) — {counts}")
-            self._evolve_line(f"session ended ({reason}) — {counts}")
             with self._files_lock:
                 data = self._load()
                 data["report_pending"] = True
                 self._put_session(data, session)
                 self._save(data)
             self._set_setting(REPORT_PENDING_KEY, True)
-            if session["kind"] == "nightly":
-                end = _parse_iso(session["window_end"])
-                mark = getattr(self._evolve, "mark_night_covered", None)
-                if end is not None and callable(mark):
-                    try:
-                        mark(end.date())
-                    except Exception:  # noqa: BLE001
-                        pass
         except Exception:  # noqa: BLE001
             _LOG.warning("dream: wind-down failed", exc_info=True)
         finally:
@@ -1866,17 +1989,16 @@ class DreamService:
                               "job": str(job), "reason": reason}
         self._set_flag("rebuild_pending", False)
         self._note(session, f"rebuild and relaunch scheduled ({reason}) — quitting so it can run")
-        self._evolve_line(f"rebuild requested ({reason})")
         return reason
 
     def _carry_agenda(self, session: dict) -> None:
         """Nothing is lost to a limit (§13): when the night paused for the plan's limit and ended
-        with improvements still queued, they go to the Evolve backlog so tomorrow night starts from
-        them. The journal keeps them as `agenda_remaining` either way."""
+        with improvements still queued, they go to the improvement backlog so tomorrow night starts
+        from them. The journal keeps them as `agenda_remaining` either way."""
         remaining = [str(x) for x in _records(session.get("agenda_remaining")) if str(x).strip()]
         if not remaining or not session.get("limit_log"):
             return
-        add = getattr(self._evolve, "add_backlog", None)
+        add = getattr(self._backlog, "add", None)
         if not callable(add):
             return
         saved = 0
@@ -2217,15 +2339,28 @@ class DreamService:
         stamp = self._clock.now().strftime("%H:%M")
         session["notes"] = (session.get("notes") or [])[-(_NOTES_CAP - 1):] + [f"{stamp} {line}"]
         _LOG.info("dream: %s", line)
+        self._murmur(session, murmur_for_note(line), "note", save=False)
         self._save_session(session)
 
-    def _evolve_line(self, line: str) -> None:
-        fn = getattr(self._evolve, "journal", None)
-        if callable(fn):
-            try:
-                fn("dream: " + line)
-            except Exception:  # noqa: BLE001
-                pass
+    def _murmur(self, session: dict, text: str | None, kind: str = "note", *, save: bool = True) -> None:
+        """Sleep-talk (services/murmur.py, DREAM_MIND.md §14): keep one murmur on the night's record
+        and tell the face (DreamMurmur — the star flickers, the line drifts past, the shell whispers
+        it when someone is there). A template murmur ("note") is paced on the session's clock so a
+        burst of notes is one breath; the mind's own words ("mind") always land."""
+        if not text:
+            return
+        now = self._clock.now()
+        if kind == "note" and self._murmur_at is not None and now - self._murmur_at < timedelta(seconds=_MURMUR_GAP_S):
+            return
+        self._murmur_at = now
+        entry = {"at": now.strftime("%H:%M"), "text": text, "kind": kind}
+        session["murmurs"] = _records(session.get("murmurs"))[-(_MURMUR_KEEP - 1):] + [entry]
+        if save:
+            self._save_session(session)
+        try:
+            self._bus.publish(DreamMurmur(text=text, kind=kind))
+        except Exception:  # noqa: BLE001
+            _LOG.warning("dream: could not publish the murmur", exc_info=True)
 
     def _journal_refusal(self, day: str, reason: str) -> None:
         """Say once per night, in the journal, why a frozen build can't dream — never every 15 s."""
@@ -2237,7 +2372,6 @@ class DreamService:
             data["refused"] = {"day": day, "reason": reason}
             self._save(data)
         _LOG.warning("dream: not dreaming tonight — %s", reason)
-        self._evolve_line("not dreaming tonight — " + reason)
 
     def _close_orphans(self) -> None:
         """A session HELIX died in the middle of (a crash, a kill, a quit, power) is journaled with
@@ -2277,7 +2411,6 @@ class DreamService:
         self._set_setting(REPORT_PENDING_KEY, True)
         for s in closed:
             _LOG.warning("dream: closed the session of %s — HELIX had closed mid-session", s.get("day"))
-            self._evolve_line(f"session ended ({_CLOSED_MID_SESSION}) — {self._counts(s)}")
 
     # ------------------------------------------------------------------ the journal file
     def _journal_path(self) -> Path:

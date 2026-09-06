@@ -108,9 +108,12 @@ def test_the_self_change_bullet_teaches_reading_the_diff_before_applying():
     assert "approve_self_change" in bullet  # taught beside the approval, where the choice is made
 
 
-def test_the_evolve_bullet_sends_the_model_to_the_diff_rather_than_the_summary():
-    bullet = _bullet("EVOLVE.")
-    assert "show_self_change" in bullet
+def test_the_dreaming_bullet_sends_the_model_to_the_diff_rather_than_the_summary():
+    """A draft waiting for review is described from its diff, never guessed from the summary — the
+    guidance the retired Evolve bullet carried now lives with dreaming, the one night faculty."""
+    bullet = _bullet("DREAMING.")
+    assert "show_self_change" in bullet and "approve_self_change" in bullet
+    assert "EVOLVE." not in prompts.CONSOLE_SYSTEM
 
 
 def test_the_dreaming_bullet_teaches_every_dream_tool_and_the_voice_shapes():

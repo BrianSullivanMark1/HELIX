@@ -124,7 +124,6 @@ _TOOL_PHRASES: dict[str, str] = {
     "print_hologram": "Sending it to the printer",
     "printer_status": "Checking on the printer",
     "note_improvement": "Adding that to my list",
-    "evolve_report": "Checking my overnight work",
     # Dreaming — the nightly self-improvement session (READ_ME/DREAM.md). Three of these start, stop
     # or reschedule hours of unattended self-editing (fenced); the fourth only reads.
     "dream_schedule": "Setting my dream schedule",

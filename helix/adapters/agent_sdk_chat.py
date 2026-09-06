@@ -87,7 +87,7 @@ def _hide_child_windows() -> None:
         pass
 
 ORB_MODEL = "claude-sonnet-4-6"   # fast conversational turns (mirrors the API path's tiering)
-# NOTE: deep-think (think_harder) and Evolve pass their model EXPLICITLY per call now — the growth
+# NOTE: deep-think (think_harder) and the dream session pass their model EXPLICITLY per call now — the growth
 # model resolved by GrowthModelResolver (Fable 5, auto-upscaling), not a constant here. There is
 # deliberately no DEEP_MODEL constant; the growth tier is decided in the container/resolver.
 _TURN_TIMEOUT_S = 600.0           # one orb turn (tools included) must land inside this

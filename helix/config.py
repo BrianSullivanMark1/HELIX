@@ -107,6 +107,9 @@ VOLATILE_STORE_NAMES: tuple[str, ...] = (
     # by the session thread, so both guards must skip them like the dream journal.
     "helix_verified.json",
     "helix_self.json",
+    # The improvement backlog (services/backlog.py): the night queues research-found ideas on it
+    # while its own coder draft runs, so both guards must skip it like the dream journal.
+    "helix_backlog.json",
 )
 
 

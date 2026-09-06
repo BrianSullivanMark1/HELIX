@@ -173,6 +173,27 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
   100% { opacity: 0; }
 }
 
+/* Sleep-talk: a murmur condenses in above the pill, drifts up for a few seconds, and thins away. */
+.sleep-talk {
+  pointer-events: none;
+  max-width: 560px;
+  text-align: center;
+  font-style: italic;
+  font-size: 14px;
+  letter-spacing: 0.3px;
+  margin-bottom: 10px;
+  color: color-mix(in srgb, var(--state-color) 62%, #e2edf1);
+  text-shadow: 0 0 16px color-mix(in srgb, var(--state-color) 45%, transparent);
+  opacity: 0.92;
+  animation: murmurIn 1.4s ease-out both;
+  transition: opacity 2.6s ease-in, transform 2.6s ease-in;
+}
+.sleep-talk.fading { opacity: 0; transform: translateY(-18px); }
+@keyframes murmurIn {
+  from { opacity: 0; transform: translateY(8px); filter: blur(6px); }
+  to { opacity: 0.92; transform: translateY(0); filter: blur(0); }
+}
+
 /* PTT level gauge: the mic level physically fills a ring around the held button. */
 .ptt-gauge {
   position: relative;

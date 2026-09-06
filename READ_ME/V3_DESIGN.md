@@ -110,3 +110,5 @@ scenes are unchanged; the primitive-JSON engine and its glossy render rig are re
   PROTECTED_FILES / SHELL_PREFIX / EDITABLE_PREFIXES · knowledge/file/api-body fencing · CSPRNG
   nonces · subscription workdir off the data tree · single-instance mutex · voice-identity gate.
 - Version: `3.0.0`. The exe stays `HELIX.exe`; built with `python build.py --with-voice`.
+
+> **2026-09-05:** §5's Evolve faculty was retired in favour of the DREAM SESSION (READ_ME/DREAM.md, DREAM_MIND.md); its backlog lives on in `services/backlog.py`.

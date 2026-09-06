@@ -192,15 +192,20 @@ class _SelfDev:
         return self.findings
 
 
-class _Evolve:
+class _Backlog:
+    """services/backlog.py's surface as the mind sees it: material, add (and items for the pins)."""
+
     def __init__(self):
         self.backlog: list[str] = []
+
+    def items(self):
+        return list(self.backlog)
 
     def material(self):
         return ("IMPROVEMENT BACKLOG (…):\n- remember the camera\n\nLESSONS (…):\n[brian] Keep replies short"
                 "\n\nLOG TAIL (the last lines of helix.log):\nERROR reminders: fired twice")
 
-    def add_backlog(self, text):
+    def add(self, text):
         if text not in self.backlog:
             self.backlog.append(text)
         return True
@@ -289,7 +294,7 @@ FOLDED_PLAN = (
 
 
 def _mind(clock=None, *, chat=None, conversation=None, verified=None, research=None, selfdev=None,
-          evolve=None, store=None, activity=None, tools=None, growth_model=None, source_root=None,
+          backlog=None, store=None, activity=None, tools=None, growth_model=None, source_root=None,
           agents=None, default_agent_names=(), log_tail=None):
     clock = clock or _Clock()
     return DreamMind(
@@ -297,7 +302,7 @@ def _mind(clock=None, *, chat=None, conversation=None, verified=None, research=N
         conversation, selfdev, verified, research, None, None, tools if tools is not None else _Tools(),
         store if store is not None else _Store(), _Store(), clock,
         log_tail or (lambda: "WARNING x\nINFO y\nERROR z"),
-        activity, evolve=evolve, growth_model=growth_model, source_root=source_root, agents=agents,
+        activity, backlog=backlog, growth_model=growth_model, source_root=source_root, agents=agents,
         default_agent_names=default_agent_names,
     )
 
@@ -328,12 +333,12 @@ def _full_rig(clock=None, **kw):
                     "[verified: https://invensense.tdk.com/products/inmp441/]\nFACTS NOTED: 1\nIDEAS:\n")
     conversation = _Conversation(RESEARCH_REPLY, RESEARCH_REPLY, verify_reply, clock=clock,
                                  verified=verified, research=research, on_turn=on_turn)
-    evolve = _Evolve()
+    backlog = _Backlog()
     selfdev = _SelfDev()
     store = kw.pop("store", None) or _Store()  # a test may seed the self-model (the nights count)
     mind = _mind(clock, conversation=conversation, verified=verified, research=research, selfdev=selfdev,
-                 evolve=evolve, store=store, **kw)
-    return mind, conversation, verified, research, selfdev, evolve, store
+                 backlog=backlog, store=store, **kw)
+    return mind, conversation, verified, research, selfdev, backlog, store
 
 
 # ----------------------------------------------------------------------------- limits (§13)
@@ -543,7 +548,7 @@ def test_choose_discoveries_ranks_sourced_things_first_and_marks_the_unverified(
 # ----------------------------------------------------------------------------- the night
 def test_the_night_runs_all_six_cycles_against_the_fakes():
     clock = _Clock()
-    mind, conversation, verified, research, selfdev, evolve, store = _full_rig(clock)
+    mind, conversation, verified, research, selfdev, backlog, store = _full_rig(clock)
     hooks = _Hooks()
     summary = mind.run_night(clock.dt + timedelta(hours=8), 5, hooks=hooks.hooks)
     # REFLECT: the growth chat, the fenced material, the system prompt; the self-model saved + dated.
@@ -577,7 +582,7 @@ def test_the_night_runs_all_six_cycles_against_the_fakes():
     assert first["facts_noted"] == 1 and first["facts"][0]["host"] == "wiki.seeedstudio.com"
     assert first["facts"][0]["project"] == "IronEye" and first["facts"][0]["date"] == "2026-09-04"
     assert summary.research[1]["facts_noted"] == 0  # the second turn noted nothing new: counted from the store
-    assert evolve.backlog[0].startswith("Use the esp-idf I2S driver for the mic (source: https://docs.espressif.com/i2s)")
+    assert backlog.backlog[0].startswith("Use the esp-idf I2S driver for the mic (source: https://docs.espressif.com/i2s)")
     # VERIFY: the claim, the addendum, the verdict; the fact it noted counts once.
     verify_calls = [c for c in conversation.calls if "VERIFY TURN" in c[0]]
     assert len(verify_calls) == 1 and DREAM_VERIFY_ADDENDUM in verify_calls[0][0]
@@ -589,7 +594,7 @@ def test_the_night_runs_all_six_cycles_against_the_fakes():
     assert 60 <= selfdev.requests[0][1] <= 1500
     assert summary.experiments[0]["ok"] is True
     assert summary.experiments[0]["recommendation"].startswith("Switch the DDG parser to lxml")
-    assert any(b.startswith("Switch the DDG parser to lxml") and "from an experiment" in b for b in evolve.backlog)
+    assert any(b.startswith("Switch the DDG parser to lxml") and "from an experiment" in b for b in backlog.backlog)
     # IMPROVE: the ideas were folded into the plan — research-derived first — and drafted through the hooks.
     assert chat.systems[1] is not None and "FINAL numbered list" in chat.prompts[1]
     assert "TONIGHT'S RESEARCH IDEAS" in chat.prompts[1] and "esp-idf I2S driver" in chat.prompts[1]
@@ -872,7 +877,7 @@ def test_the_seventh_night_writes_a_weekly_digest_and_falls_back_when_the_chat_c
                "drafts": [{"outcome": "drafted"}]} for i in range(3)]
     digest = ("This week I verified the XIAO's PSRAM on Seeed's wiki, applied three changes, and left "
               "two drafts waiting for you.")
-    mind, conversation, verified, research, selfdev, evolve, store = _full_rig(
+    mind, conversation, verified, research, selfdev, backlog, store = _full_rig(
         clock, chat=_Chat(REFLECTION, FOLDED_PLAN, digest), store=_Store({"self_model": {"nights": 6}}))
     hooks = _Hooks(nights=nights)
     summary = mind.run_night(clock.dt + timedelta(hours=8), 5, hooks=hooks.hooks)
@@ -1032,7 +1037,7 @@ class _LeakyConversation(_Conversation):
                 Message(Role.USER, "and the slack one is xoxb-1234567890-abcdefghijk thanks", now - timedelta(days=1))]
 
 
-class _LeakyEvolve(_Evolve):
+class _LeakyBacklog(_Backlog):
     def material(self):
         return ("IMPROVEMENT BACKLOG (…):\n- use github_pat_11ABCDEFGHIJKLMNOPQRSTUV for the watcher\n\n"
                 "LESSONS (…):\n[brian] Keep replies short\n\nLOG TAIL (…):\nERROR x")
@@ -1044,7 +1049,7 @@ def test_no_secret_reaches_the_reflect_prompt_or_the_journaled_trail():
     by design) is scrubbed line by line too."""
     hooks = _Hooks()
     chat = _Chat(REFLECTION, FOLDED_PLAN)
-    mind = _mind(chat=chat, conversation=_LeakyConversation(), evolve=_LeakyEvolve(),
+    mind = _mind(chat=chat, conversation=_LeakyConversation(), backlog=_LeakyBacklog(),
                  log_tail=lambda: "ERROR call_api: 401 with Authorization: Bearer ghp_ABCDEFTOKENABCDEFTOKEN\n"
                                   "WARNING reminders: api_key=AKIAIOSFODNN7EXAMPLE refused")
     mind._reflect(hooks.hooks, 2)
@@ -1331,3 +1336,49 @@ def test_the_dreams_own_chat_refusing_to_serve_pauses_the_night_like_a_limit():
 
 
 from helix.domain.models import Role  # noqa: E402  (used by the rail test above)
+
+
+# ----- sleep-talk (§14) and rounds (§15) -----
+def test_parse_reflection_and_findings_lift_the_murmur_line_off_the_reply():
+    r = parse_reflection(REFLECTION + "\nMURMUR: taking stock… the camera again…", 10)
+    assert r.murmur == "taking stock… the camera again…" and r.improve and not r.quiet
+    q = parse_reflection("QUIET\nMURMUR: nothing tonight… just drifting…", 10)
+    assert q.quiet and q.murmur == "nothing tonight… just drifting…"
+    f = parse_findings(RESEARCH_REPLY + "\nMURMUR: eight megabytes… room enough…")
+    assert f.murmur == "eight megabytes… room enough…" and f.findings and f.ideas
+    assert all("MURMUR" not in i.text for i in f.ideas)  # never glued onto the last idea
+    assert parse_findings(RESEARCH_REPLY).murmur == ""
+
+
+def test_the_reflect_prompt_asks_for_a_murmur_and_a_later_round_reads_tonights_entry():
+    from helix.services.murmur import start_murmur
+
+    hooks = _Hooks()
+    said: list[str] = []
+    hooks.hooks.murmur = said.append
+    chat = _Chat(REFLECTION + "\nMURMUR: taking stock… the camera again…")
+    mind = _mind(chat=chat)
+    reflection = mind._reflect(hooks.hooks, 2)
+    assert reflection is not None and len(reflection.improve) == 2
+    assert "MURMUR: <the murmur>" in chat.prompts[0] and "ROUND" not in chat.prompts[0]
+    assert said == [start_murmur("reflect", ""), "taking stock… the camera again…"]
+    hooks.hooks.round_no = 3
+    mind._reflect(hooks.hooks, 2)
+    assert "THIS IS ROUND 3 OF TONIGHT" in chat.prompts[1] and "never repeat" in chat.prompts[1]
+
+
+def test_a_later_round_neither_bumps_the_nights_counter_nor_writes_the_digest():
+    clock = _Clock()
+    store = _Store()
+    hooks = _Hooks()
+    hooks.hooks.round_no = 2
+    mind = _mind(clock, chat=_Chat("QUIET"), store=store)
+    mind._save_self_model({"nights": 6})
+    summary = mind.run_night(clock.dt + timedelta(hours=8), 5, hooks=hooks.hooks)
+    assert mind._load_self_model()["nights"] == 6
+    assert summary.weekly_digest == "" and "weekly_digest" not in hooks.merged()
+    # The first round of the seventh night counts it and writes the digest.
+    hooks2 = _Hooks()
+    mind2 = _mind(clock, chat=_Chat("QUIET"), store=store)
+    mind2.run_night(clock.dt + timedelta(hours=8), 5, hooks=hooks2.hooks)
+    assert mind2._load_self_model()["nights"] == 7 and "weekly_digest" in hooks2.merged()

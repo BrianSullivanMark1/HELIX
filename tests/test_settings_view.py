@@ -113,18 +113,6 @@ def test_two_credential_service_needs_both_to_show_connected(_app):
     assert dots["alpaca"].text() == "●"
 
 
-def test_evolve_defaults_on_and_round_trips(_app):
-    s, c = _Settings(), _Conns()
-    view = SettingsView(s, c)
-    assert view._evolve.isChecked()  # a missing key means ON
-    view._evolve.setChecked(False)
-    view._save()
-    assert s.get("evolve_enabled") is False
-    s.set("evolve_enabled", True)
-    view.reload()
-    assert view._evolve.isChecked()
-
-
 class _Sub:
     """Mirrors SubscriptionBrain.active(): live only when a token is saved AND the engine is present.
 

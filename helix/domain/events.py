@@ -53,7 +53,7 @@ class AgentsChanged(Event):
 class SelfChangeProgress(Event):
     """A live step while HELIX drafts a change to its OWN code in the background.
 
-    `unattended` means nobody asked for this draft and nobody is in the room — the overnight Evolve
+    `unattended` means nobody asked for this draft and nobody is in the room — the overnight dream session
     pass reuses this very lane between 3 and 6 AM. Growth narration is deliberately spoken even when
     the mic is asleep (a user who asked HELIX to improve itself WANTS to hear it describe what it is
     becoming), so without this flag riding along with the line, the 3 AM pass reads every coder step
@@ -334,6 +334,16 @@ class DreamStateChanged(Event):
 
     running: bool
     line: str = ""
+
+
+@dataclass(frozen=True)
+class DreamMurmur(Event):
+    """One line of sleep-talk from the dream session (services/murmur.py): what HELIX mumbles about
+    the moment it is in. The face drifts it past the orb and flickers the star; the shell whispers
+    it aloud when someone is there to hear. Published from the session thread."""
+
+    text: str
+    kind: str = "note"  # "mind" — the model's own murmur; "note" — a template for a session moment
 
 
 @dataclass(frozen=True)

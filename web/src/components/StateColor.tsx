@@ -2,7 +2,7 @@
 // (10Hz, only on meaningful change), so the whole HUD breathes with the star. Also fires the
 // done/error wash: the shockwave leaves the sphere and crosses the interface.
 import { useEffect, useRef } from "react";
-import { HUE_LOOK, STATE_LOOK } from "./Orb";
+import { HUE_LOOK, baseLook } from "./Orb";
 import { useHelix } from "../lib/store";
 
 export default function StateColor() {
@@ -17,7 +17,7 @@ export default function StateColor() {
 
     const tick = (now: number) => {
       const s = useHelix.getState();
-      const base = STATE_LOOK[s.orb] ?? STATE_LOOK.idle;
+      const base = baseLook(s); // asleep, the whole HUD tints indigo with the star
       const target = s.hue !== "none" ? HUE_LOOK[s.hue] : base.color;
       for (let i = 0; i < 3; i++) eased[i] += (target[i] - eased[i]) * 0.06;
 
