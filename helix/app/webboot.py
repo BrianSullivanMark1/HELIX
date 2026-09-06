@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -26,19 +27,36 @@ _LOG = get_logger("webboot")
 # act, from its own thread, and the journal write + status push just before it deserve a moment to
 # land. The rebuild script is already waiting for the exe to exit, so nothing else is in a hurry.
 _REBUILD_QUIT_DELAY_S = 1.0
+# A rebuild now follows ANY session that applied changes — the user may be mid-sentence with HELIX.
+# The quit waits, polling `ready()` (the shell: no turn running, nothing being spoken — the
+# announcement included), up to this long; then it goes regardless, the rebuild script is waiting.
+_REBUILD_QUIT_MAX_WAIT_S = 45.0
+_REBUILD_QUIT_POLL_S = 0.5
 
 
-def wire_rebuild_quit(bus, app, quit_fn):
+def wire_rebuild_quit(bus, app, quit_fn, ready=None):
     """The quit-for-rebuild hook (READ_ME/DREAM.md §6): when the dream session has scheduled the
     detached rebuild it publishes RebuildRequested, and the ONLY thing left is to get out of the
     way — the same graceful quit the Settings power button runs. Marks the instance as quitting
     first (the snapshot probe answers 503 from that moment, so an icon click during the teardown
-    boots in our place instead of pointing a tab at a corpse). Returns the handler for tests."""
+    boots in our place instead of pointing a tab at a corpse), then waits for `ready()` (a turn or
+    a reply in flight finishes first) before quitting. Returns the handler for tests."""
+
+    def _quit_when_ready() -> None:
+        deadline = time.monotonic() + _REBUILD_QUIT_MAX_WAIT_S
+        while ready is not None and time.monotonic() < deadline:
+            try:
+                if ready():
+                    break
+            except Exception:  # noqa: BLE001 — a broken probe must never hold the rebuild
+                break
+            time.sleep(_REBUILD_QUIT_POLL_S)
+        quit_fn()
 
     def _on_rebuild(ev: RebuildRequested) -> None:
-        _LOG.info("quit requested for the overnight rebuild: %s", ev.reason or "(no reason)")
+        _LOG.info("quit requested for the rebuild: %s", ev.reason or "(no reason)")
         app.state.quitting = True
-        timer = threading.Timer(_REBUILD_QUIT_DELAY_S, quit_fn)
+        timer = threading.Timer(_REBUILD_QUIT_DELAY_S, _quit_when_ready)
         timer.daemon = True
         timer.start()
 
@@ -114,7 +132,7 @@ def run_web(open_mode: str = "window") -> int:
     app.state.quit = graceful_quit
     # The dream session's rebuild (DREAM.md §6): it schedules the detached rebuild-and-relaunch job
     # itself, then asks for this same graceful quit through the bus so the new build can take over.
-    wire_rebuild_quit(container.bus, app, graceful_quit)
+    wire_rebuild_quit(container.bus, app, graceful_quit, ready=shell.quiet_now)
     port = int(container.settings.get(PORT_SETTING) or DEFAULT_PORT)
     token = app.state.token
     url = f"http://127.0.0.1:{port}/?t={token}"

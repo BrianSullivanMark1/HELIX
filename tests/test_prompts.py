@@ -122,7 +122,7 @@ def test_the_dreaming_bullet_teaches_every_dream_tool_and_the_voice_shapes():
     is (Fable, test-gated merges, the dawn rebuild), how to switch it off, and the one rule that
     keeps mornings quiet: the report is told once, never mid-task."""
     bullet = _bullet("DREAMING.")
-    for tool in ("dream_schedule", "dream_now", "stop_dreaming", "dream_status"):
+    for tool in ("dream_schedule", "dream_now", "stop_dreaming", "rebuild_helix", "dream_status"):
         assert tool in bullet, tool
     for shape in ("dream tonight from eleven for eight hours", "no dreaming tonight",
                   "stop dreaming", "dream for an hour now", "how did you sleep?",

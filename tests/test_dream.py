@@ -913,10 +913,11 @@ def test_a_frozen_night_that_applied_changes_schedules_the_rebuild_and_asks_to_q
     assert "and applied 3" in report and report.endswith("I rebuilt and relaunched at 7:20. Its theme: Reminders that fire once.")
 
 
-def test_a_night_the_user_stopped_or_is_awake_for_never_quits_the_app_for_a_rebuild(tmp_path):
-    # "Stop dreaming" on the frozen build: the rebuild would quit HELIX one second after the user
-    # spoke. A night the user ended by hand — or is at the machine as it ends — carries its applied
-    # changes to the next quiet night instead.
+def test_a_night_the_user_stopped_or_is_awake_for_still_rebuilds_announced(tmp_path):
+    """2026-09-05, the owner: "after a dream session it should rebuild itself — that's the purpose
+    of a dream." A night ended by "stop dreaming", or with the user at the machine as it ends,
+    rebuilds like any other: the shell announces it and the quit hook waits for a turn in flight,
+    so nothing is cut off. Nothing is carried to a later night any more."""
     rb = _Rebuilder()
 
     def suite(branch):
@@ -928,16 +929,19 @@ def test_a_night_the_user_stopped_or_is_awake_for_never_quits_the_app_for_a_rebu
     rig.dream.tick()
     s = rig.last()
     assert s["stopped_reason"] == "the user asked" and len(s["applied"]) == 1
-    assert rb.scheduled == [] and rig.rebuilds == [] and rig.journal()["rebuild_pending"] is True
-    assert any("after the next quiet night — you stopped the session" in n for n in s["notes"])
-    assert "They'll load at the next rebuild." in rig.dream.morning_report()
+    assert rb.scheduled == ["applied 1 change"] and [r.reason for r in rig.rebuilds] == ["applied 1 change"]
+    assert rig.journal()["rebuild_pending"] is False
+    assert not any("next quiet night" in n for n in s["notes"])
+    assert any("rebuild and relaunch scheduled (applied 1 change)" in n for n in s["notes"])
+    assert "They'll load at the next rebuild." not in rig.dream.morning_report()
 
     awake = _frozen_rig(tmp_path, rebuilder=rb, clock=_Clock(hour=23, day=5),
                         activity=lambda: 15 * 60.0 if len(awake.lane.requests) < 3 else 5.0)
     awake.dream.tick()  # the plan runs while the user is away; they are back as it ends
     assert awake.last()["stopped_reason"] == "the plan was done" and len(awake.last()["applied"]) == 3
-    assert rb.scheduled == [] and awake.rebuilds == [] and awake.journal()["rebuild_pending"] is True
-    assert any("you're using the machine" in n for n in awake.last()["notes"])
+    assert rb.scheduled == ["applied 1 change", "applied 3 changes"] and len(awake.rebuilds) == 1
+    assert awake.journal()["rebuild_pending"] is False
+    assert not any("you're using the machine" in n for n in awake.last()["notes"])
 
 
 def test_the_report_is_honest_about_a_rebuild_that_failed_or_left_no_record(tmp_path):
@@ -979,16 +983,57 @@ def test_no_rebuild_when_nothing_applied_or_rebuilding_is_off_or_it_cannot(tmp_p
     assert broken.rebuilds == [] and any("could not be scheduled — disk full" in n for n in broken.last()["notes"])
 
 
-def test_a_manual_session_never_quits_the_app_but_the_next_night_catches_up(tmp_path):
+def test_a_manual_session_that_applied_changes_rebuilds_at_its_end_too(tmp_path):
+    """"Dream for an hour now" that merged something quits, rebuilds and relaunches like a night
+    does — the user asked for the improvement and gets it, announced, six minutes later."""
     rb = _Rebuilder()
     rig = _frozen_rig(tmp_path, rebuilder=rb, clock=_Clock(hour=14))
     rig.dream.dream_now(60)
-    assert rb.scheduled == [] and rig.rebuilds == [] and rig.journal()["rebuild_pending"] is True
-    assert any("next nightly session will rebuild" in n for n in rig.last()["notes"])
+    assert rb.scheduled == ["applied 3 changes"] and [r.reason for r in rig.rebuilds] == ["applied 3 changes"]
+    assert rig.journal()["rebuild_pending"] is False
+    assert not any("next nightly session" in n for n in rig.last()["notes"])
+
+
+def test_changes_a_session_could_not_rebuild_are_caught_up_by_the_next_session(tmp_path):
+    rig = _frozen_rig(tmp_path, rebuilder=_Rebuilder(available=False, why="the source isn't reachable"),
+                      clock=_Clock(hour=14))
+    rig.dream.dream_now(60)
+    assert rig.rebuilds == [] and rig.journal()["rebuild_pending"] is True
+    rb = _Rebuilder()
     night = _Rig(tmp_path, paths=_paths(tmp_path, frozen=True), rebuilder=rb, chat=_Chat("QUIET"),
                  settings=rig.settings, clock=_Clock(hour=23))
     night.dream.tick()
     assert rb.scheduled == ["changes applied earlier"] and len(night.rebuilds) == 1
+
+
+def test_rebuild_yourself_rebuilds_waiting_changes_and_says_so_otherwise(tmp_path):
+    from helix.domain.events import RebuildRequested
+
+    # Development run: a restart loads changes; nothing to rebuild.
+    dev = _Rig(tmp_path)
+    assert dev.dream.rebuild_now().startswith("This is a development run")
+    # Frozen, nothing waiting: says so, does nothing.
+    rb = _Rebuilder()
+    rig = _frozen_rig(tmp_path, rebuilder=rb, clock=_Clock(hour=14))
+    assert rig.dream.rebuild_now() == "The running build already has everything I've applied — nothing to rebuild."
+    assert rb.scheduled == []
+    # Changes left waiting (the rebuilder was away when the session ended): now they rebuild.
+    rig.dream._set_flag("rebuild_pending", True)
+    heard: list[RebuildRequested] = []
+    rig.bus.subscribe(RebuildRequested, heard.append)
+    line = rig.dream.rebuild_now()
+    assert line.startswith("Rebuilding myself now") and "six minutes" in line
+    assert rb.scheduled == ["the user asked for a rebuild"] and [e.reason for e in heard] == ["the user asked for a rebuild"]
+    assert rig.journal()["rebuild_pending"] is False
+    # The rebuilder can't: the reason, and the flag stays.
+    rig.dream._set_flag("rebuild_pending", True)
+    rig.dream._rebuilder = _Rebuilder(available=False, why="the source isn't reachable")
+    assert rig.dream.rebuild_now() == "I can't rebuild right now — the source isn't reachable."
+    assert rig.journal()["rebuild_pending"] is True
+    # Mid-session: the session's own end does it.
+    rig.dream._session = {"kind": "now"}
+    assert rig.dream.rebuild_now().startswith("I'm dreaming right now")
+    rig.dream._session = None
 
 
 def test_in_development_an_applied_change_asks_for_a_restart_not_a_rebuild(tmp_path):
@@ -1731,7 +1776,7 @@ def test_a_night_that_ended_because_drafts_kept_failing_still_rebuilds_and_never
     assert len(s["applied"]) == 1 and s["stopped_reason"].startswith("drafts kept failing")
     assert rb.scheduled == ["applied 1 change"] and [r.reason for r in rig.rebuilds] == ["applied 1 change"]
     assert not any("you stopped the session" in n for n in s["notes"])
-    # …and with the user at the machine as it ends, the deferral names THAT, not a stop.
+    # …and with the user at the machine as it ends, the rebuild still runs (announced by the shell).
     awake = _Rig(tmp_path, mind=_Mind(requests=requests, summary=mind.summary), paths=_paths(tmp_path, frozen=True),
                  rebuilder=_Rebuilder(), settings=_Settings({"dream_auto_apply": True, "dream_rebuild": True}),
                  activity=lambda: 5.0, clock=_Clock(day=5))
@@ -1739,7 +1784,8 @@ def test_a_night_that_ended_because_drafts_kept_failing_still_rebuilds_and_never
     awake.dream._lane = awake.lane
     awake.dream.activity = lambda: 15 * 60.0 if len(awake.lane.requests) < 3 else 5.0
     awake.dream.tick()
-    assert any("after the next quiet night — you're using the machine" in n for n in awake.last()["notes"])
+    assert [r.reason for r in awake.rebuilds] == ["applied 1 change"]  # the user's presence no longer defers it
+    assert not any("next quiet night" in n for n in awake.last()["notes"])
     assert dream_mod._natural_end("drafts kept failing: x") and dream_mod._natural_end("reflection failed")
     assert not dream_mod._natural_end("the user asked")
 

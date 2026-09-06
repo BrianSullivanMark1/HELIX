@@ -1004,3 +1004,31 @@ def test_a_murmur_is_whispered_for_a_manual_session_or_a_user_who_just_spoke_nev
         assert plain.spoken == []
     finally:
         sh.shutdown()
+
+
+def test_a_rebuild_is_announced_before_the_lights_go_out_and_quiet_now_says_when():
+    """RebuildRequested now follows ANY session that applied changes — the user may be right there.
+    The shell says what is happening (a bubble, spoken) and tells the quit hook when nothing is in
+    flight."""
+    from helix.domain.events import RebuildRequested
+
+    container = _DreamContainer()
+    events: list[dict] = []
+    voice = _TalkingVoice()
+    sh = ShellSession(container, events.append, voice=voice)
+    try:
+        assert sh.quiet_now() is True
+        container.bus.publish(RebuildRequested(reason="applied 2 changes"))
+        said = [e["text"] for e in events if e.get("t") == "msg" and e.get("role") == "helix"]
+        assert said and said[-1].startswith("I applied 2 changes to myself and they passed the full test suite.")
+        assert "back in about six minutes" in said[-1] and voice.spoken[-1] == said[-1]
+        container.bus.publish(RebuildRequested(reason="changes applied earlier"))
+        said = [e["text"] for e in events if e.get("t") == "msg" and e.get("role") == "helix"]
+        assert said[-1].startswith("Changes I applied earlier are waiting in my source.")
+        sh._busy = True
+        assert sh.quiet_now() is False  # a turn in flight holds the quit
+        sh._busy = False
+        voice.is_active = lambda: True  # a reply still being spoken holds it too
+        assert sh.quiet_now() is False
+    finally:
+        sh.shutdown()

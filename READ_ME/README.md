@@ -88,7 +88,9 @@ A packaged install is built with `python build.py --with-voice`; the frozen app 
   each round reflecting again on what the night has found. While it dreams the orb sleeps (indigo, an
   aurora drifting through it) and HELIX talks in its sleep: murmurs about the page it is reading or the
   change it is making drift past the orb, whispered aloud only when you're there. The one-draft
-  "Evolve" pass it grew out of was retired on 2026-09-05. It plans on Fable, drafts change
+  "Evolve" pass it grew out of was retired on 2026-09-05. Any session that applied changes — a manual
+  one too — says so, quits, rebuilds and relaunches itself, so the improvement is what runs next.
+  It plans on Fable, drafts change
   after change on a branch each, and — only if you switch on automatic applying — merges a draft when
   its full test suite passes on it; anything red waits for you. It can rebuild and relaunch itself
   before you wake (the previous build is kept and restored if the new one fails), and the first time

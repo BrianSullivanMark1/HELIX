@@ -43,9 +43,9 @@ from helix.domain.events import (
 )
 
 try:  # the dream engine's own start/end announcement; without it the heartbeat polls (DREAM.md §7)
-    from helix.domain.events import DreamMurmur, DreamStateChanged
+    from helix.domain.events import DreamMurmur, DreamStateChanged, RebuildRequested
 except ImportError:  # pragma: no cover — an events module without it: polling only
-    DreamStateChanged = DreamMurmur = None
+    DreamStateChanged = DreamMurmur = RebuildRequested = None
 from helix.logging_setup import get_logger
 from helix.services import attachments
 from helix.services import images as imagesvc
@@ -186,6 +186,8 @@ class ShellSession:
             bus.subscribe(DreamStateChanged, self._on_dream_state)
         if DreamMurmur is not None:
             bus.subscribe(DreamMurmur, self._on_dream_murmur)
+        if RebuildRequested is not None:
+            bus.subscribe(RebuildRequested, self._on_rebuild_requested)
         self._wire_dream()
 
         self._heartbeat = threading.Timer(_HEARTBEAT_S, self._tick)
@@ -1708,6 +1710,33 @@ class ShellSession:
         self.push({"t": "murmur", **self._murmur_last})
         if self._murmur_aloud():
             self._whisper(text)
+
+    def _on_rebuild_requested(self, ev) -> None:
+        """RebuildRequested from the engine: HELIX is about to quit, rebuild and relaunch itself.
+        It says so first — a bubble and, with voice on, the spoken line — because a rebuild now
+        follows ANY session that applied changes, the user possibly right there. The quit hook
+        (app/webboot.py) waits for quiet_now() so the sentence finishes before the lights go out."""
+        reason = " ".join(str(getattr(ev, "reason", "") or "").split())
+        tail = "Rebuilding myself now — I'll quit and be back in about six minutes."
+        if reason.startswith("applied"):
+            text = f"I {reason} to myself and they passed the full test suite. {tail}"
+        elif reason == "changes applied earlier":
+            text = f"Changes I applied earlier are waiting in my source. {tail}"
+        else:
+            text = tail
+        self._bubble("helix", text)
+        self._speak(text)
+
+    def quiet_now(self) -> bool:
+        """Nothing in flight: no turn running and nothing being spoken — the moment a rebuild may
+        quit the app without cutting anyone off."""
+        if self._busy:
+            return False
+        active = getattr(self.voice, "is_active", None)
+        try:
+            return not (callable(active) and bool(active()))
+        except Exception:  # noqa: BLE001
+            return True
 
     def _murmur_aloud(self) -> bool:
         """Is anyone there to hear? A manual session (the user asked for it, so they are at the

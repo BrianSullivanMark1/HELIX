@@ -342,3 +342,14 @@ are gone; the `dream_status` recap names what is still queued. The constructor i
 `DreamService(chat, lane, selfdev, backlog, settings, clock, bus, …)`; `covers_tonight` and
 `mark_night_covered` went with the pass. Two things joined the same day: rounds until the window closes
 (READ_ME/DREAM_MIND.md §15) and sleep-talk (§14). References above to Evolve describe the history.
+
+
+## Every session rebuilds (2026-09-05, later that day)
+
+The owner: "After a dream session it should rebuild itself. Purpose of a dream." `_plan_rebuild` no
+longer defers a manual session, a night stopped by hand, or a night the user is awake for: frozen +
+`dream_rebuild` + something applied (or `rebuild_pending`) + a Rebuilder that can → schedule and
+`RebuildRequested`, every time. The shell (`_on_rebuild_requested`) puts up a bubble and speaks it;
+the quit hook waits for `shell.quiet_now()` (no turn, nothing spoken) up to 45 s. `rebuild_helix`
+(`DreamService.rebuild_now`, fenced) rebuilds changes left waiting. `_natural_end` stays for the
+report's wording. A plain restart of the frozen app never loads applied changes — only a rebuild does.

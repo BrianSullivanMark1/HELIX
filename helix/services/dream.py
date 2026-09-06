@@ -712,6 +712,50 @@ class DreamService:
         return ("Stopping the dream session — cancelling the draft in flight. I'll report what it "
                 "did next time we talk.")
 
+    def rebuild_now(self) -> str:
+        """The user's own "rebuild yourself": when changes applied earlier are waiting on a rebuild
+        (a session whose rebuild could not run, or automatic rebuilding switched off), schedule the
+        detached rebuild-and-relaunch now and ask for the quit. Answers in plain words; a fenced
+        tool (conversation.BUILD_TOOLS) — quitting the app is the human's call."""
+        if not self._paths_frozen():
+            return ("This is a development run, so there's nothing to rebuild — restart HELIX to load "
+                    "any applied changes.")
+        if self.running:
+            return "I'm dreaming right now — the rebuild comes at the end of the session, on its own."
+        with self._files_lock:
+            pending = bool(self._load().get("rebuild_pending"))
+        if not pending:
+            return "The running build already has everything I've applied — nothing to rebuild."
+        why = self._rebuilder_problem()
+        if why:
+            return f"I can't rebuild right now — {why}."
+        reason = "the user asked for a rebuild"
+        try:
+            self._rebuilder.schedule(reason=reason)
+        except Exception as exc:  # noqa: BLE001
+            return "I couldn't schedule the rebuild — " + _first_line(str(exc), 160)
+        self._set_flag("rebuild_pending", False)
+        _LOG.info("dream: rebuild requested by the user")
+        try:
+            self._bus.publish(RebuildRequested(reason=reason))
+        except Exception:  # noqa: BLE001
+            _LOG.warning("dream: could not request the quit for the rebuild", exc_info=True)
+        return ("Rebuilding myself now — I'll quit and be back in about six minutes with the changes "
+                "loaded.")
+
+    def _rebuilder_problem(self) -> str | None:
+        """Why the Rebuilder can't run right now, or None when it can."""
+        rebuilder = self._rebuilder
+        if rebuilder is None:
+            return "no rebuilder is wired"
+        try:
+            if not rebuilder.available():
+                why_fn = getattr(rebuilder, "why_unavailable", None)
+                return (why_fn() if callable(why_fn) else None) or "the rebuilder isn't available"
+        except Exception as exc:  # noqa: BLE001
+            return _first_line(str(exc), 160)
+        return None
+
     def status(self) -> str:
         """Readable, honest, in plain words: whether dreaming is on, the window, what is running,
         the model, how green changes are handled, and the last session. Names no tool."""
@@ -1930,8 +1974,13 @@ class DreamService:
     def _plan_rebuild(self, session: dict) -> str:
         """Decide what becomes of the applied changes (§4 step 6). Returns the reason to publish
         RebuildRequested with, or "" when no quit is requested. A frozen build that applied changes
-        rebuilds and relaunches when dream_rebuild is on and the Rebuilder can; anything else leaves a
-        plain note and a `rebuild_pending` flag so the next nightly session catches up."""
+        rebuilds and relaunches when dream_rebuild is on and the Rebuilder can — after EVERY session
+        that applied something (2026-09-05, the owner: "after a dream session it should rebuild
+        itself; that's the purpose of a dream"): a manual "dream now", a night stopped by hand, the
+        user at the machine as it ends. The shell announces it (a bubble, spoken) and the quit hook
+        waits for a turn or a reply in flight, so the rebuild never lands mid-sentence. Rebuilding
+        switched off, or a Rebuilder that cannot, leaves a plain note and a `rebuild_pending` flag
+        so the next session — or "rebuild yourself" — catches up."""
         applied = len(session["applied"])
         with self._files_lock:
             pending = bool(self._load().get("rebuild_pending"))
@@ -1947,37 +1996,12 @@ class DreamService:
             self._note(session, f"{_plural(applied, 'applied change')} wait for a rebuild — automatic "
                                 "rebuilding is off")
             return ""
-        if session["kind"] != "nightly":
-            self._set_flag("rebuild_pending", True)
-            self._note(session, "the next nightly session will rebuild and relaunch with the applied "
-                                "changes; until then this is still the old build")
-            return ""
-        reason = str(session.get("stopped_reason") or "")
-        if not _natural_end(reason) or not self._user_idle():
-            # The user ended the night by hand, or is at the machine as it ends: the rebuild quits
-            # the app, and that never happens under someone's hands. The next quiet night does it.
-            # (A night that ended on its own — drafts kept failing, a reflection that failed — is a
-            # natural end: the person did nothing, and the note never says they did.)
-            self._set_flag("rebuild_pending", True)
-            self._note(session, "applied changes will rebuild and relaunch after the next quiet "
-                                "night — " + ("you're using the machine" if _natural_end(reason)
-                                              else "you stopped the session"))
-            return ""
-        rebuilder = self._rebuilder
-        why = None
-        if rebuilder is None:
-            why = "no rebuilder is wired"
-        else:
-            try:
-                if not rebuilder.available():
-                    why_fn = getattr(rebuilder, "why_unavailable", None)
-                    why = (why_fn() if callable(why_fn) else None) or "the rebuilder isn't available"
-            except Exception as exc:  # noqa: BLE001
-                why = _first_line(str(exc), 160)
+        why = self._rebuilder_problem()
         if why:
             self._set_flag("rebuild_pending", True)
             self._note(session, f"rebuild skipped — {why}")
             return ""
+        rebuilder = self._rebuilder
         reason = f"applied {_plural(applied, 'change')}" if applied else "changes applied earlier"
         try:
             job = rebuilder.schedule(reason=reason)

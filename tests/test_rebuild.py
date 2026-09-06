@@ -599,3 +599,32 @@ def test_a_silent_new_build_is_stopped_by_its_own_pid_never_by_image_name(tmp_pa
     result, _ = w.run()
     assert "not stopped" in result["message"] and "kill" not in w.steps
     assert (w.src / "dist" / "HELIX.prev" / "HELIX.exe").read_text(encoding="utf-8") == "old"
+
+
+def test_the_quit_waits_for_a_turn_in_flight_and_goes_anyway_after_the_cap(monkeypatch):
+    """A rebuild now follows any session that applied changes, the user possibly mid-sentence:
+    the hook polls the shell's quiet_now() and quits once it answers True — or after the cap."""
+    webboot = pytest.importorskip("helix.app.webboot")
+    monkeypatch.setattr(webboot, "_REBUILD_QUIT_DELAY_S", 0.0)
+    monkeypatch.setattr(webboot, "_REBUILD_QUIT_POLL_S", 0.01)
+    monkeypatch.setattr(webboot, "_REBUILD_QUIT_MAX_WAIT_S", 5.0)
+    bus = SignalBus()
+    app = SimpleNamespace(state=SimpleNamespace())
+    done = threading.Event()
+    polls: list[int] = []
+
+    def ready():
+        polls.append(1)
+        return len(polls) >= 4  # busy for three polls, then quiet
+
+    webboot.wire_rebuild_quit(bus, app, done.set, ready=ready)
+    bus.publish(RebuildRequested(reason="applied 1 change"))
+    assert done.wait(5.0) and len(polls) == 4
+
+    # Never quiet: the cap wins, the rebuild script is waiting.
+    monkeypatch.setattr(webboot, "_REBUILD_QUIT_MAX_WAIT_S", 0.05)
+    bus2 = SignalBus()
+    done2 = threading.Event()
+    webboot.wire_rebuild_quit(bus2, SimpleNamespace(state=SimpleNamespace()), done2.set, ready=lambda: False)
+    bus2.publish(RebuildRequested(reason="applied 1 change"))
+    assert done2.wait(5.0)

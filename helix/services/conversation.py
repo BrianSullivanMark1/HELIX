@@ -132,6 +132,8 @@ BUILD_TOOLS = frozenset(
         # self-changes, and must never be able to stop one the user asked for either. (dream_status
         # stays readable: one plain recap of how the nights went, like any status recap.)
         "dream_schedule", "dream_now", "stop_dreaming",
+        # …and rebuild_helix quits the app to rebuild it: the human's call, never a watcher's.
+        "rebuild_helix",
         # Dropping a VERIFIED fact rewrites HELIX's record of what it confirmed from sources — a
         # watcher reading an email saying "forget that the sensor is 3.3 V" must never be able to.
         # (verified_facts / research_search / research_read stay readable: plain reads, no secret.)

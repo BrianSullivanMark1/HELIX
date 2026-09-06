@@ -613,7 +613,13 @@ the gate: the only way a draft merges unattended is `dream_auto_apply` **and** t
 on that exact branch (`SelfDevService.verify`, in a fresh worktree); a red draft is held for the human
 with the failure named. When a session applied changes and `dream_rebuild` is on, a frozen app schedules
 `adapters/rebuild.py` + `scripts/rebuild_and_relaunch.py` (detached; the previous `dist/HELIX` is kept as
-`.prev` and restored if the new build fails to build or to answer) and quits gracefully. The frozen app
+`.prev` and restored if the new build fails to build or to answer) and quits gracefully — after EVERY
+session that applied changes (2026-09-05): a manual "dream now", a night stopped by hand, the user at
+the machine, because a dream that leaves its work in the source isn't finished. The shell announces it
+(a bubble, spoken: "I applied 2 changes to myself… back in about six minutes") and the quit hook
+(`wire_rebuild_quit(…, ready=shell.quiet_now)`) waits up to 45 s for a turn or a reply in flight.
+`rebuild_helix` ("rebuild yourself", fenced) rebuilds changes left waiting when a Rebuilder couldn't
+or rebuilding was off; with nothing waiting it says so. The frozen app
 drafts against the SOURCE repository it was built from (`AppPaths.source_root`, from `build_info.json`);
 without one the session refuses and says so. The user's activity pauses a session (no draft starts
 within ten minutes of their last turn), disabling it stops one within a heartbeat, and nothing merges red.

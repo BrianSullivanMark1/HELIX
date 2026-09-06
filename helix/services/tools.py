@@ -144,6 +144,7 @@ def _as_bool(value, default=None):
 _FENCED_DREAM_WORDS: tuple[tuple[str, str], ...] = (
     ("dream_schedule", "the dream schedule"),
     ("stop_dreaming", "stopping the session"),
+    ("rebuild_helix", "asking for a rebuild"),
     ("dream_now", "a session now"),
 )
 
@@ -1234,6 +1235,19 @@ class ToolRegistry:
                         "is cancelled, finished drafts are kept, and the session's summary is written "
                         "for the morning report. This is not the nightly schedule — to stop dreaming "
                         "at night in general, use dream_schedule with enabled false."
+                    ),
+                    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                ),
+                ToolSpec(
+                    name="rebuild_helix",
+                    description=(
+                        "Rebuild and relaunch HELIX NOW so changes it applied to itself earlier — "
+                        "ones still waiting on a rebuild — become the running app: 'rebuild "
+                        "yourself', 'load your changes', 'restart with the new code'. HELIX says so, "
+                        "quits, rebuilds (about six minutes) and comes back on its own; the previous "
+                        "build is kept and restored if the new one fails. With nothing waiting it "
+                        "says so and does nothing. Only at the user's clear request — it quits the "
+                        "app. Relay its answer in one line."
                     ),
                     input_schema={"type": "object", "properties": {}, "additionalProperties": False},
                 ),
@@ -2552,6 +2566,9 @@ class ToolRegistry:
                 return f"I couldn't start a dream session: {exc}"
         if name == "stop_dreaming" and self._dream is not None:
             return str(self._dream.stop("the user asked") or "")
+        if name == "rebuild_helix" and self._dream is not None:
+            fn = getattr(self._dream, "rebuild_now", None)
+            return str(fn() or "") if callable(fn) else "I can't rebuild myself in this build."
         if name == "dream_status" and self._dream is not None:
             text = _plain_dream_words(str(self._dream.status() or ""))
             queued = []

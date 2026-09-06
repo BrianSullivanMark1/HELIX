@@ -129,6 +129,7 @@ _TOOL_PHRASES: dict[str, str] = {
     "dream_schedule": "Setting my dream schedule",
     "dream_now": "Starting a dream session",
     "stop_dreaming": "Winding the dream down",
+    "rebuild_helix": "Rebuilding myself",
     "dream_status": "Checking on my dreaming",
     # The research faculty (READ_ME/DREAM_MIND.md §10): reads on a leash, and the verified record.
     "research_search": "Searching the web",

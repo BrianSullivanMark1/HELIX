@@ -13,8 +13,8 @@ from helix.domain.vocabulary import friendly_tool_label
 from helix.services.conversation import BUILD_TOOLS
 from helix.services.tools import ToolRegistry
 
-DREAM_TOOLS = ("dream_schedule", "dream_now", "stop_dreaming", "dream_status")
-FENCED = ("dream_schedule", "dream_now", "stop_dreaming")
+DREAM_TOOLS = ("dream_schedule", "dream_now", "stop_dreaming", "rebuild_helix", "dream_status")
+FENCED = ("dream_schedule", "dream_now", "stop_dreaming", "rebuild_helix")
 
 
 class _Dream:
@@ -177,3 +177,23 @@ def test_the_specs_teach_the_shapes_and_advertise_the_read_as_read_only():
     assert specs["stop_dreaming"].input_schema["properties"] == {}
     for name in DREAM_TOOLS:
         assert specs[name].input_schema["additionalProperties"] is False
+
+
+# ----- rebuild_helix: 'rebuild yourself' -----
+
+def test_rebuild_helix_asks_the_engine_and_relays_its_line():
+    class _RebuildDream(_Dream):
+        def __init__(self):
+            super().__init__()
+            self.rebuilds = 0
+
+        def rebuild_now(self):
+            self.rebuilds += 1
+            return "Rebuilding myself now — I'll quit and be back in about six minutes with the changes loaded."
+
+    dream = _RebuildDream()
+    out = _registry(dream).dispatch("rebuild_helix", {})
+    assert dream.rebuilds == 1 and out.startswith("Rebuilding myself now")
+    # An engine without the faculty (an older build) answers plainly instead of raising.
+    out2 = _registry(_Dream()).dispatch("rebuild_helix", {})
+    assert out2 == "I can't rebuild myself in this build."
