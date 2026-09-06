@@ -131,3 +131,33 @@ def test_clean_run_kills_nothing(monkeypatch):
 
     assert res.ok and res.summary == "built the thing"
     assert kills == [] and proc.bare_kills == 0
+
+
+def test_success_subtype_is_success_even_on_a_nonzero_exit(monkeypatch):
+    """The overnight watcher bug: a final result event with subtype "success" but an empty result
+    text and a nonzero exit code was routed down the error path, the API fallback then died on
+    MissingApiKey, and the scheduled runs went blind. The CLI's own verdict wins."""
+    proc = _FakeProc(['{"type":"result","subtype":"success","is_error":false,"result":""}\n'])
+    proc.returncode = 1
+    res, kills = _run(monkeypatch, proc)
+
+    assert res.ok, res.error
+    assert res.summary == "built"
+    assert kills == [] and proc.bare_kills == 0
+
+
+def test_success_subtype_overrides_a_stray_is_error_flag(monkeypatch):
+    proc = _FakeProc(['{"type":"result","subtype":"success","is_error":true,"result":"done"}\n'])
+    res, kills = _run(monkeypatch, proc)
+
+    assert res.ok, res.error
+    assert res.summary == "done"
+    assert kills == []
+
+
+def test_an_error_subtype_still_reports_an_error(monkeypatch):
+    proc = _FakeProc(['{"type":"result","subtype":"error_during_execution","is_error":true,"result":""}\n'])
+    res, _ = _run(monkeypatch, proc)
+
+    assert not res.ok
+    assert "error_during_execution" in (res.error or "")

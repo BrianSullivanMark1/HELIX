@@ -359,7 +359,14 @@ class ClaudeCodeCli:
         stderr = "".join(stderr_lines)
 
         summary = str((final or {}).get("result") or "").strip()
+        subtype = str((final or {}).get("subtype") or "").strip().lower()
         is_error = bool((final or {}).get("is_error"))
+        if subtype == "success":
+            # The CLI's own verdict outranks every other signal: a final result event with subtype
+            # "success" is a completed run, whatever the exit code or a stray is_error flag says.
+            # Routing it down the error path sent healthy scheduled runs to the API fallback — which
+            # dies on MissingApiKey on the subscription-only rail — and blinded the overnight watchers.
+            return CoderResult(ok=True, summary=summary or "built")
         if timed_out.is_set() and not summary:
             limit = (f"{self._timeout / 60:.0f} minutes" if self._timeout >= 60
                      else f"{self._timeout:g} seconds")
@@ -373,5 +380,6 @@ class ClaudeCodeCli:
                 ok=False, summary="", error=f"Coder exited {proc.returncode}: {stderr.strip()[:500]}"
             )
         if is_error and not summary:
-            return CoderResult(ok=False, summary="", error="The coder reported an error.")
+            kind = f" ({subtype})" if subtype else ""
+            return CoderResult(ok=False, summary="", error=f"The coder reported an error{kind}.")
         return CoderResult(ok=True, summary=summary or "built")
