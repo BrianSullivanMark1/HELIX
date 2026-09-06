@@ -815,7 +815,7 @@ class DreamService:
         else:
             parts.append("Every draft waits for your review.")
         if self._paths_frozen():
-            parts.append("After a night that applied changes I rebuild and relaunch."
+            parts.append("After any session that applied changes I rebuild and relaunch myself."
                          if self._rebuild_enabled() else
                          "Applied changes wait for a rebuild — automatic rebuilding is off.")
         last = self._last_session_summary()
