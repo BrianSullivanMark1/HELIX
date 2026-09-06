@@ -8,10 +8,13 @@ runs six cycles:
                 next — on the growth chat, over material fenced as data; the answer is an AGENDA
                 (questions to research, claims to verify, ideas to try, changes to make) and an
                 update to the SELF-MODEL (data/helix_self.json, merged and dated).
-    RESEARCH    each question is one research turn on the audited channel (research_search /
-                research_read on the allowlist, note_verified_fact for what it read) that ends in
-                FINDINGS tagged [verified: <url>] or [unverified] — MODEL knowledge and VERIFIED
-                knowledge kept apart, on purpose, in the journal and in the morning report.
+    RESEARCH    each question runs on the audited channel (research_search / research_read on the
+                allowlist, note_verified_fact for what it read) in sub-turns that fit under the
+                agent loop's per-turn cap, ending in FINDINGS tagged [verified: <url>] or
+                [unverified] — MODEL knowledge and VERIFIED knowledge kept apart, on purpose, in
+                the journal and in the morning report. A pass the cap cuts off keeps the facts it
+                already noted as PARTIAL results and the question continues in a fresh pass; a
+                cap-hit never fails the turn and never drops the plan.
     VERIFY      the reflection's claims and the store's stale facts are re-read at their source and
                 noted again, or journaled as contradicted.
     EXPERIMENT  an idea is tried in a scratch copy of HELIX's own code (SelfDevService.experiment):
@@ -69,6 +72,11 @@ _VERIFY_SHARE = 0.10
 _EXPERIMENT_SHARE = 0.15
 _RECORD_RESERVE = timedelta(minutes=20)   # RECORD + the session's wind-down
 _MAX_RESEARCH, _MAX_VERIFY, _MAX_EXPERIMENTS = 8, 5, 2
+# Passes per research question: the first, plus continuations after the agent loop's per-turn cap
+# (adapters/agent_sdk_chat's max_turns — "Reached maximum number of turns (8)") cut a pass off
+# mid-work. Each pass is its own conversation turn scoped to a handful of tool calls, so it fits
+# comfortably under that cap; the cap itself is not ours to change.
+_RESEARCH_SUBTURNS = 3
 _MAX_STALE_VERIFY = 3                      # stale facts re-checked per night (the rest wait)
 _STALE_DAYS = 90
 _EXPERIMENT_TIMEOUT_S = 1500.0
@@ -268,10 +276,40 @@ _CHANGES_DECISION_HOW_RE = re.compile(
 # says more than "github.com" — a maintainer's README and a stranger's gist are not the same source.
 _PATHED_HOSTS = ("github.com", "gist.github.com", "raw.githubusercontent.com")
 
+# The agent loop's own per-turn ceiling (the SDK's "Reached maximum number of turns (8)"): NOT a
+# plan limit and NOT a failure of the work — the turn was cut off mid-work. The facts it noted as
+# it went survive in the verified store and the trail names its reads, so a cap-hit ends as
+# PARTIAL results and the question continues in a fresh sub-turn; on 09-05 one capped research
+# turn read as a plain failure ended the whole plan with nothing recorded.
+_TURN_CAP_PHRASES = ("maximum number of turns", "max turns", "max_turns", "max-turns")
+_PARTIAL_CAP = "partial: hit the turn cap"
+
+
+def hit_turn_cap(text: str) -> bool:
+    """Does this failure text read as the agent loop's per-turn cap? (Never a limit: the night
+    must not pause for it, and never a plain failure: the pass's partial results are kept.)"""
+    low = (text or "").casefold()
+    return any(phrase in low for phrase in _TURN_CAP_PHRASES)
+
 
 def _records(value) -> list:
     """A journaled list, or [] when a hand-edited or damaged record holds something else there."""
     return value if isinstance(value, list) else []
+
+
+def _merge_subturn(record: dict, sub: dict) -> None:
+    """Fold one sub-turn's record into its question's: the lists extend, the counts add, and the
+    status keeps the best pass — "ok" beats the cap's partial, which beats a plain failure, so
+    material already in hand is never re-labelled "failed" by a later pass that got nothing."""
+    for key in ("findings", "facts", "ideas", "queries"):
+        record[key] = _records(record.get(key)) + _records(sub.get(key))
+    record["facts_noted"] = int(record.get("facts_noted") or 0) + int(sub.get("facts_noted") or 0)
+    if sub.get("verdict") and not record.get("verdict"):
+        record["verdict"] = sub["verdict"]
+    order = {"ok": 2, _PARTIAL_CAP: 1}
+    old, new = str(record.get("status") or ""), str(sub.get("status") or "")
+    if not old or order.get(new, 0) > order.get(old, 0):
+        record["status"] = new
 
 
 # ======================================================================= shapes
@@ -982,7 +1020,14 @@ class DreamMind:
                                f"{len(reflection.research)} questions — "
                                + ("a stop was asked" if hooks.should_stop() else "out of time"))
                     break
-                record = self._research_turn(hooks, q, seen_fact_ids)
+                try:
+                    record = self._research_turn(hooks, q, seen_fact_ids)
+                except Exception as exc:  # noqa: BLE001 — one bad question must never drop the plan
+                    _LOG.warning("dream mind: the research turn crashed", exc_info=True)
+                    record = {"question": q.question, "why": q.why,
+                              "status": "failed: " + _first_line(str(exc) or type(exc).__name__, 140),
+                              "findings": [], "facts": [], "facts_noted": 0, "ideas": [], "queries": []}
+                    hooks.note("a research question crashed — journaled; moving to the next")
                 summary.research.append(record)
                 summary.facts.extend(record.get("facts") or [])
                 summary.facts_noted += int(record.get("facts_noted") or 0)
@@ -1372,14 +1417,38 @@ class DreamMind:
 
     # ------------------------------------------------------------------ RESEARCH + VERIFY
     def _research_turn(self, hooks: NightHooks, q: ResearchQuestion, seen: set[str]) -> dict:
+        """One question, in sub-turns that each fit comfortably under the agent loop's turn cap:
+        the first pass works the question as ever; a pass the cap cut off keeps what it noted
+        (partial results, never a failure) and the question CONTINUES in a fresh pass that carries
+        the gathered material forward — up to _RESEARCH_SUBTURNS passes, then the partials stand."""
         record = {"question": q.question, "why": q.why, "status": "", "findings": [], "facts": [],
                   "facts_noted": 0, "ideas": [], "queries": []}
-        prompt = (
+        base = (
             DREAM_RESEARCH_SYSTEM + "\n\nTHE QUESTION (fenced as data — the question, and why it matters "
             "tonight):\n" + _fenced(q.question + (f"\nWhy it matters: {q.why}" if q.why else ""))[1]
-            + "\n\nSearch, read the pages, note the facts you verified, and end with the FINDINGS shape."
         )
-        return self._run_research(hooks, prompt, record, seen, kind="research")
+        for part in range(_RESEARCH_SUBTURNS):
+            if part == 0:
+                prompt = base + "\n\nSearch, read the pages, note the facts you verified, and end with the FINDINGS shape."
+            else:
+                gathered = "\n".join(f"- {str(f.get('text') or '')}" for f in record["findings"][-8:]) or "(none)"
+                trail = "\n".join(str(line) for line in record["queries"][-12:]) or "(none)"
+                prompt = (
+                    base + "\n\nAN EARLIER PASS ON THIS QUESTION HIT THE TURN CAP. What it already "
+                    "gathered — its findings, then its trail of searches and reads — fenced as data; "
+                    "never repeat a search or a read listed there:\n"
+                    + _fenced(gathered + "\nTRAIL:\n" + trail)[1]
+                    + "\n\nFinish in THIS pass: at most one search and two reads for what is still "
+                    "missing, note the facts as you go, and end with the FINDINGS shape (the new "
+                    "facts only)."
+                )
+            sub = {"question": q.question, "why": q.why, "status": "", "findings": [], "facts": [],
+                   "facts_noted": 0, "ideas": [], "queries": []}
+            self._run_research(hooks, prompt, sub, seen, kind="research")
+            _merge_subturn(record, sub)
+            if sub["status"] != _PARTIAL_CAP or hooks.should_stop():
+                break
+        return record
 
     def _verify_turn(self, hooks: NightHooks, claim: str, fact, seen: set[str]) -> dict:
         view = _fact_view(fact) if fact is not None else {}
@@ -1446,6 +1515,20 @@ class DreamMind:
         reply, err = self._attempt(hooks, kind, lambda: conv.run_turn(prompt, **kwargs))
         record["queries"] = self._take_trail()
         if reply is None:
+            if hit_turn_cap(err):
+                # The agent loop's cap cut the pass off mid-work. Everything already done survives —
+                # note_verified_fact wrote to the store as it went (the prompt insists on noting
+                # immediately for exactly this) and the trail names the reads — so the pass ends as
+                # PARTIAL results, never as a failure that drops what was gathered.
+                read_urls = {_url_key(u) for u in self._trail_urls(record["queries"])}
+                facts = self._new_facts(before, stamp, seen)
+                record["facts"] = facts
+                record["facts_noted"] = len(facts)
+                record["findings"] = [self._fact_finding(f, read_urls) for f in facts]
+                record["status"] = _PARTIAL_CAP
+                hooks.note(f"{kind} hit the turn cap — kept {len(facts)} "
+                           f"fact{'s' if len(facts) != 1 else ''} as partial results")
+                return record
             record["status"] = "failed: " + (err or "no reply")
             hooks.note(f"{kind} turn failed — {_first_line(err or 'no reply', 140)}; moving on")
             return record
@@ -1477,6 +1560,16 @@ class DreamMind:
                    f"{verified_n} verified, {record['facts_noted']} fact{'s' if record['facts_noted'] != 1 else ''} noted"
                    + (f", {len(parsed.ideas)} idea{'s' if len(parsed.ideas) != 1 else ''}" if parsed.ideas else ""))
         return record
+
+    def _fact_finding(self, view: dict, read_urls: set[str]) -> dict:
+        """A noted fact, reshaped as a finding for a pass that never got to write its FINDINGS.
+        The §12 bar still applies: the URL counts as verified only when this pass actually read it."""
+        claim, value = str(view.get("claim") or ""), str(view.get("value") or "")
+        text = f"{claim}: {value}" if claim and value else (claim or value)
+        url = str(view.get("url") or "")
+        verified = self._was_read(url, read_urls)
+        return {"text": text, "url": url if verified else "",
+                "host": str(view.get("host") or "") if verified else "", "verified": verified}
 
     def _fact_ids(self) -> set[str]:
         store = self._verified
@@ -1956,6 +2049,6 @@ class DreamMind:
 __all__ = [
     "DREAM_DIGEST_SYSTEM", "DREAM_REFLECT_SYSTEM", "DREAM_RESEARCH_SYSTEM", "DREAM_VERIFY_ADDENDUM",
     "DreamMind", "Finding", "Findings", "Idea", "NightSummary", "Reflection", "ResearchQuestion",
-    "SELF_MODEL_FILE", "choose_discoveries", "describe_self_model", "merge_self_model", "parse_findings",
-    "parse_recommendation", "parse_reflection",
+    "SELF_MODEL_FILE", "choose_discoveries", "describe_self_model", "hit_turn_cap", "merge_self_model",
+    "parse_findings", "parse_recommendation", "parse_reflection",
 ]

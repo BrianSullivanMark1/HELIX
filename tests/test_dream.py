@@ -1417,13 +1417,34 @@ def test_the_minds_leftover_agenda_survives_and_the_improve_loop_names_why_it_st
 
 
 def test_a_mind_that_dies_still_ends_in_a_journaled_report(tmp_path):
+    # The raise is caught at the round, not in _run's last-resort handler: what the mind journaled
+    # through hooks.record before dying stays in the session (09-05: a raising research turn used
+    # to drop the whole plan with nothing recorded).
     rig = _Rig(tmp_path, mind=_Mind(raises=RuntimeError("the reflection exploded")))
     rig.dream.tick()
     s = rig.last()
     assert s["stopped_reason"] == "an error" and s["ended"] and rig.dream.running is False
-    assert any("hit an error and stopped early" in n for n in s["notes"])
+    assert any("the round hit an error mid-night — keeping what was already recorded" in n
+               for n in s["notes"])
     assert rig.dream.morning_report() == ("Last night I hit an error and stopped early before changing "
                                           "anything — the journal and the log have the details.")
+
+
+def test_a_mind_that_dies_mid_round_keeps_the_research_it_already_recorded(tmp_path):
+    class _DiesAfterResearch(_Mind):
+        def run_night(self, deadline, budget, *, hooks=None):
+            hooks.record({"research": [{"question": "q1", "status": "partial: hit the turn cap",
+                                        "findings": [{"text": "a fact noted before the cut",
+                                                      "verified": True}]}],
+                          "facts_noted": 2})
+            raise RuntimeError("Reached maximum number of turns (8)")
+
+    rig = _Rig(tmp_path, mind=_DiesAfterResearch())
+    rig.dream.tick()
+    s = rig.last()
+    assert s["stopped_reason"] == "an error"
+    assert [r["question"] for r in s["research"]] == ["q1"] and s["facts_noted"] == 2
+    assert s["research"][0]["status"] == "partial: hit the turn cap"
 
 
 def test_status_names_the_minds_cycle_and_a_limit_through_the_hooks_pauses_the_session(tmp_path):

@@ -1267,7 +1267,16 @@ class DreamService:
                 murmur=lambda text: self._murmur(session, text, "mind"),
                 round_no=round_no,
             )
-            summary = self._mind.run_night(end, ceiling, hooks=hooks)
+            try:
+                summary = self._mind.run_night(end, ceiling, hooks=hooks)
+            except Exception:  # noqa: BLE001 — a round that dies mid-cycle keeps what its hooks recorded
+                # The mind journals research, facts and drafts incrementally through hooks.record,
+                # so everything the round gathered before the error is already in the session — the
+                # night ends with those partial results instead of "an error" that drops the plan.
+                _LOG.warning("dream: round %d of the mind's night failed mid-cycle", round_no, exc_info=True)
+                self._note(session, "the round hit an error mid-night — keeping what was already recorded")
+                reason = "an error"  # the reporting vocabulary _run has always used for a dead night
+                break
             self._fold_summary(session, base, summary)
             reason = str(getattr(summary, "reason", "") or "the night's work was done")
             if self._improve_stopped == "the draft ceiling was reached":
