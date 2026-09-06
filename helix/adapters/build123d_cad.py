@@ -255,7 +255,7 @@ class Build123dCad:
         try:
             proc = subprocess.Popen(
                 [sys.executable, "-m", "pip", "install", "build123d"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                 creationflags=_CREATE_NO_WINDOW,
             )
             deadline = time.time() + timeout_s
@@ -378,6 +378,7 @@ class Build123dCad:
             job_path.write_text(json.dumps(job), encoding="utf-8")
             proc = subprocess.run(
                 self._worker_cmd(job_path), timeout=timeout_s, capture_output=True, text=True,
+                stdin=subprocess.DEVNULL,
                 creationflags=_CREATE_NO_WINDOW, env=env, cwd=str(source.parent),
             )
         except subprocess.TimeoutExpired:

@@ -230,7 +230,7 @@ def try_slice(model_3mf: Path, out_3mf: Path, timeout_s: float = 240.0) -> bool:
         out_3mf.parent.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(
             [str(exe), "--slice", "0", "--export-3mf", str(out_3mf), str(model_3mf)],
-            capture_output=True, timeout=timeout_s,
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout_s,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         ok = proc.returncode == 0 and out_3mf.is_file() and out_3mf.stat().st_size > 0
@@ -248,7 +248,10 @@ def open_in_studio(path: Path) -> bool:
     if exe is None:
         return False
     try:
-        subprocess.Popen([str(exe), str(path)], close_fds=True)
+        # Explicit std handles: a child inheriting this windowless process's (possibly invalid)
+        # handles can die at spawn with WinError 50.
+        subprocess.Popen([str(exe), str(path)], close_fds=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except Exception:  # noqa: BLE001
         _LOG.warning("could not open Bambu Studio", exc_info=True)

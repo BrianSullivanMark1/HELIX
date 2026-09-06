@@ -48,7 +48,10 @@ def spawn_watchdog(data_dir: Path, entry: Path, root: Path) -> None:
             "watchdog", "--pid", str(os.getpid()),
             "--data", str(data_dir), "--entry", str(entry), "--root", str(root),
         ]
-        kwargs: dict = {"close_fds": True, "cwd": str(root)}
+        # Explicit std handles: a detached child inheriting a corrupted parent handle dies at spawn
+        # on Windows (WinError 50) — the watchdog would silently never exist.
+        kwargs: dict = {"close_fds": True, "cwd": str(root), "stdin": subprocess.DEVNULL,
+                        "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         if sys.platform == "win32":
             kwargs["creationflags"] = _detached_flags()
         else:
@@ -131,7 +134,8 @@ def watchdog_main(pid: int, data_dir: Path, entry: Path, root: Path) -> int:
     if _too_many_recent_relaunches(data_dir / RELAUNCH_JOURNAL):
         return 1  # crash-looping — stand down; self-heal / the user takes it from here
     try:
-        kwargs: dict = {"close_fds": True, "cwd": str(root)}
+        kwargs: dict = {"close_fds": True, "cwd": str(root), "stdin": subprocess.DEVNULL,
+                        "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         if sys.platform == "win32":
             kwargs["creationflags"] = _detached_flags()
         else:
