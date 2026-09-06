@@ -303,6 +303,22 @@ class PartsService:
                     return True
         return False
 
+    def link_staged(self, project: str, name: str, asin: str, price: float | None,
+                    quantity: int = 1) -> None:
+        """A cart line was staged for this project — make sure the BOM remembers it. A row the
+        list already knows resolves in place and flips to staged; a row it doesn't know is
+        CREATED (and so is the list itself when the project is new), status 'staged'. This is
+        the deterministic net under the model's save_parts habit: on 09-04 a whole cart was
+        staged for IronEye while PARTS LISTS stayed empty, and the BOM table had to be
+        re-derived from the conversation. Never again — staging IS saving."""
+        if not _slug(project) or not str(name or "").strip():
+            return
+        if self.resolve(project, name, asin, price):
+            self.set_status(project, [asin], "staged")
+            return
+        self.save(project, [{"name": name, "quantity": quantity, "asin": asin,
+                             "price": price, "status": "staged"}])
+
     def set_dims(self, project: str, part_name: str, length, width, height, *,
                  source: str = "measured") -> bool:
         """Record a row's physical size in mm (from the camera ruler or a listing). Sorted so

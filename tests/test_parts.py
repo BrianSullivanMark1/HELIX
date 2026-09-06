@@ -76,6 +76,28 @@ def test_resolve_status_and_the_ledger():
     assert s.ledger("iron")[0]["est_total"] == 13.98 and s.ledger("other") == []
 
 
+def test_link_staged_creates_the_list_when_the_project_is_new_and_survives_a_restart():
+    # The 09-04 hole: a cart staged for IronEye left PARTS LISTS empty because no list existed.
+    store = _Store()
+    s = PartsService(store, clock=lambda: "t1")
+    s.link_staged("IronEye", "28mm speaker", "B0C49RZ9WJ", 6.99, quantity=2)
+    assert s.projects() == ["IronEye"]
+    r = s.rows("IronEye")[0]
+    assert (r.name, r.asin, r.price, r.quantity, r.status) == ("28mm speaker", "B0C49RZ9WJ", 6.99, 2, "staged")
+    # A row the list already knows resolves in place — no duplicate.
+    s.link_staged("iron eye", "28mm SPEAKER", "B0C49RZ9WJ", 5.99)
+    assert len(s.rows("IronEye")) == 1 and s.rows("IronEye")[0].price == 5.99
+    # Blank project or name is a no-op, never a crash.
+    s.link_staged("", "thing", "B08N5WRWNW", None)
+    s.link_staged("IronEye", "  ", "B08N5WRWNW", None)
+    assert s.projects() == ["IronEye"] and len(s.rows("IronEye")) == 1
+    # A restart: a fresh service over the same store still has the staged BOM.
+    fresh = PartsService(store, clock=lambda: "t2")
+    again = fresh.rows("IronEye")[0]
+    assert again.asin == "B0C49RZ9WJ" and again.status == "staged" and again.quantity == 2
+    assert "28mm speaker" in fresh.show("IronEye")
+
+
 def test_show_describes_and_never_coaches_a_fenced_tool():
     s = _svc()
     assert "No parts lists are saved yet" in s.show()

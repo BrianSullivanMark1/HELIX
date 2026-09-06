@@ -271,6 +271,32 @@ def test_stage_parts_stages_needed_rows_at_planned_quantities_and_names_the_rest
     assert "don't have a parts list called 'Nope'" in s.stage_parts("Nope")
 
 
+def test_staging_for_a_project_creates_its_parts_list_and_it_survives_a_restart():
+    # 09-04: the IronEye cart was staged but PARTS LISTS stayed empty, so "put the table in the
+    # chat" had to be re-derived from conversation. Staging IS saving now.
+    parts_store = _Store()
+    parts = PartsService(parts_store, clock=lambda: "2026-09-04T18:00")
+    s = _svc(parts=parts, web=_Web(listings={"B0C49RZ9WJ": SPEAKER, "B0C1C64R8S": MIC,
+                                             "B0DCJR8JTG": Listing("B0DCJR8JTG", "Solder 60/40", 8.49)}))
+    assert parts.projects() == []
+    s.add([{"name": "28mm speaker", "asin": "B0C49RZ9WJ", "quantity": 2},
+           {"name": "INMP441 mic", "asin": "B0C1C64R8S"}], project="IronEye")
+    rows = {r.name: r for r in parts.rows("IronEye")}
+    assert rows["28mm speaker"].status == "staged" and rows["28mm speaker"].asin == "B0C49RZ9WJ"
+    assert rows["28mm speaker"].quantity == 2 and rows["28mm speaker"].price == 6.99
+    assert rows["INMP441 mic"].status == "staged"
+    # Staging the same product again merges the cart line and keeps ONE parts row.
+    s.add([{"name": "28mm speaker", "asin": "B0C49RZ9WJ"}], project="IronEye")
+    assert len(parts.rows("IronEye")) == 2
+    # The BOM is on disk: a fresh PartsService (a restart) still shows the table.
+    fresh = PartsService(parts_store, clock=lambda: "2026-09-05T08:00")
+    text = fresh.show("IronEye")
+    assert "Parts list 'IronEye'" in text and "28mm speaker" in text and "INMP441 mic" in text
+    # No project named = nothing written to parts lists (an ad-hoc buy stays ad hoc).
+    s.add([{"name": "solder", "asin": "B0DCJR8JTG"}])
+    assert fresh.projects() == ["IronEye"] and len(fresh.rows("IronEye")) == 2
+
+
 def test_add_with_project_links_the_row_and_a_handoff_flips_it_to_carted_with_a_ledger_line():
     parts = _parts()
     parts.save("IronEye", [{"name": "28mm speaker", "quantity": 2}, {"name": "filament", "quantity": 1}])

@@ -6,8 +6,10 @@ listing is read before it's accepted: a dead or wrong ASIN is refused, the live 
 keeps the staged list on disk (a restart mid-shop loses nothing), and on the user's go HANDS the
 cart to Amazon by driving HELIX's own Chrome window — each product page's real Add-to-Cart button at
 the real quantity — and READS THE CART BACK so what it reports is what Amazon holds. Parts lists
-(the BOM behind a project) link in: "stage the IronEye parts" stages the needed rows at their
-planned counts, and a handoff flips them to carted with the date and estimated spend.
+(the BOM behind a project) link in BOTH ways: "stage the IronEye parts" stages the needed rows at
+their planned counts, staging an item WITH a project writes it into that project's parts list
+(creating the list when it's new — a staged BOM is always under PARTS LISTS after a restart), and
+a handoff flips the rows to carted with the date and estimated spend.
 
 Checkout stays a human act: nothing here can press Buy. User-driven only — the BUILD_TOOLS fence
 keeps every cart mutation (and any browser launch) off autonomous agent runs; the read-only search
@@ -272,7 +274,8 @@ class ShoppingService:
                                      project=proj or existing.project, note=note or existing.note)
                     self._items[self._items.index(existing)] = merged
                     added.append(f"{merged.label or asin} (now {merged.quantity})")
-                    self._link_part(proj or existing.project, merged.label, asin, merged.price)
+                    self._link_part(proj or existing.project, merged.label, asin, merged.price,
+                                    merged.quantity)
                     continue
                 if len(self._items) >= MAX_ITEMS:
                     rejected.append(f"{label or asin} — the staged cart is full at {MAX_ITEMS} "
@@ -290,7 +293,7 @@ class ShoppingService:
                 if note:
                     line += f" [{note}]"
                 added.append(line)
-                self._link_part(proj, label or title, asin, price)
+                self._link_part(proj, label or title, asin, price, quantity)
             summary = self._summary_locked()
             if added:
                 self._changed_locked()
@@ -305,12 +308,15 @@ class ShoppingService:
         parts.append(summary)
         return " ".join(parts)
 
-    def _link_part(self, project: str, name: str, asin: str, price: float | None) -> None:
+    def _link_part(self, project: str, name: str, asin: str, price: float | None,
+                   quantity: int = 1) -> None:
+        """Staging for a project IS saving its BOM: the parts list upserts the row (and creates
+        the list itself when the project is new), so a staged cart always shows under PARTS
+        LISTS and survives a restart — never re-derived from the conversation."""
         if self._parts is None or not project:
             return
         try:
-            if self._parts.resolve(project, name, asin, price):
-                self._parts.set_status(project, [asin], "staged")
+            self._parts.link_staged(project, name, asin, price, quantity)
         except Exception:  # noqa: BLE001
             _LOG.warning("parts link failed", exc_info=True)
 
