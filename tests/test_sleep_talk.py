@@ -194,3 +194,29 @@ def test_a_voice_backend_without_murmur_stays_silent():
     v.enabled = lambda: True  # type: ignore[method-assign]
     v.murmur("mm…")  # nothing happens, nothing raises
     assert v._narrating is False
+
+
+def test_the_mic_is_closed_while_a_murmur_plays_and_reopens_after():
+    """The live app woke its sleeping orb every twenty seconds: the wake-word VAD heard the whisper
+    and flipped the state to 'listening'. A murmur now closes the listen gate for its length."""
+    class _SlowTts(_Tts):
+        def __init__(self):
+            super().__init__()
+            self.release = threading.Event()
+
+        def murmur(self, text):
+            self.murmured.append(text)
+            self.done.set()
+            self.release.wait(2.0)
+
+    v, tts = _voice(_SlowTts())
+    v._apply_listen_gate()
+    assert v._listening is True  # idle, hands-free on: the wake word is being listened for
+    v.murmur("footsteps… I'll wait…")
+    assert tts.done.wait(2.0)
+    assert v._listening is False and v._murmuring is True  # deaf to its own whisper
+    tts.release.set()
+    deadline = time.monotonic() + 2.0
+    while v._murmuring and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert v._murmuring is False and v._listening is True  # …and listening again once it ends

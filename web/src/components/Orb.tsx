@@ -36,7 +36,7 @@ export const STATE_LOOK: Record<string, { color: [number, number, number]; glow:
   thinking: { color: [1.0, 0.62, 0.16], glow: 0.72, speed: 1.6 },
   speaking: { color: [1.0, 0.74, 0.24], glow: 1.0, speed: 1.3 },
   // Asleep: indigo-violet, dim, slow — the aurora and the REM flicker are separate uniforms.
-  dreaming: { color: [0.4, 0.26, 0.96], glow: 0.34, speed: 0.22 },
+  dreaming: { color: [0.36, 0.2, 0.92], glow: 0.3, speed: 0.22 },
 };
 export const HUE_LOOK: Record<string, [number, number, number]> = {
   working: [1.0, 0.78, 0.2],
@@ -141,8 +141,11 @@ const CORE_FRAG = /* glsl */ `
       // ---- THE AURORA (dreaming): a slow, separate field of teal light threading the sleeping
       // star — on its own clock, unrelated to the plasma's drift. Costs one fbm while asleep. ----
       if (uDream > 0.01) {
-        float aur = smoothstep(0.56, 0.84, fbm(p * 1.7 + vec3(uTime * 0.05, -uTime * 0.035, 1.7)));
-        aurAcc += aur * depthFade;
+        float aur = smoothstep(0.46, 0.80, fbm(p * 1.7 + vec3(uTime * 0.05, -uTime * 0.035, 1.7)));
+        // A curtain: the field is banded across the sphere and the band itself drifts, so the
+        // light reads as a slow sheet moving through the star, not an even tint.
+        float curtain = 0.55 + 0.45 * sin(p.y * 2.6 + p.x * 0.8 + uTime * 0.12);
+        aurAcc += aur * curtain * depthFade;
       }
       // ---- TENDRILS: two ridged octaves multiplied — their crease intersections are thin
       // branching filaments in 3D, not sheets. pow sharpens them to wire thickness. ----
@@ -160,7 +163,7 @@ const CORE_FRAG = /* glsl */ `
     vec3 interior = uColor * haze * 1.15 + mix(uColor, vec3(1.0), 0.55) * glowAcc * (0.7 + uGlow)
                   + arcCol * arcAcc;
     // Dreaming: the aurora threads the interior; a REM flicker washes it rose for a breath.
-    interior += uAurora * aurAcc * uDream * 0.95;
+    interior += uAurora * aurAcc * uDream * 1.7;
     interior += uRemColor * (haze * 0.8 + glowAcc * 0.5) * uRem * 1.1;
 
     // ---- stacked-fresnel glass + limb darkening (the volume read) ----

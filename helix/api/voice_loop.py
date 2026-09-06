@@ -115,6 +115,7 @@ class WebVoice:
         self._camera_stt_busy = False
         self._barge_busy = False
         self._narrating = False
+        self._murmuring = False  # a whisper is playing: the wake-word mic is closed for its length
         self._speaking_text = ""
         self._speak_gen = 0
         self._pending_emb = None
@@ -242,7 +243,8 @@ class WebVoice:
             and self._state != "speaking"
         )
         self._listening = bool(
-            self.enabled() and not self._working and (self._state == "idle" or camera)
+            self.enabled() and not self._working and not self._murmuring
+            and (self._state == "idle" or camera)
         )
 
     def set_working(self, on: bool) -> None:
@@ -759,6 +761,11 @@ class WebVoice:
             return
         self._speaking_text = text
         self._narrating = True
+        # The mic closes for the whisper's length (the VAD would otherwise hear it, flip the orb to
+        # "listening" and wake the sleeping star) and re-opens — resetting the VAD — when it ends.
+        with self._lock:
+            self._murmuring = True
+            self._apply_listen_gate()
 
         def go() -> None:
             try:
@@ -767,6 +774,9 @@ class WebVoice:
                 pass
             finally:
                 self._narrating = False
+                with self._lock:
+                    self._murmuring = False
+                    self._apply_listen_gate()
 
         threading.Thread(target=go, daemon=True, name="helix-voice-murmur").start()
 
