@@ -163,3 +163,8 @@ live view at true scale (calibrate once on a credit card) with a ghost pocket pe
 parts go inside their ghosts before anything prints; a part the library doesn't know is measured with
 the camera's ruler in real millimetres. Print on your go, with a print sheet for the P1S. No dimension
 is ever typed from memory. Details: ARCHITECTURE.md §7d and READ_ME/MAKER_FLOW.md.
+
+Someone else's files print the same way: "load the InMoov right hand into a hologram" takes a folder
+(or files, a glob, a zip) of STLs, measures every mesh, lays the set out on P1S plates, marks which
+parts need supports, and opens it as an ordinary hologram with a print-scale slider — a section at a
+time, filed under one project. Details: ARCHITECTURE.md §7a, "Loaded meshes".

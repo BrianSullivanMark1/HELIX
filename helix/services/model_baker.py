@@ -304,6 +304,10 @@ class ModelBaker:
         # studio shows. Duck-typed: fakes and engines without meta_for simply skip the gate.
         meta = getattr(self._cad, "meta_for", lambda _s: None)(src)
         warns = [str(w) for w in ((meta or {}).get("print_warnings") or [])]
+        # A SUPPORTS line is about a LOADED mesh — someone else's STL, printed as they authored
+        # it. The studio and the print sheet show it; no coder pass can re-author it, so it never
+        # gates a build (the OVERHANG line covers the authored parts alone).
+        warns = [w for w in warns if not w.startswith("SUPPORTS")]
         floating = [w for w in warns if w.startswith("FLOATING")]
         # Huge overhang is the same disease in one solid (a lifted floor, a hung interior): a part
         # authored in the wrong orientation. Small legitimate support jobs stay warnings.

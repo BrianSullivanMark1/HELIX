@@ -22,6 +22,7 @@ import traceback
 from pathlib import Path
 
 from helix.domain import cadpy
+from helix.domain import meshes as M
 
 
 def _fail(result_path: Path, problem: str, detail: str, seconds: float) -> int:
@@ -40,28 +41,85 @@ def _norm_parts(built) -> list[tuple[str, object]]:
     return [("part", built)] if built is not None else []
 
 
-def _arrange(parts: list[tuple[str, object]]):
+def _layout(parts: list[tuple[str, object]]):
     """Multiple parts print (and read) best side by side: lay them along X on Z=0 with a gap,
-    centered as a group. Single parts keep their authored position (libraries sit on Z=0)."""
+    centered as a group, each keeping its authored Y — the enclosure generator's print_origins and
+    the AR ghost pockets count on exactly this row, however wide it runs. Single parts keep their
+    authored position (libraries sit on Z=0). A set holding LOADED MESHES whose row would overflow
+    one P1S plate — twenty InMoov parts — is shelf-packed onto PLATES instead
+    (domain.meshes.pack_plates: rows within 244 mm, plates side by side along X), still centred as
+    a group. Returns (placed parts, the part names per plate)."""
     from build123d import Pos
 
     if len(parts) <= 1:
-        return parts
-    gap = 8.0
+        return parts, [[name for name, _ in parts]]
+    gap = M.PART_GAP_MM
+    boxes = [(name, p, p.bounding_box()) for name, p in parts]
+    total = sum(bb.size.X for _, _, bb in boxes) + gap * (len(parts) - 1)
     placed: list[tuple[str, object]] = []
-    x = 0.0
-    total = 0.0
-    boxes = []
-    for name, p in parts:
-        bb = p.bounding_box()
-        boxes.append((name, p, bb))
-        total += bb.size.X
-    total += gap * (len(parts) - 1)
-    x = -total / 2
-    for name, p, bb in boxes:
-        placed.append((name, Pos(x - bb.min.X, 0, -bb.min.Z) * p))
-        x += bb.size.X + gap
-    return placed
+    if total <= M.PLATE_MM or not any(_is_mesh(p) for _, p in parts):
+        x = -total / 2
+        for name, p, bb in boxes:
+            placed.append((name, Pos(x - bb.min.X, 0, -bb.min.Z) * p))
+            x += bb.size.X + gap
+        return placed, [[name for name, _ in parts]]
+    slots = M.pack_plates([(name, bb.size.X, bb.size.Y) for name, _, bb in boxes], gap=gap)
+    max_x = max(s.x + bb.size.X for s, (_, _, bb) in zip(slots, boxes))
+    max_y = max(s.y + bb.size.Y for s, (_, _, bb) in zip(slots, boxes))
+    cx, cy = max_x / 2, max_y / 2
+    for s, (name, p, bb) in zip(slots, boxes):
+        placed.append((name, Pos(s.x - cx - bb.min.X, s.y - cy - bb.min.Y, -bb.min.Z) * p))
+    return placed, M.plates_of(slots)
+
+
+def _arrange(parts: list[tuple[str, object]]):
+    """The laid-out parts alone (the layout's first half) — what the enclosure compile tests read."""
+    return _layout(parts)[0]
+
+
+def _is_mesh(shape) -> bool:
+    """A LOADED mesh (helix_parts.mesh: a triangulated face, no solid) rather than an authored
+    solid. Duck-typed so the print checks' stand-in parts (a bounding box, no faces) read as
+    authored."""
+    try:
+        if shape.solids():
+            return False
+        return bool(getattr(shape, "faces", lambda: [])())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def mesh_volume_cm3(v) -> float:
+    """The enclosed volume of triangle soup by the divergence theorem (signed tetrahedra to the
+    origin, summed) — a closed mesh's true volume, whatever its winding. What a loaded STL weighs,
+    since a triangulated face has no kernel volume. Pure numpy."""
+    import numpy as np
+
+    if v is None or len(v) == 0:
+        return 0.0
+    vol = float(np.einsum("ij,ij->i", v[:, 0], np.cross(v[:, 1], v[:, 2])).sum() / 6.0)
+    return abs(vol) / 1000.0
+
+
+def _part_masks(placed, v):
+    """One boolean mask per placed part: the triangles whose centroid lies in that part's plan
+    (XY) box — parts are laid out with gaps, so the boxes don't overlap. None where a box can't be
+    read."""
+    import numpy as np
+
+    if v is None or len(v) == 0:
+        return [None] * len(placed)
+    c = v.mean(axis=1)
+    masks = []
+    for _, shape in placed:
+        try:
+            bb = shape.bounding_box()
+            lo_x, hi_x = float(bb.min.X) - 0.05, float(bb.max.X) + 0.05
+            lo_y, hi_y = float(bb.min.Y) - 0.05, float(bb.max.Y) + 0.05
+            masks.append((c[:, 0] >= lo_x) & (c[:, 0] <= hi_x) & (c[:, 1] >= lo_y) & (c[:, 1] <= hi_y))
+        except Exception:  # noqa: BLE001
+            masks.append(None)
+    return masks
 
 
 def _read_stl_tris(stl_path: Path):
@@ -177,7 +235,27 @@ def _print_warnings(parts, stl_path: Path) -> list[str]:
         pass
     try:
         tris = _read_stl_tris(stl_path)
-        report = overhang_report(tris)
+        # A LOADED mesh is someone else's file printed as they authored it: its steep faces are
+        # reported per part as SUPPORTS (the print sheet's list), never as the OVERHANG line the
+        # repair pass would try — and fail — to re-author. The OVERHANG line covers the authored
+        # parts' triangles only.
+        authored = None
+        if tris is not None and len(tris):
+            import numpy as np
+
+            authored = np.ones(len(tris), dtype=bool)
+            for (name, shape), mask in zip(parts, _part_masks(parts, tris)):
+                if mask is None or not _is_mesh(shape):
+                    continue
+                authored &= ~mask
+                own = overhang_report(tris[mask])
+                if own["overhang_cm2"] >= _WARN_AREA_CM2:
+                    warnings.append(
+                        f"SUPPORTS: '{name}' (a loaded mesh) measures ≈{own['overhang_cm2']:.1f} cm² "
+                        f"of faces steeper than 45° downward — print it with supports on, as its "
+                        f"author intended, or lay it differently in the slicer."
+                    )
+        report = overhang_report(tris if authored is None else tris[authored])
         if report["overhang_cm2"] >= _WARN_AREA_CM2:
             warnings.append(
                 f"OVERHANG: ≈{report['overhang_cm2']:.1f} cm² of faces steeper than 45° downward "
@@ -306,9 +384,10 @@ def run_job(job_path: str) -> int:
         if not parts:
             return _fail(result_path, "The design's build() didn't hand back a part.",
                          f"build() returned {type(built).__name__}", time.time() - t0)
-        parts = _arrange(parts)
+        parts, plates = _layout(parts)
         shapes = [p for _, p in parts]
         whole = shapes[0] if len(shapes) == 1 else Compound(children=list(shapes))
+        mesh_parts = [name for name, p in parts if _is_mesh(p)]
     except MemoryError:
         return _fail(result_path, "The design ran out of room to compute — too much detail at "
                      "once.", traceback.format_exc(limit=3), time.time() - t0)
@@ -325,7 +404,11 @@ def run_job(job_path: str) -> int:
             produced["stl"] = str(outputs["stl"])
         except Exception:  # noqa: BLE001
             problems.append("stl: " + traceback.format_exc(limit=1).strip().splitlines()[-1])
-    if "step" in outputs:
+    if "step" in outputs and mesh_parts:
+        # A triangulated face has no B-rep to write: STEP of a loaded mesh is a 1 kB stub that
+        # opens as nothing. The STL (and the 3MF) are the slicer's food for these; say so.
+        problems.append("step: skipped — loaded meshes carry no STEP geometry; use the STL or 3MF")
+    elif "step" in outputs:
         try:
             outputs["step"].parent.mkdir(parents=True, exist_ok=True)
             export_step(whole, str(outputs["step"]))
@@ -333,13 +416,23 @@ def run_job(job_path: str) -> int:
         except Exception:  # noqa: BLE001
             problems.append("step: " + traceback.format_exc(limit=1).strip().splitlines()[-1])
     if "mf" in outputs:
+        # Per part, tolerant: one loaded mesh the 3MF writer calls invalid (a non-manifold STL from
+        # the wild) must not cost the whole set its 3MF — it is named and skipped instead.
         try:
             outputs["mf"].parent.mkdir(parents=True, exist_ok=True)
             mesher = Mesher()
-            for _, shape in parts:
-                mesher.add_shape(shape)
-            mesher.write(str(outputs["mf"]))
-            produced["mf"] = str(outputs["mf"])
+            added = 0
+            for name, shape in parts:
+                try:
+                    mesher.add_shape(shape)
+                    added += 1
+                except Exception as exc:  # noqa: BLE001
+                    problems.append(f"3mf: '{name}' left out ({str(exc).strip() or type(exc).__name__})")
+            if added:
+                mesher.write(str(outputs["mf"]))
+                produced["mf"] = str(outputs["mf"])
+            else:
+                problems.append("3mf: no part could be written")
         except Exception:  # noqa: BLE001
             problems.append("3mf: " + traceback.format_exc(limit=1).strip().splitlines()[-1])
     if "png" in outputs and "stl" in produced:
@@ -353,17 +446,29 @@ def run_job(job_path: str) -> int:
         return _fail(result_path, "The design computed but couldn't be exported.", detail,
                      time.time() - t0)
 
-    meta: dict = {"parts": [name for name, _ in parts], "problems": problems}
+    meta: dict = {"parts": [name for name, _ in parts], "problems": problems, "plates": plates,
+                  "mesh_parts": mesh_parts}
     try:
         bb = whole.bounding_box()
         meta["bbox_mm"] = [round(bb.size.X, 2), round(bb.size.Y, 2), round(bb.size.Z, 2)]
+        sizes = {}
+        for name, shape in parts:
+            pb = shape.bounding_box()
+            sizes[name] = [round(pb.size.X, 2), round(pb.size.Y, 2), round(pb.size.Z, 2)]
+        meta["parts_mm"] = sizes
         vol_cm3 = sum(getattr(s, "volume", 0.0) for s in shapes) / 1000.0
+        if mesh_parts and "stl" in produced:
+            # Loaded meshes have no kernel volume: read it off the exported triangles instead
+            # (the authored parts are in that STL too, so this is the whole set's volume).
+            vol_cm3 = mesh_volume_cm3(_read_stl_tris(Path(produced["stl"])))
         meta["volume_cm3"] = round(vol_cm3, 2)
         meta["solid_grams_pla"] = round(vol_cm3 * 1.24, 1)  # solid PLA; shells print near-solid
     except Exception:  # noqa: BLE001 — metadata is a nicety
         pass
     if "stl" in produced:
         meta["print_warnings"] = _print_warnings(parts, Path(produced["stl"]))
+        meta["supports"] = [w.split("'")[1] for w in meta["print_warnings"]
+                            if w.startswith("SUPPORTS: '") and w.count("'") >= 2]
     if "meta" in outputs:
         try:
             outputs["meta"].parent.mkdir(parents=True, exist_ok=True)

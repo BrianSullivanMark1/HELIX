@@ -21,17 +21,22 @@ Contract: READ_ME/MAKER_FLOW.md §7.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING
 
 from helix.domain import cadpy
 from helix.domain import enclosure as E
+from helix.domain import meshes as M
 from helix.domain.events import BuildCreated, BuildDeleted, BuildIterated, CameraCommandRequested
 from helix.domain.models import App, BuildKind, slugify
 from helix.domain.vocabulary import kind_label
 from helix.logging_setup import get_logger
+from helix.services import stl_measure
 from helix.services.camera import CameraCommand, read_layout
 
 if TYPE_CHECKING:
@@ -209,6 +214,80 @@ def _cut_words(a: dict) -> str:
     if kind == "switch":
         return f"switch slot {size}"
     return f"{_kind_word(kind)} window {size}"
+
+
+def _source_list(sources) -> list[str]:
+    """The tool's `sources` as a clean list of strings: a list, or one string (split on newlines
+    and semicolons only — a path may hold spaces)."""
+    if sources is None:
+        return []
+    if isinstance(sources, str):
+        raw = [s for chunk in sources.splitlines() for s in chunk.split(";")]
+    elif isinstance(sources, (list, tuple)):
+        raw = [str(s) for s in sources]
+    else:
+        raw = [str(sources)]
+    out: list[str] = []
+    for s in raw:
+        s = s.strip().strip('"').strip("'")
+        if s and s not in out:
+            out.append(s)
+    return out[:200]
+
+
+def _resolve_path(raw: str) -> Path | None:
+    """A usable absolute path: `~` expands, a bare relative path is taken from the user's home
+    folder (the natural anchor for spoken paths), the glob part (if any) left in place."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = Path.home() / path
+        return path
+    except (OSError, ValueError):
+        return None
+
+
+def _within(child: Path, parent: Path) -> bool:
+    try:
+        c = os.path.normcase(str(child.resolve()))
+        p = os.path.normcase(str(parent.resolve()))
+    except OSError:
+        return False
+    sep = os.sep
+    return c == p or c.startswith(p.rstrip(sep) + sep)
+
+
+def _has_glob(raw: str) -> bool:
+    return any(ch in str(raw or "") for ch in "*?[")
+
+
+def _glob_files(raw: str) -> list[Path]:
+    """Expand a source with a glob in it ('…/Right-Hand/*.stl', '…/InMoov/**/*.stl'): the anchor
+    is the path up to the first wildcard segment; files only, A–Z."""
+    path = _resolve_path(raw)
+    if path is None:
+        return []
+    parts = PurePath(path).parts
+    i = next((k for k, seg in enumerate(parts) if _has_glob(seg)), None)
+    if i is None:
+        return [path] if path.is_file() else []
+    anchor = Path(*parts[:i]) if i else Path.home()
+    pattern = "/".join(parts[i:])
+    try:
+        return sorted((p for p in anchor.glob(pattern) if p.is_file()), key=lambda p: str(p).lower())
+    except (OSError, ValueError):
+        return []
+
+
+def _origin_words(wanted: list[str]) -> str:
+    """The sources as the user gave them, for the brief and the reply (forward slashes; at most
+    three named)."""
+    shown = [w.replace("\\", "/") for w in wanted[:3]]
+    tail = f" (+{len(wanted) - 3} more)" if len(wanted) > 3 else ""
+    return ", ".join(shown) + tail
 
 
 def _g(v, digits: int = 1) -> str:
@@ -401,6 +480,278 @@ class MakerService:
             self._bus.publish(BuildIterated(app) if iterating else BuildCreated(app))
         return self._fit_report(app, layout, problems, meta, notes, skipped, iterating)
 
+    # ----- loading meshes (STL files the user brings in) -----
+    def load_parts(self, name: str, sources, *, project: str = "", scale: float | None = None,
+                   credit: str = "", on_progress=None) -> str:
+        """Bring STL files INTO a hologram of their own — a downloaded set (InMoov's hand, a
+        Thingiverse bracket), a folder of them, a release zip. The files are copied into the
+        workspace's parts/ folder, each is measured off its vertices, and the design written beside
+        them is an ordinary model.py that loads every part (domain.meshes.model_source) — compiled,
+        baked, committed and announced like any hologram, filed under `project` when given. The
+        report reads every part against the P1S bed, the plates, which parts measured steep
+        overhang, and the grams. Refuses plainly; never leaves a half-written build live."""
+        build_name = " ".join(str(name or "").split())[:60]
+        if not build_name:
+            return "What should the hologram be called? Give it a name, then the files."
+        wanted = _source_list(sources)
+        if not wanted:
+            return ("Which files? Give the STL files to load — each file's path, a folder of them, "
+                    "or a zip — and I'll bring them in.")
+        entries, notes = self._collect(wanted)
+        if not entries:
+            return ("I couldn't find any STL files to load." + (" " + " ".join(notes) if notes else "")
+                    + " Nothing was built.")
+        measured: list[tuple[str, bytes, stl_measure.MeshBox]] = []
+        for origin_name, data in entries:
+            box = stl_measure.measure_bytes(data, origin_name)
+            if box is None:
+                notes.append(f"{origin_name} isn't a readable STL — skipped.")
+                continue
+            measured.append((origin_name, data, box))
+        if not measured:
+            return ("None of those files read as an STL mesh. " + " ".join(notes) + " Nothing was built.").strip()
+        refusal = self._engine_refusal()
+        if refusal:
+            return refusal
+        # An EXACT name (or slug) reloads the same hologram; a loose match never does.
+        prior = self.find_model(build_name, loose=False)
+        taken = next((a for a in self._builds.list()
+                      if a.build_kind != BuildKind.MODEL
+                      and (a.slug == slugify(build_name) or a.name.strip().lower() == build_name.lower())), None)
+        if taken is not None:
+            what = kind_label(taken.build_kind.value)
+            article = "an" if what[:1] in "aeiou" else "a"
+            return (f"There's already {article} {what} called '{taken.name}' — "
+                    f"give the hologram a different name.")
+        names = M.unique_names(M.safe_part_name(n) for n, _, _ in measured)
+        try:
+            scale_v = float(scale) if scale is not None and str(scale).strip() != "" else 1.0
+        except (TypeError, ValueError):
+            scale_v = 1.0
+        if not (M.SCALE_MIN <= scale_v <= M.SCALE_MAX):
+            clamped = min(M.SCALE_MAX, max(M.SCALE_MIN, scale_v))
+            notes.append(f"A scale of {scale_v:g} is outside the {M.SCALE_MIN:g}–{M.SCALE_MAX:g} the studio "
+                         f"slider covers — loaded at {clamped:g}.")
+            scale_v = clamped
+        origin = _origin_words(wanted)
+        source = M.model_source(
+            build_name, [(fn, box.size) for fn, (_, _, box) in zip(names, measured)],
+            origin=origin, credit=" ".join(str(credit or "").split())[:120], scale=scale_v,
+        )
+        lints = cadpy.inspect_source(source)
+        if lints:  # the generator's output is pinned to pass; if it ever doesn't, say so rather than compile
+            return f"The generated design failed its own checks ({' '.join(lints)}) — nothing was built."
+        request = (f"{len(measured)} STL part{'' if len(measured) == 1 else 's'} loaded from {origin}"
+                   + (f" — {credit}" if credit else "") + ", laid out for the Bambu Lab P1S by HELIX.")
+        app = App.from_request(build_name, request)
+        app.build_kind = BuildKind.MODEL
+        iterating = prior is not None
+        if prior is not None:   # the hologram keeps its own name, slug and birthday; only the files move
+            app.slug, app.name, app.created_at = prior.slug, prior.name, prior.created_at
+        ws = self._builds.create_workspace(app)
+        self._builds.mark_building(app.slug)
+        failure: str | None = None
+        try:
+            parts_dir = ws / M.PARTS_DIR
+            if parts_dir.exists():          # the design IS these files: a reload replaces the set
+                shutil.rmtree(parts_dir)
+            parts_dir.mkdir(parents=True, exist_ok=True)
+            for fn, (_, data, _) in zip(names, measured):
+                (parts_dir / fn).write_bytes(data)
+            (ws / "model.py").write_text(source, encoding="utf-8")
+            (ws / "assets").mkdir(parents=True, exist_ok=True)
+            for stale in (STL_REL, META_REL, LAYOUT_REL):   # a previous design's artefacts must not read as this one's
+                try:
+                    (ws / stale).unlink()
+                except OSError:
+                    pass
+            self._baker.prepare(ws)
+            if on_progress is not None:
+                on_progress(f"Laying out {len(measured)} part{'' if len(measured) == 1 else 's'} for the printer…")
+            failure = self._compile(ws)
+            if failure is None:
+                self._baker.bake(ws)
+                if not (ws / STL_REL).is_file():
+                    failure = "the engine produced no mesh"
+        except Exception as exc:  # noqa: BLE001 — never leave a half-written build live
+            _LOG.warning("load_parts failed", exc_info=True)
+            failure = f"{exc}"
+        if failure is not None:
+            self._rollback(app, ws, iterating)
+            return (f"The parts didn't compile: {failure} Nothing was kept"
+                    + (" — the previous version of the hologram stands." if iterating else ".")
+                    + " Tell the user plainly; the files on disk are untouched.")
+        meta = self._meta(ws)
+        try:
+            app = self._builds.finalize(app)   # manifest + the version commit (repo.commit_all)
+        except Exception as exc:  # noqa: BLE001 — the design is baked; a git hiccup is worth one honest line
+            _LOG.warning("finalize/commit failed for %s", app.slug, exc_info=True)
+            notes.append(f"The version commit didn't go through ({exc}); the files are on disk and the hologram opens.")
+            self._builds.clear_building(app.slug)
+        filed = ""
+        folder = " ".join(str(project or "").split())
+        if folder:
+            try:
+                out = self._builds.set_project(app.slug, folder)
+                if out is not None:
+                    app.project = out.project
+                    filed = out.project
+            except Exception:  # noqa: BLE001 — a folder tag is a courtesy, never the build's fate
+                _LOG.warning("could not file %s under %s", app.slug, folder, exc_info=True)
+        elif prior is not None:
+            filed = getattr(prior, "project", "") or ""
+        if self._bus is not None:
+            self._bus.publish(BuildIterated(app) if iterating else BuildCreated(app))
+        return self._load_report(app, names, measured, meta, notes, iterating, origin, filed)
+
+    def _collect(self, wanted: list[str]) -> tuple[list[tuple[str, bytes]], list[str]]:
+        """(file name, bytes) for every STL the sources name — a file, a folder (its own .stl files,
+        A–Z), a glob ('…/Right-Hand/*.stl'), or a zip (its .stl entries, read in memory) — in the
+        order given, with a note per thing that couldn't be read. HELIX's own data folder is sealed
+        (secrets live there) except data/builds, the user's own creations; the caps in
+        domain.meshes stop a runaway set."""
+        entries: list[tuple[str, bytes]] = []
+        notes: list[str] = []
+        total = 0
+        capped = False
+        builds_dir = Path(self._builds.dir).resolve()
+        data_dir = builds_dir.parent
+
+        def take(label: str, data: bytes) -> bool:
+            nonlocal total, capped
+            if len(entries) >= M.MAX_PARTS or total + len(data) > M.MAX_TOTAL_BYTES:
+                capped = True
+                return False
+            entries.append((label, data))
+            total += len(data)
+            return True
+
+        for raw in wanted:
+            if capped:
+                break
+            path = _resolve_path(raw)
+            if path is None:
+                notes.append(f"'{raw}' isn't a path I can use.")
+                continue
+            if _within(path, data_dir) and not _within(path, builds_dir):
+                notes.append(f"'{raw}' is inside HELIX's own data folder — I don't read from there.")
+                continue
+            if _has_glob(raw):
+                files = _glob_files(raw)
+                if not files:
+                    notes.append(f"Nothing matches {raw}.")
+                    continue
+            elif path.is_dir():
+                files = sorted((p for p in path.iterdir() if p.is_file() and p.suffix.lower() in (".stl", ".zip")),
+                               key=lambda p: p.name.lower())
+                if not files:
+                    notes.append(f"No STL files in {raw}.")
+                    continue
+            elif path.is_file():
+                files = [path]
+            else:
+                notes.append(f"Nothing at {raw}.")
+                continue
+            for f in files:
+                low = f.name.lower()
+                try:
+                    if low.endswith(".stl"):
+                        if f.stat().st_size > M.MAX_TOTAL_BYTES:
+                            notes.append(f"{f.name} is too big to load ({f.stat().st_size // (1024 * 1024)} MB).")
+                            continue
+                        if not take(f.name, f.read_bytes()):
+                            break
+                    elif low.endswith(".zip"):
+                        with zipfile.ZipFile(f) as zf:
+                            for info in zf.infolist():
+                                if info.is_dir() or not info.filename.lower().endswith(".stl"):
+                                    continue
+                                with zf.open(info) as fh:
+                                    data = fh.read(M.MAX_TOTAL_BYTES + 1)
+                                if len(data) > M.MAX_TOTAL_BYTES:
+                                    notes.append(f"{info.filename} (in {f.name}) is too big to load.")
+                                    continue
+                                if not take(info.filename, data):
+                                    break
+                    elif f == path:
+                        notes.append(f"{f.name} isn't an STL or a zip — skipped.")
+                except (OSError, zipfile.BadZipFile) as exc:
+                    notes.append(f"{f.name} couldn't be read ({exc.__class__.__name__}).")
+                if capped:
+                    break
+        if capped:
+            notes.append(f"Stopped at the cap ({M.MAX_PARTS} parts or {M.MAX_TOTAL_BYTES // (1024 * 1024)} MB "
+                         f"per hologram) — load the rest as another hologram, a section at a time.")
+        return entries, notes
+
+    def _engine_refusal(self) -> str | None:
+        """The 'not started' line when the kernel isn't there (None when it is, or when no engine
+        is wired — the baker then writes its install page)."""
+        if self._cad is None:
+            return None
+        try:
+            available = bool(self._cad.available())
+        except Exception:  # noqa: BLE001 — a probing hiccup reads as missing
+            available = False
+        if available:
+            return None
+        hint = ""
+        try:
+            hint = self._cad.install_hint() or ""
+        except Exception:  # noqa: BLE001
+            hint = ""
+        return ("Not started — the hologram engine isn't installed, so there is nothing to lay the parts "
+                "out with. " + hint + " Offer install_cad_engine (only after the user says yes), then "
+                "try again.").replace("  ", " ")
+
+    def _load_report(self, app: App, names: list[str], measured, meta: dict, notes: list[str],
+                     iterating: bool, origin: str, filed: str) -> str:
+        n = len(measured)
+        head = f"{'Reloaded' if iterating else 'Loaded'} {n} STL part{'' if n == 1 else 's'} into '{app.name}'"
+        if filed:
+            head += f" (filed under '{filed}')"
+        lines = [head + ":"]
+        limit = M.BED_MM - M.BED_MARGIN_MM
+        sizes = meta.get("parts_mm") if isinstance(meta.get("parts_mm"), dict) else {}
+        dims: dict[str, list[float]] = {}
+        for fn, (_, _, box) in zip(names, measured):
+            label = M.label_of(fn)
+            got = sizes.get(label)
+            dims[label] = [float(v) for v in got] if isinstance(got, (list, tuple)) and len(got) == 3 else list(box.size)
+        big = [(k, v) for k, v in dims.items() if max(v) > limit]
+        if big:
+            named = ", ".join(f"{k} at {_g(v[0])} × {_g(v[1])} × {_g(v[2])} mm" for k, v in big[:6])
+            lines.append(f"- {len(big)} part{'s' if len(big) > 1 else ''} exceed the Bambu P1S bed "
+                         f"({M.BED_MM:.0f} mm each way): {named} — scale the set down (the studio's slider) "
+                         f"or cut those in the slicer.")
+        else:
+            k, v = max(dims.items(), key=lambda kv: max(kv[1]))
+            lines.append(f"- every part fits the Bambu P1S bed; the largest is {k} at "
+                         f"{_g(v[0])} × {_g(v[1])} × {_g(v[2])} mm.")
+        plates = [list(p) for p in (meta.get("plates") or []) if isinstance(p, (list, tuple))]
+        if len(plates) > 1:
+            lines.append(f"- laid out on {len(plates)} P1S plates — "
+                         + "; ".join(f"plate {i + 1}: {', '.join(str(x) for x in p)}" for i, p in enumerate(plates)) + ".")
+        elif n > 1:
+            lines.append("- all on one P1S plate.")
+        supports = [str(s) for s in (meta.get("supports") or [])]
+        if supports:
+            lines.append(f"- steep overhang measured on {len(supports)} part{'s' if len(supports) > 1 else ''} — "
+                         f"print with supports on: {', '.join(supports)}.")
+        elif meta.get("bbox_mm"):
+            lines.append("- no part measured steep overhang: print them as they lie, without supports.")
+        grams = meta.get("solid_grams_pla")
+        if grams is not None:
+            lines.append(f"- about {_g(grams)} g of PLA printed solid; at 20–30 % infill the slicer's estimate "
+                         "is the one to trust.")
+        if origin:
+            lines.append(f"- from {origin}.")
+        for note in notes:
+            lines.append(f"- {note}")
+        lines.append("It opens from the menu like any hologram — scale is a slider in the studio; "
+                     "say print when ready and the print sheet lists the plates.")
+        return "\n".join(lines)
+
     # ----- reading back -----
     def find_model(self, name: str, *, loose: bool = True) -> App | None:
         """The hologram the user named — its slug or its name as spoken (case and spacing don't
@@ -440,19 +791,44 @@ class MakerService:
         meta = self._meta(ws)
         warns = [str(w) for w in (meta.get("print_warnings") or [])]
         overhang = [w for w in warns if w.upper().startswith("OVERHANG")]
+        mesh_parts = [str(p) for p in (meta.get("mesh_parts") or [])]
+        needs_support = [str(p) for p in (meta.get("supports") or [])]
+        plates = [list(p) for p in (meta.get("plates") or []) if isinstance(p, (list, tuple))]
         lines = [f"Print sheet — {name} (Bambu Lab P1S, PLA)"]
-        supports = ("supports ON where the slicer asks — the compiled model measured steep overhang"
-                    if overhang else "no supports (every part prints on its flat face)")
-        lines.append(f"Settings: 0.2 mm layers, 3 walls, 15 % infill, {supports}. STEP first in Bambu Studio; "
-                     "the STL carries every part laid side by side.")
+        if mesh_parts:
+            # Loaded meshes: someone else's files, printed as they lie. Supports per measured
+            # part; the STL is the slicer's food (a triangulated face has no STEP).
+            sup = (f"supports ON for {', '.join(needs_support)} (measured steep overhang), off for the rest"
+                   if needs_support else "no supports (no part measured steep overhang)")
+            lines.append(f"Settings: 0.2 mm layers, 3 walls, 20 % infill, {sup}. Loaded meshes: import the STL "
+                         "in Bambu Studio (they carry no STEP), split to objects, print one plate at a time.")
+        else:
+            supports = ("supports ON where the slicer asks — the compiled model measured steep overhang"
+                        if overhang else "no supports (every part prints on its flat face)")
+            lines.append(f"Settings: 0.2 mm layers, 3 walls, 15 % infill, {supports}. STEP first in Bambu Studio; "
+                         "the STL carries every part laid side by side.")
         parts = [str(p) for p in (meta.get("parts") or [])]
+        sizes = meta.get("parts_mm") if isinstance(meta.get("parts_mm"), dict) else {}
         bbox = meta.get("bbox_mm")
         if layout:
             lines.append("Parts to print (planned sizes, from the shell recipe):")
             for line in self._part_sizes(layout):
                 lines.append(f"- {line}")
+        elif parts and sizes and len(parts) > 1:
+            lines.append("Parts to print (measured off the compiled model):")
+            for p in parts[:60]:
+                d = sizes.get(p)
+                if isinstance(d, (list, tuple)) and len(d) == 3:
+                    lines.append(f"- {p} — {_g(d[0])} × {_g(d[1])} × {_g(d[2])} mm")
+                else:
+                    lines.append(f"- {p}")
+            if len(parts) > 60:
+                lines.append(f"- …and {len(parts) - 60} more")
         elif parts:
             lines.append("Parts to print: " + ", ".join(parts) + ".")
+        if len(plates) > 1:
+            lines.append("Plates (each fits the 256 mm bed): "
+                         + "; ".join(f"plate {i + 1}: {', '.join(str(x) for x in p)}" for i, p in enumerate(plates)) + ".")
         if isinstance(bbox, (list, tuple)) and len(bbox) == 3:
             lines.append(f"On the plate (measured on the compiled model): {_g(bbox[0])} × {_g(bbox[1])} × "
                          f"{_g(bbox[2])} mm all together (bed 256 × 256 × 256).")

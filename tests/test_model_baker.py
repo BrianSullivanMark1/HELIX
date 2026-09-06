@@ -855,3 +855,20 @@ def test_real_engine_compiles_the_good_source_end_to_end(tmp_path, three_js):
     html = _html(ws)
     assert VIEWER_SENTINEL in html and "MeshMatcapMaterial" in html
     assert base64.b64decode(re.search(r'window\.HELIX_STL="([^"]+)"', (ws / STL_JS_REL).read_text()).group(1)) == stl
+
+
+def test_a_loaded_meshs_supports_note_never_gates_a_build(tmp_path):
+    # A SUPPORTS line is about someone else's STL printed as they lie — no coder pass can re-author
+    # it, so it must not cost the coder its one repair pass nor roll a compiling design back.
+    cad = _MeteredCad(["SUPPORTS: 'thumb5' (a loaded mesh) measures ≈12.0 cm² of faces steeper than "
+                       "45° downward — print it with supports on, as its author intended."])
+    baker = ModelBaker(cad)
+    ws = _ws(tmp_path)
+    baker.prepare(ws)
+    assert baker.check(ws) is None
+    # …while the same area on an AUTHORED part still goes to the repair pass once
+    cad2 = _MeteredCad(["OVERHANG: ≈12.0 cm² of faces steeper than 45° downward (lowest at 4.0 mm)"])
+    baker2 = ModelBaker(cad2)
+    ws2 = _ws(tmp_path / "two")
+    baker2.prepare(ws2)
+    assert "P1S" in (baker2.check(ws2) or "")

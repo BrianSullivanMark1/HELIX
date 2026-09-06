@@ -29,7 +29,11 @@ interface Hologram {
   params: Param[];
   files: { stl: string; step: string; mf: string; preview: string };
   meta: { bbox_mm?: number[]; volume_cm3?: number; solid_grams_pla?: number; parts?: string[];
-          print_warnings?: string[] };
+          print_warnings?: string[];
+          // Loaded meshes (domain.meshes): each part's own size, the P1S plates the runner laid
+          // the set out on, which parts are loaded STLs, and which measured steep overhang.
+          parts_mm?: Record<string, number[]>; plates?: string[][]; mesh_parts?: string[];
+          supports?: string[] };
   engine: string;
   // The maker flow (MAKER_FLOW §7): the component layout design_enclosure wrote beside the mesh
   // (null for a hologram the coder drew) and the P1S print sheet, plain text.
@@ -287,7 +291,15 @@ export default function Studio({ slug, title }: { slug: string; title: string })
   }
 
   const bbox = meta.bbox_mm || [];
-  const fits = bbox.length === 3 && bbox.every((v, i) => v <= P1S_BED[i]);
+  // Parts print one plate at a time: when the runner measured each part, the bed check is per
+  // part (a set laid out on three plates is wider than the bed and still fits); otherwise the
+  // whole model's box, as before.
+  const partSizes = Object.values(meta.parts_mm || {}).filter((d) => d.length === 3);
+  const plates = meta.plates || [];
+  const fits = partSizes.length > 0
+    ? partSizes.every((d) => d.every((v, i) => v <= P1S_BED[i]))
+    : bbox.length === 3 && bbox.every((v, i) => v <= P1S_BED[i]);
+  const loadedMeshes = (meta.mesh_parts?.length ?? 0) > 0;
 
   return (
     <div className="h-full pt-14 px-6 pb-6 flex gap-4" style={{ pointerEvents: "auto" }}>
@@ -436,7 +448,22 @@ export default function Studio({ slug, title }: { slug: string; title: string })
             )}
             {bbox.length === 3 && (
               <div style={{ color: fits ? "var(--done)" : "var(--error)" }}>
-                {fits ? "✓ Fits the P1S bed (256³)" : "✗ Exceeds the P1S bed (256³) — split or shrink it"}
+                {fits
+                  ? (plates.length > 1
+                    ? `✓ Every part fits the P1S bed (256³) — ${plates.length} plates`
+                    : "✓ Fits the P1S bed (256³)")
+                  : (partSizes.length > 0
+                    ? "✗ A part exceeds the P1S bed (256³) — scale it down or cut it in the slicer"
+                    : "✗ Exceeds the P1S bed (256³) — split or shrink it")}
+              </div>
+            )}
+            {plates.length > 1 && (
+              <div className="space-y-0.5">
+                {plates.map((names, i) => (
+                  <div key={i}>
+                    <span style={{ color: "var(--text)" }}>Plate {i + 1}:</span> {names.join(", ")}
+                  </div>
+                ))}
               </div>
             )}
             {meta.volume_cm3 !== undefined && (
@@ -467,7 +494,9 @@ export default function Studio({ slug, title }: { slug: string; title: string })
             )}
           </div>
           <div className="text-[11px] mt-2" style={{ color: "var(--muted)" }}>
-            STEP opens natively in Bambu Studio — cleanest geometry for slicing.
+            {loadedMeshes
+              ? "Loaded meshes: import the STL in Bambu Studio and split to objects — they carry no STEP."
+              : "STEP opens natively in Bambu Studio — cleanest geometry for slicing."}
           </div>
           {holo?.print_sheet && (
             <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--line)" }}>

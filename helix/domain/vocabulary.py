@@ -159,6 +159,7 @@ _TOOL_PHRASES: dict[str, str] = {
     "design_enclosure": "Designing the enclosure",
     "check_fit": "Checking the fit on the camera",
     "camera_measure": "Measuring with the ruler",
+    "load_hologram_parts": "Loading the parts",
     "create_workflow": "Saving that workflow",
     "run_workflow": "Running the workflow",
     "list_workflows": "Checking your workflows",
@@ -177,6 +178,7 @@ _NAMED_VERBS: dict[str, str] = {
     "delete_build": "Removing",
     "rename_build": "Renaming",
     "file_hologram": "Filing",
+    "load_hologram_parts": "Loading",
 }
 
 

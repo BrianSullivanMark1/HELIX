@@ -382,3 +382,19 @@ build queue — no coder runs, so there is nothing to narrate beyond two progres
 waits for the kernel; the enclosure's name update keeps the hologram's existing name; a fit check
 cannot confirm the panel's calibration from the backend; the print sheet's per-part sizes are
 computed from the shell recipe (labelled "planned") while the overall size is measured off the mesh.
+
+## 10. Loaded meshes (2026-09-06)
+
+The flow gained a fourth way a hologram comes to be: **someone else's STL files**. `load_hologram_parts`
+(→ `MakerService.load_parts`) copies files / a folder / a glob / a zip of STLs into the workspace's
+`parts/` folder, measures each off its vertices, and writes an ordinary `model.py` whose `build()`
+returns `{label: mesh(file, scale)}` — `mesh()` is a `helix_parts` helper that resolves only plain file
+names inside `parts/`. The runner packs a set that overflows one plate onto P1S plates (`meshes.pack_plates`;
+authored designs keep the single row §4's `print_origins` describes), reads the volume off the
+triangles, skips STEP with a note, writes the 3MF per part, and reports each loaded mesh's steep faces
+as `SUPPORTS: '<part>'` (never the coder's `OVERHANG`; the baker's repair gate ignores SUPPORTS).
+`meta` gains `parts_mm` / `plates` / `mesh_parts` / `supports`; the studio's bed check is per part and
+lists plates; the print sheet says "STL first, supports on for …, plate 1: …". Worked example on the
+real kernel: InMoov's Right-Hand folder (17 STLs, 10.8 MB) → 6.3 s → three plates, five parts flagged
+for supports, 535 cm³. Contract text: ARCHITECTURE.md §7a "Loaded meshes"; tests `test_meshes.py`,
+`test_load_parts.py`, `test_mesh_compile.py`.

@@ -911,6 +911,87 @@ def deboss_text(text: str, size: float, depth: float, font: str = "Arial") -> Pa
         return solid
     except Exception:  # noqa: BLE001 — a missing font must never fail a build
         return deboss_tag(text, size, depth)
+
+
+# ----- loaded meshes: STL files the user brought into this hologram's parts/ folder ----------
+# (helix/domain/meshes.py writes the design that calls mesh() per file; a coder edit may call it
+# too — "add a stand under the hand". Only plain file names inside parts/ resolve, never a path.)
+from pathlib import Path as _Path
+
+PARTS_DIR = _Path(__file__).resolve().parent / "parts"
+
+
+def _stl_triangles(path):
+    """(n, 3, 3) float64 vertices of a binary or ASCII STL — the file's own numbers, unscaled."""
+    import struct
+
+    import numpy as np
+
+    raw = path.read_bytes()
+    if len(raw) >= 84:
+        (count,) = struct.unpack_from("<I", raw, 80)
+        exact = count > 0 and len(raw) == 84 + 50 * count
+        ascii_head = raw[:512].lstrip().startswith(b"solid")
+        if exact or (count > 0 and len(raw) >= 84 + 50 * count and not ascii_head):
+            body = np.frombuffer(raw, dtype=np.uint8, offset=84)[: count * 50].reshape(count, 50)
+            floats = np.frombuffer(body[:, :48].tobytes(), dtype="<f4").reshape(count, 12)
+            return floats[:, 3:12].reshape(count, 3, 3).astype(np.float64)
+    verts = []
+    for line in raw.decode("ascii", "replace").splitlines():
+        bits = line.split()
+        if len(bits) >= 4 and bits[0].lower() == "vertex":
+            verts.append([float(bits[1]), float(bits[2]), float(bits[3])])
+    n = len(verts) // 3
+    return np.array(verts[: n * 3], dtype=np.float64).reshape(n, 3, 3)
+
+
+def _mesh_from_triangles(tris):
+    """A triangulated Face straight from vertex triples (what import_stl builds, but from numbers
+    we control — the scaled path)."""
+    from OCP.BRep import BRep_Builder
+    from OCP.gp import gp_Pnt
+    from OCP.Poly import Poly_Triangle, Poly_Triangulation
+    from OCP.TopoDS import TopoDS_Face
+
+    n = len(tris)
+    if n == 0:
+        raise ValueError("the STL holds no triangles")
+    tri = Poly_Triangulation(n * 3, n, False)
+    for i, (x, y, z) in enumerate(tris.reshape(-1, 3).tolist(), 1):
+        tri.SetNode(i, gp_Pnt(x, y, z))
+    for i in range(n):
+        tri.SetTriangle(i + 1, Poly_Triangle(3 * i + 1, 3 * i + 2, 3 * i + 3))
+    face = TopoDS_Face()
+    BRep_Builder().MakeFace(face, tri)
+    return Face(face)
+
+
+def mesh(file: str, scale: float = 1.0):
+    """One STL from this hologram's parts/ folder as a build123d shape — a TRIANGULATED face:
+    move it (Pos/Rot), lay it out, build fixtures BESIDE it; booleans against it are unreliable.
+    Centred on X/Y and sitting on Z=0. `scale` resizes it about the origin (1.0 = the file's own
+    size). Only a plain file name inside parts/ resolves — never a path."""
+    from build123d import import_stl
+
+    key = str(file or "").strip()
+    bad = (not key or "/" in key or chr(92) in key or key in (".", "..")
+           or not key.lower().endswith(".stl"))
+    if bad:
+        raise ValueError(f"mesh({file!r}): give the file's name inside this hologram's parts/ "
+                         f"folder, like mesh('bracket.stl')")
+    root = PARTS_DIR.resolve()
+    path = (root / key).resolve()
+    if root not in path.parents or not path.is_file():
+        raise ValueError(f"mesh({file!r}): there is no {key} in this hologram's parts/ folder")
+    s = float(scale)
+    if not s > 0.0:
+        raise ValueError(f"mesh({file!r}): scale must be a positive number, not {scale!r}")
+    if abs(s - 1.0) < 1e-9:
+        shape = import_stl(str(path))
+    else:
+        shape = _mesh_from_triangles(_stl_triangles(path) * s)
+    bb = shape.bounding_box()
+    return Pos(-(bb.min.X + bb.max.X) / 2, -(bb.min.Y + bb.max.Y) / 2, -bb.min.Z) * shape
 '''
 
 HELIX_LIB = _LIB_HEAD + render_boards(CATALOG) + _LIB_TAIL
@@ -989,6 +1070,10 @@ Plate-face CUTTERS (subtract at Pos(x,y,0); each spans 1 mm below Z=0 up to `dep
   deboss_text(text,size,depth)       label cutter from Z=0 up depth+0.2: Pos(x,y,face_z-depth)*;
                                      mirror(..., about=Plane.YZ) on a plate face so it reads from
                                      outside; degrades to deboss_tag (a plain recess) if no font loads
+Loaded meshes (STL files in this hologram's parts/ folder, when it has one):
+  mesh(file, scale=1.0)              one parts/ file as a TRIANGULATED shape, centred X/Y on Z=0 — move it
+                                     (Pos/Rot), lay it out, build fixtures BESIDE it; booleans against a
+                                     mesh are unreliable. Plain file names only ('hand.stl'), never a path.
 build123d in 6 lines (algebra mode): parts combine with + - &; move with Pos(x,y,z)*p and
   Rot(x,y,z)*p; primitives Box(l,w,h,align=...), Cylinder(r,h); round with
   fillet(p.edges().filter_by(Axis.Z), r) and chamfer(p.edges(), c); sketch+extrude for profiles:

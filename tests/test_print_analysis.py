@@ -110,3 +110,54 @@ def test_a_short_print_never_triggers_the_contact_warning(tmp_path):
     short = [tri(0.0, size=5.0), tri(10.0, size=5.0, up=True)]  # 10 mm tall — nothing to tip
     stl = _write_binary_stl(tmp_path / "short.stl", short)
     assert _print_warnings([], stl) == []
+
+
+# ----------------------------------------------------------------------------------------------------
+# Loaded meshes: the volume off the triangles, and SUPPORTS per loaded part vs the coder's OVERHANG
+# ----------------------------------------------------------------------------------------------------
+
+from helix.cad.runner import mesh_volume_cm3  # noqa: E402
+
+
+def _closed_box(x0, y0, z0, x1, y1, z1):
+    p = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0), (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
+    faces = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4),
+             (1, 2, 6), (1, 6, 5), (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7)]
+    return [[p[a], p[b], p[c]] for a, b, c in faces]
+
+
+def test_mesh_volume_reads_a_closed_mesh_whatever_its_winding_and_position():
+    box = np.array(_closed_box(100, -50, 7, 110, -40, 17), dtype=np.float64)   # 10 × 10 × 10 away from the origin
+    assert abs(mesh_volume_cm3(box) - 1.0) < 1e-9
+    assert abs(mesh_volume_cm3(box[:, ::-1, :]) - 1.0) < 1e-9                 # inside-out winding: same volume
+    assert mesh_volume_cm3(None) == 0.0 and mesh_volume_cm3(np.zeros((0, 3, 3))) == 0.0
+
+
+class _FakeMesh(_FakePart):
+    """A stand-in LOADED mesh: no solids, one face, a plan box the runner masks triangles with."""
+
+    def __init__(self, x0, y0, x1, y1):
+        super().__init__(x1 - x0, y1 - y0, 30.0)
+        self._bb = SimpleNamespace(size=SimpleNamespace(X=x1 - x0, Y=y1 - y0, Z=30.0),
+                                   min=SimpleNamespace(X=x0, Y=y0, Z=0.0), max=SimpleNamespace(X=x1, Y=y1, Z=30.0))
+
+    def faces(self):
+        return [object()]
+
+
+def test_a_loaded_meshs_steep_faces_are_reported_per_part_as_supports(tmp_path):
+    # two hung ceilings at 10 mm (2 cm² each): one under the loaded mesh 'cap' (x 0..40), one under
+    # an authored part (x 100..140) — only the cap's, grown past the bar, becomes SUPPORTS for 'cap'
+    v = [tri(10.0, size=20.0), [[100, 0, 10.0], [100, 20, 10.0], [120, 0, 10.0]],
+         tri(0.0, size=40.0, up=False), [[100, 0, 0.0], [100, 40, 0.0], [140, 0, 0.0]]]
+    stl = _write_binary_stl(tmp_path / "two.stl", v)
+    parts = [("cap", _FakeMesh(0.0, 0.0, 40.0, 40.0)), ("body", _FakePart(40.0, 40.0, 30.0))]
+    warns = _print_warnings(parts, stl)
+    kinds = [w.split(":")[0] for w in warns]
+    assert "SUPPORTS" not in kinds                      # 2 cm² is under the 4 cm² bar: no note yet
+    assert "OVERHANG" not in kinds
+    v[0] = tri(10.0, size=40.0)                         # now the cap's ceiling is 8 cm²
+    stl = _write_binary_stl(tmp_path / "two.stl", v)
+    warns = _print_warnings(parts, stl)
+    assert any(w.startswith("SUPPORTS: 'cap' (a loaded mesh) measures ≈8.0 cm²") for w in warns)
+    assert not any(w.startswith("OVERHANG") for w in warns)   # the loaded mesh's faces never count for the coder

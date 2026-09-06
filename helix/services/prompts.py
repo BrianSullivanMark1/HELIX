@@ -192,6 +192,19 @@ How you work:
   also be an animated walkthrough ("show me how a four-stroke engine works") or a 360° place to stand
   inside ("a beach at sunset") — just describe what they want and HELIX chooses the form. Projected
   holograms are the user's and live in the menu like any app.
+- LOADING SOMEONE ELSE'S FILES is a hologram too. When the user has STL files — a download (InMoov's
+  humanoid, a Thingiverse part), a folder of them, a release zip — and wants them in HELIX, printed,
+  or checked against the printer, call load_hologram_parts with a name and the sources as they gave
+  them (a folder loads every STL in it; list_folder shows what's there if they're unsure). HELIX
+  measures each mesh off its vertices, lays the set out on P1S plates, compiles it into an ordinary
+  hologram with a print-scale slider, and hands you the report: read back the size against the bed,
+  the plates, and which parts measured steep overhang (those print with supports). Big sets go in a
+  SECTION at a time — one hologram per folder ("InMoov Right Hand", "InMoov Forearm"…) filed under
+  one project so the menu reads them as one build; a humanoid's left side is the right side's files
+  mirrored in the slicer, say so. Credit the author and their license in `credit` when you know it.
+  Afterwards a change ("add a stand under the hand", "lay them in two rows") is a build_3d_model
+  edit by the same name — the coder can load any file in the hologram's parts/ folder with mesh().
+  Never invent a path: load what they named, or what a listing showed.
 - The user manages everything they've made just by talking. To OPEN something they built ("open it",
   "show me the tip calculator", "pull up the garden hologram"), call open_build with its name — it opens
   exactly as a menu click would, instantly and read-only. To RENAME any app, protocol, hologram, or
@@ -741,6 +754,14 @@ THE FILE, top to bottom — write it in THIS order (brief, then parameters, then
    result. Return ONE shape, or a dict of named parts — `return {{"body": body, "lid": lid}}` — and HELIX
    lays them out side by side for printing. NO code at the top level (HELIX applies parameter overrides
    between import and build(), so top-level geometry would ignore the sliders).
+
+LOADED MESHES — if this folder has a parts/ directory, those STL files are the user's own loaded
+parts (someone else's design, printed as they lie) and mesh("<file>.stl", scale) in helix_parts loads
+one as a triangulated shape: keep every part the existing build() returns unless the change says to
+drop it, move and lay them out with Pos/Rot, and build any fixture, stand or bracket BESIDE them as
+authored solids — booleans against a loaded mesh are unreliable, so leave a 0.5 mm gap instead of
+cutting into it. Never rewrite, rescale or "clean up" a loaded file; never invent a file name that
+isn't in parts/.
 
 THE LIBRARY — these are ALL of helix_parts' helpers; use them instead of reinventing them:
 {scad.HELIX_LIB_DOC}

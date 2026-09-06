@@ -128,6 +128,9 @@ BUILD_TOOLS = frozenset(
         # or open the webcam. (suggest_components stays readable: a plain read of the component
         # library that names no fenced tool, like search_amazon.)
         "design_enclosure", "check_fit", "camera_measure",
+        # …and load_hologram_parts READS files off the user's disk into a build and compiles them:
+        # text a watcher processes must never be able to pull a path into a hologram.
+        "load_hologram_parts",
         # DREAMING is hours of UNATTENDED self-editing of HELIX's own source — and, when the user
         # set it so, a rebuild and relaunch of the app at dawn. Scheduling a night of it, starting a
         # session now, or cutting one short is human-driven only: text a watcher processes (an

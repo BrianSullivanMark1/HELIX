@@ -2064,6 +2064,53 @@ class ToolRegistry:
                         "additionalProperties": False,
                     },
                 ),
+                ToolSpec(
+                    name="load_hologram_parts",
+                    description=(
+                        "LOAD STL FILES INTO A HOLOGRAM — files someone else designed: a downloaded "
+                        "set (InMoov's humanoid parts, a Thingiverse bracket), a folder of STLs, a "
+                        "release zip. Give the hologram a name and the sources — each a file path, a "
+                        "folder (every .stl in it loads), a glob ('…/Right-Hand/*.stl'), or a .zip "
+                        "(its .stl entries) — as the user said them or as read_file/list_folder "
+                        "showed them. HELIX copies the files into the hologram, measures every mesh "
+                        "off its vertices, lays the parts out on Bambu P1S plates (256 mm bed), "
+                        "compiles the set into an ordinary hologram with a print scale slider, and "
+                        "returns the report: each part against the bed, the plates, which parts "
+                        "measured steep overhang (print those with supports), the grams. Big sets "
+                        "load a SECTION at a time (one hologram per folder: 'InMoov Right Hand', "
+                        "'InMoov Forearm'…) filed under one `project` so they read as one build on "
+                        "the menu. Calling it again with the SAME name replaces that hologram's "
+                        "files. Afterwards, 'add a stand under it' or a layout change is a "
+                        "build_3d_model edit by the same name. Loads the user's own downloads — "
+                        "never a path HELIX made up. Confirm with the user first, like any build."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string",
+                                     "description": "The hologram's name, e.g. 'InMoov Right Hand'. "
+                                                    "Reuse it to replace the files."},
+                            "sources": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "The STL files to load: file paths, folders, globs, "
+                                               "or zips, as the user gave them.",
+                            },
+                            "project": {"type": "string",
+                                        "description": "A project folder to file it under on the "
+                                                       "menu (e.g. 'InMoov'); empty leaves it loose."},
+                            "scale": {"type": "number",
+                                      "description": "Print scale, 0.25–2 (default 1 = the files' "
+                                                     "own millimetres)."},
+                            "credit": {"type": "string",
+                                       "description": "Whose files and their license, when known "
+                                                      "('InMoov by Gael Langevin, CC BY-NC 4.0') — "
+                                                      "written into the design's brief."},
+                        },
+                        "required": ["name", "sources"],
+                        "additionalProperties": False,
+                    },
+                ),
             ]
             if self._bus is not None:
                 # Both open the camera panel on the user's screen — fenced like view_camera.
@@ -2661,6 +2708,19 @@ class ToolRegistry:
                 str(args.get("project") or ""), lid=str(args.get("lid") or "screw"),
                 mount=str(args.get("mount") or ""), wall=wall_mm, name=str(args.get("name") or ""),
                 on_progress=on_progress,
+            )
+        if name == "load_hologram_parts" and self._maker is not None:
+            scale = args.get("scale")
+            try:
+                scale_v = float(scale) if scale is not None and str(scale).strip() != "" else None
+            except (TypeError, ValueError):
+                scale_v = None
+            # Copies the files, then one kernel run on this turn's worker — the progress line keeps
+            # the orb honest while a big set lays out.
+            return self._maker.load_parts(
+                str(args.get("name") or ""), args.get("sources"),
+                project=str(args.get("project") or ""), scale=scale_v,
+                credit=str(args.get("credit") or ""), on_progress=on_progress,
             )
         if name == "check_fit" and self._maker is not None and self._bus is not None:
             _ok, line = self._maker.project(str(args.get("name") or ""))

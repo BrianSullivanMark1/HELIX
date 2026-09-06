@@ -405,6 +405,32 @@ page on `render_kit.py`. Retired engines migrate on their next edit: the primiti
 (`materials.py`) and now the OpenSCAD engine (`model.scad`) both read as "redraw this as model.py" in
 the same build's repair pass, while their old generated pages keep working untouched.
 
+**Loaded meshes — someone else's STL files as a hologram (2026-09-06).** Much of what gets printed was
+designed by someone else and published as STL (InMoov's humanoid is ~350 parts in ~30 sections; a
+Thingiverse bracket; a release zip). `load_hologram_parts` (fenced in `BUILD_TOOLS` — it reads the user's
+disk into a build) takes a name and the sources as the user gave them — files, a folder (its `.stl`
+files), a glob, a `.zip` (its `.stl` entries, read in memory) — and `MakerService.load_parts` copies them
+into the workspace's `parts/` folder (plain ASCII names, `domain/meshes.py`), measures each off its
+vertices (`services/stl_measure.py`), and writes an ORDINARY `model.py`: a brief listing every part with
+its size, one `scale` parameter (the studio's slider, 0.25–2), a `PARTS` table, and a `build()` that
+returns `{label: mesh(file, scale)}`. `mesh()` lives in `helix_parts` (a triangulated Face via
+`import_stl`, or a scaled `Poly_Triangulation` built from the file's own vertices, since OCCT won't scale
+a bare triangulation): centred X/Y on Z=0, and it resolves ONLY a plain file name inside `parts/` — the
+design file itself still imports nothing new. The compile worker then treats loaded meshes as what they
+are: when a set's row would overflow one P1S plate it is shelf-packed onto PLATES
+(`meshes.pack_plates`: rows within 244 mm, plates 40 mm apart along X — authored designs keep the single
+row `print_origins` and the AR ghosts count on), the volume comes off the exported triangles (a Face has
+none), STEP is skipped with a note (a triangulation has no B-rep; the STL/3MF are the slicer's food), the
+3MF is written per part so one non-manifold file from the wild can't cost the set its export, and each
+mesh's steep faces are reported as a `SUPPORTS: '<part>'` line (`meta.supports`) rather than the coder's
+`OVERHANG` — the baker's repair gate ignores SUPPORTS, since no coder pass can re-author a loaded file.
+`model.meta.json` gains `parts_mm`, `plates`, `mesh_parts`, `supports`; the studio checks the bed PER
+PART and lists the plates; the print sheet says "STL first, supports on for X, Y, plate 1: …". Big sets
+load a section at a time under one project folder ("InMoov Right Hand", "InMoov Forearm" … under
+"InMoov"); a later "add a stand under it" is a `build_3d_model` edit whose coder prompt teaches
+`mesh("<file>.stl")` and forbids inventing file names. Tests: `test_meshes.py` (pure), `test_load_parts.py`
+(the brain against fakes, the registry, the fence, the prompts), `test_mesh_compile.py` (the real kernel).
+
 **Project folders.** A hologram can be shelved under a project name on the menu — "put the case in the
 wall camera project" (`file_hologram`, fenced in `BUILD_TOOLS` like `rename_build`), the 📁 button on a
 card, or nothing at all: an enclosure `design_enclosure` makes from a parts list files itself under that
