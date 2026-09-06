@@ -1,7 +1,8 @@
 """The Dream Mind (READ_ME/DREAM_MIND.md §11 + §13) — the reflection's strict shape (QUIET and
 malformed included), the agenda caps, the research turn's FINDINGS shape, the six cycles against a
 fake chat / conversation / research / verified store / gate / lane (deadline and activity pauses
-honoured, empty inputs skipped cleanly, a failing research turn journaled and skipped, facts counted
+honoured, empty inputs skipped cleanly, a failing research turn journaled and skipped, a capped turn
+kept as partial results and continued in sub-turns, facts counted
 from the verified store's deltas, discoveries chosen, the self-model merged and dated, the weekly
 digest on the 7th night), and the limits helper's matrix."""
 from __future__ import annotations
@@ -666,6 +667,82 @@ def test_a_failing_research_turn_is_journaled_and_skipped():
     assert summary.research[1]["status"] == "ok"
     assert any("research turn failed — the search exploded; moving on" in n for n in hooks.notes)
     assert hooks.limits == []  # not a limit: no pause
+
+
+def test_hit_turn_cap_reads_the_agent_loops_wording_and_never_a_limit():
+    for text in ("Reached maximum number of turns (8)", "error_max_turns", "Max turns exceeded"):
+        assert mind_mod.hit_turn_cap(text), text
+        assert not looks_like_limit(text), text  # the cap must never pause the night as a limit
+    for text in ("rate limit exceeded", "the search exploded", "", None):
+        assert not mind_mod.hit_turn_cap(text), text
+
+
+def test_a_turn_cap_hit_keeps_partial_results_and_the_question_continues_in_a_sub_turn():
+    # 09-05: one research turn raised "Reached maximum number of turns (8)" and the whole plan was
+    # dropped with nothing recorded. The cap is the agent loop's ceiling, not a limit and not a
+    # failure: the capped pass keeps the facts it noted mid-work as PARTIAL results, and the
+    # question continues in a fresh sub-turn that carries the gathered material forward.
+    clock = _Clock()
+    verified = _Verified(clock)
+    research = _Research()
+
+    def on_turn(n, prompt):
+        if n == 1:  # the capped pass read a page and noted a fact before the cut
+            research.trail.append("read: https://wiki.seeedstudio.com/xiao_esp32s3/ (5000 chars)")
+            verified.note("XIAO ESP32S3 Sense PSRAM", "8 MB", "https://wiki.seeedstudio.com/xiao_esp32s3/")
+
+    conversation = _Conversation(RuntimeError("Reached maximum number of turns (8)"), RESEARCH_REPLY,
+                                 clock=clock, verified=verified, research=research, on_turn=on_turn)
+    mind = _mind(clock, conversation=conversation, verified=verified, research=research)
+    hooks = _Hooks()
+    summary = mind.run_night(clock.dt + timedelta(hours=8), 5, hooks=hooks.hooks)
+    research_calls = [c for c in conversation.calls if "VERIFY TURN" not in c[0]]
+    assert len(research_calls) == 3  # question 1 took two passes, question 2 one
+    follow_up = research_calls[1][0]
+    assert "HIT THE TURN CAP" in follow_up and "never repeat" in follow_up
+    assert "XIAO ESP32S3 Sense PSRAM: 8 MB" in follow_up  # the gathered finding rides along
+    assert "read: https://wiki.seeedstudio.com/xiao_esp32s3/" in follow_up  # and the trail
+    first = summary.research[0]
+    assert first["status"] == "ok"  # the continuation landed, so the question ended whole
+    # pass 1's salvaged finding (verified: the trail shows the read) + pass 2's two findings
+    assert first["findings"][0] == {"text": "XIAO ESP32S3 Sense PSRAM: 8 MB",
+                                    "url": "https://wiki.seeedstudio.com/xiao_esp32s3/",
+                                    "host": "wiki.seeedstudio.com", "verified": True}
+    assert len(first["findings"]) == 3 and first["facts_noted"] == 1
+    assert any("research hit the turn cap — kept 1 fact as partial results" in n for n in hooks.notes)
+    assert hooks.limits == []  # the cap is not a limit: the night never paused
+
+
+def test_a_deliberately_long_plan_of_capped_turns_yields_partial_findings_not_a_failed_night():
+    # A research plan deliberately too long for the cap: EVERY pass is cut off. Each question still
+    # ends recorded with partial findings (the facts it noted mid-work), the plan runs to its last
+    # question, and the night finishes all its cycles — no "research failed" warning, no dropped plan.
+    clock = _Clock()
+    verified = _Verified(clock)
+    research = _Research()
+
+    def on_turn(n, prompt):
+        research.trail.append(f"read: https://docs.espressif.com/page{n} (900 chars)")
+        verified.note(f"claim {n}", f"value {n}", f"https://docs.espressif.com/page{n}")
+
+    conversation = _Conversation(RuntimeError("Reached maximum number of turns (8)"),
+                                 clock=clock, verified=verified, research=research, on_turn=on_turn)
+    mind = _mind(clock, conversation=conversation, verified=verified, research=research,
+                 selfdev=_SelfDev())
+    hooks = _Hooks()
+    summary = mind.run_night(clock.dt + timedelta(hours=8), 5, hooks=hooks.hooks)
+    assert len(summary.research) == 2  # both questions ran: the plan survived every cap
+    for rec in summary.research:
+        assert rec["status"] == "partial: hit the turn cap"
+        assert rec["facts_noted"] == 3 and len(rec["findings"]) == 3  # one fact per capped pass
+        assert all(f["verified"] and f["url"] for f in rec["findings"])
+    assert summary.verify[0]["status"] == "partial: hit the turn cap"  # a capped VERIFY keeps too
+    assert summary.facts_noted == 7  # 3 + 3 from research, 1 from the verify pass
+    assert not any("research turn failed" in n for n in hooks.notes)
+    assert hooks.limits == []
+    assert summary.reason == "the night's work was done"
+    assert [c["name"] for c in hooks.merged()["cycles"]] == ["reflect", "research", "verify",
+                                                             "experiment", "improve", "record"]
 
 
 def test_a_verified_tag_naming_a_page_never_read_is_downgraded_when_the_trail_is_known():
