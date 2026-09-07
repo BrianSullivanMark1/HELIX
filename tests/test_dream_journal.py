@@ -396,12 +396,15 @@ def test_the_nights_model_is_named_as_what_the_drafts_ran_on():
 
 
 def test_the_docs_record_the_minds_wiring_and_the_rail_per_cycle():
-    """READ_ME/DREAM.md and ARCHITECTURE.md must carry the engine facts that shipped with the face:
-    the container order, the collaborators, the self-model file, the hooks, the rail check, and
-    which model each cycle runs on — the face must not overclaim Fable for the research turns."""
+    """READ_ME/DREAM.md must carry the engine facts that shipped with the face: the container order,
+    the collaborators, the self-model file, the hooks, the rail check, and which model each cycle
+    runs on — the face must not overclaim Fable for the research turns.
+
+    ARCHITECTURE.md used to be asserted alongside it and carried the same strings twice. It was
+    folded into the root README.md (2026-09-07); DREAM.md is the doc the source cites by section as
+    this contract, so it is the one that has to stay honest."""
     dream = (ROOT / "READ_ME" / "DREAM.md").read_text(encoding="utf-8")
-    arch = (ROOT / "READ_ME" / "ARCHITECTURE.md").read_text(encoding="utf-8")
-    for doc in (dream, arch):
+    for doc in (dream,):
         assert "DreamMind(" in doc
         assert "mind=" in doc and "subscription=" in doc
         assert "verified=self.verified" in doc

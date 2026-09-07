@@ -143,7 +143,7 @@ def test_the_dreaming_bullet_sits_right_after_you_grow():
 
 
 # --- the install manifest has to match what the code actually imports ------------------------------
-# READ_ME/README.md sells `pip install -r requirements.txt` as THE install, and there is no CI. When an
+# README.md sells `pip install -r requirements.txt` as THE install, and there is no CI. When an
 # unguarded module-scope import outruns that file the app installs clean and then dies at the first use
 # of the feature — which is exactly how scipy (services/materials.py) went missing while build.py already
 # carried a hidden-import for it. These two tests read the imports back out of the tree, so the manifest

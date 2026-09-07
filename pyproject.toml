@@ -2,7 +2,7 @@
 name = "helix"
 version = "3.0.0"
 description = "HELIX — a local-first, voice-first desktop AI presence that converses, sees, remembers, builds, and improves itself."
-readme = "READ_ME/README.md"
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
 dependencies = [

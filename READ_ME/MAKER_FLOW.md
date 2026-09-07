@@ -31,7 +31,7 @@ memory.
 | **A — Components** | `helix/domain/components.py` (fill the catalog; keep the schema), NEW `helix/services/components.py`, `helix/services/parts.py` (add the fields in §3), NEW `tests/test_components.py`, `tests/test_parts.py` (extend) | cadpy.py, enclosure.py, web/, tools.py, prompts.py, shell.py, server.py |
 | **B — Enclosure** | NEW `helix/domain/enclosure.py`, `helix/domain/cadpy.py` (HELIX_LIB + HELIX_LIB_DOC + a `render_boards()`), NEW `tests/test_enclosure.py`, NEW `tests/test_enclosure_compile.py`, `tests/test_cadpy.py` (extend) | components.py schema (read only), web/, tools.py, prompts.py, shell.py, server.py, parts.py |
 | **C — AR measure & true scale** | NEW `web/src/lib/measure.ts`, `web/src/components/CameraDock.tsx`, `web/src/components/ArHologram.tsx`, `web/src/lib/store.ts`, `web/src/lib/overlay.ts`, `helix/api/shell.py` (camera measure/holograms parts only), `helix/api/server.py` (camera routes only), `helix/services/camera.py`, NEW `tests/test_camera_measure.py`, `tests/test_camera_panel.py` (extend) | tools.py, prompts.py, container.py, Studio.tsx, cadpy.py, enclosure.py, components.py |
-| **D — Brain** (after A, B, C) | `helix/services/tools.py`, `helix/services/prompts.py`, `helix/app/container.py`, `helix/services/conversation.py` (fence), NEW `helix/services/maker.py`, `web/src/pages/Studio.tsx`, `helix/api/server.py` (studio/hologram routes only), NEW `tests/test_maker.py`, `tests/test_prompts.py`, `READ_ME/ARCHITECTURE.md`, `READ_ME/README.md`, this file's "What shipped" | the files A/B/C own except where a contract says D wires them |
+| **D — Brain** (after A, B, C) | `helix/services/tools.py`, `helix/services/prompts.py`, `helix/app/container.py`, `helix/services/conversation.py` (fence), NEW `helix/services/maker.py`, `web/src/pages/Studio.tsx`, `helix/api/server.py` (studio/hologram routes only), NEW `tests/test_maker.py`, `tests/test_prompts.py`, `README.md`, this file's "What shipped" | the files A/B/C own except where a contract says D wires them |
 
 Shared rules for every workstream:
 - Python 3.11, build123d 0.11.1 is installed in dev (`python -c "import build123d"`); tests run with
@@ -396,5 +396,5 @@ as `SUPPORTS: '<part>'` (never the coder's `OVERHANG`; the baker's repair gate i
 `meta` gains `parts_mm` / `plates` / `mesh_parts` / `supports`; the studio's bed check is per part and
 lists plates; the print sheet says "STL first, supports on for …, plate 1: …". Worked example on the
 real kernel: InMoov's Right-Hand folder (17 STLs, 10.8 MB) → 6.3 s → three plates, five parts flagged
-for supports, 535 cm³. Contract text: ARCHITECTURE.md §7a "Loaded meshes"; tests `test_meshes.py`,
+for supports, 535 cm³. Contract text: README.md, "Loaded meshes"; tests `test_meshes.py`,
 `test_load_parts.py`, `test_mesh_compile.py`.
