@@ -1,7 +1,24 @@
+# HELIX V2
 .idea/
+.vscode/
 __pycache__/
 *.py[cod]
+
+# Local state — NEVER committed, NEVER bundled (keys, DB, logs, built apps live here)
 data/
+
+# Build artifacts
 build/
 dist/
 *.spec
+*.egg-info/
+
+# Envs / tooling
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Claude Code local (machine-specific settings — shared config stays tracked)
+.claude/settings.local.json
+*.stackdump

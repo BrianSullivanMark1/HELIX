@@ -1,3 +1,3 @@
-"""HELIX: Home Enterprise Learning Investment Expert."""
+"""HELIX — a local-first, voice-first desktop AI presence you talk to."""
 
-__version__ = "0.1.0"
+__version__ = "3.0.0"

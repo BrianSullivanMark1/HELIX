@@ -1,0 +1,194 @@
+"""VersionedRepo adapter — backed by the git CLI. The only place that shells out to git."""
+from __future__ import annotations
+
+import subprocess
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+from helix.ports.repo import Commit
+
+_FMT = "%H%x1f%s%x1f%cI"  # sha, subject, committer-date(ISO) joined by 0x1f
+# In a --windowed (frozen) build, a child process with no console flag flashes a console window. HELIX
+# fires many git calls (startup recovery, every build/iterate commit), so suppress the window every time.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_GIT_TIMEOUT = 60.0  # a git op that hasn't returned in a minute is stuck (a lock, an auth prompt, a
+                     # network hang) — kill it and surface an error instead of parking the worker forever
+
+
+class GitError(RuntimeError):
+    pass
+
+
+class GitRepo:
+    def __init__(self, git: str = "git") -> None:
+        self._git = git
+        # An empty dir so HELIX-driven git NEVER executes a (possibly planted) repo hook. A hook in
+        # .git/hooks would otherwise fire during merge/checkout — arbitrary code the scan can't see.
+        # ONE stable dir reused across launches (not a fresh mkdtemp each time) so the app doesn't leak
+        # an empty temp dir per run — the security property (an empty HELIX-owned hooks path) is identical.
+        stable = Path(tempfile.gettempdir()) / "helix-nohooks"
+        try:
+            stable.mkdir(exist_ok=True)
+            self._no_hooks = str(stable)
+        except OSError:
+            self._no_hooks = tempfile.mkdtemp(prefix="helix-nohooks-")
+
+    def _run(self, repo_dir: Path, *args: str) -> str:
+        try:
+            proc = subprocess.run(
+                [self._git, "-c", f"core.hooksPath={self._no_hooks}", *args],
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",  # git emits UTF-8; don't crash on a non-ASCII app name/path
+                creationflags=_NO_WINDOW,  # no flashing console window in the packaged (--windowed) app
+                timeout=_GIT_TIMEOUT,  # a hung git must not park the build/recovery worker forever
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GitError(f"git {' '.join(args)} timed out after {int(_GIT_TIMEOUT)}s") from exc
+        except FileNotFoundError as exc:
+            # Git isn't installed/on PATH — the most common first-build wall on a clean consumer machine.
+            # Give a human, actionable message instead of a raw OSError the UI would discard.
+            raise GitError(
+                "Git isn’t installed. Install it from https://git-scm.com and restart HELIX."
+            ) from exc
+        if proc.returncode != 0:
+            msg = proc.stderr.strip() or proc.stdout.strip()
+            raise GitError(f"git {' '.join(args)} failed: {msg}")
+        return proc.stdout.strip()
+
+    def _parse_commit(self, line: str) -> Commit:
+        sha, summary, iso = line.split("\x1f")
+        return Commit(sha=sha, summary=summary, at=datetime.fromisoformat(iso))
+
+    def _head(self, repo_dir: Path) -> Commit:
+        return self._parse_commit(self._run(repo_dir, "log", "-1", f"--pretty={_FMT}"))
+
+    # ----- VersionedRepo -----
+    def init(self, repo_dir: Path) -> None:
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        self._run(repo_dir, "init", "-q")
+        self._run(repo_dir, "config", "user.name", "HELIX")
+        self._run(repo_dir, "config", "user.email", "helix@localhost")
+
+    def current_branch(self, repo_dir: Path) -> str:
+        return self._run(repo_dir, "rev-parse", "--abbrev-ref", "HEAD")
+
+    def create_branch(self, repo_dir: Path, name: str) -> None:
+        self._run(repo_dir, "checkout", "-q", "-b", name)
+
+    def checkout(self, repo_dir: Path, ref: str) -> None:
+        self._run(repo_dir, "checkout", "-q", ref)
+
+    def commit_all(self, repo_dir: Path, message: str) -> Commit:
+        # A process killed mid-commit (e.g. closing HELIX during a build) leaves a stale index.lock that
+        # bricks every future commit — and thus iterate/rename — in that workspace. Ask git for the
+        # canonical lock path so this is correct in a linked WORKTREE too (where .git is a file and the
+        # lock lives under .git/worktrees/<name>/). Single-worker, so removing it before staging is safe.
+        try:
+            lock = Path(self._run(repo_dir, "rev-parse", "--git-path", "index.lock"))
+            if not lock.is_absolute():
+                lock = repo_dir / lock
+            lock.unlink()
+        except (OSError, GitError):
+            pass
+        self._run(repo_dir, "add", "-A")
+        self._run(repo_dir, "commit", "-q", "--allow-empty", "-m", message)
+        return self._head(repo_dir)
+
+    def merge_no_ff(self, repo_dir: Path, branch: str, message: str) -> Commit:
+        self._run(repo_dir, "merge", "--no-ff", "-q", "-m", message, branch)
+        return self._head(repo_dir)
+
+    def restore_to(self, repo_dir: Path, sha: str) -> None:
+        self._run(repo_dir, "reset", "--hard", sha)
+
+    def revert_to(self, repo_dir: Path, sha: str) -> Commit:
+        """Roll the build back to an OLD version NON-destructively: make the working tree + index exactly
+        match `sha` (read-tree -u --reset, which does NOT move HEAD), then commit it forward as a new
+        version. So the mistaken newer commits stay in the log and the revert is itself undoable — unlike
+        restore_to's hard reset, which throws away everything after `sha`."""
+        self._run(repo_dir, "read-tree", "-u", "--reset", sha)
+        return self.commit_all(repo_dir, f"revert to {sha[:8]}")
+
+    def discard_changes(self, repo_dir: Path) -> None:
+        self._run(repo_dir, "reset", "--hard")  # drop staged/unstaged edits
+        self._run(repo_dir, "clean", "-fd")  # drop untracked files (respects .gitignore)
+
+    def restore_paths(self, repo_dir: Path, paths: list[str]) -> None:
+        """Revert specific paths: tracked → checkout; newly-added untracked → remove."""
+        for p in paths:
+            try:
+                self._run(repo_dir, "checkout", "--", p)  # revert a tracked modification
+            except GitError:
+                try:  # untracked (newly added) file — delete it
+                    fp = repo_dir / p
+                    if fp.is_file():
+                        fp.unlink()
+                except OSError:
+                    pass
+
+    def log(self, repo_dir: Path, limit: int = 100) -> list[Commit]:
+        out = self._run(repo_dir, "log", f"-{int(limit)}", f"--pretty={_FMT}")
+        return [self._parse_commit(ln) for ln in out.splitlines() if ln.strip()]
+
+    def changed_paths(self, repo_dir: Path, ref_a: str, ref_b: str) -> list[str]:
+        out = self._run(repo_dir, "diff", "--name-only", "--no-renames", "--diff-filter=ACMR", ref_a, ref_b)
+        return [ln for ln in out.splitlines() if ln.strip()]
+
+    def deleted_paths(self, repo_dir: Path, ref_a: str, ref_b: str) -> list[str]:
+        out = self._run(repo_dir, "diff", "--name-only", "--no-renames", "--diff-filter=D", ref_a, ref_b)
+        return [ln for ln in out.splitlines() if ln.strip()]
+
+    def diff(self, repo_dir: Path, ref_a: str, ref_b: str) -> str:
+        return self._run(repo_dir, "diff", "--no-color", "--no-renames", ref_a, ref_b)
+
+    def hooks_dir(self, repo_dir: Path) -> Path:
+        # Use the common-dir (NOT --git-path hooks, which honors our core.hooksPath override) so the
+        # tripwire scans the REAL default hooks location where a planted hook would sit.
+        raw = self._run(repo_dir, "rev-parse", "--git-common-dir")
+        common = Path(raw)
+        if not common.is_absolute():
+            common = repo_dir / common
+        return common / "hooks"
+
+    def is_clean(self, repo_dir: Path) -> bool:
+        return not self._run(repo_dir, "status", "--porcelain").strip()
+
+    def stage_all(self, repo_dir: Path) -> None:
+        self._run(repo_dir, "add", "-A")
+
+    def staged_changed(self, repo_dir: Path) -> list[str]:
+        out = self._run(repo_dir, "diff", "--cached", "--name-only", "--no-renames", "--diff-filter=ACMR")
+        return [ln for ln in out.splitlines() if ln.strip()]
+
+    def staged_deleted(self, repo_dir: Path) -> list[str]:
+        # --no-renames so a renamed protected/shell file shows its OLD path as a deletion.
+        out = self._run(repo_dir, "diff", "--cached", "--name-only", "--no-renames", "--diff-filter=D")
+        return [ln for ln in out.splitlines() if ln.strip()]
+
+    def list_branches(self, repo_dir: Path, prefix: str = "") -> list[str]:
+        out = self._run(repo_dir, "branch", "--list", f"{prefix}*", "--format=%(refname:short)")
+        return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+    def delete_branch(self, repo_dir: Path, name: str) -> None:
+        self._run(repo_dir, "branch", "-D", name)
+
+    def branch_head(self, repo_dir: Path, branch: str) -> Commit:
+        return self._parse_commit(self._run(repo_dir, "log", "-1", f"--pretty={_FMT}", branch))
+
+    def add_worktree(self, repo_dir: Path, path: Path, ref: str) -> None:
+        self._run(repo_dir, "worktree", "add", "-q", str(path), ref)
+
+    def add_worktree_branch(self, repo_dir: Path, path: Path, branch: str, start: str) -> None:
+        self._run(repo_dir, "worktree", "add", "-q", "-b", branch, str(path), start)
+
+    def remove_worktree(self, repo_dir: Path, path: Path) -> None:
+        self._run(repo_dir, "worktree", "remove", "--force", str(path))
+
+    def prune_worktrees(self, repo_dir: Path) -> None:
+        """Drop admin entries for worktrees whose directories are gone — so a leaked/locked draft worktree
+        stops pinning its branch (which would otherwise refuse `git branch -D`)."""
+        self._run(repo_dir, "worktree", "prune")

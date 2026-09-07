@@ -1,0 +1,92 @@
+"""VersionedRepo port — the git verbs the Forge needs. No raw git anywhere else."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Protocol
+
+
+@dataclass(frozen=True)
+class Commit:
+    sha: str
+    summary: str
+    at: datetime
+
+
+class VersionedRepo(Protocol):
+    def init(self, repo_dir: Path) -> None: ...
+
+    def current_branch(self, repo_dir: Path) -> str: ...
+
+    def create_branch(self, repo_dir: Path, name: str) -> None: ...
+
+    def checkout(self, repo_dir: Path, ref: str) -> None: ...
+
+    def commit_all(self, repo_dir: Path, message: str) -> Commit: ...
+
+    def merge_no_ff(self, repo_dir: Path, branch: str, message: str) -> Commit:
+        """Revertible merge — always a real merge commit, never fast-forward."""
+        ...
+
+    def restore_to(self, repo_dir: Path, sha: str) -> None:
+        """Hard-restore the working tree to a past commit (the Archive lifeline)."""
+        ...
+
+    def revert_to(self, repo_dir: Path, sha: str) -> Commit:
+        """Non-destructive revert: restore the tree to `sha` and commit it forward as a new version, so
+        newer commits stay in history and the revert is itself undoable."""
+        ...
+
+    def discard_changes(self, repo_dir: Path) -> None:
+        """Drop all uncommitted changes (tracked + untracked) — used to abort a refused self-change."""
+        ...
+
+    def restore_paths(self, repo_dir: Path, paths: list[str]) -> None:
+        """Revert specific paths only: tracked → checkout; newly-added untracked → remove."""
+        ...
+
+    def log(self, repo_dir: Path, limit: int = 100) -> list[Commit]: ...
+
+    def changed_paths(self, repo_dir: Path, ref_a: str, ref_b: str) -> list[str]: ...
+
+    def deleted_paths(self, repo_dir: Path, ref_a: str, ref_b: str) -> list[str]: ...
+
+    def diff(self, repo_dir: Path, ref_a: str, ref_b: str) -> str:
+        """Unified diff between two refs (for the human approval surface)."""
+        ...
+
+    def hooks_dir(self, repo_dir: Path) -> Path:
+        """Resolved git hooks directory (follows the worktree common-dir)."""
+        ...
+
+    def is_clean(self, repo_dir: Path) -> bool: ...
+
+    def stage_all(self, repo_dir: Path) -> None: ...
+
+    def staged_changed(self, repo_dir: Path) -> list[str]:
+        """Paths added/modified/renamed in the index (after stage_all)."""
+        ...
+
+    def staged_deleted(self, repo_dir: Path) -> list[str]:
+        """Paths deleted in the index (after stage_all)."""
+        ...
+
+    def list_branches(self, repo_dir: Path, prefix: str = "") -> list[str]: ...
+
+    def delete_branch(self, repo_dir: Path, name: str) -> None: ...
+
+    def branch_head(self, repo_dir: Path, branch: str) -> Commit: ...
+
+    def add_worktree(self, repo_dir: Path, path: Path, ref: str) -> None: ...
+
+    def add_worktree_branch(self, repo_dir: Path, path: Path, branch: str, start: str) -> None:
+        """Create `branch` at `start` and check it out in a NEW worktree at `path`, without moving the
+        main working tree (git worktree add -b). Used to draft a self-change in isolation."""
+        ...
+
+    def remove_worktree(self, repo_dir: Path, path: Path) -> None: ...
+
+    def prune_worktrees(self, repo_dir: Path) -> None:
+        """Drop admin entries for worktrees whose directories no longer exist (frees pinned branches)."""
+        ...

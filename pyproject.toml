@@ -1,0 +1,49 @@
+[project]
+name = "helix"
+version = "3.0.0"
+description = "HELIX — a local-first, voice-first desktop AI presence that converses, sees, remembers, builds, and improves itself."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+    "PyQt6>=6.7",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+# Mirrors the two "Optional:" blocks in requirements.txt. Both features degrade rather than break:
+# without voice HELIX is text-only, without WebEngine built apps and holograms open in the system
+# browser and the orb falls back to QPainter. PyQt6-WebEngine is left unpinned on purpose — it has to
+# track the PyQt6 minor resolved above it, so a floor here would fight that.
+voice = [
+    "edge-tts>=6.1",
+    "faster-whisper>=1.0",
+]
+viewer = [
+    "PyQt6-WebEngine",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+helix = "helix.app.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["helix*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
