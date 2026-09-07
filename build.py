@@ -12,6 +12,7 @@ data\\helix_settings.json (Alpaca + Claude keys) and data\\helix.db into dist\\H
 over your account + history. Requires: pip install pyinstaller."""
 from __future__ import annotations
 
+
 import importlib.util
 import subprocess
 import sys
