@@ -29,6 +29,16 @@ _LIMIT_PHRASES: tuple[str, ...] = (
 )
 _STATUS_429_RE = re.compile(r"(?<![\d.])429(?![\d.])")
 
+# What a provider, an SDK, or the CLI says when the MODEL ITSELF isn't available to this plan — a
+# different failure from a limit and it earns a different answer: not a pause, a step DOWN to the
+# named Opus fallback (§13 rule 1, "Fable, else Opus"). A limit reads first: "rate limit exceeded for
+# model X" is a limit, not a missing model, so `looks_like_missing_model` defers to `looks_like_limit`.
+_MISSING_MODEL_PHRASES: tuple[str, ...] = (
+    "model not found", "model_not_found", "not_found_error", "unknown model", "invalid model",
+    "model is not available", "not available on your plan", "does not have access to",
+    "no access to model", "unsupported model", "model unavailable",
+)
+
 # "resets at 3pm", "will reset at 3:00 PM (America/New_York)", "try again in 2 hours",
 # "resets in 45 minutes" — the phrase a person wants to hear, cut at the sentence's natural end.
 _RESET_RE = re.compile(
@@ -52,6 +62,17 @@ def looks_like_limit(text: str) -> bool:
     if any(phrase in low for phrase in _LIMIT_PHRASES):
         return True
     return _STATUS_429_RE.search(low) is not None
+
+
+def looks_like_missing_model(text: str) -> bool:
+    """Does this failure text read as "that MODEL isn't available to you" rather than "you're out of
+    room"? The two want opposite answers: a limit pauses the night, a missing model steps it down to
+    the Opus fallback and carries on. A limit wins the tie — "rate limit exceeded for model X" names
+    a model but is not a missing one."""
+    low = (text or "").casefold()
+    if not low or looks_like_limit(low):
+        return False
+    return any(phrase in low for phrase in _MISSING_MODEL_PHRASES)
 
 
 def reset_hint(text: str) -> str:
@@ -107,4 +128,4 @@ def scrub_secrets(text: str) -> str:
 
 
 __all__ = ["LIMIT_BACKOFF_MINUTES", "MAX_LIMIT_PAUSES", "backoff_minutes", "looks_like_limit",
-           "reset_hint", "scrub_secrets"]
+           "looks_like_missing_model", "reset_hint", "scrub_secrets"]

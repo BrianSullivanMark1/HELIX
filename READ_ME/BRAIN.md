@@ -89,10 +89,10 @@ on a background thread:
    planted.
 2. Create an **isolated git worktree** in a temp dir (never the live tree) on a `selfdev/` branch.
 3. The **growth coder** (the Claude Code CLI on the subscription token) edits code in that worktree,
-   streaming plain-language progress. It drafts on the growth model by default (Fable 5,
-   auto-upscaling), but Evolve **sizes it per task**: its Fable-5 proposal ends with an `EFFORT` tier —
-   `deep` holds at Fable 5+, `standard` drops to the **Opus 4.8 work floor** for a small mechanical
-   change. It never drafts below Opus 4.8.
+   streaming plain-language progress. It drafts on the growth model by default (Fable, auto-upscaling,
+   falling back to Opus when the plan carries no Fable), but the proposal **sizes it per task**: an
+   `EFFORT` tier where `deep` holds at the top and `standard` drops to the **Opus work floor** for a
+   small mechanical change. It never drafts below Opus.
 4. Guards, all fail-closed: a **source-escape** scan (the coder must not write the live source outside
    its worktree) and a **data-guard** (it must not write into `data/`). The data-guard SKIPS the app's
    own volatile stores (`config.volatile_data_paths` — helix.db, agents/memory/reflexes, the log,
@@ -115,13 +115,21 @@ there can only mean a new version shipped, and the app **re-stamps automatically
 never strands the user in the paused state). In dev mode, where the source IS editable, the strict
 compare-and-pause stands.
 
-### Growth runs on the strongest mind available — Fable 5, auto-upscaling
+### Growth runs on the strongest mind available — Fable, else Opus
 Growth is where HELIX rewrites itself, so it must reason with the best model it can reach. The deep
-reasoner and the Evolve loop are pinned to **Fable 5** (`claude-fable-5`) — and the model resolver
+reasoner and the nightly dream pin **Fable** (`claude-fable-5-1`) — and the model resolver
 (`adapters/model_select.py`) queries the live model list so that when a stronger model in the same line
 appears (a future **Fable 6**, or a higher Opus), HELIX **automatically upscales** its growth reasoning
-to it. It always grows on the most capable brain Anthropic offers, without a code change. The everyday
-conversation stays on a fast model; only the deliberate, self-modifying reasoning reaches for the top.
+to it, without a code change.
+
+**Fable, else Opus.** Fable is not on every plan, so the step down is explicit and named rather than a
+refusal or a silent fall-through: a live list with no Fable resolves to that plan's strongest **Opus**
+(`FALLBACK_GROWTH_MODEL`, `claude-opus-5`), and a caller that gets "that model isn't available to you"
+back calls `note_unavailable()`, which demotes growth to Opus for half a day. On a subscription-only
+install that report is the only availability signal there is — with the API key cleared the live list
+is never read. Growth never drops **below** Opus: a Sonnet-only plan names the Opus fallback rather
+than growing on Sonnet. The everyday conversation stays on a fast model; only the deliberate,
+self-modifying reasoning reaches for the top.
 
 ## What HELIX may grow (the editable surface)
 
@@ -152,7 +160,8 @@ the genome (the laws) and the brainstem's vital reflexes (the gate, containment,
   can never fire from ambient speech or grow unbounded.
 - Growth (`go_to_sleep` consolidation, Evolve) stays fenced from autonomous agent runs (BUILD_TOOLS)
   and behind the human-approval gate; the constitution is unchanged.
-- Growth reasoning resolves to the top available model (Fable 5 → newer); everyday turns do not.
+- Growth reasoning resolves to the top available model (Fable → newer, else Opus, never below Opus);
+  everyday turns do not.
 - `model_select.py` (adapters/) sends the API key to the fixed `api.anthropic.com/v1/models` host, GET
   only, with a no-redirect opener so the key can't leak via a 3xx — same posture as `call_api`. It is
   in the editable self-improvement surface deliberately: it holds no gate logic, only a model-ranking

@@ -169,16 +169,34 @@ night?" → dream_status + the journal's latest entry.
 Brian: "If the dream state runs out of limit, it should have a neat and easy way to handle this. The
 solution is NOT to drop down to a low-end model that could mess the program up." Two rules:
 
-**Rule 1 — Fable or nothing.** The dream plans, researches, and drafts on the growth model only:
-`growth_model.work_model(deep=True)` for every coder run (the planner's `EFFORT: standard` line is
-read but IGNORED at night — journaled as "standard suggested; drafting on Fable anyway"), and the
-growth chat for reflection/research. If the growth model resolver cannot name a Fable-class model
-(the pinned floor is missing from the plan, the resolver fell back below `claude-fable`), the session
-does not start; `dream_status` says "Dreaming is paused: Fable isn't available on this plan right now"
-and the Settings card shows it. No leg of the night may fall through to a weaker model: the dream
-constructs its chats so that `PreferredChat`'s API-key fallback is never taken for dream work
-(pass a chat whose fallback is None, or check `subscription.active()` before each step and treat
-inactivity as a limit) — a downgrade is treated exactly like a limit (below), never as success.
+**Rule 1 — Fable, else Opus (revised 2026-09-07).** The dream plans, researches, and drafts on the
+growth model: `growth_model.work_model(deep=True)` for every coder run (the planner's
+`EFFORT: standard` line is read but IGNORED at night), and the growth chat for reflection/research.
+
+Fable is not on every plan, and the original "Fable or nothing" cost a whole night whenever it wasn't
+— worse, the resolver's unconditional Fable floor NAMED a model such a plan cannot call, so every
+growth call failed on an unresolvable id. So the step down is explicit and named:
+
+- `best_growth_model` treats a LIVE model list as authoritative: no Fable in it resolves to the plan's
+  strongest **Opus**, not to the pin. Only an empty/unreadable list (no key, offline) keeps the pin.
+- A caller that gets "that model isn't available to you" back calls
+  `growth_model.note_unavailable(id)`, which demotes growth to `FALLBACK_GROWTH_MODEL` for half a day.
+  `services/limits.looks_like_missing_model` tells that failure from a limit (a limit wins the tie).
+  On a **subscription-only install this is the only availability signal there is** — with the API key
+  cleared the live list is never read.
+- The night runs either way and says which brain it used: `dream_status` reads "I plan and draft on
+  Opus 5 — Fable isn't available on this plan right now. I never drop below Opus", and the journal
+  notes the step down. It is **not** a pause and not a refusal.
+- A resolver that cannot answer at all still names the Opus fallback rather than `None`. Handing the
+  lane `None` is what the old fail-closed gate was really protecting against: the coder would pick its
+  own boot-time default, unannounced.
+
+What stays forbidden is the thing Brian's rule was about: **never below Opus**. A Sonnet-only plan
+names the Opus fallback rather than growing on Sonnet, and no leg of the night may fall through to a
+weaker model — the dream constructs its chats so that `PreferredChat`'s API-key fallback is never
+taken for dream work (pass a chat whose fallback is None, or check `subscription.active()` before each
+step and treat inactivity as a limit); a downgrade below Opus is treated exactly like a limit (below),
+never as success.
 
 **Rule 2 — A limit pauses the night; it never degrades it.** `helix/services/limits.py` (F2 owns it;
 F1 may import it): `looks_like_limit(text) -> bool` (case-insensitive: "rate limit", "rate_limit",

@@ -18,7 +18,8 @@ approves with `approve_self_change` → `SelfDevService.approve` (constitution r
 compile smoke check, a revertible `--no-ff` merge into the base branch, "restart to load it"); the
 startup self-heal in `helix/app/bootstrap.py` rolls the source back to the last commit that booted if
 a merged change bricks startup. The growth model (`helix/adapters/model_select.py`
-`GrowthModelResolver`) pins Fable 5 as the floor and upgrades automatically; Evolve plans on
+`GrowthModelResolver`) pins Fable as the floor, upgrades automatically, and steps down to Opus when
+the plan carries no Fable; Evolve plans on
 `growth_chat` and sizes the coder with `work_model(deep)` (deep = Fable).
 
 **The hidden break.** In the FROZEN desktop app (the one on Brian's icon), `AppPaths.root` is the

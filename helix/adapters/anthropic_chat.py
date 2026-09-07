@@ -18,10 +18,12 @@ from helix.ports.llm import Image, Reply, Text, ToolResult, ToolSpec, ToolUse, T
 
 _LOG = get_logger("anthropic")
 
-# Default model. Opus 4.8 uses adaptive thinking only; we omit `thinking` here for snappy
-# conversational turns (no thinking) and keep replies short — the Forge's chat is routing + confirming,
-# not long-form generation.
-DEFAULT_MODEL = "claude-opus-4-8"
+# Default model. Opus 5 uses adaptive thinking only; we omit `thinking` here for snappy
+# conversational turns and keep replies short — the Forge's chat is routing + confirming, not
+# long-form generation. (Opus 5 thinks by DEFAULT when `thinking` is omitted, unlike 4.8/4.7, and
+# explicitly disabling it can leak a tool call into the visible text — so leave it adaptive and let
+# the caller's effort setting hold the cost down.)
+DEFAULT_MODEL = "claude-opus-5"
 
 # Anthropic server-side tools: Claude runs the searches/fetches itself and answers with the results
 # folded in (no search-API key, no client executor). The result blocks come back as server-tool types
@@ -35,7 +37,14 @@ _WEB_TOOLS = (
 # Tiering uses Sonnet for the conversation and Opus for builds / deep reasoning, so cost must be
 # model-aware — a flat Opus rate would over-report the cheap conversational turns.
 _PRICING: dict[str, tuple[float, float]] = {
+    # The growth tier (Fable, and the Mythos line above it) prices above Opus — so a night that ran
+    # on Fable and one that fell back to Opus must not be metered at the same rate.
+    "claude-fable-5-1": (10.0, 50.0),
+    "claude-fable-5": (10.0, 50.0),
+    "claude-mythos-5-1": (10.0, 50.0),
+    "claude-opus-5": (5.0, 25.0),
     "claude-opus-4-8": (5.0, 25.0),
+    "claude-sonnet-5": (2.0, 10.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5": (1.0, 5.0),
 }

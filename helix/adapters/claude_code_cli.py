@@ -46,7 +46,7 @@ def _kill_tree(proc) -> None:
     except Exception:  # noqa: BLE001
         pass
 
-DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_MODEL = "claude-opus-5"
 TIMEOUT_SECONDS = 1800
 CLI_OVERRIDE_ENV = "HELIX_CLAUDE_CLI"
 OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"

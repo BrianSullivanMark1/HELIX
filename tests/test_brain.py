@@ -140,11 +140,41 @@ def test_reflexes_prune_the_least_recently_fired_over_the_cap():
 
 # ----- growth model: Fable 5 floor, auto-upscale to a stronger family/version -----
 
-def test_growth_model_defaults_to_the_fable_floor():
+def test_growth_model_defaults_to_the_fable_floor_only_when_nothing_was_learned():
+    # An EMPTY list means the plan was never read (no key, offline, an API hiccup) — the pin stands.
     assert best_growth_model([]) == PREFERRED_GROWTH_MODEL
-    # A weaker line never displaces the Fable floor.
+
+
+def test_a_live_list_without_fable_falls_back_to_its_best_opus():
+    from helix.adapters.model_select import FALLBACK_GROWTH_MODEL
+
+    # FABLE, ELSE OPUS: a plan that carries no Fable resolves to its strongest Opus, NOT to the
+    # pinned Fable id — which nothing on that plan could call, so every growth call would fail.
     assert best_growth_model(["claude-sonnet-5", "claude-haiku-4-5", "claude-opus-4-8"]) \
-        == PREFERRED_GROWTH_MODEL
+        == "claude-opus-4-8"
+    assert best_growth_model(["claude-opus-5", "claude-opus-4-8"]) == "claude-opus-5"
+    # …but never BELOW Opus: a Sonnet-only plan names the Opus fallback rather than growing on Sonnet.
+    assert best_growth_model(["claude-sonnet-5", "claude-haiku-4-5"]) == FALLBACK_GROWTH_MODEL
+    # A list that does carry Fable still wins.
+    assert best_growth_model(["claude-opus-5", "claude-fable-5-1"]) == "claude-fable-5-1"
+
+
+def test_a_caller_can_report_the_growth_model_unavailable_and_growth_steps_down_to_opus():
+    from helix.adapters.model_select import FALLBACK_GROWTH_MODEL, GrowthModelResolver
+
+    # The subscription-only path: with no API key the live list is never read, so a caller's report
+    # is the ONLY availability signal there is.
+    r = GrowthModelResolver(lambda: "")
+    assert r.resolve() == PREFERRED_GROWTH_MODEL and r.fallback_active() is False
+    assert r.note_unavailable(PREFERRED_GROWTH_MODEL) == FALLBACK_GROWTH_MODEL
+    assert r.fallback_active() is True
+    assert r.resolve() == FALLBACK_GROWTH_MODEL
+    assert r.work_model(deep=True) == FALLBACK_GROWTH_MODEL   # the deep tier steps down with it
+    # Reporting a model at or below the fallback changes nothing — there is nothing left to drop to.
+    fresh = GrowthModelResolver(lambda: "")
+    assert fresh.note_unavailable("claude-opus-5") == PREFERRED_GROWTH_MODEL
+    assert fresh.note_unavailable("") == PREFERRED_GROWTH_MODEL
+    assert fresh.fallback_active() is False
 
 
 def test_growth_model_auto_upscales_to_a_future_fable_6():
@@ -184,8 +214,8 @@ def test_work_model_tiers_floor_at_opus_and_top_at_fable():
     from helix.adapters.model_select import WORK_FLOOR_MODEL, GrowthModelResolver
 
     r = GrowthModelResolver(lambda: "")  # no key → resolve() is the Fable floor
-    assert r.work_model(deep=False) == WORK_FLOOR_MODEL == "claude-opus-4-8"
-    assert r.work_model(deep=True) == PREFERRED_GROWTH_MODEL == "claude-fable-5"
+    assert r.work_model(deep=False) == WORK_FLOOR_MODEL == "claude-opus-5"
+    assert r.work_model(deep=True) == PREFERRED_GROWTH_MODEL == "claude-fable-5-1"
     # The standard (floor) tier is never stronger than the deep tier.
     assert best_growth_model([r.work_model(False), r.work_model(True)]) == r.work_model(True)
 

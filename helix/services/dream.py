@@ -33,7 +33,14 @@ from helix.domain.models import Role
 from helix.logging_setup import get_logger
 from helix.ports.llm import Text, Turn
 from helix.services.backlog import default_log_tail as _default_log_tail
-from helix.services.limits import MAX_LIMIT_PAUSES, backoff_minutes, looks_like_limit, reset_hint
+from helix.adapters.model_select import FALLBACK_GROWTH_MODEL, is_fable_class
+from helix.services.limits import (
+    MAX_LIMIT_PAUSES,
+    backoff_minutes,
+    looks_like_limit,
+    looks_like_missing_model,
+    reset_hint,
+)
 from helix.services.prompts import _fenced
 
 from helix.domain.events import DreamMurmur
@@ -96,9 +103,10 @@ _CLOSED_MID_SESSION = "HELIX closed mid-session"
 # backoff (limits.backoff_minutes) before asking the rail one cheap question.
 _PAUSE_POLL_S = 60.0
 _PROBE_SYSTEM = "You are a connectivity probe for HELIX. Reply with exactly the word OK and nothing else."
-# Fable or nothing: the growth model the night runs on must resolve to one of these families (the
-# resolver ranks mythos above fable). Anything below is a downgrade the night refuses to take.
-_FABLE_FAMILIES = ("fable", "mythos")
+# Fable, ELSE OPUS (§13 rule 1, revised 2026-09-07). The night prefers the top tier, but Fable is not
+# on every plan and a session that refuses outright is a night lost. So a missing Fable steps DOWN to
+# the named Opus fallback and says so, in the status, the journal and the voice — it never stops the
+# night, and it never falls below Opus, which is the downgrade the rule exists to prevent.
 _FABLE_MISSING = "Fable isn't available on this plan right now"
 _PAUSED_LINE = "dreaming — paused for the plan's limit"
 
@@ -613,11 +621,8 @@ class DreamService:
             return "tonight's session already ran"
         if not self._has_brain():
             return "no Claude token or key is connected"
-        fable = self._fable_problem()
-        if fable:
-            # Fable or nothing (§13): a night on a weaker model is a downgrade, never a session.
-            self._journal_refusal(day, fable)
-            return fable
+        # No Fable gate here (§13 rule 1 is "Fable, else Opus"): a plan without Fable steps down to
+        # the Opus fallback and the night runs. The reason travels with the report, not as a refusal.
         try:
             if self._lane.busy():
                 return "a draft is already running"
@@ -683,9 +688,6 @@ class DreamService:
             return "I'm already dreaming — say “stop dreaming” to end the session."
         if not self._has_brain():
             return "I can't dream until a Claude token or key is connected."
-        fable = self._fable_problem()
-        if fable:
-            return f"I can't dream right now — {fable}. I only dream on Fable, never on a weaker model."
         problem = self._source_problem()
         if problem:
             return "I can't dream in this build: " + problem
@@ -787,9 +789,6 @@ class DreamService:
                     f"{kind}{f' ({doing})' if doing else ''} — since {start:%H:%M}, until {end:%H:%M}: "
                     f"{_plural(len(drafts), 'draft')} so far, {applied} applied."
                 )
-        elif self._enabled() and self._fable_problem():
-            # Fable or nothing (§13): the card and the voice say why no night will start.
-            parts.append(f"Dreaming is paused: {self._fable_problem()}.")
         elif self._enabled():
             start, end = self._window(now)
             if start <= now < end:
@@ -805,10 +804,7 @@ class DreamService:
         problem = self._source_problem()
         if problem and problem not in parts[0]:  # the open-window line may already carry it
             parts.append("I can't dream in this build: " + problem + ".")
-        if self._fable_problem():
-            parts.append("I only dream on Fable — never on a weaker model.")
-        else:
-            parts.append(f"I plan and draft on {self._model_name()}.")
+        parts.append(self._tier_line())
         if self._auto_apply():
             parts.append("A draft whose full test suite is green applies on its own; anything red "
                          "waits for you.")
@@ -1517,9 +1513,11 @@ class DreamService:
         return "the plan isn't available right now" + (f" ({_first_line(str(why), 140)})" if why else "")
 
     def _fable_problem(self) -> str | None:
-        """Fable or nothing (§13 rule 1): the growth model must resolve to a Fable-class id. None
-        when it does (or when no resolver is wired to ask); else the one plain sentence the status
-        and the card show."""
+        """Why the night is NOT on Fable, or None when it is. REPORTING ONLY (§13 rule 1 is now
+        "Fable, else Opus"): it names the step down for the status, the journal and the voice, and
+        never stops a session. A resolver that cannot answer at all reads the same way — the night
+        runs on the named Opus fallback rather than on the coder's boot-time default, which is what
+        the old fail-closed gate was really protecting against."""
         gm = self._growth_model
         resolve = getattr(gm, "resolve", None)
         if not callable(resolve):
@@ -1527,19 +1525,24 @@ class DreamService:
         try:
             model_id = str(resolve() or "")
         except Exception as exc:  # noqa: BLE001
-            # Fail closed: a resolver that cannot answer names no Fable-class model, and a night
-            # started on it would hand every draft to the coder's boot-time default — the one
-            # downgrade §13 forbids. Not a downgrade in itself, so the sentence says what it is.
             return "the growth model couldn't be named right now (" + _first_line(str(exc), 120) + ")"
-        m = _MODEL_ID_RE.match(model_id.strip())
-        if m is not None and m.group(1).lower() in _FABLE_FAMILIES:
+        if is_fable_class(model_id):
             return None
         return _FABLE_MISSING
 
+    def _tier_line(self) -> str:
+        """The one sentence the status and the voice use for which brain tonight runs on — the tier,
+        and the reason when it isn't the top one."""
+        why = self._fable_problem()
+        if not why:
+            return f"I plan and draft on {self._model_name()}."
+        return (f"I plan and draft on {self._model_name()} — {why}. I never drop below Opus.")
+
     def _probe(self) -> tuple[bool, str]:
-        """One cheap question to the rail — the resume probe while paused. (True, "") when the
-        plan answers on a Fable-class model; (False, why) otherwise."""
-        problem = self._rail_problem() or self._fable_problem()
+        """One cheap question to the rail — the resume probe while paused. (True, "") when the plan
+        answers; (False, why) otherwise. The TIER is not probed: a night that stepped down to Opus
+        is a running night, not a paused one (§13 rule 1)."""
+        problem = self._rail_problem()
         if problem:
             return False, problem
         try:
@@ -1671,10 +1674,11 @@ class DreamService:
             "changes_decision": bool(getattr(item, "changes_decision", False)),
         }
         if model is None and self._growth_model is not None:
-            # Fable or nothing (§13): a resolver that cannot name the model right now must not hand
-            # the coder its boot-time default. Held exactly like a limit — the loop pauses, probes
-            # the resolver with the rail, and retries the same request once a model can be named.
-            why = "no Fable-class model could be named — the growth model resolver isn't answering"
+            # Belt and braces (§13): _model_for names the Opus fallback rather than None whenever a
+            # resolver is wired, so this fires only if one returns nothing at all. Handing the coder
+            # its boot-time default is the unnamed downgrade the rule forbids, so it is held exactly
+            # like a limit — the loop pauses, probes the rail, and retries once a model can be named.
+            why = "no growth model could be named — the growth model resolver isn't answering"
             record["limit_text"] = why
             record["ended"] = self._stamp()
             session["drafts"].append(record)
@@ -1699,7 +1703,10 @@ class DreamService:
             record["reason"] = record["reason"] or "the draft lane refused to start it"
             record["ended"] = self._stamp()
             session["drafts"].append(record)
-            if looks_like_limit(record.get("limit_text") or record["reason"]):
+            failure = record.get("limit_text") or record["reason"]
+            if self._step_down(session, failure, model):
+                self._note(session, f"retrying on the fallback — {_first_line(item.text)}")
+            elif looks_like_limit(failure):
                 self._hold_for_limit(record, "")
                 self._note(session, f"held: {record['reason']} — {_first_line(item.text)}")
             else:
@@ -1754,7 +1761,9 @@ class DreamService:
         else:
             record["outcome"] = "failed"
             record["reason"] = _first_line(ev.error or "the coder produced no change", 200)
-            if looks_like_limit(ev.error or ""):
+            if self._step_down(session, ev.error or "", record.get("model") or ""):
+                record["outcome"] = "stepped down"
+            elif looks_like_limit(ev.error or ""):
                 # The plan ran out mid-draft (§13): journaled as "held: limit", never as a failure of
                 # the idea, and any half-drafted branch is discarded so it never waits for review.
                 record["limit_text"] = str(ev.error or "")
@@ -1765,6 +1774,30 @@ class DreamService:
         else:
             self._note(session, f"{record['outcome']}: {record['reason']} — {_first_line(item.text)}")
         return record
+
+    def _step_down(self, session: dict, failure: str, model: str) -> bool:
+        """§13 rule 1, the call-time half: a draft that came back "that model isn't available to you"
+        DEMOTES growth to the Opus fallback and says so, rather than pausing the night on a plan that
+        will never carry Fable. True when the demotion happened, so the caller journals a step-down
+        instead of a hold.
+
+        This is the only availability signal a SUBSCRIPTION-ONLY install has (with the API key
+        cleared the resolver never reads the live model list), so it is what actually makes "Opus if
+        Fable unavailable" true on Brian's machine. Demoting for the resolver's cooldown means the
+        rest of the night drafts on Opus without re-trying a model that isn't there."""
+        if not looks_like_missing_model(failure) or not is_fable_class(model):
+            return False
+        note = getattr(self._growth_model, "note_unavailable", None)
+        if not callable(note):
+            return False
+        try:
+            now_on = str(note(model) or "")
+        except Exception:  # noqa: BLE001 — a resolver hiccup must not end the night
+            return False
+        self._note(session, f"{_humanize_model(model) or model} isn't available on this plan — "
+                            f"stepping down to {_humanize_model(now_on) or now_on} for the rest of "
+                            f"the night; I never drop below Opus")
+        return True
 
     def _hold_for_limit(self, record: dict, branch: str) -> None:
         """Mark a draft record as held for the plan's limit and discard its branch, if any."""
@@ -2329,20 +2362,27 @@ class DreamService:
 
     # ------------------------------------------------------------------ models, events, notes
     def _model_for(self, deep: bool) -> str | None:
-        """The coder model for a draft: ALWAYS the growth model (work_model(deep=True) — Fable), whatever
-        EFFORT the planner suggested. Brian's rule (§13): a limit or a small change is never an excuse
-        for a weaker model on HELIX's own code. `deep` is accepted for the record only."""
+        """The coder model for a draft: ALWAYS the growth model (work_model(deep=True) — Fable, or the
+        Opus fallback when Fable isn't on the plan), whatever EFFORT the planner suggested. Brian's
+        rule (§13): a limit or a small change is never an excuse for a weaker model on HELIX's own
+        code. `deep` is accepted for the record only.
+
+        A resolver that raises names the FALLBACK explicitly rather than None — handing the lane None
+        would let the coder pick its own boot-time default, which is the unnamed downgrade the rule
+        forbids. None means only "no resolver is wired at all"."""
         gm = self._growth_model
         if gm is None:
             return None
         try:
-            return gm.work_model(True)
+            return gm.work_model(True) or FALLBACK_GROWTH_MODEL
         except Exception:  # noqa: BLE001
-            return None
+            return FALLBACK_GROWTH_MODEL
 
     def _model_name(self) -> str:
-        """The growth model as a person says it ('Fable 5'), never a raw id read aloud. The id
-        itself reaches the face through GET /api/dream's `model` (the shell resolves it)."""
+        """The growth model as a person says it ('Fable 5.1'), never a raw id read aloud. The id
+        itself reaches the face through GET /api/dream's `model` (the shell resolves it). A resolver
+        that cannot answer names the Opus FALLBACK, not the top tier — the night really does run on
+        it (§13 rule 1), so saying "Fable" there would be a lie the journal repeats."""
         gm = self._growth_model
         resolve = getattr(gm, "resolve", None)
         if callable(resolve):
@@ -2352,6 +2392,7 @@ class DreamService:
                     return name
             except Exception:  # noqa: BLE001
                 pass
+            return _humanize_model(FALLBACK_GROWTH_MODEL) or "Opus"
         return "Fable (the growth model)"
 
     def _on_finished(self, ev: SelfChangeFinished) -> None:

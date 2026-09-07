@@ -1614,35 +1614,74 @@ class _Mythos(_GrowthModel):
 
 
 class _BrokenResolver(_GrowthModel):
+    """Cannot answer at all — neither the id nor the coder tier."""
+
     def resolve(self):
         raise RuntimeError("the plan list is unreadable")
 
+    def work_model(self, deep):
+        return self.resolve()
 
-def test_fable_or_nothing_a_sub_fable_growth_model_never_starts_a_night(tmp_path):
+
+def test_fable_else_opus_a_sub_fable_growth_model_still_dreams_and_says_which(tmp_path):
+    # §13 rule 1, revised: a plan without Fable STEPS DOWN to Opus and the night runs — refusing
+    # outright lost a whole night's work. What must never happen is a drop BELOW Opus, or a silent one.
     rig = _Rig(tmp_path, growth_model=_Opus())
-    why = "Fable isn't available on this plan right now"
-    assert rig.dream.why_not_now() == why
-    rig.dream.tick()
-    rig.dream.tick()
-    assert rig.chat.prompts == [] and rig.lane.requests == [] and "dream_last_session" not in rig.settings.d
-    assert rig.journal()["refused"]["reason"] == why  # said once, on the dream's own record
+    assert rig.dream.why_not_now() is None
     text = rig.dream.status()
-    assert text.startswith("Dreaming is paused: Fable isn't available on this plan right now.")
-    assert "I only dream on Fable — never on a weaker model." in text and "Opus" not in text
-    assert rig.dream.dream_now(30) == ("I can't dream right now — Fable isn't available on this plan right "
-                                       "now. I only dream on Fable, never on a weaker model.")
-    # A Fable-class id (Fable, or the Mythos tier above it) passes. A resolver that cannot answer
-    # names no Fable-class model: the gate fails CLOSED (a night on it would hand every draft to the
-    # coder's boot-time default), and the status and dream_now say what it is, never "Opus".
-    assert _Rig(tmp_path, growth_model=_Mythos()).dream.why_not_now() is None
+    assert "Dreaming is paused" not in text
+    assert ("I plan and draft on Opus 4.8 — Fable isn't available on this plan right now. "
+            "I never drop below Opus." in text)
+    assert rig.dream.dream_now(30).startswith("Dreaming for 30 minutes")
+    # A Fable-class id (Fable, or the Mythos tier above it) reads as the top tier, no caveat.
+    top = _Rig(tmp_path, growth_model=_Mythos())
+    assert top.dream.why_not_now() is None and "never drop below Opus" not in top.dream.status()
+    # A resolver that cannot answer at all also runs — on the NAMED Opus fallback, never on the
+    # coder's boot-time default, which is the unnamed downgrade the rule actually forbids.
     broken = _Rig(tmp_path, growth_model=_BrokenResolver())
     unnamed = "the growth model couldn't be named right now (the plan list is unreadable)"
-    assert broken.dream.why_not_now() == unnamed
-    broken.dream.tick()
-    assert broken.lane.requests == [] and "dream_last_session" not in broken.settings.d
-    assert broken.dream.status().startswith(f"Dreaming is paused: {unnamed}.")
-    assert broken.dream.dream_now(30) == (f"I can't dream right now — {unnamed}. I only dream on Fable, never "
-                                          "on a weaker model.")
+    assert broken.dream.why_not_now() is None
+    assert f"I plan and draft on Opus 5 — {unnamed}. I never drop below Opus." in broken.dream.status()
+    assert broken.dream._model_for(deep=True) == "claude-opus-5"
+
+
+def test_a_draft_refused_for_a_missing_model_steps_growth_down_instead_of_pausing(tmp_path):
+    """The call-time half of "Fable, else Opus" — and the only signal a subscription-only install
+    has, since with no API key the resolver never reads the live model list."""
+    from helix.adapters.model_select import FALLBACK_GROWTH_MODEL
+
+    class _Demotable(_GrowthModel):
+        def __init__(self):
+            self.reported = []
+            self.demoted = False
+
+        def resolve(self):
+            return FALLBACK_GROWTH_MODEL if self.demoted else "claude-fable-5"
+
+        def work_model(self, deep):
+            return self.resolve()
+
+        def note_unavailable(self, model_id):
+            self.reported.append(model_id)
+            self.demoted = True
+            return FALLBACK_GROWTH_MODEL
+
+    gm = _Demotable()
+    rig = _Rig(tmp_path, growth_model=gm)
+    session = {"drafts": [], "notes": []}
+    # "that model isn't available to you" is NOT a limit: it demotes and carries on…
+    assert rig.dream._step_down(session, "model not found: claude-fable-5", "claude-fable-5") is True
+    assert gm.reported == ["claude-fable-5"] and gm.demoted
+    assert "isn't available on this plan" in " ".join(str(n) for n in session["notes"])
+    assert rig.dream._model_for(deep=True) == FALLBACK_GROWTH_MODEL
+    # …a LIMIT still pauses (never a step down), and a model already at the fallback has nowhere to go.
+    gm2 = _Demotable()
+    rig2 = _Rig(tmp_path / "two", growth_model=gm2)
+    assert rig2.dream._step_down({"drafts": [], "notes": []},
+                                 "rate limit exceeded for model claude-fable-5", "claude-fable-5") is False
+    assert rig2.dream._step_down({"drafts": [], "notes": []},
+                                 "model not found", FALLBACK_GROWTH_MODEL) is False
+    assert gm2.reported == [] and not gm2.demoted
 
 
 class _FlakyResolver(_GrowthModel):
@@ -1661,10 +1700,10 @@ class _FlakyResolver(_GrowthModel):
         return self.resolve()
 
 
-def test_a_night_whose_resolver_breaks_mid_way_never_drafts_on_an_unnamed_model(tmp_path):
-    """Fable or nothing (§13) on the draft path too: when work_model() cannot name the model, the
-    draft is HELD like a limit — never handed to the lane with model=None (the coder's default) —
-    the night pauses, and its probes ask the resolver along with the rail until the window closes."""
+def test_a_night_whose_resolver_breaks_mid_way_drafts_on_the_named_opus_fallback(tmp_path):
+    """Fable, ELSE OPUS (§13) on the draft path too: when work_model() cannot name the model, the
+    night does NOT stall — it drafts on the named Opus fallback. What stays forbidden is handing the
+    lane model=None, which would let the coder pick its own boot-time default unannounced."""
     clock = _Clock()
     chat = _ProbeChat(PLAN, probes=("OK",), clock=clock)
     # The gate names the model once (why_not_now) and the session record once (its model line);
@@ -1673,14 +1712,13 @@ def test_a_night_whose_resolver_breaks_mid_way_never_drafts_on_an_unnamed_model(
     rig.dream._stop = _ClockEvent(clock)
     rig.dream.tick()
     s = rig.last()
-    assert rig.lane.requests == [] and rig.lane.models == []  # nothing started on an unnamed model
-    assert s["drafts"] and all(d["held_for"] == "limit" and d["model"] == "" for d in s["drafts"])
-    assert s["drafts"][0]["reason"].startswith("limit — no Fable-class model could be named")
-    assert any("held: no Fable-class model could be named" in n for n in s["notes"])
-    assert chat.probe_times == []  # the probe found the resolver broken before asking the plan anything
-    assert any("still paused at 23:25 — the growth model couldn't be named right now" in n for n in s["notes"])
-    assert s["stopped_reason"] == "the window closed" and s["agenda_remaining"]
-    assert "0 of 3 planned improvements ran" in rig.dream.morning_report()
+    assert rig.lane.requests, "the night went on"
+    # The first draft still names Fable (the resolver was alive for it); every draft after the
+    # resolver dies runs on the named Opus fallback — none on an unnamed model.
+    assert rig.lane.models == ["claude-fable-5", "claude-opus-5", "claude-opus-5"]
+    assert all(d["model"] for d in s["drafts"])
+    assert not any(d.get("held_for") == "limit" for d in s["drafts"])
+    assert not any("no growth model could be named" in n for n in s["notes"])
 
 
 def test_a_manual_session_is_never_held_for_the_presence_of_the_user_who_asked(tmp_path):
