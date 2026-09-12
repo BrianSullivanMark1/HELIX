@@ -16,7 +16,8 @@ Protection model (immutable to AUTONOMOUS self-modification — edit, delete, ad
   - PROTECTED_PREFIXES — the skeleton: the ports (contracts the gate trusts) and app/ (composition
     root, bootstrap = the recovery anchor, startup).
   - PROTECTED_FILES    — the vital organs: the approval gate + laws, the containment/egress boundaries,
-    the git executor, and startup/recovery files (some live under otherwise-editable prefixes).
+    the git executor, startup/recovery files, and THE FLEET's laws and egress (some live under
+    otherwise-editable prefixes — that is exactly why they are named individually).
 Everything else — services, adapters, the UI/interface, the domain's own brain structures & vocabulary,
 and tests — is the growable surface, and even there only on a branch, smoke-checked, re-scanned, and
 HUMAN-APPROVED before anything merges.
@@ -71,6 +72,20 @@ PROTECTED_FILES: tuple[str, ...] = (
     "helix/services/prompts.py",  # the coder framing + persona + untrusted-data fences
     "helix/adapters/api_coder.py",  # the build sandbox (_safe_target)
     "helix/adapters/agent_sdk_chat.py",  # the subscription brain's token/env isolation + tool allowlist
+    # THE FLEET (HELIX_MARK1_PLAN.md §10.1). These sit under helix/domain/ and helix/services/, which
+    # are otherwise the growable surface — so without these six lines the nightly dream may rewrite the
+    # file that says "production is human-only", the flags that have cost a service its database, and
+    # the allowlist of what a CLOUD user may reach. A rule an autonomous process can edit is not a rule.
+    # The cost is accepted deliberately: HELIX can no longer improve its own fleet code overnight. The
+    # fleet is the one part of HELIX where a well-meant 3 a.m. refactor has a blast radius measured in
+    # production systems. (The owner may still hand-edit any of them at any time; this restrains only
+    # AUTONOMOUS self-modification.)
+    "helix/domain/fleet.py",  # the fleet's laws: forbidden deploy flags, the prod gate, plant-data
+    "helix/domain/packs.py",  # what capability each faculty pack carries
+    "helix/domain/runtime_profile.py",  # the DESKTOP/CLOUD split and the fail-closed CLOUD allowlist
+    "helix/services/fleet.py",  # the enforcement point, as selfdev.py is for this file
+    "helix/adapters/github_fleet.py",  # an egress boundary (its own host allowlist + redirect refusal)
+    "helix/adapters/rest_fleet.py",  # an egress boundary (the GCP REST reader, CLOUD profile)
 )
 SHELL_PREFIX = ""  # the interface is now part of the growable brain — HELIX may improve its own shell
 # (still human-approved + revertible; voice/text commands STILL cannot delete the shell — that is a
