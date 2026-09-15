@@ -15,6 +15,7 @@ routes are tokenless (the SPA must load before it knows the token) but same-orig
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import secrets
@@ -267,6 +268,40 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         body = await request.json()
         shell.action(str(body.get("id") or ""))
         return {"ok": True}
+
+    # ----- exports: a table leaves the console as a file -----
+    # The desktop window swallows a plain <a download> (and can refuse the clipboard outright), so
+    # the face hands the bytes here and HELIX writes them. A real file in a real folder, so: the
+    # name is sanitised to one segment, the extension is an allowlist, the size is capped, and an
+    # existing file is never overwritten.
+    export_limits = {".png": 20_000_000, ".csv": 5_000_000, ".txt": 5_000_000, ".html": 5_000_000}
+
+    @app.post("/api/export/save")
+    async def export_save(request: Request):
+        body = await request.json()
+        asked = " ".join(str(body.get("name") or "").split())
+        name = re.sub(r"[^A-Za-z0-9._-]+", "-", asked)[:80].strip(".-") or "table.png"
+        suffix = Path(name).suffix.lower()
+        if suffix not in export_limits:
+            return JSONResponse({"error": "that kind of file isn't exported"}, status_code=400)
+        try:
+            data = base64.b64decode(str(body.get("data") or ""), validate=True)
+        except ValueError:  # binascii.Error is a ValueError — an unreadable payload, not a crash
+            return JSONResponse({"error": "unreadable payload"}, status_code=400)
+        if len(data) > export_limits[suffix]:
+            return JSONResponse({"error": "too large to save"}, status_code=413)
+        folder = Path.home() / "Downloads"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            path, stem, n = folder / name, Path(name).stem, 2
+            while path.exists():
+                path = folder / f"{stem} ({n}){suffix}"
+                n += 1
+            path.write_bytes(data)
+        except OSError as exc:
+            _LOG.warning("export save failed: %s", exc)
+            return JSONResponse({"error": "could not write the file"}, status_code=500)
+        return {"ok": True, "path": str(path)}
 
     @app.post("/api/shell/voice")
     async def voice_op(request: Request):

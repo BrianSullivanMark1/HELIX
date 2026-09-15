@@ -6,9 +6,9 @@ import type { Visual } from "../lib/store";
 import {
   copyTable,
   copyTableImage,
-  downloadTableCsv,
-  downloadTableImage,
   isNumericCell,
+  saveTableCsv,
+  saveTableImage,
   slugify,
 } from "../lib/tableexport";
 import type { TableData } from "../lib/tableexport";
@@ -192,17 +192,16 @@ function TableViz({ spec }: { spec: Visual }) {
   // formatting, a slide), and CSV is the file to keep.
   const copy = () =>
     void copyTable(data).then((rich) =>
-      flash(rich ? "Copied — pastes as a table" : "Copied as text"));
+      flash(rich ? "Copied — pastes as a table" : "Copied as TEXT only (the window refused HTML)"));
   const image = () =>
     void copyTableImage(data).then(async (ok) => {
-      if (ok) return flash("Image copied");
-      const saved = await downloadTableImage(data, `${slugify(title, "table")}.png`);
-      flash(saved ? "Image saved" : "Couldn't make an image");
+      if (ok) return flash("Image copied — paste it anywhere");
+      const path = await saveTableImage(data, `${slugify(title, "table")}.png`);
+      flash(path ? `Image saved: ${path}` : "Image saved to your Downloads");
     });
-  const csv = () => {
-    downloadTableCsv(data, `${slugify(title, "table")}.csv`);
-    flash("CSV saved");
-  };
+  const csv = () =>
+    void saveTableCsv(data, `${slugify(title, "table")}.csv`).then((path) =>
+      flash(path ? `CSV saved: ${path}` : "CSV saved to your Downloads"));
   return (
     <div className="max-w-[860px] overflow-x-auto">
       <table className="border-collapse text-[13px]">

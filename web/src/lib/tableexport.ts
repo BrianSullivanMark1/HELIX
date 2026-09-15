@@ -13,6 +13,8 @@
 // Light palette on purpose: these leave HELIX for an email or a document, where cyan-on-black
 // reads as a screenshot of something broken and costs a fortune to print.
 
+import { api } from "./api";
+
 const INK = "#1f2328";
 const MUTED = "#57606a";
 const LINE = "#d0d7de";
@@ -75,7 +77,55 @@ export function tableToHtml({ columns, rows, title }: TableData): string {
  * Put the table on the clipboard as HTML *and* as text. Returns false when the browser has no
  * ClipboardItem (then the caller's plain-text fallback already ran).
  */
+/**
+ * The old way, and the one that actually works in the app's WebView2: hook the `copy` event, put
+ * both flavours on `clipboardData` by hand, and fire it with execCommand. It runs SYNCHRONOUSLY
+ * inside the click, so it needs no clipboard permission and no user-activation grace — which is
+ * why the async navigator.clipboard.write path silently lost its text/html flavour in the desktop
+ * window and tables pasted into Gmail as flattened text.
+ */
+function copyViaEvent(html: string, text: string): boolean {
+  let wrote = false;
+  const onCopy = (e: ClipboardEvent) => {
+    e.preventDefault();
+    e.clipboardData?.setData("text/html", html);
+    e.clipboardData?.setData("text/plain", text);
+    wrote = true;
+  };
+  document.addEventListener("copy", onCopy, true);
+  const holder = document.createElement("div");
+  try {
+    // execCommand("copy") needs something selected to act on; an off-screen node gives it one
+    // without disturbing what the user has selected on the page.
+    holder.setAttribute("aria-hidden", "true");
+    holder.style.cssText = "position:fixed;left:-9999px;top:0;width:1px;height:1px;overflow:hidden;";
+    holder.textContent = text;
+    document.body.appendChild(holder);
+    const range = document.createRange();
+    range.selectNodeContents(holder);
+    const selection = window.getSelection();
+    const previous = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    const fired = document.execCommand("copy");
+    selection?.removeAllRanges();
+    if (previous) selection?.addRange(previous);
+    wrote = wrote && fired;
+  } catch {
+    wrote = false;
+  } finally {
+    holder.remove();
+    document.removeEventListener("copy", onCopy, true);
+  }
+  return wrote;
+}
+
+/**
+ * Both flavours onto the clipboard. True means the HTML really landed (the caller says so, because
+ * a silent drop to text is the bug this function exists to prevent).
+ */
 export async function copyRich(html: string, text: string): Promise<boolean> {
+  if (copyViaEvent(html, text)) return true;
   try {
     if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
       await navigator.clipboard.write([
@@ -89,7 +139,11 @@ export async function copyRich(html: string, text: string): Promise<boolean> {
   } catch {
     // A rejected write (permission, an unfocused window) falls through to the text path below.
   }
-  await navigator.clipboard.writeText(text);
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Nothing more to try: the caller reports that only text (or nothing) reached the clipboard.
+  }
   return false;
 }
 
@@ -218,6 +272,41 @@ export function download(blob: Blob, name: string): void {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+const toBase64 = (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.readAsDataURL(blob);
+  });
+
+/**
+ * Hand the bytes to the backend, which writes them into the user's Downloads folder and answers
+ * with the path. The desktop window swallows a plain <a download> (and may refuse the clipboard
+ * altogether), so this is the way a file reliably leaves HELIX.
+ */
+export async function saveFile(name: string, blob: Blob): Promise<string> {
+  try {
+    const data = await toBase64(blob);
+    const res = (await api.post("/api/export/save", { name, data })) as { path?: string };
+    if (res?.path) return res.path;
+  } catch {
+    // Fall through to the browser's own download, which works when the face runs in a real browser.
+  }
+  download(blob, name);
+  return "";
+}
+
+export async function saveTableImage(data: TableData, name: string): Promise<string> {
+  const blob = await canvasBlob(tableToCanvas(data));
+  return blob ? saveFile(name, blob) : "";
+}
+
+export function saveTableCsv(data: TableData, name: string): Promise<string> {
+  // The BOM is what makes Excel open a UTF-8 CSV without mangling °, — and accented names.
+  return saveFile(name, new Blob(["﻿" + tableToCsv(data)], { type: "text/csv;charset=utf-8" }));
 }
 
 export async function downloadTableImage(data: TableData, name: string): Promise<boolean> {
