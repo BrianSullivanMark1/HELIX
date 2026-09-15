@@ -354,7 +354,10 @@ class ShellSession:
 
     # ----- the submit gauntlet (spec §3.4 — same order) -----
     def submit(self, text: str, *, attachment_ids: list[str] | None = None,
-               from_voice: bool = False, speaker: str | None = None) -> None:
+               from_voice: bool = False, speaker: str | None = None) -> bool:
+        """The submit gauntlet. True when a turn was started or queued; False when the gauntlet
+        answered the message itself (a sleep/wake/stop word, a cleanup answer, no Claude connected)
+        — the voice needs to know, because it went 'thinking' before handing a command over."""
         self._touch_activity()  # any submission is the user being here — the dream engine holds
         text = (text or "").strip()
         paths = [self._attachments.pop(a) for a in (attachment_ids or []) if a in self._attachments]
@@ -365,19 +368,19 @@ class ShellSession:
             if fid:
                 self._last_frame_id = fid
         if not text and not paths:
-            return
+            return False
         self._last_user_utterance = text if from_voice else ""
         if not from_voice and text.lower() == "recalibrate my voice":
             self._bubble("user", text)
             self._bubble("helix", "Voice calibration has to be spoken — turn the mic on and say: "
                                   "recalibrate my voice.")
-            return
+            return False
         if self._offers and not from_voice:
             answer = self._cleanup_answer(text)
             if answer is not None:
                 self._bubble("user", text)
                 self._answer_offer(self._offers[-1], remove=answer)
-                return
+                return False
         if is_sleep(text):
             self._bubble("user", text)
             if self.voice is not None and self.voice.can_listen():
@@ -385,17 +388,17 @@ class ShellSession:
             else:
                 self._bubble("helix", _NOTHING_TO_SLEEP)
             self._push_voice_state()
-            return
+            return False
         if is_wake(text):
             self._bubble("user", text)
             if self.voice is not None:
                 self.voice.set_muted(False)
             self._push_voice_state()
-            return
+            return False
         if is_stop(text):
             self._bubble("user", text)
             self.stop()
-            return
+            return False
         authed = bool((self.c.settings.get("claude_api_key") or "").strip()
                       or (self.c.settings.get("claude_code_oauth_token") or "").strip())
         if not authed:
@@ -404,7 +407,7 @@ class ShellSession:
                 self._bubble("helix", "Connect Claude in Settings to start — I kept your message.")
             self._status("Connect Claude in Settings to start — I kept your message.")
             self.push({"t": "keep_input", "text": text})
-            return
+            return False
         images, others = imagesvc.split_images(paths) if paths else ([], [])
         prompt = text
         if not prompt:
@@ -418,8 +421,15 @@ class ShellSession:
         with self._lock:
             if self._busy:
                 self._pending.append((prompt, from_voice, paths, speaker))
-                return
+                return True
         self._start_turn(prompt, from_voice, paths, speaker)
+        return True
+
+    def turn_in_flight(self) -> bool:
+        """A turn running or queued. The voice's watchdog asks before deciding that a voice left
+        'thinking' has nothing left to think about."""
+        with self._lock:
+            return self._busy or bool(self._pending)
 
     def _cleanup_answer(self, text: str) -> bool | None:
         """yes → remove, no → keep, neither → an ordinary message. ANY negation can never be a yes
@@ -551,7 +561,11 @@ class ShellSession:
             self._busy = False
             self._cancel = None
         self.push({"t": "busy", "on": False})
-        if self.voice is not None and not self.voice.is_active():
+        # The turn is over. Unless the reply is being spoken right now (speak() ends in idle by
+        # itself), the voice settles here — an idle one so the face's orb does (the turn pushed
+        # "thinking" itself), a "thinking" one because nothing else ever would: a typed turn with
+        # voice off, or a reply nothing spoke, used to leave the gate shut for good.
+        if self.voice is not None and self.voice.state() != "speaking":
             self.voice.idle()
         self._status(self.voice_state()["idle_line"])
         if cancelled and token.build is not None:
@@ -1903,7 +1917,12 @@ class ShellSession:
     # ----- voice wiring (called by server at construction) -----
     def on_voice_recognized(self, command: str) -> None:
         speaker = self.voice.current_speaker if self.voice is not None else None
-        self.submit(command, from_voice=True, speaker=speaker)
+        started = self.submit(command, from_voice=True, speaker=speaker)
+        # The voice went 'thinking' (gate shut) before handing the command over. A command the
+        # gauntlet declined — no Claude connected — starts no turn, so nothing downstream would
+        # ever bring it back: the mic stayed deaf until a restart.
+        if not started and self.voice is not None and self.voice.state() == "thinking":
+            self.voice.idle()
 
     def on_voice_identity(self, heard: str, reply: str) -> None:
         self.push({"t": "identity", "heard": heard, "reply": reply})

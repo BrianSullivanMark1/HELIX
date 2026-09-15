@@ -109,6 +109,7 @@ def run_web(open_mode: str = "window") -> int:
         voice.on_stop = shell.stop
         voice.on_identity = shell.on_voice_identity
         voice.on_muted = lambda _m: shell.push({"t": "voice", **shell.voice_state()})
+        voice.busy_probe = shell.turn_in_flight  # the watchdog's "is a turn really running?"
 
     app = build_app(container, shell, hub, _web_dist(container.paths.root))
 
