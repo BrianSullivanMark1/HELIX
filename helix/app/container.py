@@ -718,6 +718,28 @@ class Container:
         _attach_research = getattr(self.tools, "attach_research", None)
         if callable(_attach_research):
             _attach_research(self.research, self.verified)
+        # THE SAP DATA MODEL (READ_ME/SAP.md): the dictionary catalog (shipped tables + on-demand
+        # fetches under data/sap/), the curated joins, the user's EDW overlay in its own guard-safe
+        # JSON, and the Snowflake writer — behind sap_lookup / sap_table / sap_join / sap_sql /
+        # sap_edw and the per-turn block. Wrapped so a broken catalog file (or a half-shipped
+        # package) can never keep the app from booting: the faculty reads as absent — no tools
+        # offered, nothing injected — and the log says why. Late-bound like the research faculty.
+        try:
+            from helix.adapters.sap_catalog import CatalogStore
+            from helix.services.sap import SapService
+
+            self.sap_catalog = CatalogStore(self.paths.data)
+            self.sap = SapService(
+                self.sap_catalog, JsonSettings(self.paths.data / "helix_sap_edw.json"), self.clock,
+                settings=self.settings,
+            )
+        except Exception:  # noqa: BLE001 — one faculty must never block boot
+            _LOG.warning("SAP faculty unavailable", exc_info=True)
+            self.sap_catalog = None
+            self.sap = None
+        _attach_sap = getattr(self.tools, "attach_sap", None)
+        if callable(_attach_sap) and self.sap is not None:
+            _attach_sap(self.sap)
         self.subscription._tools = self.tools  # late-bind (tools → services ctor cycle, like agents)
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM,
@@ -729,6 +751,9 @@ class Container:
             # VERIFIED KNOWLEDGE rides into a turn beside lessons/memory (§10): what HELIX itself
             # confirmed on a current source, labelled as data, so an engineering answer prefers it.
             verified=self.verified,
+            # THE SAP DATA MODEL rides in the same way: a named table's key, joins and EDW status
+            # from the dictionary, so an SAP answer rests on a lookup rather than a recollection.
+            sap=self.sap,
         )
         # Agents persist in a DEDICATED file (not the guarded settings file): scheduled agents write
         # last_run mid-build via the heartbeat, and the orb can create/pause an agent while a build runs

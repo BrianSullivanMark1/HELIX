@@ -139,6 +139,13 @@ _TOOL_PHRASES: dict[str, str] = {
     "verified_facts": "Checking what I've verified",
     "note_verified_fact": "Noting the verified fact",
     "forget_verified": "Dropping that record",
+    # The SAP data model (READ_ME/SAP.md): four reads on the dictionary catalog, one write to the
+    # user's EDW record. "Snowflake" and "SAP" are the user's own words; the voice says them whole.
+    "sap_lookup": "Checking the SAP catalog",
+    "sap_table": "Looking up that SAP table",
+    "sap_join": "Working out the SAP joins",
+    "sap_sql": "Writing the Snowflake query",
+    "sap_edw": "Noting what the warehouse has",
     "open_program": "Opening the program",
     "media_control": "Reaching the media keys",
     "system_status": "Checking the machine",

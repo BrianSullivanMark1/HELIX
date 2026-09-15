@@ -1,0 +1,823 @@
+<!doctype html>
+<!-- Trimmed copy of https://leanx.eu/sap/table/rkpf/ fetched 2026-09-15 for tests/test_sap_leanx_parse.py:
+     the <h1>/<h2>, the first 3 field rows, then the FULL foreign-key table — the smallest page
+     whose FK rows take columns from SYST, from another table (RESB) and from the generic '*'.
+     Indentation stripped.
+     The theme chrome before and after (≈70 KB of WordPress/Tailwind scaffolding) is dropped. -->
+<html lang="en-US"><head><meta charset="UTF-8"><title>RKPF - Document Header: Reservation</title></head>
+<body><div id="sap-content" class="sap-resources-content">
+<h1 class="text-3xl font-bold mb-2 text-gray-800">SAP Table RKPF</h1>
+<h2 class="text-xl font-semibold mb-4 text-gray-700">Document Header: Reservation</h2>
+
+<div class="mb-8">
+<p class="text-gray-600 mb-4">RKPF                    (Document Header: Reservation) is a standard table in SAP R\3 ERP systems. Below you can find
+the technical details of the fields that make up this table. Key fields are marked in blue.</p>
+<p class="text-gray-600 mb-4">Additionally we provide an overview of foreign key relationships, if any, that
+link RKPF to other SAP tables.</p>
+</div>
+
+<div class="bg-white border rounded-lg overflow-hidden mb-8">
+<div class="bg-gray-50 px-6 py-4 border-b">
+<h3 class="text-xl font-semibold text-gray-800">RKPF table fields</h3>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full">
+<thead class="bg-gray-100">
+<tr>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Field</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Data element</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Checktable</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Datatype</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Length</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Decimals</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Possible values</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-gray-200">
+<tr class="bg-blue-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">MANDT</div>
+<div class="text-sm text-gray-500">Client</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">CLNT</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">3</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="bg-blue-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">RSNUM</div>
+<div class="text-sm text-gray-500">Number of Reservation/Dependent Requirement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">RSNUM</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">NUMC</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">10</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">KZVER</div>
+<div class="text-sm text-gray-500">Origin</div>
+</td>
+<td class="px-4 py-3 text-gray-700">KZVER</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">CHAR</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">1</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+<button
+class="inline-flex items-center px-3 py-1 bg-gray-100 text-gray-700 text-sm rounded hover:bg-gray-200 transition-colors"
+onclick="toggleCollapse('collapse-2')">
+Possible values
+</button>
+</td>
+</tr>
+<tr id="collapse-2" class="hidden">
+<td colspan="7" class="px-4 py-0">
+<div class="bg-gray-50 rounded-lg p-4 my-2">
+<table class="w-full text-sm">
+<thead class="bg-gray-100">
+<tr>
+<th class="px-3 py-2 text-left font-medium text-gray-700">Value</th>
+<th class="px-3 py-2 text-left font-medium text-gray-700">Description</th>
+</tr>
+</thead>
+<tbody class="bg-white divide-y divide-gray-200">
+<tr class="hover:bg-gray-50">
+<td class="px-3 py-2 font-medium text-gray-900">
+X                                                                </td>
+<td class="px-3 py-2 text-gray-700">
+Yes</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-3 py-2 font-medium text-gray-900">
+<span class="text-gray-500 italic">NULL</span>                                                                </td>
+<td class="px-3 py-2 text-gray-700">
+No</td>
+</tr>
+</tbody>
+</table>
+</div>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="bg-white border rounded-lg overflow-hidden">
+<div class="bg-gray-50 px-6 py-4 border-b">
+<h3 class="text-xl font-semibold text-gray-800">RKPF foreign key
+relationships</h3>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full">
+<thead class="bg-gray-100">
+<tr>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Table</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Field</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Foreign key table</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Foreign key field</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Check table</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Check field</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-gray-200">
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ANLN1</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ANLN1</td>
+<td class="px-4 py-3">
+<a href="/sap/table/anlh/"
+class="text-blue-600 hover:text-blue-800">
+ANLH                                            </a>
+<div class="text-sm text-gray-500">Main asset number</div>
+</td>
+<td class="px-4 py-3 text-gray-700">ANLN1</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ANLN1</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/anlh/"
+class="text-blue-600 hover:text-blue-800">
+ANLH                                            </a>
+<div class="text-sm text-gray-500">Main asset number</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ANLN1</td>
+<td class="px-4 py-3 text-gray-700">RESB</td>
+<td class="px-4 py-3 text-gray-700">BUKRS</td>
+<td class="px-4 py-3">
+<a href="/sap/table/anlh/"
+class="text-blue-600 hover:text-blue-800">
+ANLH                                            </a>
+<div class="text-sm text-gray-500">Main asset number</div>
+</td>
+<td class="px-4 py-3 text-gray-700">BUKRS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ANLN2</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/anla/"
+class="text-blue-600 hover:text-blue-800">
+ANLA                                            </a>
+<div class="text-sm text-gray-500">Asset Master Record Segment</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ANLN2</td>
+<td class="px-4 py-3 text-gray-700">RESB</td>
+<td class="px-4 py-3 text-gray-700">BUKRS</td>
+<td class="px-4 py-3">
+<a href="/sap/table/anla/"
+class="text-blue-600 hover:text-blue-800">
+ANLA                                            </a>
+<div class="text-sm text-gray-500">Asset Master Record Segment</div>
+</td>
+<td class="px-4 py-3 text-gray-700">BUKRS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ANLN2</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ANLN1</td>
+<td class="px-4 py-3">
+<a href="/sap/table/anla/"
+class="text-blue-600 hover:text-blue-800">
+ANLA                                            </a>
+<div class="text-sm text-gray-500">Asset Master Record Segment</div>
+</td>
+<td class="px-4 py-3 text-gray-700">ANLN1</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ANLN2</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ANLN2</td>
+<td class="px-4 py-3">
+<a href="/sap/table/anla/"
+class="text-blue-600 hover:text-blue-800">
+ANLA                                            </a>
+<div class="text-sm text-gray-500">Asset Master Record Segment</div>
+</td>
+<td class="px-4 py-3 text-gray-700">ANLN2</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">AUFNR</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/aufk/"
+class="text-blue-600 hover:text-blue-800">
+AUFK                                            </a>
+<div class="text-sm text-gray-500">Order master data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">AUFNR</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">AUFNR</td>
+<td class="px-4 py-3">
+<a href="/sap/table/aufk/"
+class="text-blue-600 hover:text-blue-800">
+AUFK                                            </a>
+<div class="text-sm text-gray-500">Order master data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">AUFNR</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">BWART</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t156/"
+class="text-blue-600 hover:text-blue-800">
+T156                                            </a>
+<div class="text-sm text-gray-500">Movement Type</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">BWART</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">BWART</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t156/"
+class="text-blue-600 hover:text-blue-800">
+T156                                            </a>
+<div class="text-sm text-gray-500">Movement Type</div>
+</td>
+<td class="px-4 py-3 text-gray-700">BWART</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">EBELN</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">EBELN</td>
+<td class="px-4 py-3">
+<a href="/sap/table/ekko/"
+class="text-blue-600 hover:text-blue-800">
+EKKO                                            </a>
+<div class="text-sm text-gray-500">Purchasing Document Header</div>
+</td>
+<td class="px-4 py-3 text-gray-700">EBELN</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">EBELN</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/ekko/"
+class="text-blue-600 hover:text-blue-800">
+EKKO                                            </a>
+<div class="text-sm text-gray-500">Purchasing Document Header</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">EBELP</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/ekpo/"
+class="text-blue-600 hover:text-blue-800">
+EKPO                                            </a>
+<div class="text-sm text-gray-500">Purchasing Document Item</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">EBELP</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">EBELN</td>
+<td class="px-4 py-3">
+<a href="/sap/table/ekpo/"
+class="text-blue-600 hover:text-blue-800">
+EKPO                                            </a>
+<div class="text-sm text-gray-500">Purchasing Document Item</div>
+</td>
+<td class="px-4 py-3 text-gray-700">EBELN</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">EBELP</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">EBELP</td>
+<td class="px-4 py-3">
+<a href="/sap/table/ekpo/"
+class="text-blue-600 hover:text-blue-800">
+EKPO                                            </a>
+<div class="text-sm text-gray-500">Purchasing Document Item</div>
+</td>
+<td class="px-4 py-3 text-gray-700">EBELP</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">FIPOS</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">FIPOS</td>
+<td class="px-4 py-3">
+<a href="/sap/table/fmfpo/"
+class="text-blue-600 hover:text-blue-800">
+FMFPO                                            </a>
+<div class="text-sm text-gray-500">FIFM: Commitment Item</div>
+</td>
+<td class="px-4 py-3 text-gray-700">FIPOS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">FIPOS</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">RSDAT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/fmfpo/"
+class="text-blue-600 hover:text-blue-800">
+FMFPO                                            </a>
+<div class="text-sm text-gray-500">FIFM: Commitment Item</div>
+</td>
+<td class="px-4 py-3 text-gray-700">DATBIS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">FIPOS</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/fmfpo/"
+class="text-blue-600 hover:text-blue-800">
+FMFPO                                            </a>
+<div class="text-sm text-gray-500">FIFM: Commitment Item</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">FIPOS</td>
+<td class="px-4 py-3 text-gray-700">T001</td>
+<td class="px-4 py-3 text-gray-700">FIKRS</td>
+<td class="px-4 py-3">
+<a href="/sap/table/fmfpo/"
+class="text-blue-600 hover:text-blue-800">
+FMFPO                                            </a>
+<div class="text-sm text-gray-500">FIFM: Commitment Item</div>
+</td>
+<td class="px-4 py-3 text-gray-700">FIKRS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KDAUF</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/vbuk/"
+class="text-blue-600 hover:text-blue-800">
+VBUK                                            </a>
+<div class="text-sm text-gray-500">Sales Document: Header Status and Administrative Data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KDAUF</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KDAUF</td>
+<td class="px-4 py-3">
+<a href="/sap/table/vbuk/"
+class="text-blue-600 hover:text-blue-800">
+VBUK                                            </a>
+<div class="text-sm text-gray-500">Sales Document: Header Status and Administrative Data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">VBELN</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KOKRS</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KOKRS</td>
+<td class="px-4 py-3">
+<a href="/sap/table/tka01/"
+class="text-blue-600 hover:text-blue-800">
+TKA01                                            </a>
+<div class="text-sm text-gray-500">Controlling Areas</div>
+</td>
+<td class="px-4 py-3 text-gray-700">KOKRS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KOKRS</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/tka01/"
+class="text-blue-600 hover:text-blue-800">
+TKA01                                            </a>
+<div class="text-sm text-gray-500">Controlling Areas</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KOSTL</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/csks/"
+class="text-blue-600 hover:text-blue-800">
+CSKS                                            </a>
+<div class="text-sm text-gray-500">Cost Center Master Data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KOSTL</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KOKRS</td>
+<td class="px-4 py-3">
+<a href="/sap/table/csks/"
+class="text-blue-600 hover:text-blue-800">
+CSKS                                            </a>
+<div class="text-sm text-gray-500">Cost Center Master Data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">KOKRS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KOSTL</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KOSTL</td>
+<td class="px-4 py-3">
+<a href="/sap/table/csks/"
+class="text-blue-600 hover:text-blue-800">
+CSKS                                            </a>
+<div class="text-sm text-gray-500">Cost Center Master Data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">KOSTL</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KOSTL</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">RSDAT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/csks/"
+class="text-blue-600 hover:text-blue-800">
+CSKS                                            </a>
+<div class="text-sm text-gray-500">Cost Center Master Data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">DATBI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KUNNR</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/kna1/"
+class="text-blue-600 hover:text-blue-800">
+KNA1                                            </a>
+<div class="text-sm text-gray-500">General Data in Customer Master</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KUNNR</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">KUNNR</td>
+<td class="px-4 py-3">
+<a href="/sap/table/kna1/"
+class="text-blue-600 hover:text-blue-800">
+KNA1                                            </a>
+<div class="text-sm text-gray-500">General Data in Customer Master</div>
+</td>
+<td class="px-4 py-3 text-gray-700">KUNNR</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">NPLNR</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/aufk/"
+class="text-blue-600 hover:text-blue-800">
+AUFK                                            </a>
+<div class="text-sm text-gray-500">Order master data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">NPLNR</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">NPLNR</td>
+<td class="px-4 py-3">
+<a href="/sap/table/aufk/"
+class="text-blue-600 hover:text-blue-800">
+AUFK                                            </a>
+<div class="text-sm text-gray-500">Order master data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">AUFNR</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">PARBU</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t001/"
+class="text-blue-600 hover:text-blue-800">
+T001                                            </a>
+<div class="text-sm text-gray-500">Company Codes</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">PARBU</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">PARBU</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t001/"
+class="text-blue-600 hover:text-blue-800">
+T001                                            </a>
+<div class="text-sm text-gray-500">Company Codes</div>
+</td>
+<td class="px-4 py-3 text-gray-700">BUKRS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">PARGB</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/tgsb/"
+class="text-blue-600 hover:text-blue-800">
+TGSB                                            </a>
+<div class="text-sm text-gray-500">Business Areas</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">PARGB</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">PARGB</td>
+<td class="px-4 py-3">
+<a href="/sap/table/tgsb/"
+class="text-blue-600 hover:text-blue-800">
+TGSB                                            </a>
+<div class="text-sm text-gray-500">Business Areas</div>
+</td>
+<td class="px-4 py-3 text-gray-700">GSBER</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">UMLGO</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">UMLGO</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t001l/"
+class="text-blue-600 hover:text-blue-800">
+T001L                                            </a>
+<div class="text-sm text-gray-500">Storage Locations</div>
+</td>
+<td class="px-4 py-3 text-gray-700">LGORT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">UMLGO</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t001l/"
+class="text-blue-600 hover:text-blue-800">
+T001L                                            </a>
+<div class="text-sm text-gray-500">Storage Locations</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">UMLGO</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">UMWRK</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t001l/"
+class="text-blue-600 hover:text-blue-800">
+T001L                                            </a>
+<div class="text-sm text-gray-500">Storage Locations</div>
+</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">UMWRK</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t001w/"
+class="text-blue-600 hover:text-blue-800">
+T001W                                            </a>
+<div class="text-sm text-gray-500">Plants/Branches</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">UMWRK</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">UMWRK</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t001w/"
+class="text-blue-600 hover:text-blue-800">
+T001W                                            </a>
+<div class="text-sm text-gray-500">Plants/Branches</div>
+</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">VPTNR</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">VPTNR</td>
+<td class="px-4 py-3">
+<a href="/sap/table/kna1/"
+class="text-blue-600 hover:text-blue-800">
+KNA1                                            </a>
+<div class="text-sm text-gray-500">General Data in Customer Master</div>
+</td>
+<td class="px-4 py-3 text-gray-700">KUNNR</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">VPTNR</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/kna1/"
+class="text-blue-600 hover:text-blue-800">
+KNA1                                            </a>
+<div class="text-sm text-gray-500">General Data in Customer Master</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZREGION</td>
+<td class="px-4 py-3 text-gray-700">SYST</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/zreg/"
+class="text-blue-600 hover:text-blue-800">
+ZREG                                            </a>
+<div class="text-sm text-gray-500">User Defined Regions</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZREGION</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZREGION</td>
+<td class="px-4 py-3">
+<a href="/sap/table/zreg/"
+class="text-blue-600 hover:text-blue-800">
+ZREG                                            </a>
+<div class="text-sm text-gray-500">User Defined Regions</div>
+</td>
+<td class="px-4 py-3 text-gray-700">ZZREGION</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZSPREG</td>
+<td class="px-4 py-3 text-gray-700">SYST</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/zzspreg/"
+class="text-blue-600 hover:text-blue-800">
+ZZSPREG                                            </a>
+<div class="text-sm text-gray-500">Check table for ZZSPREG = Special Region</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZSPREG</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZSPREG</td>
+<td class="px-4 py-3">
+<a href="/sap/table/zzspreg/"
+class="text-blue-600 hover:text-blue-800">
+ZZSPREG                                            </a>
+<div class="text-sm text-gray-500">Check table for ZZSPREG = Special Region</div>
+</td>
+<td class="px-4 py-3 text-gray-700">ZZSPREG</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZSTATE</td>
+<td class="px-4 py-3 text-gray-700">SYST</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t005s/"
+class="text-blue-600 hover:text-blue-800">
+T005S                                            </a>
+<div class="text-sm text-gray-500">Taxes: Region (Province) Key</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZSTATE</td>
+<td class="px-4 py-3 text-gray-700">*</td>
+<td class="px-4 py-3 text-gray-700"></td>
+<td class="px-4 py-3">
+<a href="/sap/table/t005s/"
+class="text-blue-600 hover:text-blue-800">
+T005S                                            </a>
+<div class="text-sm text-gray-500">Taxes: Region (Province) Key</div>
+</td>
+<td class="px-4 py-3 text-gray-700">LAND1</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZSTATE</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZSTATE</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t005s/"
+class="text-blue-600 hover:text-blue-800">
+T005S                                            </a>
+<div class="text-sm text-gray-500">Taxes: Region (Province) Key</div>
+</td>
+<td class="px-4 py-3 text-gray-700">BLAND</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZUSERFLD1</td>
+<td class="px-4 py-3 text-gray-700">SYST</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/zfu1/"
+class="text-blue-600 hover:text-blue-800">
+ZFU1                                            </a>
+<div class="text-sm text-gray-500">Check Table for User Field 1</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZUSERFLD1</td>
+<td class="px-4 py-3 text-gray-700">RKPF</td>
+<td class="px-4 py-3 text-gray-700">ZZUSERFLD1</td>
+<td class="px-4 py-3">
+<a href="/sap/table/zfu1/"
+class="text-blue-600 hover:text-blue-800">
+ZFU1                                            </a>
+<div class="text-sm text-gray-500">Check Table for User Field 1</div>
+</td>
+<td class="px-4 py-3 text-gray-700">ZZUSERFLD1</td>
+</tr>
+</tbody>
+</table>
+</div></div>
+</div></body></html>

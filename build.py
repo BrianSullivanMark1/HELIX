@@ -133,6 +133,13 @@ def main(argv: list[str] | None = None) -> int:
     assets = ROOT / "helix" / "ui" / "assets"
     if assets.exists():
         args += ["--add-data", f"{assets}{os.pathsep}helix/ui/assets"]
+    # THE SAP CATALOG (READ_ME/SAP.md): the shipped dictionary tables, index and wide index ride as
+    # helix/sapcatalog, resolved package-relative by adapters.sap_catalog.shipped_dir — the same
+    # path in dev and frozen. Only when the folder exists: a tree built before the catalog was
+    # generated still freezes, and the faculty reads as absent rather than failing the build.
+    sapcatalog = ROOT / "helix" / "sapcatalog"
+    if sapcatalog.exists():
+        args += ["--add-data", f"{sapcatalog}{os.pathsep}helix/sapcatalog"]
     # THE WEB FACE: the built React app rides as helix/webui (webboot._web_dist's frozen location).
     web_dist = _build_web_face()
     if web_dist is not None:

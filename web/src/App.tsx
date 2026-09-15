@@ -8,6 +8,7 @@ import StateColor from "./components/StateColor";
 import Console from "./pages/Console";
 import Dream from "./pages/Dream";
 import Menu from "./pages/Menu";
+import Sap from "./pages/Sap";
 import Settings from "./pages/Settings";
 import Studio from "./pages/Studio";
 import Vault from "./pages/Vault";
@@ -142,6 +143,7 @@ export default function App() {
               ["◉ Console", { name: "console" }],
               ["☰ Menu", { name: "menu" }],
               ["◐ Dream", { name: "dream" }],
+              ["⌗ SAP", { name: "sap" }],
               ["⚙ Settings", { name: "settings" }],
             ] as [string, Page][]
           ).map(([label, target]) => (
@@ -162,6 +164,7 @@ export default function App() {
         {page.name === "menu" && <Menu />}
         {page.name === "settings" && <Settings />}
         {page.name === "dream" && <Dream />}
+        {page.name === "sap" && <Sap table={page.table} />}
         {page.name === "vault" && <Vault slug={page.slug} title={page.title} />}
         {page.name === "studio" && <Studio slug={page.slug} title={page.title} />}
         {page.name === "viewer" && (

@@ -958,6 +958,110 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         c.user_memory.set_facts(list(body.get("facts") or []), user=str(body.get("user") or ""))
         return {"ok": True}
 
+    # ----- the SAP faculty -----
+    # Thin routes into SapService (helix/services/sap.py): the SAP page reads the SAME dicts the
+    # tools read, so what the panel shows and what HELIX says about a table never drift. The
+    # faculty is optional wiring (a container without it answers 503 with a sentence), and a
+    # service that raises answers a JSON error rather than uvicorn's bare "Internal Server Error":
+    # the page renders `error` as text, and a body without one leaves it blank.
+    def _sap():
+        return getattr(c, "sap", None)
+
+    def _sap_down():
+        return JSONResponse({"error": "SAP faculty unavailable"}, status_code=503)
+
+    def _sap_call(fn, *args, **kwargs):
+        """One service call for a route: its dict on success; on a raise, the exception's own
+        sentence as a JSON error — logged with the traceback here, where it is useful."""
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — the panel wants a sentence, not a traceback
+            _LOG.warning("sap route %s failed", getattr(fn, "__name__", "?"), exc_info=True)
+            return JSONResponse({"error": str(exc) or exc.__class__.__name__}, status_code=500)
+
+    @app.get("/api/sap/status")
+    def sap_status():
+        sap = _sap()
+        if sap is None:
+            return _sap_down()
+        return _sap_call(sap.status_dict)
+
+    @app.get("/api/sap/search")
+    def sap_search(q: str = "", limit: int = 30):
+        sap = _sap()
+        if sap is None:
+            return _sap_down()
+        return _sap_call(sap.search_dict, q, limit=max(1, min(200, limit)))
+
+    @app.get("/api/sap/table/{name}")
+    def sap_table(name: str, fetch: bool = True):
+        """`fetch=false` reads only what the catalog already holds — the page's own default is
+        the service's (an on-demand fetch when the setting allows it)."""
+        sap = _sap()
+        if sap is None:
+            return _sap_down()
+        out = _sap_call(sap.table_dict, name, fetch=fetch)
+        if out is None:
+            return JSONResponse({"error": f"{name.strip().upper() or 'that table'} isn't in the "
+                                          "catalog"}, status_code=404)
+        return out
+
+    @app.get("/api/sap/join")
+    def sap_join(tables: str = "", root: str = ""):
+        """`tables` is comma-separated (AFRU,AFVC,CRHD); `root` names the FROM table (default:
+        the service's choice, the first)."""
+        sap = _sap()
+        if sap is None:
+            return _sap_down()
+        names = [t.strip() for t in tables.split(",") if t.strip()]
+        return _sap_call(sap.join_dict, names, root=root.strip())
+
+    @app.post("/api/sap/sql")
+    async def sap_sql(request: Request):
+        """The body IS the spec: {tables, columns, filters, recipes, root, limit}."""
+        sap = _sap()
+        if sap is None:
+            return _sap_down()
+        try:
+            spec = await request.json()
+        except Exception:  # noqa: BLE001 — a body that isn't JSON is a bad request, not a crash
+            spec = None
+        if not isinstance(spec, dict):
+            return JSONResponse({"error": "the body must be a JSON object (the query spec)"},
+                                status_code=400)
+        return _sap_call(sap.sql_dict, spec)
+
+    @app.get("/api/sap/report/{name}")
+    def sap_report(name: str):
+        sap = _sap()
+        if sap is None:
+            return _sap_down()
+        return _sap_call(sap.report_dict, name)
+
+    @app.get("/api/sap/edw")
+    def sap_edw():
+        sap = _sap()
+        if sap is None:
+            return _sap_down()
+        return _sap_call(sap.edw_dict)
+
+    @app.post("/api/sap/edw")
+    async def sap_edw_record(request: Request):
+        """{action, table, text}: 'record_columns' (text = a pasted column list),
+        'information_schema' (text = the export), 'missing', 'present', 'forget', …"""
+        sap = _sap()
+        if sap is None:
+            return _sap_down()
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — a body that isn't JSON is a bad request, not a crash
+            body = None
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "the body must be a JSON object {action, table, text}"},
+                                status_code=400)
+        return _sap_call(sap.edw_record, str(body.get("action") or ""),
+                         table=str(body.get("table") or ""), text=str(body.get("text") or ""))
+
     # ----- static: builds + the SPA -----
     app.mount("/builds", StaticFiles(directory=str(c.paths.builds), check_dir=False), name="builds")
 

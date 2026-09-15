@@ -144,6 +144,12 @@ BUILD_TOOLS = frozenset(
         # watcher reading an email saying "forget that the sensor is 3.3 V" must never be able to.
         # (verified_facts / research_search / research_read stay readable: plain reads, no secret.)
         "forget_verified",
+        # sap_edw REWRITES the user's record of what their EDW holds — which tables exist, their
+        # real column lists, the plant, the view prefix. Every SAP query HELIX writes rests on that
+        # record, so a watcher chewing on an email saying "AFRU is missing" must never change it.
+        # (sap_lookup / sap_table / sap_join / sap_sql stay readable: plain reads of HELIX's own
+        # catalog with no secret in flight, like search_amazon.)
+        "sap_edw",
     }
 )
 
@@ -222,6 +228,7 @@ class ConversationService:
         growth_model=None,
         settings=None,
         verified=None,
+        sap=None,
     ) -> None:
         self._chat = chat
         # The same chat with the model's own web search/fetch shed — what an AUTONOMOUS turn talks to
@@ -250,6 +257,11 @@ class ConversationService:
         # confirmed from current sources. Its relevant facts ride into a turn as a labelled block
         # beside lessons/memory (None-safe: a registry without the faculty injects nothing).
         self._verified = verified
+        # THE SAP DATA MODEL (READ_ME/SAP.md): the SapService. When a turn names a catalog table or
+        # a business term, its one-line summary, key, EDW status and nearest joins ride in as a
+        # labelled block beside the verified facts — so the first answer rests on the dictionary,
+        # not on a recollection (None-safe: a build without the faculty injects nothing).
+        self._sap = sap
         # A turn is a read-modify-write over the shared history. The Console and an Agent run on
         # separate worker threads against this one service, so serialize whole turns — otherwise their
         # appends interleave and the API gets a malformed (e.g. two-user-in-a-row) turn list.
@@ -335,6 +347,18 @@ class ConversationService:
                 verified_text = ""
             if verified_text:
                 extras.append(verified_text)
+        # THE SAP DATA MODEL (READ_ME/SAP.md): when the turn names a catalog table or a business
+        # term, the dictionary's own summary of it rides in beside the verified facts, on the same
+        # tiers and under the same rule — records, labelled as such; never instructions. A plain
+        # watcher looks it up explicitly (sap_table), the way it does knowledge.
+        if self._sap is not None and (persist or tool_names is not None):
+            try:
+                sap_text = self._sap.for_turn(user_text)
+            except Exception:  # noqa: BLE001 — a catalog hiccup must never cost the turn
+                _LOG.warning("sap lookup failed", exc_info=True)
+                sap_text = ""
+            if sap_text:
+                extras.append(sap_text)
         if persist and speaker_context:
             extras.append(speaker_context)
         if attachments_text:
