@@ -32,7 +32,7 @@ EXPECTED_SERVICES = (
     "selfdev_lane", "connections", "knowledge", "files", "user_memory", "tools", "profile",
     "lessons", "backlog", "conversation", "agents", "scheduler", "workflows", "speech_in",
     "speech_out", "voice_id", "cad", "parts", "verified", "research", "rebuilder", "dream",
-    "dream_mind",
+    "dream_mind", "sap",
 )
 
 
@@ -144,6 +144,26 @@ def test_the_dream_mind_is_built_on_the_real_collaborators_and_handed_to_the_ses
     assert container.dream._activity_seconds() == 7.0
     # VERIFIED KNOWLEDGE rides into the orb's turns: the conversation holds the same store the tools write.
     assert container.conversation._verified is container.verified
+
+
+def test_the_sap_faculty_is_one_service_shared_by_the_tools_and_the_conversation(container):
+    """READ_ME/SAP.md: the SapService the five sap_* tools dispatch to must be the same object the
+    conversation asks for its per-turn block, and both must be the container's own — a registry
+    built without attach_sap offers no SAP tool, and a conversation built without sap= injects
+    nothing, while every SAP test that uses fakes stays green. The container wraps the faculty's
+    construction so a broken catalog cannot block boot; when it is absent here the half-wired
+    check has nothing to pin, and says so rather than passing on two Nones."""
+    if container.sap is None:
+        pytest.skip(
+            "the SAP faculty did not construct (helix/services/sap.py or the catalog adapter still "
+            "a stub, or the catalog failed to load) — identity pins skipped; see helix.log"
+        )
+    assert container.tools._sap is container.sap, "ToolRegistry was built without attach_sap"
+    assert container.conversation._sap is container.sap, (
+        "ConversationService was built without sap= — no per-turn SAP block"
+    )
+    names = {s.name for s in container.tools.specs()}
+    assert {"sap_lookup", "sap_table", "sap_join", "sap_sql", "sap_edw"} <= names
 
 
 def test_rail_diagnostic_names_the_missing_piece_not_the_credential(container):

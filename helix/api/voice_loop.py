@@ -17,9 +17,28 @@ Differences from the Qt original, all mechanical:
 
 Barge-in remains deliberately disabled exactly as in V3 Qt: the gate deafens the mic while HELIX
 thinks, speaks, or works; deliberate stops are UI gestures.
+
+The watchdog (one daemon thread, a tick every couple of seconds) keeps the ears alive for the life
+of the process — the failure it exists for: HELIX heard fine at boot and was deaf an hour later,
+with not one line in helix.log. Three ways that happened, each now caught and logged:
+  - The stream died under us. The mic is opened ONCE through PortAudio (MME on Windows), and a
+    laptop sleep, a re-plugged headset or a default-device switch silently ends that stream: the
+    callback stops firing (or PortAudio marks the stream inactive, or the device hands back exact
+    digital silence) and nothing ever reopened it. The watchdog notices, refreshes PortAudio's
+    device list (it enumerates devices only at initialization — the device a resumed laptop comes
+    back with is invisible until asked again) and reopens the mic, with a backoff after failures.
+  - The callback raised. sounddevice aborts a stream whose callback raises — for good, with the
+    traceback on a stderr nobody sees in the frozen app. _on_audio now never lets one out.
+  - The listen gate stayed shut: the state is only ever put back to "idle" by the path that left
+    it, and a handler that crashed, a spoken command the shell declined, a transcription or an
+    utterance that never returned left it "transcribing"/"thinking"/"speaking" forever. The
+    watchdog sweeps those with generous ceilings — and asks the shell (busy_probe) before it
+    decides a "thinking" voice has nothing left to think about.
 """
 from __future__ import annotations
 
+import logging
+import math
 import os
 import tempfile
 import threading
@@ -64,6 +83,30 @@ _SAMPLE_RATE = 16000
 _BLOCK = 1600  # 100 ms of 16 kHz mono int16 per callback
 _LEVEL_EVERY_S = 1 / 15  # UI level/bands cadence
 
+# The watchdog's clock. A live stream calls back every 100 ms; a stall is declared only when TWO
+# consecutive ticks find the last chunk older than _STREAM_STALL_S — one tick could be the GIL
+# having starved both the callback and the watchdog through a long transcription, and the second
+# tick gives the callback a whole tick to prove itself alive first.
+_WATCHDOG_TICK_S = 2.0
+_STREAM_STALL_S = 3.0
+# Exact digital zero, chunk after chunk, is not a quiet room (a live mic always carries hiss — the
+# floor measured on the reference laptop is ~0.5 RMS, never 0): it is a device that went away under
+# the stream, or a mic the OS has muted. The window doubles after each silence-triggered reopen
+# that found only more silence, so an OS-muted mic costs one reopen every two minutes, not every
+# fifteen seconds.
+_ZERO_WINDOW_S = 15.0
+_ZERO_WINDOW_MAX_S = 120.0
+# Retry cadence after a FAILED open/reopen (no mic, audio service still coming up after resume).
+_REOPEN_BACKOFF_S = (2.0, 5.0, 10.0, 30.0)
+# Stuck-gate ceilings. Transcribing: whisper takes seconds, never a minute. Thinking: only with the
+# shell reporting NO turn in flight for this long (a real turn can run for many minutes). Speaking:
+# the longest reply HELIX ever reads aloud is a couple of minutes; five is a hung player.
+_STUCK_TRANSCRIBING_S = 60.0
+_STUCK_THINKING_S = 15.0
+_STUCK_SPEAKING_S = 300.0
+# "Thinking with no turn in flight" must hold for this many ticks IN A ROW before it counts.
+_STUCK_THINKING_TICKS = math.ceil(_STUCK_THINKING_S / _WATCHDOG_TICK_S)
+
 
 def _sounddevice():
     try:
@@ -92,6 +135,7 @@ class WebVoice:
         on_identity: Callable[[str, str], None] = lambda h, r: None,
         on_recognized: Callable[[str], None] = lambda t: None,
         on_stop: Callable[[], None] = lambda: None,
+        busy_probe: Callable[[], bool] | None = None,
     ) -> None:
         self._settings = settings
         self._stt = stt
@@ -103,9 +147,13 @@ class WebVoice:
         self.on_state, self.on_level, self.on_bands = on_state, on_level, on_bands
         self.on_muted, self.on_identity = on_muted, on_identity
         self.on_recognized, self.on_stop = on_recognized, on_stop
+        # "Is a turn running or queued?" — the shell's answer. Without one the watchdog never
+        # judges a "thinking" voice (it cannot know), so a test rig with no shell is left alone.
+        self.busy_probe = busy_probe
 
         self._lock = threading.RLock()
         self._state = "idle"
+        self._state_since = time.monotonic()
         self._muted = False
         self._working = False
         self._session = False
@@ -134,8 +182,27 @@ class WebVoice:
         self._last_level_ts = 0.0
         self._closed = False
 
+        # Watchdog state. `_stream_wanted` is the one the watchdog acts on: hands-free voice asked
+        # for a live stream (set by every open made for it, cleared by every close) — a test rig
+        # that patches enabled() without ever opening a mic never has it set, so the watchdog never
+        # opens a real device inside a test process.
+        self._stream_wanted = False
+        self._last_audio_ts = 0.0     # when the callback last delivered a chunk
+        self._stall_seen = 0          # consecutive ticks that found the stream silent
+        self._zero_since = 0.0        # when the current run of exact-zero chunks began (0 = none)
+        self._zero_window = _ZERO_WINDOW_S
+        self._zero_reopens = 0        # silence-triggered reopens in a row (log the first, not all)
+        self._audio_faults = 0        # callback exceptions swallowed on the current stream
+        self._reopen_fails = 0        # failed opens in a row → backoff
+        self._reopen_next = 0.0       # earliest next open attempt after a failure
+        self._refresh_warned = False  # the device-list refresh failed once already (log at DEBUG)
+        self._stt_since = 0.0         # when the in-flight transcription started (0 = none)
+        self._thinking_idle_ticks = 0 # ticks that found "thinking" with no turn in flight
+        self._halt = threading.Event()
+
         if self.enabled():
             self._start_stream()
+        threading.Thread(target=self._watch, daemon=True, name="helix-voice-watchdog").start()
 
     # ----- capability gates (same predicates, same order, as the Qt shell) -----
     def mic_available(self) -> bool:
@@ -143,7 +210,10 @@ class WebVoice:
         if sd is None:
             return False
         try:
-            return sd.query_devices(kind="input") is not None
+            # Under the stream lock: the watchdog re-initializes PortAudio there, and PortAudio is
+            # not safe to query mid-Terminate from another thread.
+            with self._stream_lock:
+                return sd.query_devices(kind="input") is not None
         except Exception:  # noqa: BLE001
             return False
 
@@ -184,6 +254,9 @@ class WebVoice:
         sd = _sounddevice()
         if sd is None or self._closed:
             return
+        # Hands-free asked for this stream (a PTT hold with voice off did not): the watchdog keeps
+        # it alive from here — including retrying an open that fails right now.
+        self._stream_wanted = self.enabled()
         with self._stream_lock:
             if self._stream is not None:
                 return
@@ -194,27 +267,72 @@ class WebVoice:
                 )
                 self._stream.start()
             except Exception:  # noqa: BLE001 — no mic just means a text app
-                _LOG.warning("could not open the microphone", exc_info=True)
+                # The first failure gets the traceback; the watchdog's retries stay quiet until
+                # one succeeds (a machine with no mic at all would otherwise fill the log).
+                if self._reopen_fails == 0:
+                    _LOG.warning("could not open the microphone", exc_info=True)
                 self._stream = None
+                self._reopen_fails += 1
+                back = _REOPEN_BACKOFF_S[min(self._reopen_fails, len(_REOPEN_BACKOFF_S)) - 1]
+                self._reopen_next = time.monotonic() + back
+            else:
+                self._last_audio_ts = time.monotonic()
+                self._stall_seen = 0
+                self._zero_since = 0.0
+                self._audio_faults = 0
+                if self._reopen_fails:
+                    _LOG.info("microphone opened after %d failed attempt(s)", self._reopen_fails)
+                self._reopen_fails = 0
+                level = logging.DEBUG if self._zero_reopens > 1 else logging.INFO
+                try:
+                    _LOG.log(level, "microphone open: %s", sd.query_devices(kind="input")["name"])
+                except Exception:  # noqa: BLE001
+                    _LOG.log(level, "microphone open")
         self._apply_listen_gate()
 
-    def _stop_stream(self) -> None:
+    def _stop_stream(self, *, abort: bool = False) -> None:
+        self._stream_wanted = False
         with self._stream_lock:
             stream, self._stream = self._stream, None
         if stream is not None:
             try:
-                stream.stop()
+                # A dead stream is ABORTED (drop its buffers) rather than stopped: stop() waits for
+                # buffers a vanished device will never complete.
+                if abort:
+                    stream.abort()
+                else:
+                    stream.stop()
                 stream.close()
             except Exception:  # noqa: BLE001
                 pass
 
     def _on_audio(self, indata, frames, time_info, status) -> None:  # PortAudio thread
-        chunk = bytes(indata)
+        self._last_audio_ts = time.monotonic()
+        try:
+            self._on_chunk(bytes(indata))
+        except Exception:  # noqa: BLE001
+            # An exception escaping a PortAudio callback ABORTS the stream — permanently, with the
+            # traceback on stderr (invisible in the frozen app). One bad chunk is one dropped chunk.
+            self._audio_faults += 1
+            if self._audio_faults == 1:
+                _LOG.warning("audio callback failed — chunk dropped", exc_info=True)
+
+    def _on_chunk(self, chunk: bytes) -> None:
         try:
             self._media.tick()
         except Exception:  # noqa: BLE001
             pass
         now = time.monotonic()
+        # Exact digital zero, chunk after chunk, is the device gone under the stream (see the
+        # watchdog); any signal at all — even hiss — is a mic that is really there.
+        if any(chunk):
+            if self._zero_reopens:
+                _LOG.info("the microphone is delivering audio again")
+                self._zero_reopens = 0
+            self._zero_since = 0.0
+            self._zero_window = _ZERO_WINDOW_S
+        elif not self._zero_since:
+            self._zero_since = now
         if now - self._last_level_ts >= _LEVEL_EVERY_S:
             self._last_level_ts = now
             rms = _pcm_rms(chunk)
@@ -234,6 +352,111 @@ class WebVoice:
             threading.Thread(
                 target=self._on_utterance, args=(utter,), daemon=True, name="helix-voice-utter"
             ).start()
+
+    # ----- the watchdog -----
+    def _watch(self) -> None:
+        while not self._halt.wait(_WATCHDOG_TICK_S):
+            try:
+                self._tick(time.monotonic())
+            except Exception:  # noqa: BLE001 — the watchdog outlives any one bad tick
+                _LOG.warning("voice watchdog tick failed", exc_info=True)
+
+    def _tick(self, now: float) -> None:
+        if self._closed:
+            return
+        self._check_stream(now)
+        self._check_stuck(now)
+
+    def _check_stream(self, now: float) -> None:
+        """Is the stream hands-free asked for still delivering? If not, reopen it."""
+        if not self._stream_wanted or not self.enabled():
+            return
+        stream = self._stream
+        if stream is None:
+            if now >= self._reopen_next:  # an open that failed earlier — try again (backoff)
+                self._reopen_stream("the microphone could not be opened earlier")
+            return
+        dead = None
+        try:
+            if not stream.active:
+                dead = "PortAudio stopped the stream"
+        except Exception:  # noqa: BLE001
+            dead = "the stream is unreachable"
+        if dead is None:
+            if now - self._last_audio_ts >= _STREAM_STALL_S:
+                self._stall_seen += 1
+                if self._stall_seen >= 2:
+                    dead = f"no audio for {now - self._last_audio_ts:.0f}s"
+            else:
+                self._stall_seen = 0
+        quietly = False
+        if dead is None and self._zero_since and now - self._zero_since >= self._zero_window:
+            dead = f"digital silence for {now - self._zero_since:.0f}s"
+            self._zero_reopens += 1
+            self._zero_window = min(self._zero_window * 2, _ZERO_WINDOW_MAX_S)
+            quietly = self._zero_reopens > 1  # a mic the OS muted: say it once, not every window
+        if dead is not None:
+            faults = f" ({self._audio_faults} callback fault(s))" if self._audio_faults else ""
+            _LOG.log(logging.DEBUG if quietly else logging.WARNING,
+                     "microphone stream dead — %s%s; reopening", dead, faults)
+            self._reopen_stream(dead)
+
+    def _reopen_stream(self, why: str) -> None:
+        sd = _sounddevice()
+        self._stop_stream(abort=True)
+        if sd is not None:
+            # PortAudio enumerates devices ONCE, at initialization: the mic a resumed laptop comes
+            # back with, or a headset plugged in since, is invisible until it is asked again. This
+            # pair is sounddevice's documented way to ask — safe only with every stream closed,
+            # which is the case here (the wake-word stream is this process's only one). Each step
+            # is tried on its own: a terminate that fails because PortAudio is already down must
+            # not skip the initialize that brings it back.
+            with self._stream_lock:
+                for step in (sd._terminate, sd._initialize):
+                    try:
+                        step()
+                    except Exception:  # noqa: BLE001
+                        level = logging.DEBUG if self._refresh_warned else logging.WARNING
+                        _LOG.log(level, "audio device list refresh: %s failed", step.__name__,
+                                 exc_info=True)
+                        self._refresh_warned = True
+        self._stall_seen = 0
+        self._zero_since = 0.0
+        if self.enabled():  # not if the user turned voice off while we were at it
+            self._start_stream()
+
+    def _check_stuck(self, now: float) -> None:
+        """A gate that shut and never reopened: the one rule says the mic is live only while idle,
+        so a state nobody puts back is a deaf HELIX until restart. Generous ceilings; one line."""
+        state, age = self._state, now - self._state_since
+        if self._stt_since and now - self._stt_since >= _STUCK_TRANSCRIBING_S:
+            # The STT thread never came back (a hung model): let the NEXT utterance through.
+            _LOG.warning("a transcription has run %.0fs — abandoning it", now - self._stt_since)
+            self._stt_since = 0.0
+            self._barge_busy = False
+            self._camera_stt_busy = False
+            if state == "transcribing":
+                self._set_state("idle")
+            return
+        if state == "thinking" and self.busy_probe is not None:
+            try:
+                busy = bool(self.busy_probe())
+            except Exception:  # noqa: BLE001
+                busy = True  # a broken probe never opens the mic on a running turn
+            self._thinking_idle_ticks = 0 if busy else self._thinking_idle_ticks + 1
+            if (not busy and age >= _STUCK_THINKING_S
+                    and self._thinking_idle_ticks >= _STUCK_THINKING_TICKS):
+                _LOG.warning("voice stuck 'thinking' %.0fs with no turn in flight — idling", age)
+                self._thinking_idle_ticks = 0
+                self._set_state("idle")
+            return
+        self._thinking_idle_ticks = 0
+        if state == "speaking" and age >= _STUCK_SPEAKING_S:
+            _LOG.warning("voice stuck 'speaking' %.0fs — hushing", age)
+            self.interrupt()
+        elif state == "transcribing" and age >= _STUCK_TRANSCRIBING_S:
+            _LOG.warning("voice stuck 'transcribing' %.0fs — idling", age)
+            self._set_state("idle")
 
     # ----- the listen gate (THE one rule — verbatim from the Qt shell) -----
     def _apply_listen_gate(self) -> None:
@@ -256,6 +479,8 @@ class WebVoice:
 
     def _set_state(self, state: str) -> None:
         with self._lock:
+            if state != self._state:
+                self._state_since = time.monotonic()
             self._state = state
             self._apply_listen_gate()
         try:
@@ -806,6 +1031,8 @@ class WebVoice:
             return None
 
     def _transcribe(self, path: str, on_text: Callable[[str], None], pcm: bytes | None = None) -> None:
+        self._stt_since = time.monotonic()
+
         def work() -> None:
             emb = None
             text = ""
@@ -820,6 +1047,7 @@ class WebVoice:
                 except Exception:  # noqa: BLE001
                     text = ""
             finally:
+                self._stt_since = 0.0
                 try:
                     os.remove(path)
                 except OSError:
@@ -832,11 +1060,15 @@ class WebVoice:
                     on_text(text)
                 except Exception:  # noqa: BLE001
                     _LOG.exception("utterance handler failed")
+                    # The handler is the only thing that would have reopened the gate.
+                    if self._state == "transcribing":
+                        self._set_state("idle")
 
         threading.Thread(target=work, daemon=True, name="helix-voice-stt").start()
 
     def shutdown(self) -> None:
         self._closed = True
+        self._halt.set()
         self._stop_stream()
         self._hush_tts()
         if self._session_timer is not None:

@@ -95,7 +95,8 @@ export type Page =
   | { name: "dream" } // the Dream journal: what the nights found, verified, tried and applied
   | { name: "vault"; slug: string; title: string }
   | { name: "studio"; slug: string; title: string }
-  | { name: "viewer"; slug: string; title: string; url: string; server?: boolean };
+  | { name: "viewer"; slug: string; title: string; url: string; server?: boolean }
+  | { name: "sap"; table?: string }; // the SAP data-model panel, opened on a table when given
 
 interface ConnectModal {
   service: string;

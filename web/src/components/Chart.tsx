@@ -3,6 +3,15 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { Visual } from "../lib/store";
+import {
+  copyTable,
+  copyTableImage,
+  isNumericCell,
+  saveTableCsv,
+  saveTableImage,
+  slugify,
+} from "../lib/tableexport";
+import type { TableData } from "../lib/tableexport";
 
 const SERIES = ["#3fe0e0", "#f5a623", "#78c8ff", "#2ec496", "#c878ff", "#ff7896", "#96dc78"];
 
@@ -168,15 +177,31 @@ function Pie({ spec, donut }: { spec: Visual; donut: boolean }) {
 function TableViz({ spec }: { spec: Visual }) {
   const cols = ((spec.columns as unknown[]) || []).map(String);
   const rows = ((spec.rows as unknown[][]) || []).map((r) => (r || []).map(String));
-  const numeric = (v: string) => /^-?[\d,.%$]+$/.test(v.trim());
-  // TAB-delimited, not pipe: pasting into Slack (and Excel/Sheets) then lands each cell in its own
-  // column instead of one pipe-run of text. Cells are cleaned of stray tabs/newlines so the row/
-  // column grid can't be broken by content.
-  const copy = () => {
-    const clean = (v: string) => v.replace(/[\t\r\n]+/g, " ").trim();
-    const text = [cols, ...rows].map((r) => r.map(clean).join("\t")).join("\n");
-    void navigator.clipboard.writeText(text);
+  const numeric = isNumericCell;
+  const title = typeof spec.title === "string" ? spec.title : "";
+  const data: TableData = { columns: cols, rows, title };
+  const [said, setSaid] = useState("");
+  const flash = (m: string) => {
+    setSaid(m);
+    window.setTimeout(() => setSaid(""), 2200);
   };
+  // Copy puts the table on the clipboard TWICE — as HTML and as tab-delimited text — because the
+  // destination decides which it takes: Gmail, Outlook and Word paste the HTML as a real table,
+  // Slack/Excel/Sheets take the tabs as columns. It used to write only the tabs, which pasted into
+  // an email as a wall of text. Image is for the places that accept neither (a chat that flattens
+  // formatting, a slide), and CSV is the file to keep.
+  const copy = () =>
+    void copyTable(data).then((rich) =>
+      flash(rich ? "Copied — pastes as a table" : "Copied as TEXT only (the window refused HTML)"));
+  const image = () =>
+    void copyTableImage(data).then(async (ok) => {
+      if (ok) return flash("Image copied — paste it anywhere");
+      const path = await saveTableImage(data, `${slugify(title, "table")}.png`);
+      flash(path ? `Image saved: ${path}` : "Image saved to your Downloads");
+    });
+  const csv = () =>
+    void saveTableCsv(data, `${slugify(title, "table")}.csv`).then((path) =>
+      flash(path ? `CSV saved: ${path}` : "CSV saved to your Downloads"));
   return (
     <div className="max-w-[860px] overflow-x-auto">
       <table className="border-collapse text-[13px]">
@@ -203,7 +228,12 @@ function TableViz({ spec }: { spec: Visual }) {
           ))}
         </tbody>
       </table>
-      <button className="btn-nav text-xs mt-1" onClick={copy}>⧉ Copy</button>
+      <div className="flex items-center gap-2 mt-1">
+        <button className="btn-nav text-xs" onClick={copy}>⧉ Copy</button>
+        <button className="btn-nav text-xs" onClick={image}>🖼 Image</button>
+        <button className="btn-nav text-xs" onClick={csv}>⬇ CSV</button>
+        {said ? <span className="text-xs" style={{ color: "var(--muted)" }}>{said}</span> : null}
+      </div>
     </div>
   );
 }

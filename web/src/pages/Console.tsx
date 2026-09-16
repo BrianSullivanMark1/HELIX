@@ -7,7 +7,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import VisualBlock from "../components/Chart";
 import { api, tokenUrl } from "../lib/api";
 import { useHelix, type Attachment, type Bubble, type Murmur } from "../lib/store";
-import { tablesToTabs } from "../lib/table";
+import { tablesToHtml, tablesToTabs } from "../lib/table";
+import { copyRich } from "../lib/tableexport";
 
 const STATE_LINES: Record<string, string> = {
   listening: "Listening…",
@@ -60,9 +61,10 @@ function BubbleView({ b, idx }: { b: Bubble; idx: number }) {
     useAction(b.id, label);
     void api.post("/api/shell/action", { id }).catch(() => undefined);
   };
-  // Copy the bubble as-is, except any markdown TABLE becomes tab-delimited so it pastes into Slack
-  // as columns (prose is untouched — see lib/table.ts).
-  const copy = () => void navigator.clipboard.writeText(tablesToTabs(b.text));
+  // Copy the bubble both ways: HTML, so a markdown table lands in Gmail/Word as a real table, and
+  // tab-delimited text, so the same copy pastes into Slack or Excel as columns. Prose is untouched
+  // either way (see lib/table.ts).
+  const copy = () => void copyRich(tablesToHtml(b.text), tablesToTabs(b.text));
   return (
     <div className={`w-full flex ${isUser ? "justify-end" : "justify-start"} materialize`}
       style={{ "--i": idx % 4 } as React.CSSProperties}>

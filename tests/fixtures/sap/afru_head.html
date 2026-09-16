@@ -1,0 +1,1293 @@
+<!doctype html>
+<!-- Trimmed copy of https://leanx.eu/sap/table/afru/ fetched 2026-09-15 for tests/test_sap_leanx_parse.py:
+     the <h1>/<h2>, the first 11 field rows (MANDT..LTXA1), then STOKZ with its possible-values
+     sub-table, then the FULL foreign-key table (76 rows). Indentation stripped to stay under 60 KB.
+     The theme chrome before and after (≈70 KB of WordPress/Tailwind scaffolding) is dropped. -->
+<html lang="en-US"><head><meta charset="UTF-8"><title>AFRU - Order Confirmations</title></head>
+<body><div id="sap-content" class="sap-resources-content">
+<h1 class="text-3xl font-bold mb-2 text-gray-800">SAP Table AFRU</h1>
+<h2 class="text-xl font-semibold mb-4 text-gray-700">Order Confirmations</h2>
+
+<div class="mb-8">
+<p class="text-gray-600 mb-4">AFRU                    (Order Confirmations) is a standard table in SAP R\3 ERP systems. Below you can find
+the technical details of the fields that make up this table. Key fields are marked in blue.</p>
+<p class="text-gray-600 mb-4">Additionally we provide an overview of foreign key relationships, if any, that
+link AFRU to other SAP tables.</p>
+</div>
+
+<div class="bg-white border rounded-lg overflow-hidden mb-8">
+<div class="bg-gray-50 px-6 py-4 border-b">
+<h3 class="text-xl font-semibold text-gray-800">AFRU table fields</h3>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full">
+<thead class="bg-gray-100">
+<tr>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Field</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Data element</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Checktable</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Datatype</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Length</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Decimals</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Possible values</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-gray-200">
+<tr class="bg-blue-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">MANDT</div>
+<div class="text-sm text-gray-500">Client</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t000/"
+class="text-blue-600 hover:text-blue-800 text-sm">
+T000                                            </a>
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">CLNT</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">3</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="bg-blue-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">RUECK</div>
+<div class="text-sm text-gray-500">Completion confirmation number for the operation</div>
+</td>
+<td class="px-4 py-3 text-gray-700">CO_RUECK</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">NUMC</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">10</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="bg-blue-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">RMZHL</div>
+<div class="text-sm text-gray-500">Confirmation counter</div>
+</td>
+<td class="px-4 py-3 text-gray-700">CO_RMZHL</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">NUMC</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">8</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">ERSDA</div>
+<div class="text-sm text-gray-500">Confirmation entry date</div>
+</td>
+<td class="px-4 py-3 text-gray-700">RU_ERSDA</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">DATS</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">8</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">ERNAM</div>
+<div class="text-sm text-gray-500">Name of the person who entered the confirmation</div>
+</td>
+<td class="px-4 py-3 text-gray-700">RU_ERNAM</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">CHAR</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">12</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">LAEDA</div>
+<div class="text-sm text-gray-500">Date of Last Change</div>
+</td>
+<td class="px-4 py-3 text-gray-700">LAEDA</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">DATS</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">8</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">AENAM</div>
+<div class="text-sm text-gray-500">Name of Person Who Changed Object</div>
+</td>
+<td class="px-4 py-3 text-gray-700">AENAM</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">CHAR</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">12</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">BUDAT</div>
+<div class="text-sm text-gray-500">Posting date</div>
+</td>
+<td class="px-4 py-3 text-gray-700">BUCHDATUM</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">DATS</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">8</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">ARBID</div>
+<div class="text-sm text-gray-500">Object ID</div>
+</td>
+<td class="px-4 py-3 text-gray-700">OBJEKTID</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">NUMC</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">8</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">WERKS</div>
+<div class="text-sm text-gray-500">Plant</div>
+</td>
+<td class="px-4 py-3 text-gray-700">WERKS_D</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t001w/"
+class="text-blue-600 hover:text-blue-800 text-sm">
+T001W                                            </a>
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">CHAR</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">4</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">LTXA1</div>
+<div class="text-sm text-gray-500">Confirmation text</div>
+</td>
+<td class="px-4 py-3 text-gray-700">CO_RTEXT</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">CHAR</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">40</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3">
+<div class="font-medium text-gray-900">STOKZ</div>
+<div class="text-sm text-gray-500">Indicator: Document Has Been Reversed</div>
+</td>
+<td class="px-4 py-3 text-gray-700">CO_STOKZ</td>
+<td class="px-4 py-3">
+</td>
+<td class="px-4 py-3">
+<div class="text-gray-700">CHAR</div>
+<div class="text-sm text-gray-500"></div>
+</td>
+<td class="px-4 py-3 text-gray-700">1</td>
+<td class="px-4 py-3 text-gray-700">0</td>
+<td class="px-4 py-3">
+<button
+class="inline-flex items-center px-3 py-1 bg-gray-100 text-gray-700 text-sm rounded hover:bg-gray-200 transition-colors"
+onclick="toggleCollapse('collapse-94')">
+Possible values
+</button>
+</td>
+</tr>
+<tr id="collapse-94" class="hidden">
+<td colspan="7" class="px-4 py-0">
+<div class="bg-gray-50 rounded-lg p-4 my-2">
+<table class="w-full text-sm">
+<thead class="bg-gray-100">
+<tr>
+<th class="px-3 py-2 text-left font-medium text-gray-700">Value</th>
+<th class="px-3 py-2 text-left font-medium text-gray-700">Description</th>
+</tr>
+</thead>
+<tbody class="bg-white divide-y divide-gray-200">
+<tr class="hover:bg-gray-50">
+<td class="px-3 py-2 font-medium text-gray-900">
+X                                                                </td>
+<td class="px-3 py-2 text-gray-700">
+Flag set. Event has occurred.</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-3 py-2 font-medium text-gray-900">
+<span class="text-gray-500 italic">NULL</span>                                                                </td>
+<td class="px-3 py-2 text-gray-700">
+Flag is Not Set</td>
+</tr>
+</tbody>
+</table>
+</div>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="bg-white border rounded-lg overflow-hidden">
+<div class="bg-gray-50 px-6 py-4 border-b">
+<h3 class="text-xl font-semibold text-gray-800">AFRU foreign key
+relationships</h3>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full">
+<thead class="bg-gray-100">
+<tr>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Table</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Field</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Foreign key table</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Foreign key field</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Check table</th>
+<th class="px-4 py-3 text-left text-sm font-medium text-gray-700">Check field</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-gray-200">
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">APLZL</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/afvc/"
+class="text-blue-600 hover:text-blue-800">
+AFVC                                            </a>
+<div class="text-sm text-gray-500">Operation within an order</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">APLZL</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">AUFPL</td>
+<td class="px-4 py-3">
+<a href="/sap/table/afvc/"
+class="text-blue-600 hover:text-blue-800">
+AFVC                                            </a>
+<div class="text-sm text-gray-500">Operation within an order</div>
+</td>
+<td class="px-4 py-3 text-gray-700">AUFPL</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">APLZL</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">APLZL</td>
+<td class="px-4 py-3">
+<a href="/sap/table/afvc/"
+class="text-blue-600 hover:text-blue-800">
+AFVC                                            </a>
+<div class="text-sm text-gray-500">Operation within an order</div>
+</td>
+<td class="px-4 py-3 text-gray-700">APLZL</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">AUFNR</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/aufk/"
+class="text-blue-600 hover:text-blue-800">
+AUFK                                            </a>
+<div class="text-sm text-gray-500">Order master data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">AUFNR</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">AUFNR</td>
+<td class="px-4 py-3">
+<a href="/sap/table/aufk/"
+class="text-blue-600 hover:text-blue-800">
+AUFK                                            </a>
+<div class="text-sm text-gray-500">Order master data</div>
+</td>
+<td class="px-4 py-3 text-gray-700">AUFNR</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">BEMOT</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/tbmot/"
+class="text-blue-600 hover:text-blue-800">
+TBMOT                                            </a>
+<div class="text-sm text-gray-500">Accounting indicators</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">BEMOT</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">BEMOT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/tbmot/"
+class="text-blue-600 hover:text-blue-800">
+TBMOT                                            </a>
+<div class="text-sm text-gray-500">Accounting indicators</div>
+</td>
+<td class="px-4 py-3 text-gray-700">BEMOT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">CANUM</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/kbed/"
+class="text-blue-600 hover:text-blue-800">
+KBED                                            </a>
+<div class="text-sm text-gray-500">Capacity Requirements Records</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">CANUM</td>
+<td class="px-4 py-3 text-gray-700">AFVC</td>
+<td class="px-4 py-3 text-gray-700">BEDID</td>
+<td class="px-4 py-3">
+<a href="/sap/table/kbed/"
+class="text-blue-600 hover:text-blue-800">
+KBED                                            </a>
+<div class="text-sm text-gray-500">Capacity Requirements Records</div>
+</td>
+<td class="px-4 py-3 text-gray-700">BEDID</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">CANUM</td>
+<td class="px-4 py-3 text-gray-700">AFVC</td>
+<td class="px-4 py-3 text-gray-700">BEDZL</td>
+<td class="px-4 py-3">
+<a href="/sap/table/kbed/"
+class="text-blue-600 hover:text-blue-800">
+KBED                                            </a>
+<div class="text-sm text-gray-500">Capacity Requirements Records</div>
+</td>
+<td class="px-4 py-3 text-gray-700">BEDZL</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">CANUM</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">CANUM</td>
+<td class="px-4 py-3">
+<a href="/sap/table/kbed/"
+class="text-blue-600 hover:text-blue-800">
+KBED                                            </a>
+<div class="text-sm text-gray-500">Capacity Requirements Records</div>
+</td>
+<td class="px-4 py-3 text-gray-700">CANUM</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">GMEIN</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">GMEIN</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">GMEIN</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">GRUND</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">GRUND</td>
+<td class="px-4 py-3">
+<a href="/sap/table/trug/"
+class="text-blue-600 hover:text-blue-800">
+TRUG                                            </a>
+<div class="text-sm text-gray-500">Reason for variances in completion confirmations</div>
+</td>
+<td class="px-4 py-3 text-gray-700">GRUND</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">GRUND</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/trug/"
+class="text-blue-600 hover:text-blue-800">
+TRUG                                            </a>
+<div class="text-sm text-gray-500">Reason for variances in completion confirmations</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">GRUND</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+<td class="px-4 py-3">
+<a href="/sap/table/trug/"
+class="text-blue-600 hover:text-blue-800">
+TRUG                                            </a>
+<div class="text-sm text-gray-500">Reason for variances in completion confirmations</div>
+</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">IDAUE</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">IDAUE</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">IDAUE</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE01</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE01</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE01</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE02</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE02</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE02</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE03</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE03</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE03</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE04</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE04</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE04</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE05</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE05</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE05</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE06</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE06</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ILE06</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">IPRE1</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">IPRE1</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">IPRE1</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ISMNE</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ISMNE</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ISMNE</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ISMNU</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ISMNU</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ISMNU</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">KAPID</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/kako/"
+class="text-blue-600 hover:text-blue-800">
+KAKO                                            </a>
+<div class="text-sm text-gray-500">Capacity Header Segment</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">KAPID</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">KAPID</td>
+<td class="px-4 py-3">
+<a href="/sap/table/kako/"
+class="text-blue-600 hover:text-blue-800">
+KAKO                                            </a>
+<div class="text-sm text-gray-500">Capacity Header Segment</div>
+</td>
+<td class="px-4 py-3 text-gray-700">KAPID</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">LEARR</td>
+<td class="px-4 py-3 text-gray-700">AFVGD</td>
+<td class="px-4 py-3 text-gray-700">KOKRS</td>
+<td class="px-4 py-3">
+<a href="/sap/table/csla/"
+class="text-blue-600 hover:text-blue-800">
+CSLA                                            </a>
+<div class="text-sm text-gray-500">Activity master</div>
+</td>
+<td class="px-4 py-3 text-gray-700">KOKRS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">LEARR</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">LEARR</td>
+<td class="px-4 py-3">
+<a href="/sap/table/csla/"
+class="text-blue-600 hover:text-blue-800">
+CSLA                                            </a>
+<div class="text-sm text-gray-500">Activity master</div>
+</td>
+<td class="px-4 py-3 text-gray-700">LSTAR</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">LEARR</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">BUDAT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/csla/"
+class="text-blue-600 hover:text-blue-800">
+CSLA                                            </a>
+<div class="text-sm text-gray-500">Activity master</div>
+</td>
+<td class="px-4 py-3 text-gray-700">DATBI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">LEARR</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/csla/"
+class="text-blue-600 hover:text-blue-800">
+CSLA                                            </a>
+<div class="text-sm text-gray-500">Activity master</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">LOGRP</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t421/"
+class="text-blue-600 hover:text-blue-800">
+T421                                            </a>
+<div class="text-sm text-gray-500">Wage groups</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">LOGRP</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t421/"
+class="text-blue-600 hover:text-blue-800">
+T421                                            </a>
+<div class="text-sm text-gray-500">Wage groups</div>
+</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">LOGRP</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">LOGRP</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t421/"
+class="text-blue-600 hover:text-blue-800">
+T421                                            </a>
+<div class="text-sm text-gray-500">Wage groups</div>
+</td>
+<td class="px-4 py-3 text-gray-700">LOGRP</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t000/"
+class="text-blue-600 hover:text-blue-800">
+T000                                            </a>
+<div class="text-sm text-gray-500">Clients</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MEINH</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MEINH</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MEINH</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ODAUE</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ODAUE</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ODAUE</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE01</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE01</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE01</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE02</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE02</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE02</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE03</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE03</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE03</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE04</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE04</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE04</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE05</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE05</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE05</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE06</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE06</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFE06</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFMNE</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFMNE</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFMNE</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFMNU</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFMNU</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OFMNU</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OPRE1</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OPRE1</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">OPRE1</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">QUALF</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">QUALF</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t423/"
+class="text-blue-600 hover:text-blue-800">
+T423                                            </a>
+<div class="text-sm text-gray-500">Wage group qualification</div>
+</td>
+<td class="px-4 py-3 text-gray-700">QUALF</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">QUALF</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t423/"
+class="text-blue-600 hover:text-blue-800">
+T423                                            </a>
+<div class="text-sm text-gray-500">Wage group qualification</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">QUALF</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t423/"
+class="text-blue-600 hover:text-blue-800">
+T423                                            </a>
+<div class="text-sm text-gray-500">Wage group qualification</div>
+</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">TXTSP</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">TXTSP</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t002/"
+class="text-blue-600 hover:text-blue-800">
+T002                                            </a>
+<div class="text-sm text-gray-500">Language Keys (Component BC-I18)</div>
+</td>
+<td class="px-4 py-3 text-gray-700">SPRAS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t001w/"
+class="text-blue-600 hover:text-blue-800">
+T001W                                            </a>
+<div class="text-sm text-gray-500">Plants/Branches</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t001w/"
+class="text-blue-600 hover:text-blue-800">
+T001W                                            </a>
+<div class="text-sm text-gray-500">Plants/Branches</div>
+</td>
+<td class="px-4 py-3 text-gray-700">WERKS</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ZEIER</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ZEIER</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MSEHI</td>
+</tr>
+<tr class="hover:bg-gray-50">
+<td class="px-4 py-3 font-medium text-gray-900">AFRU</td>
+<td class="px-4 py-3 text-gray-700">ZEIER</td>
+<td class="px-4 py-3 text-gray-700">AFRU</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+<td class="px-4 py-3">
+<a href="/sap/table/t006/"
+class="text-blue-600 hover:text-blue-800">
+T006                                            </a>
+<div class="text-sm text-gray-500">Units of Measurement</div>
+</td>
+<td class="px-4 py-3 text-gray-700">MANDT</td>
+</tr>
+</tbody>
+</table>
+</div></div>
+</div></body></html>

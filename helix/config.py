@@ -110,6 +110,13 @@ VOLATILE_STORE_NAMES: tuple[str, ...] = (
     # The improvement backlog (services/backlog.py): the night queues research-found ideas on it
     # while its own coder draft runs, so both guards must skip it like the dream journal.
     "helix_backlog.json",
+    # The SAP data model (READ_ME/SAP.md): the user's EDW record (which tables their warehouse has,
+    # their real column lists — written the moment they paste one, which can be mid-build) and the
+    # sap/ FOLDER, where the live app writes on-demand fetched dictionary tables and the
+    # decompressed wide index during a conversation — the same live churn as a browser profile,
+    # which a coder guard must skip rather than fail the build over.
+    "helix_sap_edw.json",
+    "sap",
 )
 
 

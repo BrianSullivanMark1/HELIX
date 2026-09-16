@@ -383,6 +383,103 @@ def test_voice_state_without_a_voice_loop_is_off_and_ready(rig):
     assert vs["wake"] == "HELIX"
 
 
+# ----- the voice's gate is the shell's to reopen when it was the shell that shut it -----
+
+class _FakeVoice:
+    """Just the seam the turn touches: a state the shell reads and settles. The listen gate is
+    open only while 'idle', so a state nobody puts back is a deaf HELIX until restart."""
+
+    def __init__(self, state="idle", enabled=False):
+        self._state, self._enabled = state, enabled
+        self.idled = 0
+        self.current_speaker = None
+        self._session = False
+
+    def state(self):
+        return self._state
+
+    def idle(self):
+        self._state = "idle"
+        self.idled += 1
+
+    def begin_turn(self):
+        self._state = "thinking"
+
+    def speak(self, text):
+        self._state = "speaking"
+
+    def is_active(self):
+        return self._state != "idle"
+
+    def enabled(self):
+        return self._enabled
+
+    def can_listen(self):
+        return True
+
+    def supported(self):
+        return True
+
+    def prewarm_error(self):
+        return ""
+
+    def is_muted(self):
+        return False
+
+    def narrate(self, text, force=False):
+        pass
+
+    def interrupt(self):
+        self._state = "idle"
+
+    def set_working(self, on):
+        pass
+
+    def camera_ears_live(self):
+        return False
+
+    def shutdown(self):
+        pass
+
+
+def test_a_spoken_command_the_gauntlet_declines_returns_the_voice_to_idle():
+    # No Claude connected: the gauntlet keeps the message and starts no turn — but the voice loop
+    # went 'thinking' before handing the command over, and nothing downstream would ever idle it.
+    container = _Container()
+    container.settings = _Settings()
+    voice = _FakeVoice(state="thinking")
+    sh = ShellSession(container, [].append, voice=voice)
+    try:
+        sh.on_voice_recognized("what time is it")
+        assert voice.state() == "idle" and voice.idled == 1
+    finally:
+        sh.shutdown()
+
+
+def test_a_turn_nothing_spoke_settles_the_voice():
+    # Voice wired but OFF: begin_turn shuts the gate, the reply is not spoken, and the old
+    # "idle it only if it is already idle" left it 'thinking' — PTT dead after one typed turn.
+    voice = _FakeVoice(enabled=False)
+    sh = ShellSession(_Container(), [].append, voice=voice)
+    try:
+        assert sh.submit("hello") is True  # begin_turn → 'thinking'; the reply is never spoken
+        sh._finish_wait()
+        assert voice.state() == "idle" and voice.idled == 1
+    finally:
+        sh.shutdown()
+
+
+def test_a_spoken_reply_is_not_cut_short_by_the_turn_ending():
+    voice = _FakeVoice(enabled=True)
+    sh = ShellSession(_Container(), [].append, voice=voice)
+    try:
+        sh.submit("hello")
+        sh._finish_wait()
+        assert voice.state() == "speaking" and voice.idled == 0  # speak() ends in idle by itself
+    finally:
+        sh.shutdown()
+
+
 # ----- the board -----
 
 def test_board_orders_building_done_error_and_is_self_clearing():
@@ -483,6 +580,9 @@ class _TalkingVoice(_SleepyVoice):
 
     def is_active(self):
         return False
+
+    def state(self):
+        return "idle"
 
     def idle(self):
         pass

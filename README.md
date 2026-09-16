@@ -192,6 +192,12 @@ These are senses and hands, not menu items. You reach them by asking.
 | **Shop** | Reads Amazon itself — live prices, stars, Prime, ASINs — verifies before staging, and drives its own Chrome window to add to cart. It never buys; checkout is yours. |
 | **Make physical things** | The component library, the deterministic enclosure generator, AR true-scale fit checking, camera measurement, and printing to a Bambu P1S. |
 | **Improve itself** | The nightly dream session, and `improve_helix` on demand — always branch-first, always human-gated. |
+| **Know the SAP data model** | An SAP ECC dictionary catalog with curated joins and their full compound keys, an overlay of what your EDW actually has, and a Snowflake writer — so field names, keys and joins are lookups, never recollections. |
+
+The SAP faculty exists because HELIX used to guess SAP field names from memory and get them wrong.
+Four read-only tools (`sap_lookup`, `sap_table`, `sap_join`, `sap_sql`) answer from the dictionary
+and the curated layer, naming their provenance; one write (`sap_edw`, human-driven) records the
+tables and column lists your warehouse really holds. Full contract: [`READ_ME/SAP.md`](READ_ME/SAP.md).
 
 ## The guardrails, in plain language
 
