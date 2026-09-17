@@ -18,7 +18,10 @@ PROVENANCE, THREE WAYS. "What commit is serving?" is answered from, in order:
      August - the console verifies against it after every deploy);
   c. nothing - `commit=None`, honestly. Never a guess.
 (b) is the one HTTP call this adapter makes, and it is fenced: only the service's own `*.run.app`
-host, GET only, no redirects followed, a small body cap. It reads a version string, nothing else.
+host, GET only, no redirects followed, a small body cap. Since 2026-09-17 it is read even when the
+label answered, because the health body is also the only source of `db`, `readOnly` and `flags`
+(appCheckRequired among them) - seen live: brms-mes-api-dev answered
+{"db":"BRMS_database_dev","ok":true,"readOnly":false,"flags":{...},"version":"3dc6631"}.
 
 The HOSTING half of a cell is NOT read in this version. `site` comes back as UNKNOWN with a note
 saying so, rather than as absent or healthy. §6.1's open question stands; this adapter is honest
@@ -264,30 +267,49 @@ class GcloudFleet:
         labels = meta.get("labels") or {}
         commit, dirty = _split_version(labels.get("version"))
         by = labels.get("by") or None
-        # Fallback (b): the app's own /api/health, the MES convention.
+        # The app's own /api/health, the MES convention. Always read when there is a URL: it is the
+        # only source for db / readOnly / flags, and fallback (b) for the commit when no label exists.
         url = status.get("url")
-        if commit is None and url:
-            commit, dirty = self._health_version(str(url), min(timeout_s, 8.0))
+        hd = self._health_doc(str(url), min(timeout_s, 8.0)) if url else {}
+        if commit is None:
+            commit, dirty = _split_version(hd.get("version") if isinstance(hd.get("version"), (str, int)) else None)
+        db = hd.get("db") if isinstance(hd.get("db"), str) else None
+        read_only = hd.get("readOnly") if isinstance(hd.get("readOnly"), bool) else None
+        raw_flags = hd.get("flags") if isinstance(hd.get("flags"), dict) else {}
+        flags = tuple(sorted((str(k), bool(v)) for k, v in raw_flags.items() if isinstance(v, bool)))
         health = _ready(sdoc)
         if rdoc is not None and health is Health.OK:
             health = _ready(rdoc) if _ready(rdoc) is not Health.UNKNOWN else health
+        # A Ready revision whose own health endpoint says ok:false is DEGRADED, not OK: Cloud Run is
+        # reporting the container answers, the app is reporting it cannot do its job.
+        if health is Health.OK and hd.get("ok") is False:
+            health = Health.DEGRADED
         return Serving(revision=rev_name, commit=commit, dirty=dirty,
                        deployed_at=_ts(meta.get("creationTimestamp")), deployed_by=by,
-                       health=health, traffic_percent=percent)
+                       health=health, traffic_percent=percent,
+                       db=db, read_only=read_only, flags=flags)
 
-    def _health_version(self, url: str, timeout_s: float) -> tuple[str | None, bool]:
-        """GET <url>/api/health and read `version`. Fenced to the service's own *.run.app host."""
+    def _health_doc(self, url: str, timeout_s: float) -> dict:
+        """GET <url>/api/health and return the JSON object, or {} for anything else. Fenced to the
+        service's own *.run.app host: the URL came from Cloud Run, but the fence costs nothing and
+        means a poisoned service doc still cannot point this probe at an arbitrary host."""
         host = (urlparse(url).hostname or "").lower()
         if not host.endswith(".run.app"):
-            return None, False
+            return {}
         status, body = self._http(url.rstrip("/") + "/api/health", timeout_s)
         if status != 200 or not body:
-            return None, False
+            return {}
         try:
             doc = json.loads(body)
         except ValueError:
-            return None, False
-        return _split_version(doc.get("version") if isinstance(doc, dict) else None)
+            return {}
+        return doc if isinstance(doc, dict) else {}
+
+    def _health_version(self, url: str, timeout_s: float) -> tuple[str | None, bool]:
+        """Kept for callers/tests that want only the commit: the (sha, dirty) pair from /api/health."""
+        doc = self._health_doc(url, timeout_s)
+        v = doc.get("version")
+        return _split_version(str(v) if isinstance(v, (str, int)) else None)
 
     def read_all(self, services: Sequence[Service], *, timeout_s: float = 90.0) -> list[CellRead]:
         per = max(5.0, min(30.0, timeout_s / max(1, len(services)) * self._workers))

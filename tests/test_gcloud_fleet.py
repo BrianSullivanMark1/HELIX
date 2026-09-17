@@ -154,17 +154,21 @@ def test_the_health_probe_is_fenced_to_run_app_hosts():
     assert r.api.commit is None
 
 
-def test_a_label_wins_over_the_health_endpoint():
+def test_a_label_wins_over_the_health_endpoint_for_the_commit():
+    """The label is what the deploy stamped; /api/health is what the container thinks. When both
+    exist the label wins for the COMMIT. Health is still read - since 2026-09-17 it is the only
+    source for db / readOnly / flags, so the probe is not skipped just because the commit is known."""
     revs = [revision_doc("wms-dev-00021-abc", "2026-09-16T10:00:00Z", {"version": "c9d3a70"})]
     seen = []
 
     def http(url, t):
-        seen.append(url); return 200, json.dumps({"version": "different"})
+        seen.append(url); return 200, json.dumps({"version": "different", "db": "WMS_dev"})
 
     run = Script({"services describe": g.Ran(0, json.dumps(service_doc()), ""),
                   "revisions list": g.Ran(0, json.dumps(revs), "")})
     r = g.GcloudFleet("p", "r", runner=run, http_get=http).read_cell(WMS_DEV)
-    assert r.api.commit == "c9d3a70" and seen == [], "no probe when the label already answered"
+    assert r.api.commit == "c9d3a70", "the label answers the commit"
+    assert len(seen) == 1 and r.api.db == "WMS_dev", "health is still read for what only it knows"
 
 
 def test_no_provenance_anywhere_is_honestly_none():
@@ -354,3 +358,36 @@ def test_gcloud_binary_is_resolved_through_which_so_windows_finds_gcloud_cmd(mon
     assert fl._gcloud.endswith("gcloud.cmd")
     monkeypatch.setattr(g.shutil, "which", lambda name: None)
     assert g.GcloudFleet("p", "r", runner=lambda a, t: g.Ran(0, "{}", ""))._gcloud == "gcloud"
+
+
+_REAL_HEALTH = (_FIX / "health.json").read_text(encoding="utf-8")
+
+
+def test_real_mes_dev_health_body_gives_commit_db_flags_and_read_only():
+    """The live /api/health from brms-mes-api-dev on 2026-09-17, verbatim."""
+    r = _real_mes_dev(lambda url, t: (200, _REAL_HEALTH)).read_cell(fleet.find("MES", Env.DEV))
+    assert (r.api.commit, r.api.dirty) == ("3dc6631", False)
+    assert r.api.db == "BRMS_database_dev"
+    assert r.api.read_only is False
+    assert r.api.flag("appCheckRequired") is False       # rule 3's per-environment switch
+    assert r.api.flag("authRequired") is True
+    assert r.api.flag("nope") is None                     # not reported -> None, never False
+    assert r.api.health is Health.OK
+    assert dict(r.api.flags) == {"appCheckRequired": False, "authRequired": True, "devPin": True,
+                                 "readGate": False, "testFill": True, "unitGate": False}
+
+
+def test_health_ok_false_makes_a_ready_revision_degraded_not_ok():
+    body = json.dumps({"ok": False, "version": "3dc6631", "db": "BRMS_database_dev"})
+    r = _real_mes_dev(lambda url, t: (200, body)).read_cell(fleet.find("MES", Env.DEV))
+    assert r.api.health is Health.DEGRADED
+
+
+def test_unreachable_health_leaves_db_and_flags_empty_not_invented():
+    r = _real_mes_dev(lambda url, t: (0, "")).read_cell(fleet.find("MES", Env.DEV))
+    assert r.api.db is None and r.api.read_only is None and r.api.flags == ()
+
+
+def test_health_body_that_is_not_an_object_is_ignored():
+    r = _real_mes_dev(lambda url, t: (200, "[1,2,3]")).read_cell(fleet.find("MES", Env.DEV))
+    assert r.api.commit is None and r.api.db is None

@@ -132,6 +132,21 @@ class Serving:
     deployed_by: str | None = None
     health: Health = Health.UNKNOWN
     traffic_percent: int | None = None   # None = unknown; < 100 means a split is in play
+    # What the app says about ITSELF, from its /api/health (the MES convention, seen live 2026-09-17:
+    # {"db":"BRMS_database_dev","readOnly":false,"flags":{"appCheckRequired":false,...},"version":"3dc6631"}).
+    # `db` is the one fact that proves an environment points at the database it is supposed to, and
+    # `flags` carries appCheckRequired - the per-environment switch rule 3 says is flipped one row at
+    # a time. Both are None/empty when the app has no health endpoint or it was unreachable.
+    db: str | None = None
+    read_only: bool | None = None
+    flags: tuple[tuple[str, bool], ...] = ()   # sorted (name, value) pairs; tuple so Serving stays hashable
+
+    def flag(self, name: str) -> bool | None:
+        """One health flag by name, or None when the app did not report it."""
+        for k, v in self.flags:
+            if k == name:
+                return v
+        return None
 
     @property
     def is_split(self) -> bool:
