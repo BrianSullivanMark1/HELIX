@@ -110,6 +110,15 @@ PACKS: tuple[Pack, ...] = (
              "check_fit and camera_measure run on the vision pack's camera, hence the dependency.",
     ),
     Pack(
+        id="sap",
+        label="SAP",
+        setting="pack_sap",
+        default_on=True,
+        tools=frozenset({"sap_lookup", "sap_table", "sap_join", "sap_sql", "sap_edw"}),
+        note="The SAP data-model faculty (Brendan, 2026-09): a catalog of what the EDW holds, looked "
+             "up instead of recited. Four reads plus sap_edw, which rewrites the catalog and is fenced.",
+    ),
+    Pack(
         id="purchasing",
         label="Purchasing",
         setting="pack_purchasing",

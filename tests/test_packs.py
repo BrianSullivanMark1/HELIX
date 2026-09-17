@@ -34,9 +34,10 @@ def test_no_tool_is_claimed_by_two_packs():
 
 
 def test_core_and_the_packs_cover_the_whole_surface():
-    """80 tools in the README plus fleet_status and fleet_history. If this number moves without a pack
-    moving with it, something was added and never placed."""
-    assert len(REGISTERED) == 82
+    """80 tools in the README, plus fleet_status and fleet_history, plus the five SAP tools Brendan
+    added on 2026-09 (which this very test caught unplaced on first run against the real registry).
+    If this number moves without a pack moving with it, something was added and never placed."""
+    assert len(REGISTERED) == 87
 
 
 def test_pack_ids_are_unique_and_settings_keys_are_too():
@@ -55,6 +56,7 @@ def test_pack_of_answers_for_packs_and_stays_quiet_for_core():
     assert packs.pack_of("fleet_status") == "fleet"
     assert packs.pack_of("view_camera") == "vision"
     assert packs.pack_of("search_amazon") == "purchasing"
+    assert packs.pack_of("sap_table") == "sap"
     assert packs.pack_of("build_app") is None, "core tools belong to no pack"
     assert packs.pack_of("nonsense") is None
 
@@ -107,7 +109,7 @@ def test_maker_needs_vision_and_switches_itself_off_without_it():
 def test_the_dependency_settles_rather_than_looping():
     """enabled() runs to a fixed point. A dependency chain must terminate, not spin."""
     assert packs.enabled(_settings(pack_vision=False, pack_maker=True)) == frozenset(
-        {"fleet", "purchasing"})
+        {"fleet", "sap", "purchasing"})
 
 
 def test_pages_follow_their_pack():
@@ -139,6 +141,8 @@ def test_cloud_is_exactly_the_two_fleet_reads_today():
     "remember_about_me", "set_location",
     # credentials
     "connect_service", "call_api",
+    # the SAP catalog and its write
+    "sap_sql", "sap_edw",
 ])
 def test_cloud_carries_nothing_that_writes_spends_or_builds(tool):
     """Enumerated by name so ADDING one of these to CLOUD_TOOLS is a red test, not a code review that
