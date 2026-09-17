@@ -172,7 +172,12 @@ class GcloudFleet:
         self._region = region
         self._run = runner or _real_runner
         self._http = http_get or _real_http_get
-        self._gcloud = gcloud
+        # On Windows the Cloud SDK ships `gcloud.cmd` and `gcloud.ps1`, no `gcloud.exe`. CreateProcess
+        # does not consult PATHEXT, so spawning bare "gcloud" raises FileNotFoundError - which this
+        # adapter would report as NOT_INSTALLED on a machine where gcloud plainly works (seen on
+        # Brian's box 2026-09-17; the .ps1 is also blocked by execution policy). shutil.which DOES
+        # honour PATHEXT and returns the .cmd, so resolve once here and spawn what it found.
+        self._gcloud = shutil.which(gcloud) or gcloud
         self._workers = max(1, workers)
         self._probe_lock = threading.Lock()
         self._probe: tuple[bool, str | None] | None = None

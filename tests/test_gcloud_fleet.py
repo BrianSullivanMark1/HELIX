@@ -277,3 +277,80 @@ def test_read_all_keeps_order_and_includes_absent_cells():
     assert [r.service.key for r in out] == [s.key for s in fleet.FLEET]
     absent = [r for r in out if not r.service.exists]
     assert len(absent) == 2 and all(r.ok and r.api is None for r in absent)
+
+
+# ------------------------------------------------------------------------------------------------
+# REAL DATA. tests/fixtures/mes_dev/ is Brian's actual `gcloud run services describe brms-mes-api-dev`
+# and `revisions list` from 2026-09-17, slimmed to metadata + status (env and annotations stripped,
+# 7 of the 53 revisions kept). The adapter must read the real shape exactly this way; if Cloud Run's
+# output ever drifts, this is the test that goes red first.
+# ------------------------------------------------------------------------------------------------
+
+import pathlib
+
+_FIX = pathlib.Path(__file__).parent / "fixtures" / "mes_dev"
+
+
+def _real_mes_dev(http_get=None):
+    svc_json = (_FIX / "service.json").read_text(encoding="utf-8")
+    rev_json = (_FIX / "revisions.json").read_text(encoding="utf-8")
+
+    def replay(argv, timeout):
+        if "describe" in argv:
+            return g.Ran(0, svc_json, "")
+        if "revisions" in argv:
+            return g.Ran(0, rev_json, "")
+        return g.Ran(0, "Google Cloud SDK 500.0.0", "")
+
+    return g.GcloudFleet(fleet.GCP_PROJECT, fleet.GCP_REGION, runner=replay,
+                         http_get=http_get or (lambda url, t: (0, "")))
+
+
+def test_real_mes_dev_export_reads_as_one_healthy_cell_at_full_traffic():
+    r = _real_mes_dev().read_cell(fleet.find("MES", Env.DEV))
+    assert r.ok and r.problem is None
+    assert r.api.revision == "brms-mes-api-dev-00325-xtq"
+    assert r.api.traffic_percent == 100 and not r.api.is_split
+    assert r.api.health is Health.OK
+    assert r.api.deployed_at.isoformat().startswith("2026-09-14T16:21:14")
+    # Hosting half is not read yet - it must say so rather than pretend.
+    assert r.site.health is Health.UNKNOWN and r.detail == g.HOSTING_NOTE
+
+
+def test_real_mes_dev_export_has_no_version_label_yet_so_commit_is_honestly_none():
+    """The label ships with the dev.ps1/deploy.ps1 patch. Until a deploy carries it, and with
+    /api/health unreachable, the adapter says None - never a guess."""
+    r = _real_mes_dev().read_cell(fleet.find("MES", Env.DEV))
+    assert r.api.commit is None and r.api.dirty is False and r.api.deployed_by is None
+
+
+def test_real_mes_dev_export_falls_back_to_api_health_for_the_commit():
+    seen = []
+
+    def http(url, t):
+        seen.append(url)
+        return 200, json.dumps({"status": "ok", "version": "a41f9c2-dirty"})
+
+    r = _real_mes_dev(http).read_cell(fleet.find("MES", Env.DEV))
+    assert seen == ["https://brms-mes-api-dev-fofbmtg3bq-wl.a.run.app/api/health"]
+    assert (r.api.commit, r.api.dirty) == ("a41f9c2", True)
+
+
+def test_real_mes_dev_export_lists_served_revisions_newest_first():
+    r = _real_mes_dev().read_cell(fleet.find("MES", Env.DEV))
+    assert r.served_revisions[0] == "brms-mes-api-dev-00325-xtq"
+    assert r.served_revisions[1] == "brms-mes-api-dev-00324-qcg"
+    assert len(r.served_revisions) == 7
+    # Rollback targets are the newest N that served, excluding the one serving now.
+    targets = fleet.rollback_targets(r.served_revisions, r.api.revision)
+    assert targets[0] == "brms-mes-api-dev-00324-qcg"
+    assert len(targets) == min(fleet.DEFAULT_ROLLBACK_DEPTH, 6)
+
+
+def test_gcloud_binary_is_resolved_through_which_so_windows_finds_gcloud_cmd(monkeypatch):
+    """On Windows the SDK has gcloud.cmd, not gcloud.exe; bare 'gcloud' is a FileNotFoundError."""
+    monkeypatch.setattr(g.shutil, "which", lambda name: r"C:\Cloud SDK\bin\gcloud.cmd" if name == "gcloud" else None)
+    fl = g.GcloudFleet("p", "r", runner=lambda a, t: g.Ran(0, "{}", ""))
+    assert fl._gcloud.endswith("gcloud.cmd")
+    monkeypatch.setattr(g.shutil, "which", lambda name: None)
+    assert g.GcloudFleet("p", "r", runner=lambda a, t: g.Ran(0, "{}", ""))._gcloud == "gcloud"

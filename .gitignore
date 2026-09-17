@@ -22,3 +22,9 @@ venv/
 # Claude Code local (machine-specific settings — shared config stays tracked)
 .claude/settings.local.json
 *.stackdump
+
+# Fleet exports pulled with gcloud for local inspection - never committed (may carry env/annotations)
+/mes-*.json
+/wms-*.json
+/mrp-*.json
+/echo-*.json

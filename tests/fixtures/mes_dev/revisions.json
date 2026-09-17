@@ -1,0 +1,208 @@
+[
+ {
+  "apiVersion": "serving.knative.dev/v1",
+  "kind": "Revision",
+  "metadata": {
+   "name": "brms-mes-api-dev-00325-xtq",
+   "creationTimestamp": "2026-09-14T16:21:14.532567Z",
+   "labels": {
+    "client.knative.dev/nonce": "apdzkovsfj",
+    "cloud.googleapis.com/location": "us-west2",
+    "dbhost": "private",
+    "run.googleapis.com/startupProbeType": "Custom",
+    "serving.knative.dev/configuration": "brms-mes-api-dev",
+    "serving.knative.dev/configurationGeneration": "325",
+    "serving.knative.dev/route": "brms-mes-api-dev",
+    "serving.knative.dev/service": "brms-mes-api-dev",
+    "serving.knative.dev/serviceUid": "a9f676de-4ceb-4909-9d66-644541403e2d"
+   }
+  },
+  "status": {
+   "conditions": [
+    {
+     "lastTransitionTime": "2026-09-14T16:21:31.072030Z",
+     "message": "Deploying revision succeeded in 16.54s.",
+     "status": "True",
+     "type": "Ready"
+    }
+   ],
+   "observedGeneration": 1
+  }
+ },
+ {
+  "apiVersion": "serving.knative.dev/v1",
+  "kind": "Revision",
+  "metadata": {
+   "name": "brms-mes-api-dev-00324-qcg",
+   "creationTimestamp": "2026-09-06T15:58:37.130503Z",
+   "labels": {
+    "client.knative.dev/nonce": "gyhijdqsnw",
+    "cloud.googleapis.com/location": "us-west2",
+    "dbhost": "private",
+    "run.googleapis.com/startupProbeType": "Custom",
+    "serving.knative.dev/configuration": "brms-mes-api-dev",
+    "serving.knative.dev/configurationGeneration": "324",
+    "serving.knative.dev/service": "brms-mes-api-dev",
+    "serving.knative.dev/serviceUid": "a9f676de-4ceb-4909-9d66-644541403e2d"
+   }
+  },
+  "status": {
+   "conditions": [
+    {
+     "lastTransitionTime": "2026-09-14T16:21:32.437424Z",
+     "message": "Deploying revision succeeded in 8.09s.",
+     "reason": "Retired",
+     "status": "True",
+     "type": "Ready"
+    }
+   ],
+   "observedGeneration": 1
+  }
+ },
+ {
+  "apiVersion": "serving.knative.dev/v1",
+  "kind": "Revision",
+  "metadata": {
+   "name": "brms-mes-api-dev-00323-qpm",
+   "creationTimestamp": "2026-09-06T13:17:15.639219Z",
+   "labels": {
+    "client.knative.dev/nonce": "bcbottaolc",
+    "cloud.googleapis.com/location": "us-west2",
+    "dbhost": "private",
+    "run.googleapis.com/startupProbeType": "Custom",
+    "serving.knative.dev/configuration": "brms-mes-api-dev",
+    "serving.knative.dev/configurationGeneration": "323",
+    "serving.knative.dev/service": "brms-mes-api-dev",
+    "serving.knative.dev/serviceUid": "a9f676de-4ceb-4909-9d66-644541403e2d"
+   }
+  },
+  "status": {
+   "conditions": [
+    {
+     "lastTransitionTime": "2026-09-06T15:58:46.576599Z",
+     "message": "Deploying revision succeeded in 7.91s.",
+     "reason": "Retired",
+     "status": "True",
+     "type": "Ready"
+    }
+   ],
+   "observedGeneration": 1
+  }
+ },
+ {
+  "apiVersion": "serving.knative.dev/v1",
+  "kind": "Revision",
+  "metadata": {
+   "name": "brms-mes-api-dev-00322-thr",
+   "creationTimestamp": "2026-09-06T13:04:13.021362Z",
+   "labels": {
+    "client.knative.dev/nonce": "tprsxpbtah",
+    "cloud.googleapis.com/location": "us-west2",
+    "run.googleapis.com/startupProbeType": "Custom",
+    "serving.knative.dev/configuration": "brms-mes-api-dev",
+    "serving.knative.dev/configurationGeneration": "322",
+    "serving.knative.dev/service": "brms-mes-api-dev",
+    "serving.knative.dev/serviceUid": "a9f676de-4ceb-4909-9d66-644541403e2d"
+   }
+  },
+  "status": {
+   "conditions": [
+    {
+     "lastTransitionTime": "2026-09-06T13:17:25.984951Z",
+     "message": "Deploying revision succeeded in 14.33s.",
+     "reason": "Retired",
+     "status": "True",
+     "type": "Ready"
+    }
+   ],
+   "observedGeneration": 1
+  }
+ },
+ {
+  "apiVersion": "serving.knative.dev/v1",
+  "kind": "Revision",
+  "metadata": {
+   "name": "brms-mes-api-dev-00321-6mb",
+   "creationTimestamp": "2026-09-03T00:46:50.396142Z",
+   "labels": {
+    "client.knative.dev/nonce": "qhbxeoxelw",
+    "cloud.googleapis.com/location": "us-west2",
+    "run.googleapis.com/startupProbeType": "Custom",
+    "serving.knative.dev/configuration": "brms-mes-api-dev",
+    "serving.knative.dev/configurationGeneration": "321",
+    "serving.knative.dev/service": "brms-mes-api-dev",
+    "serving.knative.dev/serviceUid": "a9f676de-4ceb-4909-9d66-644541403e2d"
+   }
+  },
+  "status": {
+   "conditions": [
+    {
+     "lastTransitionTime": "2026-09-06T13:04:29.080812Z",
+     "message": "Deploying revision succeeded in 20.49s.",
+     "reason": "Retired",
+     "status": "True",
+     "type": "Ready"
+    }
+   ],
+   "observedGeneration": 1
+  }
+ },
+ {
+  "apiVersion": "serving.knative.dev/v1",
+  "kind": "Revision",
+  "metadata": {
+   "name": "brms-mes-api-dev-00320-n69",
+   "creationTimestamp": "2026-09-02T21:37:03.325348Z",
+   "labels": {
+    "client.knative.dev/nonce": "xzyblvotmc",
+    "cloud.googleapis.com/location": "us-west2",
+    "run.googleapis.com/startupProbeType": "Custom",
+    "serving.knative.dev/configuration": "brms-mes-api-dev",
+    "serving.knative.dev/configurationGeneration": "320",
+    "serving.knative.dev/service": "brms-mes-api-dev",
+    "serving.knative.dev/serviceUid": "a9f676de-4ceb-4909-9d66-644541403e2d"
+   }
+  },
+  "status": {
+   "conditions": [
+    {
+     "lastTransitionTime": "2026-09-03T00:47:12.170870Z",
+     "message": "Deploying revision succeeded in 14.7s.",
+     "reason": "Retired",
+     "status": "True",
+     "type": "Ready"
+    }
+   ],
+   "observedGeneration": 1
+  }
+ },
+ {
+  "apiVersion": "serving.knative.dev/v1",
+  "kind": "Revision",
+  "metadata": {
+   "name": "brms-mes-api-dev-00319-6lt",
+   "creationTimestamp": "2026-09-02T17:16:43.296605Z",
+   "labels": {
+    "client.knative.dev/nonce": "spwhozeflr",
+    "cloud.googleapis.com/location": "us-west2",
+    "run.googleapis.com/startupProbeType": "Custom",
+    "serving.knative.dev/configuration": "brms-mes-api-dev",
+    "serving.knative.dev/configurationGeneration": "319",
+    "serving.knative.dev/service": "brms-mes-api-dev",
+    "serving.knative.dev/serviceUid": "a9f676de-4ceb-4909-9d66-644541403e2d"
+   }
+  },
+  "status": {
+   "conditions": [
+    {
+     "lastTransitionTime": "2026-09-02T21:37:19.385462Z",
+     "message": "Deploying revision succeeded in 13.43s.",
+     "reason": "Retired",
+     "status": "True",
+     "type": "Ready"
+    }
+   ],
+   "observedGeneration": 1
+  }
+ }
+]
