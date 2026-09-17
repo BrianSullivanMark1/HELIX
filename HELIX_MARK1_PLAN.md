@@ -800,28 +800,26 @@ if someone removes it. Phase 1 ships the constants and the tests; the callers ar
 
 ---
 
-## §12 — Naming
+## §12 — Naming and theme
 
-DNA-themed for major surfaces, plain English for buttons. A button says "Deploy to dev", never
-"Express to dev".
+**Decided 2026-09-17: plain names everywhere. The theme lives in the art, not the nouns.**
 
-**These are proposals from your name list — correct any of them and I will use your meaning.**
+Every surface and every button is called what it is — Fleet, History, Versions, Secrets, New app,
+Terminal, Health, Deploy, Roll back, Approvals, Access. The three levels are **company / app /
+environment**. The product is **HELIX**; that is the one branded word. It is cleaner to say out loud,
+cleaner to share with someone outside the team, and it never needs a glossary.
 
-| Name | Proposed meaning | Phase |
-|---|---|---|
-| **THE STRAND** | The fleet grid. What is serving, drifted, healthy, and who deployed it. | 1 |
-| **VITALS** | Live health and logs for one cell. | 3 |
-| **LINEAGE** | The immutable audit log. Every action, who, when, which commit. | 2 |
-| **CHECKPOINT** | The gate a change passes through before it deploys. | 2 |
-| **THE RIBOSOME** | The thing that actually builds and deploys — the Cloud Build lane. | 2 |
-| **Expression** | A deploy in flight, and its record. What THE RIBOSOME produces. | 2 |
-| **THE ASSAY** | Read-only diagnosis against a live database. | 3 |
-| **THE TRACE** | Following one request or one record across systems. | 3 |
-| **THE NUCLEUS** | The production gate. The four conditions of §10.2. | 4 |
-| **SCREENING** | Who may do what — the identity and allowlist surface. | 5 |
-| *(rollback)* | Not a new surface: rolling back is an **action on a LINEAGE row**, because the place you choose a version to return to is the list of versions. Name it if you want one. | 2 |
-| **THE BENCH** | Where a new app is built from scratch. The Forge, pointed at the company. | 5+ |
-| **THE CULTURE** | The library of house patterns new work is grown from. | 5+ |
+**The theme is evolution and neural, drawn, not named.** The orb is a cell that evolves (§12.2). The
+board's cards are cells in a dish; an app's three environments are three states of one organism; the
+history view is the helix (§12.1) because a helix is the honest picture of two strands that should
+pair. Deploys pulse along connections like signal down a neuron; a failed deploy is a dead branch. The
+words on the buttons stay boring so the picture can be loud.
+
+Retired on 2026-09-17, kept here so older sections read: THE STRAND (→ the Fleet page), LINEAGE
+(→ History and Versions), THE CULTURE (→ the board), MITOSIS (→ New app), THE MEMBRANE (→ Secrets),
+THE BENCH (→ Terminal), VITALS (→ Health), CHECKPOINT (→ Approvals), THE NUCLEUS (→ the production
+gate), SCREENING (→ Access), THE RIBOSOME / Expression (→ Deploy), THE ASSAY / THE TRACE (→ Query /
+Trace, Phase 3).
 
 ### §12.1 — The visual language
 
@@ -850,6 +848,225 @@ apart" is then a true statement about the picture, which is the only reason to h
 **Where it is used.** THE STRAND's per-cell detail view, LINEAGE (ancestry is what a strand is *for*), and
 Expression (a deploy in flight is a rung being formed). Buttons stay plain English — a control says
 "Roll back to 6d1ac83", never "Excise".
+
+
+---
+
+## §17 — The command center: the board
+
+> Added 2026-09-17 after reading `IMAGES_ABOUT_FORGE/FORGE_INFO.md` and all 41 screenshots of
+> Brendan's THE FORGE. This is the Forge pattern, re-grown on Google Cloud, in HELIX's vocabulary.
+> The mapping is in §17.3. Everything Brendan learned the hard way (§17.6) is kept.
+
+### §17.1 — What it replaces, and why the old shape does not scale
+
+The MES command center (`console.html` + `dev.ps1`) is **project → environment → a page of buttons**,
+with projects as header tabs. Four tabs is fine; forty is not, and "other companies" is not possible at
+all — the console is one repo's tool that grew three siblings. THE FORGE solved the same problem for 18
+projects with **cards, a filter box, and one card per project that expands into its controls**. That is
+the shape HELIX takes.
+
+### §17.2 — The three levels (plain names, decided 2026-09-17)
+
+| Level | What it is | Today |
+|---|---|---|
+| **Company** | One GCP project, one region, one GitHub owner, one production allowlist. | `oats-overnight` = `windy-celerity-392822` / `us-west2` |
+| **App** | Folder on disk + GitHub repo + Cloud Run service(s) + Firebase Hosting site(s) + its secrets. | MES, WMS, MRP, ECHO |
+| **Environment** | dev, qa, prod. Unchanged. | as §2 |
+
+`domain/fleet.py` has `Company`, and `Service` has `company` + `app`. The §2 table is the
+`oats-overnight` company's apps; a second company is a second `Company` and its apps, and nothing
+above the domain changes. **This is the whole scaling story: the board iterates companies, then apps.**
+
+### §17.3 — THE FORGE → HELIX, one to one
+
+| THE FORGE (Databricks + GitLab) | HELIX (Google Cloud + GitHub) | Name |
+|---|---|---|
+| The board: cards + filter + New Project | The board: cards grouped by company, filter, "New app" | **Board** |
+| A project card (pills: unsaved / to push / live app outdated) | An app card (pills: unsaved / to push / **drift per env** from THE STRAND) | *App card* |
+| Project → Databricks App URL | App → per-env Cloud Run URL + Hosting URL | "Open app" (env-aware) |
+| `⑉ Git` panel: NOW / HISTORY / LINES OF WORK | Same three tabs. History drawn as the helix (§12.1). | **Git** |
+| `⏱ Versions`: last 25 deploys, roll back via worktree redeploy | Cloud Run revisions + Hosting versions; rollback = traffic shift (§6.5), no rebuild | **Versions** |
+| Save / Save & GO LIVE (push main → GitLab CI → Databricks) | Save / Save & GO LIVE (push → **Cloud Build trigger** → Cloud Run + Hosting), env-aware, prod human-only (§10.2) | **Deploy** |
+| Approvals inbox (GitLab MRs) | GitHub pull requests | **Approvals** |
+| THE VAULT: Databricks secret scopes, expiry pills, rotate, who-reads-what | **GCP Secret Manager**: secrets labelled by line + env, expiry pills, rotate, who-reads-what (grep of the app's code) | **Secrets** |
+| Pre-forge check | Preflight: gcloud login, GitHub token, Cloud Build permissions, Firestore, per company | **Health** |
+| THE ANVIL: real terminal, already signed in | Terminal, cwd restricted to HELIX or a line, inherits gcloud/gh logins | **Terminal** |
+| FORGE WORKS: update the console itself | HELIX's existing self-change lane (`improve_helix` → approve → merge). Already exists. | *Dream / Settings* |
+| DEV panel: per-project Claude conversations, lobby, quick change, END & BUILD | HELIX's Console with an **app in context**: conversations stored per app, quick change, build. The coder already exists; it gets pointed at an app's repo. | *Console* |
+| New Project wizard: name it / say what it is / attach / how to start / how big / what it may read | Same six sections. "How big" = Cloud Run CPU/memory. "What it may read" = Secret Manager secrets. Name checked live in **five** places: disk, GitHub, Cloud Run, Hosting, Secret Manager. | **New app** |
+| Forging cinematic + six-bar work board | Cell-division cinematic + work board: THE FOLDER / GIT / THE REPO / SECRETS / FIRST DEPLOY (dev) / LIVE | same |
+| FORGE RADIO | Not ported. Out of scope unless asked. | — |
+| Mascot packs (ducks/dwarves) | The orb is the mascot. Evolves (§12.2). | — |
+| YOUR DAY (Slack/meeting watcher) | HELIX's existing watchers/agents. Not part of this section. | — |
+| File queue (Claude in chat → `queue/pending`) | **Not needed.** Claude *is* HELIX's brain; fleet tools are called directly, gated by packs/profile/`BUILD_TOOLS`. | — |
+| Settings (overview cards, look & feel, AI engine, shipping, credentials, health) | Same six groups, HELIX's existing Settings page extended | *Settings* |
+
+### §17.4 — What an app card shows
+
+Top row: avatar (the app's own evolved orb, small), name, company chip. Three **environment pills**
+in a row — DEV / QA / PROD — each carrying that cell's drift chip from THE STRAND (§6.3) and its health
+dot. That single row is the whole of the old 4×3 grid, folded into the card. Below, when expanded:
+
+- **changed files** (with COPY), **N to push**, the last save line
+- buttons: **Dev** (open the Console on this line) · **Git** (LINEAGE) · **Versions** (LINEAGE) ·
+  **Open** (folder / editor) · **Secrets** (filtered to this app) · bin
+- commit box + **Write it** (AI message from the real diff) + **Save** + **Save & GO LIVE → [env]**
+
+The env selector on Save & GO LIVE defaults to **dev** and requires a deliberate click to change. Prod
+is not a click: it is the §10.2 gate (typed confirmation naming line + env, live identity, audit row
+first). QA and prod buttons exist from Phase 1 and are **disabled with the reason on hover** until their
+phase — the UI is designed once, the switches flip later.
+
+### §17.5 — How GO LIVE actually runs on Google Cloud
+
+THE FORGE: push main → GitLab CI → `databricks sync` + `apps deploy`. Ours: push → **Cloud Build
+trigger** per app per env → `gcloud run deploy` with the §6.6 labels, then `firebase deploy --only
+hosting:<site>`. Cloud Build runs as a scoped service account (plan §1: never a laptop). HELIX:
+
+1. commits (AI message on request, never auto), **`preflight_merge`** (fetch + merge the branch being
+   pushed; conflicts open a mine/theirs panel — Brendan's DUCK SCUFFLE, ours drawn as two strands
+   refusing to pair), pushes;
+2. asks Cloud Build to run the trigger (`gcloud builds triggers run`), streams the log into the job
+   drawer;
+3. reads back the new revision + label, writes the LINEAGE row, updates THE STRAND cell.
+
+"Everything up-to-date" deliberately does **not** stamp a deploy (Brendan's rule; §17.6).
+
+**Until the triggers exist**, Save & GO LIVE for dev delegates to the existing `dev.ps1` path
+(`BE-Deploy`), which now carries provenance (§6.6). §10.6: wrapped, not rewritten.
+
+### §17.6 — Brendan's scars, kept
+
+Each of these cost him days. They transfer directly.
+
+1. **A setting is not the truth; the files are.** `_dbxgit_needed()` read a setting and reported the
+   opposite of reality for two weeks. Every preflight row in VITALS reads the artefact (the trigger, the
+   label, the secret) — never the setting that was supposed to produce it.
+2. **Anything that sweeps "every project" goes through discovery, not a glob.** One project outside
+   `Projects\` was missed for a day. Ours: `COMPANIES` → `apps()`; nothing walks a folder.
+3. **Fix a bug in one commit-then-push path → fix it in all of them.** We have exactly one path.
+4. **Never invent a deploy timestamp.** "Up-to-date" is not a deploy.
+5. **A name is checked in every place it will exist *before* the first one is created.** Being refused
+   by the fifth after four exist leaves half a project behind.
+6. **Delete checks every part first and touches nothing unless all pass; the local folder goes last.**
+7. **Git can never open a credential prompt** (`GIT_TERMINAL_PROMPT=0` etc.) — a hung job is worse than
+   a failed one.
+8. **Never announce a fact you only inferred; `unknown` is an allowed answer.** Already our Health.UNKNOWN.
+9. **Secrets: values are never fetched or shown; expiry is derived and the pill says so (`~45 days`)**
+   until a human sets the rule.
+10. **Server change = restart; page change = refresh; bump both build stamps together.**
+
+### §17.7 — What HELIX already has that THE FORGE had to build
+
+Worth saying, because it is most of the AI layer: per-project conversations, a coder that edits a repo
+on a branch, voice in and out, an approval gate, a self-update lane, a build queue with per-project
+locks, an event bus to the face, and 80 tools behind a fence. THE FORGE built all of that in one
+6,411-line `server.py`. HELIX has it in hexagonal services with 2,300 tests. The command center is
+**a new pack and a new page**, not a new application.
+
+### §17.8 — Decisions (all answered 2026-09-17; see §17.10 and §12)
+
+1. Levels: company / app / environment. Plain names.
+2. Cloud Build triggers: none exist; every deploy is the laptop path today.
+3. Names: plain everywhere; evolution + neural in the art.
+4. GitHub now, PRs later; the host sits behind a port so GitLab can plug in.
+5. Secret Manager, read at `latest`.
+
+### §17.9 — KITS: the building blocks (added 2026-09-17)
+
+**The problem.** Every new app re-derives the same table, the same chart, the same viewer. That is
+paid for in coder time, every time. **The answer is a library of blocks that a new app picks from with
+a tick-box, and that any existing app can donate a block back into.**
+
+**What a block is.** `IMAGES_ABOUT_FORGE/../UNREAL_CAD_VIEWER_KIT.md` is the model, and it settled
+the design: a block is **a spec with an intake, plus verbatim code only for the hard-won parts**. Not
+a component you copy; a document the coder reads, asks the à-la-carte questions from, and builds only
+what was chosen. That is why it stays cheap: a viewer-only build costs a fraction of the full Workshop,
+and the kit itself says which parts are which.
+
+```
+kits/
+  <slug>/
+    KIT.md          the spec: what it is, module catalog (tiered), intake questions, porting rules,
+                    and a CHOSEN FEATURES table the coder fills in per project
+    kit.json        manifest: name, version, tags, tiers, requires (other kits), storage adapters
+    code/           verbatim snippets the KIT.md points at ("copy this exactly")
+    preview.png     what it looks like, for the picker card
+```
+
+Kits live in **their own GitHub repo** (`kits`), so every app in every company reads the same
+library and Brendan's rule holds: *anything shared by all apps belongs in the console, not in one
+app's repo* (§17.6 rule 10, and FORGE_THEME §33).
+
+**In the New app wizard, "How to start" becomes three cards** (drawn as a stem cell, a cell
+differentiating, and a cell dividing — the words stay plain):
+
+| Card | What happens |
+|---|---|
+| **Blank** | The scaffold and nothing else. |
+| **From a template** | A template is a named bundle of kits with their intakes pre-answered (e.g. "Ops dashboard" = table + chart + auth). One click, then tweak. |
+| **Copy an existing app** | Clone an app's repo minus its secrets and data; keep its kits. |
+
+Then **"Add blocks"**: a searchable card grid of kits, one line each, tick to include. Ticking a kit
+queues its intake; the intake runs in the Console as numbered choices (the Forge's `CHOICES: a | b | c`
+pattern, which HELIX's `split_choices` equivalent already handles) with recommended defaults preselected,
+so a whole app can be specified by pressing Enter through the defaults.
+
+**Saving a block back ("donate"):** on any app's card, **Save as block** → pick the files or the
+component → HELIX's coder writes the KIT.md *from the code* (what it is, the tiers it sees, the intake
+questions it would need, the verbatim-worthy parts), opens it for review, and commits it to `kits/`.
+That is the coder doing what it already does for HELIX's own docs, pointed at a folder. **Every block
+saved is a build nobody pays for again.**
+
+**Kits are versioned; apps pin.** `kit.json` carries a version; an app records which version of each
+kit it was built from (in its manifest, the way `.helixbuild.json` records a build's kind). A newer kit
+version is an offer on the card ("CAD viewer 1.3 available, you have 1.1"), never an automatic change.
+
+**The first kit is the CAD viewer.** Saved to the HELIX repo as `kits/unreal-cad-viewer/KIT.md` today,
+unchanged. Its own MANDATORY INTAKE is the pattern every kit follows.
+
+**Can HELIX scale to this?** Yes, and it is the part that fits best. HELIX's Forge already builds apps
+from plain language through a coder in a git workspace with framing prompts; a kit is one more input to
+that prompt. The library grows as a folder of markdown; the picker is a card grid with a filter, the same
+control as the board. The cost model is the point: the coder reads a kit for cents; re-deriving the
+thing the kit describes costs dollars every time.
+
+### §17.10 — Answers recorded 2026-09-17
+
+- **Cloud Build triggers: none exist.** Every deploy is the laptop path (`dev.ps1` / `.bat`). Phase 2
+  creates one trigger per app per env. Until then, GO LIVE (dev) delegates to `dev.ps1` (§17.5).
+- **Git host: GitHub now, GitLab pluggable later.** So the remote host is a **port**:
+  `ports/vcs_host.py` (`VcsHost`: pull requests list/approve/decline, create repo, delete repo, token
+  status, default branch, pipeline status) with `adapters/github_host.py` first and `gitlab_host.py`
+  when needed. Local git stays in the existing `ports/repo.py`. Pushing straight to main today; PRs
+  become CHECKPOINT when a second person is committing.
+- **Secrets: GCP Secret Manager, already full.** `ports/secrets.py` (`SecretStore`: list by company and
+  label, versions, add version, disable, destroy, who-reads by grep of the app's code) with
+  `adapters/gcp_secret_manager.py`. **Apps read `latest`**, so rotation is "add a version" and a
+  restart — the console never shows a value, ever (§17.6 rule 9). New app's "What it may read" is a
+  pick-list from this store, filtered to the company.
+- **Nouns and names:** plain (§12). Company / app / environment; Board, Git, Versions, Deploy, Secrets, Health, Terminal, New app.
+
+### §12.2 — The orb as organism (design direction)
+
+The current orb is already a domain-warped-fbm shader with a dozen uniforms (`web/src/components/Orb.tsx`).
+It *looks* like a Turing pattern. Make that true.
+
+- **A genome.** The orb's shape and skin come from a short seed: `{fbm warp, energy, feed, kill,
+  harmonics[l,m,weight]…, palette}`. Stored in settings; shown on screen as the helix (§12.1) —
+  the same picture, now literally the orb's DNA.
+- **The skin is reaction–diffusion.** Gray–Scott on the sphere, run in the fragment shader. Its two
+  parameters (feed, kill) are the genes that produce the known regimes — spots, stripes, labyrinths,
+  corals, worms — which is exactly how animal coats form. The "cool math trick" is a real one.
+- **The shape is spherical harmonics.** A few `Y(l,m)` terms displace the sphere; low orders bulge and
+  dimple, high orders spike. Zero terms = the stem cell you have now.
+- **Mutate** = perturb a few genes and show three or four offspring in a row; pick one. **Evolve** =
+  keep going. Every kept orb is a LINEAGE row of its own, so you can go back. Each **line** in THE
+  CULTURE gets a child orb of the house orb as its avatar — same genome, one mutation — so the board
+  reads as a family.
+- State still drives temperature and voltage exactly as now; the genome drives form. Not built yet;
+  design only. Ask before this gets time.
 
 ---
 
@@ -954,6 +1171,8 @@ Still open:
 
 | Date | Phase | What shipped | What was cut | What we learned |
 |---|---|---|---|---|
+| 2026-09-17 | Phase 1 | `adapters/gcloud_fleet.py` (first real read of Cloud Run; provenance from label, then the app's own /api/health, then honestly none), `adapters/github_fleet.py` (HEAD + compare; host-pinned, no redirects), `services/fleet.py` (drift judged from the compare; one HEAD read per repo; never raises), `adapters/memory_state.py`. `ports/fleet.py` split into FleetReader + RepoReader. Plain naming (§12). 225 tests green. | — | The tests caught a real bug on first run: gcloud's "command not found" (rc 127) was being read as Cloud Run's "service not found" — exactly the CLI-vs-credential confusion rule 1 exists for. Also: GitHub's compare API answers the drift question in one call, from the base's point of view, so the direction is flipped once, in the adapter, with a test that pins which way. |
+| 2026-09-17 | — | §17 The command center (the board), mapped from THE FORGE one-to-one (company / app / environment; plain names, theme in the art); §12.2 the orb as organism. 41 Forge screenshots renamed in `IMAGES_ABOUT_FORGE/`. | FORGE RADIO, mascot packs, the file queue (HELIX calls tools directly). | THE FORGE's AI layer is most of what HELIX already is; the command center is a pack and a page, not a new app. Brendan's ten scars (§17.6) transfer directly — the biggest is "a setting is not the truth; the files are." |
 | 2026-09-07 | — | §6.6 (provenance), §10.7 (allowlist + PIN), rollback-depth-by-deletion in §6.5, six §15 questions answered from `dev.ps1`. `scripts/make_shortcut.ps1` added. | The PIN-to-production path: replaced with two-person approval for prod, PIN kept for dev/QA. | The big one: **deploys are `gcloud run deploy --source .` from a working tree**, so no revision carries a commit SHA and THE STRAND cannot answer its headline question until one flag is added to `dev.ps1`. Also: the console *deletes* revisions past five, so rollback depth is a hard floor, not a display setting — and a tidy-up silently shortens how far back you can recover. |
 | 2026-09-07 | — | Rollback promoted to a first-class part of the design (§6.5), `Drift.ROLLED_BACK` added, the visual language fixed as a contract (§12.1). Team sign-off on the sequence and the five nevers. | — | Two things. Fleet rollback is a *traffic shift*, not a deploy — no build, no flags, so §11 rule 1 does not even apply to it, which makes it strictly safer than the thing it undoes and means it must ship *with* the first deploy button, not after. And a cell has two things serving, not one (§6.1) — the Cloud Run API and the Firebase Hosting site version independently, which the model did not account for. |
 | 2026-09-07 | — | This document. | — | The Constitution's `EDITABLE_PREFIXES` includes `helix/domain/`, so the fleet's own laws are dream-editable until six files are hand-added to `PROTECTED_FILES`. Found by reading `domain/constitution.py`; it reframed the whole safety section. |

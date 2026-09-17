@@ -338,9 +338,41 @@ def test_needs_attention_covers_both_drift_and_health():
                     site=Serving(health=Health.OK), drift=Drift.BEHIND).needs_attention
 
 
-def test_cell_key_is_stable_and_readable():
-    assert fleet.find("MES", Env.PROD).key == "MES/prod"
-    assert fleet.find("ECHO", Env.DEV).key == "ECHO/dev"
+def test_cell_key_is_stable_readable_and_colony_prefixed():
+    """Company-prefixed so two companies with an app called MES can never collide in Firestore."""
+    assert fleet.find("MES", Env.PROD).key == "oats-overnight/MES/prod"
+    assert fleet.find("ECHO", Env.DEV).key == "oats-overnight/ECHO/dev"
+
+
+# ---------------------------------------------------------------------------- companies (§17.2)
+
+def test_there_is_exactly_one_company_today_and_every_cell_belongs_to_it():
+    assert [c.id for c in fleet.COMPANIES] == ["oats-overnight"]
+    assert {s.company for s in fleet.FLEET} == {"oats-overnight"}
+
+
+def test_the_company_carries_the_gcp_facts_and_the_allowlist():
+    c = fleet.company("oats-overnight")
+    assert c.gcp_project == "windy-celerity-392822"
+    assert c.region == "us-west2"
+    assert c.prod_allowlist == fleet.PROD_ALLOWLIST, "one source of truth"
+    assert c.may_touch_production("brian_sullivan@mark1online.com")
+    assert not c.may_touch_production("someone@example.com")
+    assert not c.may_touch_production(None)
+
+
+def test_apps_are_the_distinct_app_names_in_table_order():
+    assert fleet.apps("oats-overnight") == ("MES", "WMS", "MRP", "ECHO")
+    assert fleet.apps("no-such-colony") == ()
+
+
+def test_app_is_the_plain_word_for_system():
+    svc = fleet.find("WMS", Env.DEV)
+    assert svc.app == svc.system == "WMS"
+
+
+def test_an_unknown_company_is_none_not_an_error():
+    assert fleet.company("acme") is None
 
 
 # ---------------------------------------------------------------------------- purity

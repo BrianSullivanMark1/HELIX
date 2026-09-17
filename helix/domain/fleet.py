@@ -82,6 +82,32 @@ ATTENTION: frozenset[Drift] = frozenset({Drift.AHEAD, Drift.DIVERGED})
 
 
 @dataclass(frozen=True)
+class Company:
+    """A company (or account): one GCP project, one region, one GitHub owner, one production allowlist.
+
+    THE SCALING AXIS (HELIX_MARK1_PLAN.md §17.2). Everything else in the fleet hangs off a company, so a
+    second company is a second Company and its apps - the board iterates companies, then apps, and
+    nothing above the domain changes. Oats Overnight is the first and, today, only one.
+
+    Plain names on purpose (Brian, 2026-09-17): company / app / environment. The biology lives in the
+    art, not the nouns.
+    """
+
+    id: str                      # "oats-overnight" - stable slug, used in Firestore paths and keys
+    label: str                   # "Oats Overnight"
+    gcp_project: str
+    region: str
+    github_owner: str            # default owner for repos; a Service may name a different one
+    prod_allowlist: frozenset[str] = frozenset()
+
+    def may_touch_production(self, identity: str | None) -> bool:
+        """§10.2 condition 2 of four, scoped to THIS company. Fail-closed."""
+        if not identity:
+            return False
+        return identity.strip().lower() in self.prod_allowlist
+
+
+@dataclass(frozen=True)
 class Serving:
     """One deployed HALF of a cell, and what it is running right now.
 
@@ -130,11 +156,18 @@ class Service:
     hosting_site: str | None
     repo: str
     branch: str = "main"   # which branch this cell is SUPPOSED to deploy from (see BRANCH note below)
+    company: str = "oats-overnight"   # Company.id this cell belongs to
+
+    @property
+    def app(self) -> str:
+        """The plain word for `system` (§17.2). `system` stays as the field name for history."""
+        return self.system
 
     @property
     def key(self) -> str:
-        """Stable id for Firestore documents, event payloads and log lines: 'MES/prod'."""
-        return f"{self.system}/{self.env.value}"
+        """Stable id for Firestore documents, event payloads and log lines: 'oats-overnight/MES/prod'.
+        Company-prefixed so two companies with an app called MES can never collide."""
+        return f"{self.company}/{self.system}/{self.env.value}"
 
     @property
     def exists(self) -> bool:
@@ -186,6 +219,37 @@ MES_REPO = "BrendanSullivanMark1/BRMS_MES_WEB_VERSION"
 WMS_REPO = "Alex-Mark1/WMS_V1"
 MRP_REPO = "BrendanSullivanMark1/mrp_prod"
 ECHO_REPO = "BrendanSullivanMark1/MES_OATS_DASHBOARD"
+
+OATS_OVERNIGHT = Company(
+    id="oats-overnight",
+    label="Oats Overnight",
+    gcp_project="windy-celerity-392822",
+    region="us-west2",
+    github_owner="BrendanSullivanMark1",
+    prod_allowlist=frozenset({
+        "brian_sullivan@mark1online.com",
+        "brendan_sullivan@mark1online.com",
+    }),
+)
+
+COMPANIES: tuple[Company, ...] = (OATS_OVERNIGHT,)
+
+
+def company(company_id: str) -> Company | None:
+    for c in COMPANIES:
+        if c.id == company_id:
+            return c
+    return None
+
+
+def apps(company_id: str) -> tuple[str, ...]:
+    """The distinct app names in one company, in table order. The board's card list."""
+    seen: list[str] = []
+    for svc in FLEET:
+        if svc.company == company_id and svc.system not in seen:
+            seen.append(svc.system)
+    return tuple(seen)
+
 
 # BRANCH. There is no branch-per-environment convention to discover: dev.ps1's Git-Branch (line 1021)
 # returns whatever branch is checked out and defaults to 'main', and deploys run from the working tree.
@@ -270,10 +334,7 @@ PLANT_DATA_IS_READ_ONLY = True
 
 # §10.7. Who may act on production, day one. Adding someone is a deliberate act with a LINEAGE row;
 # there is no PIN path to production (a PIN grants dev/QA only).
-PROD_ALLOWLIST: frozenset[str] = frozenset({
-    "brian_sullivan@mark1online.com",
-    "brendan_sullivan@mark1online.com",
-})
+PROD_ALLOWLIST: frozenset[str] = OATS_OVERNIGHT.prod_allowlist   # the first company's; see Company
 
 # §6.5. How far back a rollback can reach. NOT a display preference: dev.ps1's Run-CleanRevisions keeps
 # the 5 newest revisions per service and DELETES the rest, so this is a hard floor set by what still
