@@ -195,7 +195,7 @@ def test_the_routes_are_reads_only():
     """Phase 1 pin: no route on this surface may carry a mutating name."""
     app, _ = _app()
     paths = {r.path for r in app.routes if r.path.startswith("/api/fleet")}
-    assert paths == {"/api/fleet", "/api/fleet/refresh", "/api/fleet/history"}
+    assert paths == {"/api/fleet", "/api/fleet/refresh", "/api/fleet/history", "/api/fleet/link"}  # link edits a setting, never the fleet
     for verb in ("deploy", "rollback", "delete", "traffic", "secret", "create"):
         assert not any(verb in p for p in paths)
 
@@ -213,3 +213,77 @@ def test_cloud_profile_composes_with_the_not_built_reader_and_says_so():
     assert status == 200
     dev = doc["companies"][0]["apps"][0]["envs"][0]
     assert dev["health"] == "unknown" and dev["note"] == NOT_BUILT
+
+
+# ------------------------------------------------------------------------------ project links
+
+class _Settings:
+    def __init__(self):
+        self.d = {}
+
+    def get(self, k, default=None):
+        return self.d.get(k, default)
+
+    def set(self, k, v):
+        self.d[k] = v
+
+
+def _linked_app(token=True):
+    from types import SimpleNamespace
+    from helix.domain.project_links import links_from, SETTING
+    settings = _Settings()
+    repos = _Repos()
+    if not token:
+        repos.available = lambda: (False, "No GitHub token is connected.")
+    svc = FleetService(_reader(), repos, MemoryFleetState(), links=lambda: links_from(settings.get(SETTING)))
+    app = FastAPI()
+    fleet_routes.mount_fleet(app, SimpleNamespace(fleet=svc, runtime_profile=HelixProfile.DESKTOP, settings=settings))
+    return app, settings
+
+
+def test_every_card_carries_its_link_and_no_token_means_unlinked():
+    app, _ = _linked_app(token=False)
+    _, doc = _call(app, "GET", "/api/fleet")
+    mes = doc["companies"][0]["apps"][0]
+    assert mes["link"]["repo"] == "BrendanSullivanMark1/BRMS_MES_WEB_VERSION"
+    assert mes["link"]["linked"] is False and "token" in mes["link"]["why"]
+    assert mes["link"]["custom"] is False and mes["link"]["folder"] is None
+
+
+def test_saving_a_link_changes_what_the_board_reads_and_survives_in_settings():
+    app, settings = _linked_app()
+    st, doc = _call(app, "PUT", "/api/fleet/link", {"app": "wms", "repo": "https://github.com/Alex-Mark1/WMS_V2.git", "branch": "v3", "folder": "C:\\code\\wms"})
+    assert st == 200
+    wms = doc["companies"][0]["apps"][1]
+    assert wms["link"] == {"repo": "Alex-Mark1/WMS_V2", "branch": "v3", "folder": "C:\\code\\wms", "custom": True, "linked": True, "why": None}
+    assert all(e["repo"] == "Alex-Mark1/WMS_V2" and e["branch"] == "v3" for e in wms["envs"])
+    assert settings.d["project_links"] == {"WMS": {"repo": "Alex-Mark1/WMS_V2", "branch": "v3", "folder": "C:\\code\\wms"}}
+    # the read that follows asks GitHub for the linked repo, and the card is linked
+    _, doc = _call(app, "POST", "/api/fleet/refresh", {"app": "WMS"})
+    wms = doc["companies"][0]["apps"][1]
+    assert wms["link"]["linked"] is True and all(e["repo_ok"] is True for e in wms["envs"] if e["exists"])
+    # clearing every field returns the app to the table
+    st, doc = _call(app, "PUT", "/api/fleet/link", {"app": "WMS"})
+    assert st == 200 and doc["companies"][0]["apps"][1]["link"]["repo"] == "Alex-Mark1/WMS_V1"
+    assert settings.d["project_links"] == {}
+
+
+def test_a_bad_repo_or_app_is_refused_in_one_sentence():
+    app, _ = _linked_app()
+    st, doc = _call(app, "PUT", "/api/fleet/link", {"app": "MES", "repo": "not a repo"})
+    assert st == 400 and "owner/name" in doc["error"]
+    st, doc = _call(app, "PUT", "/api/fleet/link", {"app": "SAP", "repo": "a/b"})
+    assert st == 404
+
+
+def test_a_repo_that_does_not_answer_makes_the_card_unlinked_with_the_reason():
+    app, _ = _linked_app()
+    from types import SimpleNamespace
+    bad = _Repos()
+    bad.read_head = lambda repo, branch: RepoRead(repo=repo, branch=branch, ok=False, problem="The repo Alex-Mark1/WMS_V1 was not found, or the token cannot see it.")
+    svc = FleetService(_reader(), bad, MemoryFleetState())
+    app = FastAPI()
+    fleet_routes.mount_fleet(app, SimpleNamespace(fleet=svc, runtime_profile=HelixProfile.DESKTOP, settings=_Settings()))
+    _, doc = _call(app, "POST", "/api/fleet/refresh", {"app": "MES"})
+    mes = doc["companies"][0]["apps"][0]
+    assert mes["link"]["linked"] is False and "not found" in mes["link"]["why"]

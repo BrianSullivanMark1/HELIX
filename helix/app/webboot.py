@@ -131,6 +131,19 @@ def run_web(open_mode: str = "window") -> int:
         os._exit(0)
 
     app.state.quit = graceful_quit
+
+    # THE LAST FACE (Brian, 2026-09-19): closing the last tab or window stops HELIX too, unless
+    # Settings -> Power turns that off (then it keeps running for watchers, reminders and voice, as
+    # before). The setting is read at the moment the last face leaves, so flipping it needs no restart.
+    def _last_face_gone() -> None:
+        if not bool(container.settings.get("quit_when_closed", True)):
+            _LOG.info("last face closed - staying up (quit_when_closed is off)")
+            return
+        _LOG.info("last face closed - quitting")
+        app.state.quitting = True
+        graceful_quit()
+
+    hub.on_empty = _last_face_gone
     # The dream session's rebuild (DREAM.md §6): it schedules the detached rebuild-and-relaunch job
     # itself, then asks for this same graceful quit through the bus so the new build can take over.
     wire_rebuild_quit(container.bus, app, graceful_quit, ready=shell.quiet_now)

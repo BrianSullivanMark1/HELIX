@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 
 from helix.api.fleet_routes import mount_fleet
 from helix.api.face_routes import mount_face
+from helix.api.say import mount_say
 from helix.domain import cadpy
 from helix.domain.constitution import LOCKED_SETTINGS
 from helix.domain.models import BuildKind
@@ -58,6 +59,12 @@ _SETTING_KEYS = (
     # in (dream_setting below) so a hand-typed "99" hours can never reach the engine.
     "dream_enabled", "dream_start", "dream_hours", "dream_auto_apply", "dream_rebuild",
     "dream_max_drafts",
+    # The helix behind the Console: the two strand colors (Settings -> Voice & look -> The helix).
+    "helix_color_a", "helix_color_b",
+    # Stop HELIX when the last tab or window closes (Settings -> Power). Default on.
+    "quit_when_closed",
+    # The organism (Settings -> Voice & look -> The orb): which body the orb wears, and its tuning.
+    "orb_style", "orb_phase", "orb_hue", "orb_energy",
 )
 # github_token: the fleet's read of each repo's HEAD (drift). Presence reported, value never.
 _SECRET_SETTINGS = ("claude_api_key", "claude_code_oauth_token", "github_token")
@@ -142,13 +149,41 @@ class EventHub:
     def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
 
+    # THE LAST FACE (Brian, 2026-09-19): when the last tab or window disconnects and none comes back
+    # within the grace period, `on_empty` runs - webboot wires it to the graceful quit, behind the
+    # `quit_when_closed` setting. A reload reconnects in well under the grace, so it survives; only
+    # arms once a face has connected at all, so a slow first open never quits a fresh start.
+    on_empty = None            # Callable[[], None] | None, set by webboot
+    empty_grace_s: float = 6.0
+    _seen_one = False
+    _empty_timer = None
+
     def add(self, ws: WebSocket) -> None:
         with self._lock:
             self._clients.add(ws)
+            self._seen_one = True
+            if self._empty_timer is not None:
+                self._empty_timer.cancel()
+                self._empty_timer = None
 
     def remove(self, ws: WebSocket) -> None:
         with self._lock:
             self._clients.discard(ws)
+            if self._clients or not self._seen_one or self.on_empty is None:
+                return
+            if self._empty_timer is not None:
+                self._empty_timer.cancel()
+            self._empty_timer = threading.Timer(self.empty_grace_s, self._maybe_empty)
+            self._empty_timer.daemon = True
+            self._empty_timer.start()
+
+    def _maybe_empty(self) -> None:
+        with self._lock:
+            self._empty_timer = None
+            if self._clients or self.on_empty is None:
+                return
+            fn = self.on_empty
+        fn()
 
     def push(self, event: dict) -> None:
         loop = self._loop
@@ -260,6 +295,8 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
     def stop():
         shell.stop()
         return {"ok": True}
+
+    mount_say(app, shell)  # POST /api/say - the test line, spoken without the model
 
     @app.post("/api/shell/tap")
     def tap():
@@ -1116,13 +1153,19 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         @app.get("/{full_path:path}")
         def spa(full_path: str = ""):
             candidate = (web_dist / full_path) if full_path else (web_dist / "index.html")
+            # index.html is never cached: the assets it points at are content-hashed, so a cached
+            # shell keeps loading an OLD build's assets until a hard refresh (seen on the taskbar
+            # icon, 2026-09-19). Hashed assets under /assets are served by StaticFiles as before.
+            no_cache = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
             try:
                 candidate = candidate.resolve()
                 if candidate.is_file() and web_dist.resolve() in candidate.parents:
+                    if candidate.name == "index.html":
+                        return FileResponse(str(candidate), headers=no_cache)
                     return FileResponse(str(candidate))
             except OSError:
                 pass
-            return FileResponse(str(web_dist / "index.html"))
+            return FileResponse(str(web_dist / "index.html"), headers=no_cache)
     else:
         @app.get("/")
         def no_spa():

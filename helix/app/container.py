@@ -756,6 +756,7 @@ class Container:
             from helix.domain.fleet import GCP_PROJECT, GCP_REGION
             from helix.domain.runtime_profile import HelixProfile, from_env
             from helix.services.fleet import FleetService
+            from helix.domain.project_links import SETTING as LINKS_SETTING, links_from
 
             self.runtime_profile = from_env()
 
@@ -769,7 +770,8 @@ class Container:
                 GcloudFleet(GCP_PROJECT, GCP_REGION)
                 if self.runtime_profile is HelixProfile.DESKTOP else RestFleet()
             )
-            self.fleet = FleetService(_fleet_reader, GithubRepos(_github_token), MemoryFleetState())
+            self.fleet = FleetService(_fleet_reader, GithubRepos(_github_token), MemoryFleetState(),
+                                      links=lambda: links_from(self.settings.get(LINKS_SETTING)))
         except Exception:  # noqa: BLE001 — one faculty must never block boot
             _LOG.warning("fleet unavailable", exc_info=True)
             self.runtime_profile = None

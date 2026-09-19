@@ -55,10 +55,11 @@ function groupByProject(rows: Row[]): [string, Row[]][] {
   return out;
 }
 
-export default function Menu() {
+export default function Menu({ tab: tabProp, embedded = false }: { tab?: string; embedded?: boolean } = {}) {
   const navigate = useHelix((s) => s.navigate);
   const buildsVersion = useHelix((s) => s.buildsVersion);
-  const [tab, setTab] = useState<string>("apps");
+  const [tabState, setTab] = useState<string>("apps");
+  const tab = tabProp ?? tabState; // embedded in the Console, the Console owns the tab
   const [data, setData] = useState<MenuData | null>(null);
   const [status, setStatus] = useState("");
   const [agentName, setAgentName] = useState("");
@@ -222,9 +223,9 @@ export default function Menu() {
   );
 
   return (
-    <div className="h-full overflow-y-auto pt-16 px-8 pb-8" style={{ pointerEvents: "auto" }}>
-      <div className="max-w-[1000px] mx-auto">
-        {(data?.suggested?.length ?? 0) > 0 && (
+    <div className={embedded ? "" : "h-full overflow-y-auto pt-16 px-8 pb-8"} style={{ pointerEvents: "auto" }}>
+      <div className={embedded ? "" : "max-w-[1000px] mx-auto"}>
+        {!embedded && (data?.suggested?.length ?? 0) > 0 && (
           <div className="flex gap-2 overflow-x-auto pb-3">
             {data!.suggested.map((s) => (
               <button key={s.slug} className="glass rounded-full px-4 py-1.5 text-xs shrink-0 elide max-w-[260px]"
@@ -236,7 +237,7 @@ export default function Menu() {
           </div>
         )}
 
-        <div className="flex items-center gap-1 mb-5">
+        {!embedded && <div className="flex items-center gap-1 mb-5">
           {TABS.map(([label, key]) => (
             <button key={key}
               className={key === tab ? "btn btn-primary" : "btn-nav"}
@@ -249,10 +250,10 @@ export default function Menu() {
             onClick={() => navigate({ name: "dream" })}>
             ◐ Dream journal
           </button>
-          <button className="btn btn-primary" onClick={() => navigate({ name: "console" })}>
+          <button className="btn btn-primary" onClick={() => navigate({ name: "talk" })}>
             ＋ New
           </button>
-        </div>
+        </div>}
 
         {status && <div className="text-xs mb-3" style={{ color: "var(--muted)" }}>{status}</div>}
 
@@ -310,7 +311,7 @@ export default function Menu() {
             ))}
             {rows.length === 0 && (
               <div className="text-sm py-8" style={{ color: "var(--muted)" }}>
-                Nothing here yet — describe what you want on the Console and HELIX builds it.
+                Nothing here yet — open the orb (Dev on a card, or the orb bottom-right) and describe what you want; HELIX builds it.
               </div>
             )}
           </div>

@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime, timezone
-from typing import Callable, Sequence
+from typing import Mapping, Callable, Sequence
 
+from helix.domain.project_links import Link, apply_link
 from helix.domain.fleet import (
     Cell, Company, Drift, Health, Service, drift_from, services_for, FLEET,
 )
@@ -35,10 +36,12 @@ def _utcnow() -> datetime:
 class FleetService:
     def __init__(self, reader: FleetReader, repos: RepoReader, state: FleetState, *,
                  clock: Clock | None = None,
-                 on_update: Callable[[Company, list[Cell]], None] | None = None) -> None:
+                 on_update: Callable[[Company, list[Cell]], None] | None = None,
+                 links: Callable[[], Mapping[str, Link]] | None = None) -> None:
         self._reader = reader
         self._repos = repos
         self._state = state
+        self._links = links or (lambda: {})
         self._clock = clock or _utcnow
         self._on_update = on_update
         self._lock = threading.Lock()
@@ -55,13 +58,18 @@ class FleetService:
 
     # ---------------------------------------------------------------- the read
 
+    def services(self, company: Company, app: str | None = None) -> list[Service]:
+        """The table's cells for a company (or one app), each under the user's project link -
+        the repo and branch the board actually reads."""
+        links = self._links()
+        pool = services_for(app) if app else FLEET
+        return [apply_link(s, links) for s in pool if s.company == company.id]
+
     def read_company(self, company: Company, *, timeout_s: float = 90.0) -> list[Cell]:
-        services = [s for s in FLEET if s.company == company.id]
-        return self.read_services(company, services, timeout_s=timeout_s)
+        return self.read_services(company, self.services(company), timeout_s=timeout_s)
 
     def read_app(self, company: Company, app: str, *, timeout_s: float = 45.0) -> list[Cell]:
-        services = [s for s in services_for(app) if s.company == company.id]
-        return self.read_services(company, services, timeout_s=timeout_s)
+        return self.read_services(company, self.services(company, app), timeout_s=timeout_s)
 
     def read_services(self, company: Company, services: Sequence[Service], *,
                       timeout_s: float = 90.0) -> list[Cell]:
@@ -115,7 +123,8 @@ class FleetService:
         drift = drift_from(repo_commit, serving, behind_by=behind_by, in_history=in_history)
         note = self._note(r, head, drift)
         return Cell(service=svc, api=r.api, site=r.site, repo_commit=repo_commit, drift=drift,
-                    behind_by=behind_by, checked_at=now, note=note)
+                    behind_by=behind_by, checked_at=now, note=note,
+                    repo_ok=(bool(head.ok) if head is not None else None))
 
     @staticmethod
     def _note(r: CellRead, head: RepoRead | None, drift: Drift) -> str | None:

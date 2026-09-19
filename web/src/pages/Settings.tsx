@@ -106,9 +106,10 @@ function SectionView({ s, open, toggle, hit, groupLabel }: { s: Section; open: b
     <div className={`st-section${open ? " open" : ""}${hit ? " hit" : ""}`}>
       <button type="button" className="hd" onClick={toggle}>
         <span className="ic">{s.icon}</span>
-        <span className="t">{s.title}</span>
-        <span className="w">— {s.what}</span>
-        {groupLabel && <span className="w" style={{ marginLeft: 8, color: "var(--cyan)" }}>· {groupLabel}</span>}
+        <span className="tt">
+          <span className="t">{s.title}{groupLabel && <span className="g">in {groupLabel}</span>}</span>
+          <span className="w">{s.what}</span>
+        </span>
         <span className="chev">▼</span>
       </button>
       {open && <div className="body">{s.body}</div>}
@@ -240,6 +241,7 @@ export default function Settings() {
         return;
       }
       setNote("Saved.");
+      window.dispatchEvent(new CustomEvent("helix-settings-saved"));
       window.setTimeout(() => navigate({ name: "console" }), 400);
     }).catch(() => setNote("Save failed — try again."));
   };
@@ -278,14 +280,14 @@ export default function Settings() {
               <>
                 <div className="st-update">
                   <span className={`state ${face.face.stale ? "stale" : "fresh"}`}>
-                    {face.face.never_built ? "NEVER BUILT" : face.face.stale ? "SOURCE IS NEWER THAN THE BUILD" : "UP TO DATE"}
+                    {face.face.never_built ? "Never built" : face.face.stale ? "Source is newer than the build" : "Up to date"}
                   </span>
                   <button className={`btn ${face.face.stale ? "btn-primary" : ""}`} disabled={building || !face.face.npm} onClick={buildFace}>
                     {building ? <><span className="st-spin">⟳</span> Building…</> : "⟳ Build the face"}
                   </button>
                 </div>
                 <div className="st-note">
-                  source changed {fmt(face.face.src_changed_at)} · last built {fmt(face.face.built_at)}
+                  this window is running build <b>{__HELIX_BUILD__}</b> · source changed {fmt(face.face.src_changed_at)} · last built {fmt(face.face.built_at)}
                   {!face.face.npm && " · npm is not installed on this machine, so the build cannot run here"}
                 </div>
                 {face.last && (
@@ -312,7 +314,7 @@ export default function Settings() {
               <>
                 <div className="st-update">
                   <span className={`state ${face.backend.stale ? "stale" : "fresh"}`}>
-                    {face.backend.stale ? "PYTHON CHANGED SINCE LAUNCH" : "RUNNING THE CURRENT CODE"}
+                    {face.backend.stale ? "Python changed since launch" : "Running the current code"}
                   </span>
                   <button className={`btn ${face.backend.stale ? "btn-primary" : ""}`} disabled={restarting} onClick={restartBackend}>
                     {restarting ? <><span className="st-spin">⟳</span> Restarting…</> : "⏻ Restart HELIX"}
@@ -566,6 +568,64 @@ export default function Settings() {
         ),
       },
       {
+        id: "orb-body", group: "voice", icon: "◉", title: "The orb",
+        what: "which body HELIX wears on Talk, and how it looks", keys: "orb body organism cell face storm star hue energy look creature",
+        body: (
+          <div className="space-y-3">
+            <div className="st-choices">
+              <Choice on={String(val("orb_style") || "star") === "star"} title="The star" detail="Brendan's plasma sphere with its rings - the original." onPick={() => setVal("orb_style", "star")} />
+              <Choice on={String(val("orb_style") || "star") === "cell"} title="The avatar" detail="A holographic face that condenses out of falling code - it looks at you, its lips move when it speaks, and it pulses at the moments that matter." pill="NEW" onPick={() => setVal("orb_style", "cell")} />
+            </div>
+            {String(val("orb_style") || "star") === "cell" && (
+              <>
+                <Row label="Phase" hint="what the organism is doing">
+                  <select value={String(val("orb_phase") || "face")} onChange={(e) => setVal("orb_phase", e.target.value)}>
+                    <option value="face">Face - the avatar: eyes that follow you, lips that speak</option>
+                    <option value="core">Core - the code sphere without the face</option>
+                    <option value="storm">Storm - arcs race the code</option>
+                  </select>
+                </Row>
+                <Row label={`Hue - ${Number(val("orb_hue") ?? 185)}°`} hint="shifts the whole palette">
+                  <input type="range" min={0} max={360} step={1} className="accent-[#3fe0e0]" style={{ width: 260 }}
+                    value={Number(val("orb_hue") ?? 185)} onChange={(e) => setVal("orb_hue", Number(e.target.value))} />
+                  <span style={{ width: 22, height: 22, borderRadius: 99, background: `hsl(${Number(val("orb_hue") ?? 185)} 85% 55%)`, boxShadow: `0 0 12px hsl(${Number(val("orb_hue") ?? 185)} 85% 55%)` }} />
+                </Row>
+                <Row label={`Energy - ${Number(val("orb_energy") ?? 1).toFixed(1)}×`} hint="its tempo">
+                  <input type="range" min={0.3} max={2.5} step={0.1} className="accent-[#3fe0e0]" style={{ width: 260 }}
+                    value={Number(val("orb_energy") ?? 1)} onChange={(e) => setVal("orb_energy", Number(e.target.value))} />
+                </Row>
+                <div className="st-note">Next rung: a shape it can be asked to take ("be a cat") - needs a shape generator; the face phase is the first step toward it.</div>
+              </>
+            )}
+          </div>
+        ),
+      },
+      {
+        id: "helix-art", group: "voice", icon: "⬡", title: "The helix",
+        what: "the two strand colors behind the Console", keys: "helix colors art strand console background theme",
+        body: (
+          <div className="space-y-3">
+            <Row label="Strand A" hint="the first strand and the signals">
+              <input type="color" value={String(val("helix_color_a") || "#3fe0e0")} onChange={(e) => setVal("helix_color_a", e.target.value)} style={{ width: 54, height: 34, padding: 2 }} />
+              <span className="board-chip dim" style={{ fontFamily: "monospace", fontSize: 12 }}>{String(val("helix_color_a") || "#3fe0e0")}</span>
+            </Row>
+            <Row label="Strand B" hint="the second strand">
+              <input type="color" value={String(val("helix_color_b") || "#2a8cff")} onChange={(e) => setVal("helix_color_b", e.target.value)} style={{ width: 54, height: 34, padding: 2 }} />
+              <span className="board-chip dim" style={{ fontFamily: "monospace", fontSize: 12 }}>{String(val("helix_color_b") || "#2a8cff")}</span>
+            </Row>
+            <div className="flex gap-2 flex-wrap">
+              {([["HELIX", "#3fe0e0", "#2a8cff"], ["Ember", "#ff7a3d", "#ffc857"], ["Aurora", "#3fe07a", "#7c5cff"], ["Rose", "#ff5d8f", "#ffb3c7"], ["Ice", "#bffcfc", "#5aa7ff"]] as const).map(([n, a, b]) => (
+                <button key={n} className="btn text-xs" onClick={() => { setVal("helix_color_a", a); setVal("helix_color_b", b); }}>
+                  <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 99, background: a, marginRight: 4 }} />
+                  <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 99, background: b, marginRight: 8 }} />{n}
+                </button>
+              ))}
+            </div>
+            <div className="st-note">Saved with the rest; the Console picks the new colors up the next time it opens.</div>
+          </div>
+        ),
+      },
+      {
         id: "holo", group: "voice", icon: "◬", title: "Holograms",
         what: "how much detail a model is rendered with", keys: "hologram detail model render quality balanced high",
         body: (
@@ -623,18 +683,21 @@ export default function Settings() {
       // ---------------------------------------------------------------- power
       {
         id: "quit", group: "power", icon: "⏻", title: "Quit HELIX",
-        what: "the only way to stop it fully", keys: "quit stop shutdown power exit close",
+        what: "stop it, and what closing the tab does", keys: "quit stop shutdown power exit close tab window last",
         body: (
+          <div className="space-y-3">
           <div className="flex items-center gap-4 flex-wrap">
             <button className="btn btn-danger" onClick={() => {
               if (!window.confirm("Quit HELIX? Watchers, reminders and voice stop until you launch it again.")) return;
               void api.post("/api/shell/quit").catch(() => undefined);
-              setNote("HELIX is shutting down — this tab can be closed.");
+              window.setTimeout(() => window.dispatchEvent(new CustomEvent("helix-off", { detail: { reason: "You quit HELIX from Settings." } })), 600);
             }}>⏻ Quit HELIX</button>
-            <span className="st-note">
-              Closing the browser tab does not stop HELIX — it keeps working in the background.
-              This button shuts it down fully; the desktop icon starts it again.
-            </span>
+            <span className="st-note">Shuts down the backend and everything it started; the desktop icon starts it again.</span>
+          </div>
+          <Switch checked={Boolean(val("quit_when_closed") ?? true)} onChange={(v) => setVal("quit_when_closed", v)}>
+            Stop HELIX when the last tab or window closes
+          </Switch>
+          <div className="st-note">Off, HELIX keeps running in the background for watchers, reminders and voice after you close the tab.</div>
           </div>
         ),
       },
@@ -679,7 +742,7 @@ export default function Settings() {
     { g: "presence", k: "Conversation", v: Boolean(val("voice_input_on")) ? "Hands-free" : "Push to talk",
       d: `wake word "${String(val("wake_word") || "HELIX")}" · ${String(val("narration_mode") ?? "off") === "off" ? "quiet while working" : "speaks milestones"}` },
     { g: "voice", k: "Voice & look", v: String(val("tts_voice") ?? "en-GB-RyanNeural").replace(/Neural$/, ""),
-      d: `${Number(val("tts_rate") ?? 1).toFixed(1)}× · holograms ${String(val("model_detail") ?? "balanced")}` },
+      d: `${Number(val("tts_rate") ?? 1).toFixed(1)}× · holograms ${String(val("model_detail") ?? "balanced")} · helix ${String(val("helix_color_a") || "#3fe0e0")}` },
     { g: "camera", k: "Camera", v: String(val("camera_device") || "Any camera"), d: `${Number(val("camera_clip_seconds") ?? 6)}s clips · ${Boolean(val("camera_mirror")) ? "mirrored" : "not mirrored"}` },
     { g: "power", k: "Power", v: "Running", d: "quit from here; the icon starts it again", color: "var(--done)" },
   ];
@@ -754,12 +817,13 @@ export default function Settings() {
               </>
             ) : (
               <>
-                <div className="flex items-center gap-3 mb-2">
-                  <span className="text-[18px]" style={{ color: "var(--cyan)" }}>{active.icon}</span>
+                <div className="st-group">
+                  <span className="ic">{active.icon}</span>
                   <div>
-                    <div className="font-display text-[14px] font-bold tracking-[3px]" style={{ color: "var(--cyan)" }}>{active.title.toUpperCase()}</div>
-                    <div className="st-tag">{active.sub}</div>
+                    <div className="t">{active.title.toUpperCase()}</div>
+                    <div className="s">{active.sub}</div>
                   </div>
+                  <span className="n">{shown.length} SECTION{shown.length === 1 ? "" : "S"}</span>
                 </div>
                 {shown.map((s) => (
                   <SectionView key={s.id} s={s} open={!closed[s.id]} toggle={() => toggle(s.id)} />

@@ -206,6 +206,7 @@ class Cell:
     behind_by: int | None = None         # commits behind HEAD, when countable
     checked_at: datetime | None = None
     note: str | None = None              # ONE plain sentence a human may read; ASCII, no paths
+    repo_ok: bool | None = None          # did the repo answer for this cell's HEAD (None: not asked)
 
     @property
     def health(self) -> Health:

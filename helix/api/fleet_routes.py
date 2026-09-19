@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
+from helix.domain.project_links import SETTING, parse_link
 from helix.domain.fleet import COMPANIES, FLEET, Cell, Serving, apps, company
 from helix.ports.fleet import FleetEvent
 
@@ -77,6 +78,7 @@ def cell_dict(c: Cell) -> dict[str, Any]:
         "repo_commit": c.repo_commit,
         "checked_at": _ts(c.checked_at),
         "note": c.note,
+        "repo_ok": c.repo_ok,
         "needs_attention": c.needs_attention,
         "api": serving_dict(c.api),
         "site": serving_dict(c.site),
@@ -91,24 +93,50 @@ def event_dict(e: FleetEvent) -> dict[str, Any]:
     }
 
 
+def link_dict(app: str, rows: list[dict], links: dict, repos_ok: bool, repos_why: str | None) -> dict[str, Any]:
+    """The card's gear: where this app is linked, and whether the link works. `linked` is false
+    when there is no token, or the repo did not answer the last read; `why` says which."""
+    link = links.get(app.upper())
+    stored = link.as_dict() if link else {}
+    answered = [r["repo_ok"] for r in rows if r.get("repo_ok") is not None]
+    why = None
+    if not repos_ok:
+        why = repos_why
+    elif answered and not all(answered):
+        why = next((r["note"] for r in rows if r.get("repo_ok") is False and r.get("note")), "The repo did not answer.")
+    return {
+        "repo": rows[0]["repo"] if rows else None,
+        "branch": rows[0]["branch"] if rows else None,
+        "folder": stored.get("folder"),
+        "custom": bool(stored.get("repo") or stored.get("branch")),
+        "linked": why is None,
+        "why": why,
+    }
+
+
 def board_dict(fleet, *, profile: str | None) -> dict[str, Any]:
     """Company -> app cards -> environment rows. Cells the service has never read come back as
     the table's own knowledge (exists / names) with health and drift UNKNOWN, so the board has a
     shape before the first refresh rather than an empty page."""
     companies = []
+    readiness_rows = fleet.readiness()
+    repos_ok, repos_why = next(((ok, why) for what, ok, why in readiness_rows if what == "repos"), (True, None))
+    links = fleet._links() if hasattr(fleet, "_links") else {}
     for co in COMPANIES:
         cells, at = fleet.snapshot(co)
         seen = {c.service.key: c for c in cells}
         cards = []
         for app in apps(co.id):
             rows = []
-            for svc in FLEET:
-                if svc.company == co.id and svc.app == app:
-                    cell = seen.get(svc.key) or Cell(service=svc)
-                    rows.append(cell_dict(cell))
+            for svc in fleet.services(co, app):
+                cell = seen.get(svc.key) or Cell(service=svc)
+                if cell.service.repo != svc.repo or cell.service.branch != svc.branch:
+                    cell = Cell(service=svc)     # the link changed since this cell was read: show the new target, unread
+                rows.append(cell_dict(cell))
             cards.append({
                 "app": app,
                 "repo": rows[0]["repo"] if rows else None,
+                "link": link_dict(app, rows, links, repos_ok, repos_why),
                 "envs": rows,
                 "needs_attention": any(r["needs_attention"] for r in rows),
             })
@@ -116,7 +144,7 @@ def board_dict(fleet, *, profile: str | None) -> dict[str, Any]:
             "id": co.id, "label": co.label, "gcp_project": co.gcp_project, "region": co.region,
             "checked_at": _ts(at), "apps": cards,
         })
-    readiness = [{"what": what, "ok": ok, "why": why} for what, ok, why in fleet.readiness()]
+    readiness = [{"what": what, "ok": ok, "why": why} for what, ok, why in readiness_rows]
     return {"profile": profile, "readiness": readiness, "companies": companies}
 
 
@@ -171,6 +199,38 @@ def mount_fleet(app: FastAPI, container) -> None:
                 await asyncio.to_thread(fleet.read_company, co)
         finally:
             reading.release()
+        return board_dict(fleet, profile=_profile())
+
+    @app.put("/api/fleet/link")
+    async def fleet_link(request: Request):
+        """Save one app's project link (repo / branch / folder). Empty fields fall back to the
+        table. The next Read uses it; the board answers at once with the new target, unread."""
+        fleet = _fleet()
+        if fleet is None:
+            return _down()
+        settings = getattr(c, "settings", None)
+        if settings is None:
+            return JSONResponse({"error": "Settings are not available on this HELIX."}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        co = company(str(body.get("company") or COMPANIES[0].id))
+        app_name = str(body.get("app") or "").strip().upper()
+        if co is None or app_name not in apps(co.id):
+            return JSONResponse({"error": f"no such app: {app_name or '?'}"}, status_code=404)
+        link, why = parse_link(body)
+        if why:
+            return JSONResponse({"error": why}, status_code=400)
+        stored = settings.get(SETTING) or {}
+        stored = dict(stored) if isinstance(stored, dict) else {}
+        if link.as_dict():
+            stored[app_name] = link.as_dict()
+        else:
+            stored.pop(app_name, None)
+        settings.set(SETTING, stored)
         return board_dict(fleet, profile=_profile())
 
     @app.get("/api/fleet/history")

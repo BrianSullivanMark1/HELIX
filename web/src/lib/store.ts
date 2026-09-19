@@ -89,15 +89,15 @@ export interface Attachment {
 }
 
 export type Page =
-  | { name: "console" }
-  | { name: "menu" }
+  | { name: "console" } // the merged Console: the fleet's cards + protocols / agents / holograms / vault
+  | { name: "talk"; project?: string } // the orb + the conversation (formerly the Console page)
+  | { name: "menu" } // kept for old links; renders the Console
   | { name: "settings" }
   | { name: "dream" } // the Dream journal: what the nights found, verified, tried and applied
   | { name: "board" } // the Board: the company's apps and environments, as last read (fleet)
   | { name: "vault"; slug: string; title: string }
   | { name: "studio"; slug: string; title: string }
-  | { name: "viewer"; slug: string; title: string; url: string; server?: boolean }
-  | { name: "sap"; table?: string }; // the SAP data-model panel, opened on a table when given
+  | { name: "viewer"; slug: string; title: string; url: string; server?: boolean };
 
 interface ConnectModal {
   service: string;

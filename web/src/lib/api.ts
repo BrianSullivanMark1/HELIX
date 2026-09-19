@@ -113,6 +113,7 @@ export function connectEvents(onEvent: WsHandler, onOpen?: () => void): () => vo
   let ws: WebSocket | null = null;
   let closed = false;
   let retry = 800;
+  let refused = 0;
 
   const open = () => {
     if (closed) return;
@@ -130,7 +131,16 @@ export function connectEvents(onEvent: WsHandler, onOpen?: () => void): () => vo
       }
     };
     ws.onclose = () => {
-      if (!closed) setTimeout(open, retry = Math.min(retry * 1.5, 8000));
+      if (closed) return;
+      // Was the backend simply gone? Ask once; connection refused three times in a row means it
+      // has stopped, and the face says so instead of retrying into a dead port forever.
+      fetch("/api/snapshot", { headers: { "X-Helix-Token": token } })
+        .then((r) => { refused = 0; if (r.status === 503) { closed = true; window.dispatchEvent(new CustomEvent("helix-off", { detail: { reason: "HELIX is shutting down." } })); } })
+        .catch(() => {
+          refused += 1;
+          if (refused >= 3) { closed = true; window.dispatchEvent(new CustomEvent("helix-off", { detail: { reason: "The backend is no longer answering on this port." } })); }
+        })
+        .finally(() => { if (!closed) setTimeout(open, retry = Math.min(retry * 1.5, 8000)); });
     };
     ws.onerror = () => ws?.close();
   };

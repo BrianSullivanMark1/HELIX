@@ -93,19 +93,46 @@
 }
 .st-card .d { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.35; }
 
-/* a section inside a group */
-.st-section { border-bottom: 1px solid color-mix(in srgb, var(--cyan) 10%, var(--line)); padding: 6px 0 14px; }
-.st-section > .hd {
-  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-  background: transparent; border: none; color: var(--text); font: inherit; padding: 10px 0;
+/* a section inside a group: a card with a title block you can find at a glance. The title is
+   plain text (not the display face - that is reserved for the group and the page), the "what"
+   sits under it, the number on the left keeps sections countable, and the open state lights a
+   bar down the left edge. */
+.st-section {
+  position: relative; margin: 0 0 12px; border-radius: 14px;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--panel-hi) 70%, transparent), color-mix(in srgb, var(--panel) 55%, transparent));
+  border: 1px solid var(--line); transition: border-color 0.2s;
 }
-.st-section > .hd .ic { color: var(--cyan); width: 18px; text-align: center; }
-.st-section > .hd .t { font-family: "Orbitron", "Inter", sans-serif; font-size: 12px; letter-spacing: 3px; font-weight: 700; color: var(--cyan); }
-.st-section > .hd .w { font-size: 12px; color: var(--muted); }
-.st-section > .hd .chev { margin-left: auto; color: var(--muted); transition: transform 0.2s; font-size: 11px; }
+.st-section.open { border-color: color-mix(in srgb, var(--cyan) 28%, var(--line)); }
+.st-section.open::before {
+  content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 3px;
+  background: var(--cyan); box-shadow: 0 0 10px color-mix(in srgb, var(--cyan) 60%, transparent);
+}
+.st-section > .hd {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  background: transparent; border: none; color: var(--text); font: inherit; padding: 13px 16px 12px 18px;
+}
+.st-section > .hd .ic {
+  width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; flex-shrink: 0;
+  background: color-mix(in srgb, var(--cyan) 9%, transparent); border: 1px solid color-mix(in srgb, var(--cyan) 22%, transparent);
+  color: var(--cyan); font-size: 15px;
+}
+.st-section > .hd .tt { min-width: 0; flex: 1; }
+.st-section > .hd .t { font-size: 15px; font-weight: 700; letter-spacing: 0.2px; color: var(--text); }
+.st-section.open > .hd .t { color: #eafcfc; }
+.st-section > .hd .w { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.st-section > .hd .g { font-size: 11px; color: var(--cyan); margin-left: 8px; }
+.st-section > .hd .chev { color: var(--muted); transition: transform 0.2s; font-size: 11px; flex-shrink: 0; }
 .st-section.open > .hd .chev { transform: rotate(180deg); }
-.st-section .body { padding: 2px 0 0 28px; }
-.st-section.hit { background: linear-gradient(90deg, color-mix(in srgb, var(--cyan) 6%, transparent), transparent 60%); border-radius: 10px; padding-left: 8px; }
+.st-section .body { padding: 2px 18px 16px 62px; border-top: 1px solid color-mix(in srgb, var(--cyan) 8%, var(--line)); margin-top: 2px; padding-top: 12px; }
+.st-section.hit { border-color: color-mix(in srgb, var(--cyan) 40%, var(--line)); }
+
+/* the group's own title block at the top of its pane */
+.st-group { display: flex; align-items: center; gap: 14px; padding: 4px 0 14px; margin-bottom: 14px; border-bottom: 1px solid color-mix(in srgb, var(--cyan) 14%, var(--line)); }
+.st-group .ic { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; font-size: 19px; color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 10%, transparent); border: 1px solid color-mix(in srgb, var(--cyan) 30%, transparent); box-shadow: 0 0 18px color-mix(in srgb, var(--cyan) 18%, transparent); }
+.st-group .t { font-family: "Orbitron", "Inter", sans-serif; font-size: 16px; font-weight: 700; letter-spacing: 4px; color: var(--cyan); text-shadow: 0 0 14px color-mix(in srgb, var(--cyan) 45%, transparent); }
+.st-group .s { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.st-group .n { margin-left: auto; font-size: 11px; letter-spacing: 2px; color: var(--muted); }
 
 /* a row: label on the left, control on the right */
 .st-row { display: flex; align-items: center; gap: 14px; padding: 8px 0; font-size: 13px; }
@@ -173,9 +200,13 @@
 .btn-nav.nav-alert::after { content: " ●"; font-size: 8px; vertical-align: middle; }
 
 .st-update { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.st-update .state { font-family: "Orbitron", "Inter", sans-serif; font-size: 12px; letter-spacing: 2px; }
-.st-update .state.stale { color: var(--working); text-shadow: 0 0 12px color-mix(in srgb, var(--working) 50%, transparent); }
-.st-update .state.fresh { color: var(--done); }
+.st-update .state {
+  display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; letter-spacing: 0.3px;
+  padding: 6px 12px 6px 10px; border-radius: 999px; border: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 70%, transparent);
+}
+.st-update .state::before { content: ""; width: 8px; height: 8px; border-radius: 999px; background: currentColor; box-shadow: 0 0 8px currentColor; }
+.st-update .state.stale { color: var(--working); border-color: color-mix(in srgb, var(--working) 45%, transparent); }
+.st-update .state.fresh { color: var(--done); border-color: color-mix(in srgb, var(--done) 40%, transparent); }
 .st-output {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.45;
   white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 10px 12px; border-radius: 10px;
@@ -183,3 +214,5 @@
 }
 @keyframes st-spin { to { transform: rotate(360deg); } }
 .st-spin { display: inline-block; animation: st-spin 1s linear infinite; }
+
+.board-chip.dim { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; padding: 2px 7px; border-radius: 6px; border: 1px solid var(--line); color: var(--muted); }

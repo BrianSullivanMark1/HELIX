@@ -1,15 +1,14 @@
 // The shell: the orb behind everything, a reveal nav, one routed page, and the global panels.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Orb from "./components/Orb";
+import Organism, { type OrganismLook } from "./components/Organism";
 import CameraDock from "./components/CameraDock";
 import CartDock from "./components/CartDock";
 import ConnectModal from "./components/ConnectModal";
 import StateColor from "./components/StateColor";
-import Console from "./pages/Console";
+import ConsolePage from "./pages/Console";
+import Talk from "./pages/Talk";
 import Dream from "./pages/Dream";
-import Menu from "./pages/Menu";
-import Sap from "./pages/Sap";
-import BoardPage from "./pages/Board";
 import Settings from "./pages/Settings";
 import Studio from "./pages/Studio";
 import Vault from "./pages/Vault";
@@ -39,8 +38,30 @@ export default function App() {
   const dream = useHelix((s) => s.dream);
   const connectModal = useHelix((s) => s.connectModal);
   const lightbox = useHelix((s) => s.lightbox);
-  const [navShown, setNavShown] = useState(true);
-  const navTimer = useRef<number>(0);
+  const [menuOpen, setMenuOpen] = useState(false);
+  // HELIX IS OFF: the backend quit (Settings -> Power, the last tab rule, or a crash). The stream
+  // stops trying, the WebGL pages unmount, and one calm screen says how to start it again.
+  const [off, setOff] = useState<string | null>(null);
+  // THE ORB'S BODY (Settings -> Voice & look -> The orb): the avatar unless "The star" was chosen.
+  const [body, setBody] = useState<{ style: "star" | "cell"; look: OrganismLook }>({ style: "cell", look: { phase: "face", hue: 185, energy: 1 } });
+  useEffect(() => {
+    const read = () => void api.get<{ values?: Record<string, unknown> }>("/api/settings").then((d) => {
+      const v = d.values ?? {};
+      const phase = String(v.orb_phase || "face");
+      setBody({
+        style: v.orb_style === "star" ? "star" : "cell",
+        look: { phase: phase === "core" || phase === "cell" || phase === "storm" ? phase : "face", hue: Number(v.orb_hue ?? 185) || 185, energy: Math.max(0.3, Math.min(2.5, Number(v.orb_energy ?? 1) || 1)) },
+      });
+    }).catch(() => undefined);
+    read();
+    window.addEventListener("helix-settings-saved", read);
+    return () => window.removeEventListener("helix-settings-saved", read);
+  }, []);
+  useEffect(() => {
+    const onOff = (e: Event) => setOff((e as CustomEvent).detail?.reason || "HELIX has stopped.");
+    window.addEventListener("helix-off", onOff);
+    return () => window.removeEventListener("helix-off", onOff);
+  }, []);
   // Updates waiting (Settings -> Updates): the built face is behind its source, or the Python
   // changed since launch. Polled gently; the Settings button pulses until it is dealt with.
   const [updates, setUpdates] = useState(false);
@@ -115,34 +136,34 @@ export default function App() {
     return () => window.removeEventListener("helix-open-build", handler);
   }, [navigate]);
 
-  // Nav reveal: shown at launch, tucked after 5s on the console; a strip at the top re-reveals.
-  useEffect(() => {
-    if (page.name === "console") {
-      navTimer.current = window.setTimeout(() => setNavShown(false), 5000);
-      return () => window.clearTimeout(navTimer.current);
-    }
-    setNavShown(true);
-    return undefined;
-  }, [page.name]);
+  // The header stays put - it used to tuck itself away on Talk after 5 s and nobody could find it.
 
-  const onConsole = page.name === "console";
+  const onConsole = page.name === "talk"; // the orb page: nav tucks away, the orb fills the window
+
+  if (off) {
+    return (
+      <div className="h-full w-full relative overflow-hidden flex items-center justify-center">
+        <div className="atmosphere" style={{ zIndex: 1 }} />
+        <div className="glass rounded-2xl p-8 max-w-[460px] text-center relative" style={{ zIndex: 2 }}>
+          <div className="font-display text-glow-cyan text-[22px] font-bold tracking-[4px]" style={{ color: "var(--cyan)" }}>◉ HELIX IS OFF</div>
+          <div className="text-[13px] mt-3" style={{ color: "var(--muted)" }}>{off}</div>
+          <div className="text-[13px] mt-4">Start it again from the desktop icon; this tab can be closed.</div>
+          <button className="btn btn-primary mt-5" onClick={() => window.location.reload()}>Try to reconnect</button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full w-full relative overflow-hidden">
       <div className="atmosphere" style={{ zIndex: 1 }} />
-      {onConsole && <Orb />}
+      {onConsole && (body.style === "cell" ? <Organism look={body.look} /> : <Orb />)}
       <StateColor />
 
       {/* reveal strip */}
-      <div
-        className="absolute top-0 left-0 right-0 h-3"
-        style={{ zIndex: 30 }}
-        onMouseEnter={() => setNavShown(true)}
-      />
       <nav
-        className="absolute top-0 left-0 right-0 flex items-center px-5 py-3 transition-transform duration-300"
-        style={{ zIndex: 29, transform: navShown ? "translateY(0)" : "translateY(-110%)" }}
-        onMouseLeave={() => onConsole && setNavShown(false)}
+        className="absolute top-0 left-0 right-0 flex items-center px-5 py-3"
+        style={{ zIndex: 29 }}
       >
         <button
           className="font-display text-glow-cyan text-[17px] font-bold tracking-[3px] bg-transparent border-none"
@@ -152,43 +173,52 @@ export default function App() {
           ◉ HELIX
         </button>
         <div className="flex-1" />
-        <div className="glass rounded-xl px-1 py-0.5 flex gap-0.5">
-          {(
-            [
-              ["◉ Console", { name: "console" }],
-              ["☰ Menu", { name: "menu" }],
-              ["⬡ Board", { name: "board" }],
-              ["◐ Dream", { name: "dream" }],
-              ["⌗ SAP", { name: "sap" }],
-              ["⚙ Settings", { name: "settings" }],
-            ] as [string, Page][]
-          ).map(([label, target]) => (
-            <button
-              key={label}
-              className={`btn-nav${target.name === "settings" && updates && page.name !== "settings" ? " nav-alert" : ""}`}
-              style={page.name === target.name ? { color: "var(--cyan)" } : undefined}
-              title={target.name === "settings" && updates ? "Updates waiting - open Settings" : undefined}
-              onClick={() => navigate(target)}
-            >
-              {label}
-            </button>
-          ))}
+        <div className="glass rounded-xl px-1 py-0.5 flex gap-0.5 items-center">
+          <button className="btn-nav" style={page.name === "console" || page.name === "menu" || page.name === "board" ? { color: "var(--cyan)" } : undefined}
+            onClick={() => navigate({ name: "console" })}>▦ Console</button>
+          <button className="btn-nav" style={page.name === "talk" ? { color: "var(--cyan)" } : undefined}
+            onClick={() => navigate({ name: "talk" })}>◉ Talk</button>
+          <span style={{ width: 1, height: 18, background: "var(--line)", margin: "0 4px" }} />
+          <div className="relative">
+            <button className={`btn-nav${updates && page.name !== "settings" ? " nav-alert" : ""}`} title={updates ? "Updates waiting - open Settings" : "Menu"}
+              onClick={() => setMenuOpen((m) => !m)}>☰</button>
+            {menuOpen && (
+              <div className="glass rounded-xl p-1 absolute right-0 mt-1 flex flex-col min-w-[190px]" style={{ zIndex: 40 }}
+                onMouseLeave={() => setMenuOpen(false)}>
+                {([
+                  ["⚙ Settings" + (updates ? "  ●" : ""), { name: "settings" }],
+                  ["◐ Dream journal", { name: "dream" }],
+                ] as [string, Page][]).map(([label, target]) => (
+                  <button key={label} className="btn-nav text-left" style={updates && target.name === "settings" ? { color: "var(--working)" } : undefined}
+                    onClick={() => { setMenuOpen(false); navigate(target); }}>{label}</button>
+                ))}
+                <div className="px-3 pt-1 text-[10px] tracking-wider" style={{ color: "var(--muted)" }} title="When the page you are looking at was built (UTC)">
+                  build {__HELIX_BUILD__}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </nav>
 
       <main className="absolute inset-0" style={{ zIndex: 10, pointerEvents: "none" }}>
-        {page.name === "console" && <Console />}
-        {page.name === "menu" && <Menu />}
+        {(page.name === "console" || page.name === "menu" || page.name === "board") && <ConsolePage />}
+        {page.name === "talk" && <Talk project={page.project} />}
         {page.name === "settings" && <Settings />}
         {page.name === "dream" && <Dream />}
-        {page.name === "board" && <BoardPage />}
-        {page.name === "sap" && <Sap table={page.table} />}
         {page.name === "vault" && <Vault slug={page.slug} title={page.title} />}
         {page.name === "studio" && <Studio slug={page.slug} title={page.title} />}
         {page.name === "viewer" && (
           <Viewer slug={page.slug} title={page.title} url={page.url} server={page.server} />
         )}
       </main>
+
+      {/* the docked orb: HELIX is one click away on every page; Talk is the full orb */}
+      {!onConsole && (
+        <button className="orb-dock" title="Talk to HELIX" onClick={() => navigate({ name: "talk" })} style={{ zIndex: 25 }}>
+          <span className="orb-dock-core" />
+        </button>
+      )}
 
       {/* The dream chip: a session of self-improvement is drafting in the background right now.
           Small and out of the way (under the nav, clear of the legend strip and the input row);
