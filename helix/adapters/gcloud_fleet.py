@@ -23,8 +23,8 @@ label answered, because the health body is also the only source of `db`, `readOn
 (appCheckRequired among them) - seen live: brms-mes-api-dev answered
 {"db":"BRMS_database_dev","ok":true,"readOnly":false,"flags":{...},"version":"3dc6631"}.
 
-The HOSTING half of a cell is NOT read in this version. `site` comes back as UNKNOWN with a note
-saying so, rather than as absent or healthy. §6.1's open question stands; this adapter is honest
+The HOSTING half of a cell is NOT read in this version. `site` comes back as None (no reading) with
+the note in `detail`, rather than as absent, unknown or healthy. §6.1's open question stands; this adapter is honest
 about which half it can see.
 """
 from __future__ import annotations
@@ -221,8 +221,7 @@ class GcloudFleet:
                         timeout_s)
         if _is_not_found(svc):
             return CellRead(service=service, ok=True,
-                            api=Serving(health=Health.ABSENT),
-                            site=Serving(health=Health.UNKNOWN),
+                            api=Serving(health=Health.ABSENT), site=None,
                             problem=NOT_FOUND_NOTE, detail=(svc.err or "")[:400],
                             seconds=time.monotonic() - t0)
         bad = classify(svc)
@@ -249,8 +248,10 @@ class GcloudFleet:
         api = self._api_half(sdoc, rdocs, timeout_s)
         served = tuple(str((r.get("metadata") or {}).get("name") or "")
                        for r in rdocs if (r.get("metadata") or {}).get("name"))
-        return CellRead(service=service, ok=True, api=api,
-                        site=Serving(health=Health.UNKNOWN),
+        # The hosting half is NOT read yet: `site=None` means "no reading", and the cell's health is
+        # then the API half's alone. (An UNKNOWN site half would drag every cell to UNKNOWN via
+        # worst-of-halves and the board would say nothing - seen on the first render, 2026-09-17.)
+        return CellRead(service=service, ok=True, api=api, site=None,
                         served_revisions=served, problem=None,
                         detail=HOSTING_NOTE, seconds=time.monotonic() - t0)
 

@@ -740,6 +740,40 @@ class Container:
         _attach_sap = getattr(self.tools, "attach_sap", None)
         if callable(_attach_sap) and self.sap is not None:
             _attach_sap(self.sap)
+        # THE FLEET (HELIX_MARK1_PLAN.md §7, §17): the company's apps and environments on Cloud Run,
+        # read - never changed - in Phase 1. Composed BY PROFILE (domain/runtime_profile.py): the
+        # DESKTOP profile reads through the user's own gcloud login; the CLOUD profile has no CLI
+        # and no user login, so it gets the REST reader, which today says honestly that it is not
+        # built. The GitHub token is read per call (settings 'github_token', then the environment)
+        # so pasting it into Settings works on the next refresh. Wrapped like the SAP faculty: a
+        # fleet that cannot compose reads as absent (the routes answer 503 with one sentence) and
+        # can never keep the app from booting.
+        try:
+            from helix.adapters.gcloud_fleet import GcloudFleet
+            from helix.adapters.github_fleet import GithubRepos
+            from helix.adapters.memory_state import MemoryFleetState
+            from helix.adapters.rest_fleet import RestFleet
+            from helix.domain.fleet import GCP_PROJECT, GCP_REGION
+            from helix.domain.runtime_profile import HelixProfile, from_env
+            from helix.services.fleet import FleetService
+
+            self.runtime_profile = from_env()
+
+            def _github_token() -> str | None:
+                return (
+                    (self.settings.get("github_token") or os.environ.get("GITHUB_TOKEN") or "")
+                    .strip() or None
+                )
+
+            _fleet_reader = (
+                GcloudFleet(GCP_PROJECT, GCP_REGION)
+                if self.runtime_profile is HelixProfile.DESKTOP else RestFleet()
+            )
+            self.fleet = FleetService(_fleet_reader, GithubRepos(_github_token), MemoryFleetState())
+        except Exception:  # noqa: BLE001 — one faculty must never block boot
+            _LOG.warning("fleet unavailable", exc_info=True)
+            self.runtime_profile = None
+            self.fleet = None
         self.subscription._tools = self.tools  # late-bind (tools → services ctor cycle, like agents)
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM,
@@ -827,6 +861,16 @@ class Container:
             queue=self.build_queue,
         )
         self.restart = Restarter(self.paths.root / "main.py", self.paths.root).restart
+        # UPDATES (Settings -> Updates): is the built face behind its source, has the Python changed
+        # since this process started, and the one build the Update button runs. Human-only routes
+        # (api/face_routes.py); never a tool. Wrapped: a face that cannot compose reads as absent.
+        try:
+            from helix.adapters.face_build import FaceBuilder
+
+            self.face = FaceBuilder(self.paths.root)
+        except Exception:  # noqa: BLE001 — never block boot
+            _LOG.warning("face builder unavailable", exc_info=True)
+            self.face = None
 
         # Voice (optional; both degrade to text-only / silent if unavailable). TTS uses the chosen
         # neural accent (edge-tts), falling back to the local OS voice when offline/unavailable.

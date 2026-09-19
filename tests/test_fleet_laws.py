@@ -386,3 +386,20 @@ def test_the_domain_imports_no_other_helix_layer():
                    "from helix.ui", "from helix.api", "from helix.app",
                    "import subprocess", "import requests", "import urllib"):
         assert banned not in src, f"domain/fleet.py must not contain {banned!r}"
+
+
+def test_wms_and_mrp_service_names_follow_dev_ps1_for_every_environment():
+    """dev.ps1: ApiSvc="wms-$Env-flask" / "mrp-$Env-flask". The brief had bare 'wms-dev'; the first
+    live read (2026-09-17) came back ABSENT for four cells and this is the pin so it cannot regress."""
+    for system, prefix in (("WMS", "wms"), ("MRP", "mrp")):
+        for env in fleet.Env:
+            svc = fleet.find(system, env)
+            assert svc is not None and svc.run_service == f"{prefix}-{env.value}-flask", svc
+
+
+def test_mes_prod_drops_the_suffix_and_echo_has_only_dev():
+    assert fleet.find("MES", fleet.Env.PROD).run_service == "brms-mes-api"
+    assert fleet.find("MES", fleet.Env.QA).run_service == "brms-mes-api-qa"
+    assert fleet.find("ECHO", fleet.Env.DEV).run_service == "brms-echo-api-dev"
+    assert fleet.find("ECHO", fleet.Env.QA).run_service is None
+    assert fleet.find("ECHO", fleet.Env.PROD).run_service is None

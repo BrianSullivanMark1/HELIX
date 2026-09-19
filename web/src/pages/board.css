@@ -1,0 +1,239 @@
+/* THE BOARD's own art - evolution + neural network, carried by the visuals only (the nouns stay
+   plain). Everything is scoped to .board-* so nothing here reaches the rest of the face.
+   Layers, back to front: the 3D helix (Three.js) -> the neural net (canvas) -> the HUD overlay
+   (hex grid + scanlines) -> the content. */
+
+/* ------------------------------------------------------------------ the backdrop layers */
+.board-stage { position: absolute; inset: 0; overflow: hidden; }
+.board-layer { position: absolute; inset: 0; pointer-events: none; }
+.board-layer canvas { display: block; width: 100% !important; height: 100% !important; }
+
+.board-helix { opacity: 1; }
+.board-mesh {
+  opacity: 1;
+  mask-image: radial-gradient(ellipse at 50% 40%, black 45%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 40%, black 45%, transparent 100%);
+}
+
+/* The HUD overlay: a hex lattice drifting slowly, faint scanlines, a vignette that pools the
+   light where the cards are. */
+@keyframes board-lattice { from { background-position: 0 0; } to { background-position: 0 -104px; } }
+.board-hud::before {
+  content: "";
+  position: absolute; inset: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='60' height='104' viewBox='0 0 60 104'><path d='M30 2 L58 18 L58 50 L30 66 L2 50 L2 18 Z M30 54 L58 70 L58 102 L30 118 L2 102 L2 70 Z' fill='none' stroke='%233fe0e0' stroke-width='0.7'/></svg>");
+  background-size: 60px 104px;
+  opacity: 0.045;
+  animation: board-lattice 40s linear infinite;
+}
+.board-hud::after {
+  content: "";
+  position: absolute; inset: 0;
+  background:
+    repeating-linear-gradient(0deg, transparent 0 3px, rgba(0, 0, 0, 0.09) 3px 4px),
+    radial-gradient(ellipse at 50% 20%, transparent 45%, rgba(5, 7, 10, 0.45) 100%);
+}
+
+/* HUD corner ticks on the page itself */
+.board-corner {
+  position: absolute; width: 26px; height: 26px; pointer-events: none; opacity: 0.55;
+  border-color: var(--cyan); border-style: solid; border-width: 0;
+}
+.board-corner.tl { top: 58px; left: 14px; border-top-width: 1px; border-left-width: 1px; }
+.board-corner.tr { top: 58px; right: 14px; border-top-width: 1px; border-right-width: 1px; }
+.board-corner.bl { bottom: 14px; left: 14px; border-bottom-width: 1px; border-left-width: 1px; }
+.board-corner.br { bottom: 14px; right: 14px; border-bottom-width: 1px; border-right-width: 1px; }
+
+/* ------------------------------------------------------------------ reading: the sweep */
+@keyframes board-radar { to { transform: rotate(360deg); } }
+.board-radar {
+  position: absolute; inset: -40%;
+  pointer-events: none;
+  background: conic-gradient(from 0deg, transparent 0 78%, color-mix(in srgb, var(--cyan) 18%, transparent) 96%, color-mix(in srgb, var(--cyan) 34%, transparent) 100%);
+  animation: board-radar 2.6s linear infinite;
+  mask-image: radial-gradient(circle at 50% 50%, black 0, black 38%, transparent 62%);
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, black 0, black 38%, transparent 62%);
+  mix-blend-mode: screen;
+}
+@keyframes board-progress { 0% { left: -30%; width: 30%; } 60% { width: 45%; } 100% { left: 100%; width: 30%; } }
+.board-progress {
+  position: absolute; top: 54px; left: 0; right: 0; height: 2px; overflow: hidden; pointer-events: none;
+  background: color-mix(in srgb, var(--cyan) 12%, transparent);
+}
+.board-progress::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: -30%; width: 30%;
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  box-shadow: 0 0 12px var(--cyan);
+  animation: board-progress 1.4s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------------ the title + stat tiles */
+@keyframes board-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+.board-title {
+  font-size: 26px; letter-spacing: 6px;
+  background: linear-gradient(90deg, var(--cyan) 0%, var(--cyan) 35%, #d8ffff 50%, var(--cyan) 65%, var(--cyan) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: board-shimmer 8s linear infinite;
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--cyan) 55%, transparent));
+}
+.board-kicker { font-size: 10px; letter-spacing: 3px; color: var(--muted); text-transform: uppercase; }
+
+.board-tiles { display: flex; gap: 10px; flex-wrap: wrap; }
+.board-tile {
+  position: relative;
+  min-width: 118px; padding: 10px 14px 9px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  backdrop-filter: blur(10px);
+}
+.board-tile::before {
+  content: ""; position: absolute; left: 10px; right: 10px; top: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--tile-color, var(--cyan)), transparent);
+  opacity: 0.8;
+}
+.board-tile .n {
+  font-family: "Orbitron", "Inter", sans-serif; font-size: 22px; font-weight: 700; letter-spacing: 1px;
+  color: var(--tile-color, var(--text)); line-height: 1.1;
+  text-shadow: 0 0 16px color-mix(in srgb, var(--tile-color, var(--cyan)) 45%, transparent);
+}
+.board-tile .l { font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); margin-top: 3px; }
+
+/* ------------------------------------------------------------------ the cards */
+@property --board-ang { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@keyframes board-trace { to { --board-ang: 360deg; } }
+
+.board-card {
+  position: relative;
+  border-radius: 16px;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--panel-hi) 72%, transparent), color-mix(in srgb, var(--panel) 62%, transparent));
+  border: 1px solid color-mix(in srgb, var(--cyan) 18%, var(--line));
+  backdrop-filter: blur(14px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 color-mix(in srgb, var(--cyan) 10%, transparent);
+  transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) translateZ(0);
+  transition: transform 0.14s ease-out, border-color 0.25s, box-shadow 0.25s;
+  transform-style: preserve-3d;
+  will-change: transform;
+}
+.board-card:hover {
+  border-color: color-mix(in srgb, var(--cyan) 45%, var(--line));
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5), 0 0 36px color-mix(in srgb, var(--cyan) 10%, transparent);
+}
+/* the light that runs the border on hover */
+.board-card .trace {
+  position: absolute; inset: -1px; border-radius: 17px; padding: 1px; pointer-events: none; opacity: 0;
+  background: conic-gradient(from var(--board-ang), transparent 0 72%, var(--cyan) 88%, transparent 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  transition: opacity 0.3s;
+}
+.board-card:hover .trace { opacity: 1; animation: board-trace 2.2s linear infinite; }
+/* the glare that follows the cursor */
+.board-card .glare {
+  position: absolute; inset: 0; border-radius: 16px; pointer-events: none; opacity: 0;
+  background: radial-gradient(420px circle at var(--mx, 50%) var(--my, 50%), color-mix(in srgb, var(--cyan) 9%, transparent), transparent 60%);
+  transition: opacity 0.3s;
+}
+.board-card:hover .glare { opacity: 1; }
+/* corner brackets */
+.board-card .corners::before, .board-card .corners::after {
+  content: ""; position: absolute; width: 16px; height: 16px; pointer-events: none;
+  border-color: var(--cyan); border-style: solid; border-width: 0; opacity: 0.75;
+}
+.board-card .corners::before { top: 6px; left: 6px; border-top-width: 1px; border-left-width: 1px; border-top-left-radius: 8px; }
+.board-card .corners::after { bottom: 6px; right: 6px; border-bottom-width: 1px; border-right-width: 1px; border-bottom-right-radius: 8px; }
+/* a card being read: a scan line sweeps it */
+@keyframes board-scan { from { left: -40%; } to { left: 110%; } }
+.board-card .scan {
+  position: absolute; top: 0; bottom: 0; left: -40%; width: 40%; pointer-events: none; opacity: 0;
+  background: linear-gradient(to right, transparent, color-mix(in srgb, var(--cyan) 16%, transparent), transparent);
+}
+.board-card.reading .scan { opacity: 1; animation: board-scan 1.4s linear infinite; }
+/* a card that needs a look */
+@keyframes board-attention {
+  0%, 100% { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), 0 0 0 0 transparent; }
+  50% { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), 0 0 30px 0 color-mix(in srgb, var(--working) 28%, transparent); }
+}
+.board-card.attention { border-color: color-mix(in srgb, var(--working) 50%, var(--line)); animation: board-attention 3.6s ease-in-out infinite; }
+
+.board-app {
+  font-family: "Orbitron", "Inter", sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 4px;
+  color: var(--cyan); text-shadow: 0 0 18px color-mix(in srgb, var(--cyan) 55%, transparent);
+}
+.board-index { font-size: 9px; letter-spacing: 2px; color: var(--muted); }
+.board-chip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px;
+  padding: 2px 7px; border-radius: 6px;
+  background: color-mix(in srgb, var(--cyan) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cyan) 22%, transparent);
+  color: var(--text);
+}
+.board-chip.dim { color: var(--muted); background: transparent; border-color: var(--line); }
+
+/* the health ring on a card */
+.board-ring { width: 34px; height: 34px; transform: rotate(-90deg); }
+.board-ring circle { fill: none; stroke-width: 2.5; }
+.board-ring .track { stroke: var(--line); }
+.board-ring .arc { stroke: var(--done); stroke-linecap: round; transition: stroke-dashoffset 0.9s cubic-bezier(0.22, 1, 0.36, 1); filter: drop-shadow(0 0 4px var(--done)); }
+.board-ring.warn .arc { stroke: var(--working); filter: drop-shadow(0 0 4px var(--working)); }
+
+/* ------------------------------------------------------------------ the environment rows */
+.board-row { position: relative; }
+.board-row + .board-row { border-top: 1px solid color-mix(in srgb, var(--cyan) 10%, var(--line)); }
+.board-env {
+  font-family: "Orbitron", "Inter", sans-serif; font-size: 11px; letter-spacing: 3px; width: 54px; flex-shrink: 0;
+}
+.board-row.prod .board-env { color: var(--gold); text-shadow: 0 0 10px color-mix(in srgb, var(--gold) 50%, transparent); }
+.board-row.prod::before {
+  content: ""; position: absolute; left: -16px; top: 10px; bottom: 10px; width: 2px; border-radius: 2px;
+  background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--gold) 70%, transparent), transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--gold) 40%, transparent);
+}
+
+/* the lamp: a live cell breathes, and a ring ripples out of it */
+@keyframes board-breathe { 0%, 100% { transform: scale(1); filter: brightness(1); } 50% { transform: scale(1.22); filter: brightness(1.4); } }
+@keyframes board-ripple { 0% { transform: scale(0.4); opacity: 0.7; } 70% { transform: scale(1.6); opacity: 0; } 100% { transform: scale(1.6); opacity: 0; } }
+.board-lamp { position: relative; display: inline-block; width: 10px; height: 10px; border-radius: 999px; flex-shrink: 0; }
+.board-lamp.lit { animation: board-breathe 3.2s ease-in-out infinite; }
+.board-lamp.lit.down { animation-duration: 0.8s; }
+.board-lamp.lit.degraded { animation-duration: 1.6s; }
+.board-lamp.lit::after {
+  content: ""; position: absolute; inset: -7px; border-radius: 999px; border: 1px solid currentColor; opacity: 0;
+  animation: board-ripple 3.2s ease-out infinite;
+}
+
+/* the lineage thread: descent flows downward, DEV -> QA -> PROD */
+@keyframes board-flow { to { background-position: 0 14px; } }
+.board-thread {
+  position: absolute; left: 4.5px; top: 21px; bottom: -13px; width: 1px; pointer-events: none;
+  background-size: 1px 14px;
+  animation: board-flow 1.1s linear infinite;
+}
+.board-thread.same { background-image: linear-gradient(to bottom, var(--cyan) 0 8px, transparent 8px 14px); box-shadow: 0 0 6px color-mix(in srgb, var(--cyan) 60%, transparent); }
+.board-thread.changed { background-image: linear-gradient(to bottom, var(--amber) 0 8px, transparent 8px 14px); box-shadow: 0 0 6px color-mix(in srgb, var(--amber) 50%, transparent); }
+.board-thread.unknown { background-image: linear-gradient(to bottom, var(--line) 0 4px, transparent 4px 14px); animation: none; }
+
+/* the strip of synapses: one per cell */
+.board-pulse { display: inline-flex; gap: 4px; align-items: center; }
+.board-pulse i { width: 5px; height: 5px; border-radius: 999px; display: inline-block; background: var(--muted); opacity: 0.35; }
+.board-pulse i.ok { background: var(--done); opacity: 1; box-shadow: 0 0 6px var(--done); }
+.board-pulse i.degraded { background: var(--working); opacity: 1; box-shadow: 0 0 6px var(--working); }
+.board-pulse i.down { background: var(--error); opacity: 1; box-shadow: 0 0 6px var(--error); }
+
+/* the pill */
+.board-pill { font-size: 11px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; border: 1px solid currentColor; }
+
+/* the search bar */
+.board-search {
+  width: 100%;
+  background: color-mix(in srgb, var(--panel) 72%, transparent) !important;
+  border-color: color-mix(in srgb, var(--cyan) 20%, var(--line)) !important;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--cyan) 8%, transparent);
+}
+.board-search:focus { border-color: var(--cyan) !important; box-shadow: 0 0 18px color-mix(in srgb, var(--cyan) 20%, transparent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .board-hud::before, .board-radar, .board-progress::after, .board-title, .board-card .trace,
+  .board-card .scan, .board-card.attention, .board-lamp.lit, .board-lamp.lit::after, .board-thread { animation: none; }
+  .board-helix, .board-mesh { display: none; }
+}

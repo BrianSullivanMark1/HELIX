@@ -276,12 +276,15 @@ FLEET: tuple[Service, ...] = (
     Service("MES", Env.DEV, "brms-mes-api-dev", "oo-mes-dev", MES_REPO),
     Service("MES", Env.QA, "brms-mes-api-qa", "oo-mes-qa", MES_REPO),
     Service("MES", Env.PROD, "brms-mes-api", "oo-mes", MES_REPO),
-    # WMS + MRP prod carry '-prod-flask'.
-    Service("WMS", Env.DEV, "wms-dev", "oats-overnight-wms-dev", WMS_REPO),
-    Service("WMS", Env.QA, "wms-qa", "oats-overnight-wms-qa", WMS_REPO),
+    # WMS + MRP: every environment carries '-flask' (dev.ps1: ApiSvc="wms-$Env-flask"). The brief
+    # had dev/qa as bare 'wms-dev' / 'mrp-dev'; the first live read (2026-09-17) came back ABSENT
+    # for all four, and dev.ps1 settled it. The table is the truth; it was corrected, not patched
+    # around.
+    Service("WMS", Env.DEV, "wms-dev-flask", "oats-overnight-wms-dev", WMS_REPO),
+    Service("WMS", Env.QA, "wms-qa-flask", "oats-overnight-wms-qa", WMS_REPO),
     Service("WMS", Env.PROD, "wms-prod-flask", "oats-overnight-wms-prod", WMS_REPO),
-    Service("MRP", Env.DEV, "mrp-dev", "oats-overnight-mrp-dev", MRP_REPO),
-    Service("MRP", Env.QA, "mrp-qa", "oats-overnight-mrp-qa", MRP_REPO),
+    Service("MRP", Env.DEV, "mrp-dev-flask", "oats-overnight-mrp-dev", MRP_REPO),
+    Service("MRP", Env.QA, "mrp-qa-flask", "oats-overnight-mrp-qa", MRP_REPO),
     Service("MRP", Env.PROD, "mrp-prod-flask", "oats-overnight-mrp-prod", MRP_REPO),
     # ECHO is dev-only today. Its qa and prod cells DO NOT EXIST and are never auto-created (rule 5).
     Service("ECHO", Env.DEV, "brms-echo-api-dev",

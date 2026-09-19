@@ -93,6 +93,7 @@ export type Page =
   | { name: "menu" }
   | { name: "settings" }
   | { name: "dream" } // the Dream journal: what the nights found, verified, tried and applied
+  | { name: "board" } // the Board: the company's apps and environments, as last read (fleet)
   | { name: "vault"; slug: string; title: string }
   | { name: "studio"; slug: string; title: string }
   | { name: "viewer"; slug: string; title: string; url: string; server?: boolean }

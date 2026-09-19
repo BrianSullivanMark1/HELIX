@@ -9,6 +9,7 @@ import Console from "./pages/Console";
 import Dream from "./pages/Dream";
 import Menu from "./pages/Menu";
 import Sap from "./pages/Sap";
+import BoardPage from "./pages/Board";
 import Settings from "./pages/Settings";
 import Studio from "./pages/Studio";
 import Vault from "./pages/Vault";
@@ -40,6 +41,20 @@ export default function App() {
   const lightbox = useHelix((s) => s.lightbox);
   const [navShown, setNavShown] = useState(true);
   const navTimer = useRef<number>(0);
+  // Updates waiting (Settings -> Updates): the built face is behind its source, or the Python
+  // changed since launch. Polled gently; the Settings button pulses until it is dealt with.
+  const [updates, setUpdates] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const check = () => {
+      void api.get<{ face?: { stale?: boolean }; backend?: { stale?: boolean } }>("/api/face/status")
+        .then((s) => { if (alive) setUpdates(Boolean(s.face?.stale || s.backend?.stale)); })
+        .catch(() => undefined);
+    };
+    check();
+    const id = window.setInterval(check, 30000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, []);
 
   useEffect(() => {
     const stop = connectEvents(applyEvent, () => {
@@ -142,6 +157,7 @@ export default function App() {
             [
               ["◉ Console", { name: "console" }],
               ["☰ Menu", { name: "menu" }],
+              ["⬡ Board", { name: "board" }],
               ["◐ Dream", { name: "dream" }],
               ["⌗ SAP", { name: "sap" }],
               ["⚙ Settings", { name: "settings" }],
@@ -149,8 +165,9 @@ export default function App() {
           ).map(([label, target]) => (
             <button
               key={label}
-              className="btn-nav"
+              className={`btn-nav${target.name === "settings" && updates && page.name !== "settings" ? " nav-alert" : ""}`}
               style={page.name === target.name ? { color: "var(--cyan)" } : undefined}
+              title={target.name === "settings" && updates ? "Updates waiting - open Settings" : undefined}
               onClick={() => navigate(target)}
             >
               {label}
@@ -164,6 +181,7 @@ export default function App() {
         {page.name === "menu" && <Menu />}
         {page.name === "settings" && <Settings />}
         {page.name === "dream" && <Dream />}
+        {page.name === "board" && <BoardPage />}
         {page.name === "sap" && <Sap table={page.table} />}
         {page.name === "vault" && <Vault slug={page.slug} title={page.title} />}
         {page.name === "studio" && <Studio slug={page.slug} title={page.title} />}

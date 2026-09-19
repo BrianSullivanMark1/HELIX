@@ -149,3 +149,11 @@ class FleetService:
     def attention(self, company: Company) -> list[Cell]:
         cells, _ = self.snapshot(company)
         return [c for c in cells if c.needs_attention]
+
+    def history(self, company: Company, app: str | None = None, *, limit: int = 50):
+        """What was done to this company's fleet, newest first - the state port's ledger. Empty
+        rather than raising when the state is unreachable: the board still renders."""
+        try:
+            return list(self._state.history(company, app, limit=max(1, min(500, int(limit)))))
+        except Exception:  # noqa: BLE001
+            return []

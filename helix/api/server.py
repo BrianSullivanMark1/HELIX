@@ -27,6 +27,8 @@ from fastapi import FastAPI, Form, Request, UploadFile, WebSocket, WebSocketDisc
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from helix.api.fleet_routes import mount_fleet
+from helix.api.face_routes import mount_face
 from helix.domain import cadpy
 from helix.domain.constitution import LOCKED_SETTINGS
 from helix.domain.models import BuildKind
@@ -57,7 +59,8 @@ _SETTING_KEYS = (
     "dream_enabled", "dream_start", "dream_hours", "dream_auto_apply", "dream_rebuild",
     "dream_max_drafts",
 )
-_SECRET_SETTINGS = ("claude_api_key", "claude_code_oauth_token")
+# github_token: the fleet's read of each repo's HEAD (drift). Presence reported, value never.
+_SECRET_SETTINGS = ("claude_api_key", "claude_code_oauth_token", "github_token")
 
 # The dream settings' contract (DREAM.md §2): type, range, default. One table, read by the GET
 # (what the card shows for a key that was never set) and the PUT (what the store may hold).
@@ -1096,6 +1099,11 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
                                 status_code=400)
         return _sap_call(sap.edw_record, str(body.get("action") or ""),
                          table=str(body.get("table") or ""), text=str(body.get("text") or ""))
+
+    # ----- the fleet: the company's apps on Cloud Run, reads only (api/fleet_routes.py) -----
+    mount_fleet(app, c)
+    # ----- updates: build the face, restart the backend (api/face_routes.py) -----
+    mount_face(app, c)
 
     # ----- static: builds + the SPA -----
     app.mount("/builds", StaticFiles(directory=str(c.paths.builds), check_dir=False), name="builds")

@@ -197,11 +197,13 @@ def test_a_traffic_split_is_reported_not_assumed_away():
     assert r.api.revision == "wms-dev-00021-abc" and r.api.traffic_percent == 60 and r.api.is_split
 
 
-def test_hosting_half_is_unknown_and_says_so():
+def test_hosting_half_is_not_read_and_says_so():
+    """No reading is `site=None`, not an UNKNOWN half: an UNKNOWN half would drag every cell to
+    UNKNOWN through worst-of-halves and the board would say nothing at all."""
     run = Script({"services describe": g.Ran(0, json.dumps(service_doc()), ""),
                   "revisions list": g.Ran(0, "[]", "")})
     r = g.GcloudFleet("p", "r", runner=run, http_get=no_http).read_cell(WMS_DEV)
-    assert r.site.health is Health.UNKNOWN
+    assert r.site is None
     assert r.detail == g.HOSTING_NOTE
 
 
@@ -317,8 +319,8 @@ def test_real_mes_dev_export_reads_as_one_healthy_cell_at_full_traffic():
     assert r.api.traffic_percent == 100 and not r.api.is_split
     assert r.api.health is Health.OK
     assert r.api.deployed_at.isoformat().startswith("2026-09-14T16:21:14")
-    # Hosting half is not read yet - it must say so rather than pretend.
-    assert r.site.health is Health.UNKNOWN and r.detail == g.HOSTING_NOTE
+    # Hosting half is not read yet - no reading, and the note says so.
+    assert r.site is None and r.detail == g.HOSTING_NOTE
 
 
 def test_real_mes_dev_export_has_no_version_label_yet_so_commit_is_honestly_none():

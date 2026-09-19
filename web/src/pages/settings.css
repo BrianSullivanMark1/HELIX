@@ -1,0 +1,185 @@
+/* SETTINGS - THE FORGE's layout in HELIX's skin: a rail of groups on the left, one group at a
+   time on the right, an Overview of cards that jump to a group, and a search that finds a setting
+   wherever it lives. Scoped to .st-* so nothing here reaches the rest of the face. */
+
+.st-stage { position: absolute; inset: 0; overflow: hidden; }
+.st-hud { position: absolute; inset: 0; pointer-events: none; }
+@keyframes st-lattice { from { background-position: 0 0; } to { background-position: 0 -104px; } }
+.st-hud::before {
+  content: ""; position: absolute; inset: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='60' height='104' viewBox='0 0 60 104'><path d='M30 2 L58 18 L58 50 L30 66 L2 50 L2 18 Z M30 54 L58 70 L58 102 L30 118 L2 102 L2 70 Z' fill='none' stroke='%233fe0e0' stroke-width='0.7'/></svg>");
+  background-size: 60px 104px; opacity: 0.035;
+  animation: st-lattice 40s linear infinite;
+}
+.st-hud::after {
+  content: ""; position: absolute; inset: 0;
+  background: radial-gradient(ellipse at 22% 30%, color-mix(in srgb, var(--cyan) 6%, transparent), transparent 55%),
+              radial-gradient(ellipse at 50% 20%, transparent 45%, rgba(5, 7, 10, 0.45) 100%);
+}
+
+/* ------------------------------------------------------------ header */
+.st-title {
+  font-family: "Orbitron", "Inter", sans-serif; font-size: 22px; font-weight: 700; letter-spacing: 6px;
+  color: var(--cyan); text-shadow: 0 0 18px color-mix(in srgb, var(--cyan) 55%, transparent);
+}
+.st-tag { font-size: 12px; color: var(--muted); }
+.st-search {
+  width: 300px; max-width: 100%;
+  background: color-mix(in srgb, var(--panel) 72%, transparent) !important;
+  border-color: color-mix(in srgb, var(--cyan) 20%, var(--line)) !important;
+  padding: 8px 12px 8px 32px !important;
+}
+.st-search:focus { border-color: var(--cyan) !important; box-shadow: 0 0 18px color-mix(in srgb, var(--cyan) 20%, transparent); }
+
+/* ------------------------------------------------------------ the rail */
+.st-rail {
+  width: 256px; flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 10px 8px;
+  border-right: 1px solid color-mix(in srgb, var(--cyan) 12%, var(--line));
+}
+.st-item {
+  display: flex; align-items: center; gap: 12px; text-align: left;
+  padding: 9px 12px; border-radius: 10px; border: 1px solid transparent;
+  background: transparent; color: var(--text); font: inherit; width: 100%;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.st-item:hover { background: color-mix(in srgb, var(--panel-hi) 80%, transparent); }
+.st-item.on {
+  background: color-mix(in srgb, var(--cyan) 10%, var(--panel));
+  border-color: color-mix(in srgb, var(--cyan) 40%, transparent);
+  box-shadow: 0 0 22px color-mix(in srgb, var(--cyan) 10%, transparent), inset 3px 0 0 var(--cyan);
+}
+.st-item .ic {
+  width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; flex-shrink: 0;
+  background: color-mix(in srgb, var(--cyan) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cyan) 20%, transparent);
+  color: var(--cyan); font-size: 14px;
+}
+.st-item.on .ic { background: color-mix(in srgb, var(--cyan) 18%, transparent); box-shadow: 0 0 12px color-mix(in srgb, var(--cyan) 35%, transparent); }
+.st-item .t { font-family: "Orbitron", "Inter", sans-serif; font-size: 11px; letter-spacing: 2px; font-weight: 700; white-space: nowrap; }
+.st-item.on .t { color: var(--cyan); }
+.st-item .s { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-item .badge {
+  margin-left: auto; font-size: 9px; padding: 1px 6px; border-radius: 999px; white-space: nowrap; flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--working) 55%, transparent); color: var(--working);
+}
+
+/* ------------------------------------------------------------ the pane */
+.st-pane { flex: 1; min-width: 0; overflow-y: auto; padding: 14px 22px 120px; }
+.st-lead { font-size: 13px; color: var(--muted); }
+.st-lead b { color: var(--text); font-weight: 600; }
+
+/* overview cards */
+.st-cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+.st-card {
+  position: relative; text-align: left; font: inherit; color: var(--text);
+  padding: 14px 16px; border-radius: 14px;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--panel-hi) 78%, transparent), color-mix(in srgb, var(--panel) 66%, transparent));
+  border: 1px solid color-mix(in srgb, var(--cyan) 16%, var(--line));
+  backdrop-filter: blur(12px);
+  transition: border-color 0.2s, transform 0.12s, box-shadow 0.2s;
+}
+.st-card:hover { border-color: color-mix(in srgb, var(--cyan) 45%, var(--line)); transform: translateY(-1px); box-shadow: 0 10px 30px rgba(0,0,0,0.35), 0 0 24px color-mix(in srgb, var(--cyan) 8%, transparent); }
+.st-card.needs { border-color: color-mix(in srgb, var(--working) 45%, var(--line)); }
+.st-card::before {
+  content: ""; position: absolute; left: 12px; right: 12px; top: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--card-color, var(--cyan)), transparent); opacity: 0.8;
+}
+.st-card .k { font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); }
+.st-card .v {
+  font-family: "Orbitron", "Inter", sans-serif; font-size: 15px; font-weight: 700; letter-spacing: 1px; margin-top: 4px;
+  color: var(--card-color, var(--cyan)); text-shadow: 0 0 14px color-mix(in srgb, var(--card-color, var(--cyan)) 40%, transparent);
+}
+.st-card .d { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.35; }
+
+/* a section inside a group */
+.st-section { border-bottom: 1px solid color-mix(in srgb, var(--cyan) 10%, var(--line)); padding: 6px 0 14px; }
+.st-section > .hd {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  background: transparent; border: none; color: var(--text); font: inherit; padding: 10px 0;
+}
+.st-section > .hd .ic { color: var(--cyan); width: 18px; text-align: center; }
+.st-section > .hd .t { font-family: "Orbitron", "Inter", sans-serif; font-size: 12px; letter-spacing: 3px; font-weight: 700; color: var(--cyan); }
+.st-section > .hd .w { font-size: 12px; color: var(--muted); }
+.st-section > .hd .chev { margin-left: auto; color: var(--muted); transition: transform 0.2s; font-size: 11px; }
+.st-section.open > .hd .chev { transform: rotate(180deg); }
+.st-section .body { padding: 2px 0 0 28px; }
+.st-section.hit { background: linear-gradient(90deg, color-mix(in srgb, var(--cyan) 6%, transparent), transparent 60%); border-radius: 10px; padding-left: 8px; }
+
+/* a row: label on the left, control on the right */
+.st-row { display: flex; align-items: center; gap: 14px; padding: 8px 0; font-size: 13px; }
+.st-row .lbl { width: 200px; flex-shrink: 0; }
+.st-row .lbl small { display: block; color: var(--muted); font-size: 11px; margin-top: 1px; }
+.st-row input[type="text"], .st-row input[type="password"], .st-row input:not([type]), .st-row select { min-width: 0; }
+.st-note { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.st-note.warn { color: var(--working); }
+.st-note.err { color: var(--error); }
+
+/* the switch */
+.st-switch { display: flex; width: fit-content; align-items: center; gap: 10px; cursor: pointer; user-select: none; font-size: 13px; }
+.st-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.st-switch .tr {
+  width: 38px; height: 20px; border-radius: 999px; position: relative; flex-shrink: 0;
+  background: var(--panel-hi); border: 1px solid var(--line); transition: background 0.2s, border-color 0.2s;
+}
+.st-switch .tr::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 999px;
+  background: var(--muted); transition: transform 0.2s, background 0.2s;
+}
+.st-switch input:checked + .tr { background: color-mix(in srgb, var(--cyan) 22%, var(--panel)); border-color: color-mix(in srgb, var(--cyan) 60%, transparent); }
+.st-switch input:checked + .tr::after { transform: translateX(18px); background: var(--cyan); box-shadow: 0 0 10px var(--cyan); }
+.st-switch input:focus-visible + .tr { outline: 1px solid var(--cyan); }
+
+/* a choice: radio cards with a pill on the right */
+.st-choices { display: flex; flex-direction: column; gap: 8px; }
+.st-choice {
+  display: flex; align-items: center; gap: 12px; text-align: left; width: 100%; font: inherit; color: var(--text);
+  padding: 10px 14px; border-radius: 12px; border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 70%, transparent); transition: border-color 0.15s, background 0.15s;
+}
+.st-choice:hover { border-color: color-mix(in srgb, var(--cyan) 35%, var(--line)); }
+.st-choice.on { border-color: color-mix(in srgb, var(--cyan) 60%, transparent); background: color-mix(in srgb, var(--cyan) 7%, var(--panel)); box-shadow: 0 0 18px color-mix(in srgb, var(--cyan) 10%, transparent); }
+.st-choice .dot { width: 12px; height: 12px; border-radius: 999px; border: 1px solid var(--muted); flex-shrink: 0; }
+.st-choice.on .dot { border-color: var(--cyan); background: var(--cyan); box-shadow: 0 0 8px var(--cyan); }
+.st-choice .t { font-size: 13px; font-weight: 600; }
+.st-choice .d { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.st-choice .pill { margin-left: auto; font-size: 10px; letter-spacing: 1px; padding: 2px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--cyan) 45%, transparent); color: var(--cyan); white-space: nowrap; }
+
+/* presence dot */
+.st-dot { font-size: 11px; letter-spacing: 1px; }
+
+/* the save bar */
+.st-savebar {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 14px; display: flex; justify-content: center; gap: 12px; align-items: center;
+  background: linear-gradient(to top, rgba(5, 7, 10, 0.85), transparent); pointer-events: none;
+}
+.st-savebar > * { pointer-events: auto; }
+.st-dirty { font-size: 12px; color: var(--working); }
+
+@media (max-width: 860px) {
+  .st-rail { width: 64px; }
+  .st-item .t, .st-item .s, .st-item .badge { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .st-hud::before { animation: none; } }
+
+/* ------------------------------------------------------------ updates */
+/* The nav's Settings button while updates wait: a slow amber pulse, not a siren. */
+@keyframes nav-alert {
+  0%, 100% { color: var(--working); text-shadow: 0 0 0 transparent; }
+  50% { color: #ffe08a; text-shadow: 0 0 14px color-mix(in srgb, var(--working) 70%, transparent); }
+}
+.btn-nav.nav-alert { animation: nav-alert 1.6s ease-in-out infinite; }
+.btn-nav.nav-alert::after { content: " ●"; font-size: 8px; vertical-align: middle; }
+
+.st-update { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.st-update .state { font-family: "Orbitron", "Inter", sans-serif; font-size: 12px; letter-spacing: 2px; }
+.st-update .state.stale { color: var(--working); text-shadow: 0 0 12px color-mix(in srgb, var(--working) 50%, transparent); }
+.st-update .state.fresh { color: var(--done); }
+.st-output {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.45;
+  white-space: pre-wrap; max-height: 220px; overflow: auto; padding: 10px 12px; border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35); border: 1px solid var(--line); color: var(--muted);
+}
+@keyframes st-spin { to { transform: rotate(360deg); } }
+.st-spin { display: inline-block; animation: st-spin 1s linear infinite; }

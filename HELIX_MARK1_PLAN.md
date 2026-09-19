@@ -51,14 +51,16 @@ One GCP project, `windy-celerity-392822`, region `us-west2`. One private Cloud S
 | System | Repo | Cloud Run services | Firebase Hosting sites |
 |---|---|---|---|
 | **MES** | `BrendanSullivanMark1/BRMS_MES_WEB_VERSION` | `brms-mes-api-dev` · `brms-mes-api-qa` · `brms-mes-api` | `oo-mes-dev` · `oo-mes-qa` · `oo-mes` |
-| **WMS** | `Alex-Mark1/WMS_V1` | `wms-dev` · `wms-qa` · `wms-prod-flask` | `oats-overnight-wms-dev` · `-qa` · `-prod` |
-| **MRP** | `BrendanSullivanMark1/mrp_prod` | `mrp-dev` · `mrp-qa` · `mrp-prod-flask` | `oats-overnight-mrp-dev` · `-qa` · `-prod` |
+| **WMS** | `Alex-Mark1/WMS_V1` | `wms-dev-flask` · `wms-qa-flask` · `wms-prod-flask` | `oats-overnight-wms-dev` · `-qa` · `-prod` |
+| **MRP** | `BrendanSullivanMark1/mrp_prod` | `mrp-dev-flask` · `mrp-qa-flask` · `mrp-prod-flask` | `oats-overnight-mrp-dev` · `-qa` · `-prod` |
 | **ECHO** | `BrendanSullivanMark1/MES_OATS_DASHBOARD` | `brms-echo-api-dev` | `manufacturing-execution-system-mes-dashboard-dev` |
 
 Note the two irregularities the code must handle rather than assume away:
 
-1. **Prod service names are not uniform.** MES prod drops the suffix (`brms-mes-api`); WMS and MRP prod
-   carry `-prod-flask`. There is no derivable rule. The mapping is a table, not a format string (§6.2).
+1. **Service names are not uniform.** MES prod drops the suffix (`brms-mes-api`); WMS and MRP carry
+   `-flask` in *every* environment (`dev.ps1`: `ApiSvc="wms-$Env-flask"`). There is no derivable rule.
+   The mapping is a table, not a format string (§6.2). *Corrected 2026-09-17: the brief had dev/qa as
+   bare `wms-dev` / `mrp-dev`; the first live read came back ABSENT for all four and `dev.ps1` settled it.*
 2. **ECHO is dev-only today.** Three of its twelve cells do not exist. A missing service is a *known
    absence*, rendered as "not deployed", never as an error and never auto-created (§11.5).
 
@@ -73,7 +75,7 @@ HELIX is hexagonal and the dependency rule is absolute: `ui -> services -> ports
 may depend on `domain`, the domain depends on nothing. The fleet work obeys it exactly.
 
 ```
-web/src/pages/Strand.tsx          [NEW]  THE STRAND — the read-only fleet page
+web/src/pages/Board.tsx           [NEW]  the Board — the read-only fleet page (cards + search)
    |
 helix/api/server.py               [EDIT] +4 routes under /api/fleet/
    |
@@ -138,7 +140,7 @@ core is always on and cannot be disabled.
 | Pack | What it carries |
 |---|---|
 | *(core)* | Converse, remember, files, research, reminders, self-improvement, the dream. Always on. |
-| `fleet` | The fleet reads and (from Phase 2) the deploy lane. THE STRAND and everything after it. |
+| `fleet` | The fleet reads and (from Phase 2) the deploy lane. the board and everything after it. |
 | `maker` | Components, the enclosure generator, holograms, AR fit check, the printer. |
 | `vision` | Screen capture, webcam, AR annotation, camera measurement. |
 | `purchasing` | Amazon search, cart staging, parts lists. |
@@ -326,7 +328,7 @@ class Service:                    # one cell of the 4x3 grid
     repo: str                     # "BrendanSullivanMark1/BRMS_MES_WEB_VERSION"
 
 @dataclass(frozen=True)
-class Cell:                       # what THE STRAND renders for one service
+class Cell:                       # what the board renders for one service
     service: Service
     serving_sha: str | None       # the commit actually running
     repo_sha: str | None          # the repo's HEAD for that branch
@@ -381,7 +383,7 @@ cannot tell them apart teaches people to ignore the state that matters. `Cell` t
 `rolled_back_at`, `rolled_back_by` and `rolled_back_from` — set from the LINEAGE record, not inferred.
 
 `BEHIND` with a count ("11 commits behind") is the normal working state of dev and is rendered calmly.
-`AHEAD` and `DIVERGED` are the interesting ones and are what THE STRAND exists to surface: they mean
+`AHEAD` and `DIVERGED` are the interesting ones and are what the board exists to surface: they mean
 something was deployed from somewhere other than the branch we think we deploy from.
 
 ### §6.4 — The deploy laws, inert but present
@@ -461,15 +463,15 @@ what still exists in Cloud Run.
 
 Two requirements follow:
 
-- `fleet_rollback_depth` (default 5, adjustable in Settings) governs what THE STRAND *offers*, and can
+- `fleet_rollback_depth` (default 5, adjustable in Settings) governs what the board *offers*, and can
   never offer a revision that has been deleted. It reads the live revision list, never a cached one.
 - **Cleaning revisions destroys rollback targets, and HELIX must say so before doing it.** If HELIX ever
   wraps that cleanup action, its confirmation names the oldest revision that will stop being reachable.
   Silently shortening how far back you can recover is the worst possible side effect of a tidy-up.
 
-### §6.6 — The provenance problem (read this before building THE STRAND)
+### §6.6 — The provenance problem (read this before building the board)
 
-**THE STRAND's first promise — "what commit is serving?" — cannot be kept against the way deploys
+**the board's first promise — "what commit is serving?" — cannot be kept against the way deploys
 actually happen today.** Found by reading `dev.ps1` line 846:
 
 ```powershell
@@ -483,10 +485,10 @@ to us — it was never recorded anywhere.**
 
 Three honest consequences:
 
-1. **Phase 1 ships with `serving_sha = None` and `Drift.UNKNOWN` on every cell**, and THE STRAND says so
+1. **Phase 1 ships with `serving_sha = None` and `Drift.UNKNOWN` on every cell**, and the board says so
    in words. It does not invent a SHA, and it does not render unknown as clean.
 2. **The fix is one flag on the deploy, not a redesign.** Stamping the commit as a Cloud Run label makes
-   it readable forever after by the same `gcloud run services describe` call THE STRAND already makes:
+   it readable forever after by the same `gcloud run services describe` call the board already makes:
 
    ```powershell
    $sha = (git rev-parse --short HEAD)
@@ -498,14 +500,14 @@ Three honest consequences:
    `--vpc-connector`, `--service-account`), and a label cannot affect what the service can reach. It is
    metadata only.
    **The `-dirty` marker matters more than the SHA.** A revision built from an uncommitted working tree
-   is not reproducible from the repo, and THE STRAND should say that out loud rather than showing a
+   is not reproducible from the repo, and the board should say that out loud rather than showing a
    clean-looking SHA that no longer describes what is running.
 3. **This is the smallest change with the largest payoff in the whole plan**, and it belongs in the
    *first* commit rather than Phase 2, because every day it is not in place is a day of revisions with
    no provenance. It is a change to `dev.ps1`, which §10.6 says we wrap and do not rewrite — adding one
    flag to an existing command is within that.
 
-Until it lands, THE STRAND is a health-and-drift-of-hosting board, not a commit board, and it should
+Until it lands, the board is a health-and-drift-of-hosting board, not a commit board, and it should
 describe itself that way.
 
 ---
@@ -619,7 +621,7 @@ Firebase Auth is the identity. The allowlist of who counts is a rule condition, 
 
 ---
 
-## §9 — THE STRAND
+## §9 — The board (read-only page; formerly THE STRAND)
 
 The Phase 1 deliverable. **A page with no buttons that change anything.**
 
@@ -737,7 +739,7 @@ grants what a PIN can carry, and no more:
 
 | To grant | Requires |
 |---|---|
-| **Read** — THE STRAND, VITALS, LINEAGE | An allowlisted person adds them. No PIN needed. |
+| **Read** — the board, VITALS, LINEAGE | An allowlisted person adds them. No PIN needed. |
 | **Dev and QA actions** | **The PIN**, typed by the new person, on an invite that expires in 24 hours and is single-use. This is what the PIN is for. |
 | **Production** | **A second existing allowlisted person approves on their own machine.** No PIN path exists to production, at all. |
 
@@ -815,7 +817,7 @@ history view is the helix (§12.1) because a helix is the honest picture of two 
 pair. Deploys pulse along connections like signal down a neuron; a failed deploy is a dead branch. The
 words on the buttons stay boring so the picture can be loud.
 
-Retired on 2026-09-17, kept here so older sections read: THE STRAND (→ the Fleet page), LINEAGE
+Retired on 2026-09-17, kept here so older sections read: THE STRAND (→ the Board), LINEAGE
 (→ History and Versions), THE CULTURE (→ the board), MITOSIS (→ New app), THE MEMBRANE (→ Secrets),
 THE BENCH (→ Terminal), VITALS (→ Health), CHECKPOINT (→ Approvals), THE NUCLEUS (→ the production
 gate), SCREENING (→ Access), THE RIBOSOME / Expression (→ Deploy), THE ASSAY / THE TRACE (→ Query /
@@ -845,7 +847,7 @@ halves exist.
 backbones separate where a commit has no deployment and close where it does. "Drift is the strands coming
 apart" is then a true statement about the picture, which is the only reason to have used the metaphor.
 
-**Where it is used.** THE STRAND's per-cell detail view, LINEAGE (ancestry is what a strand is *for*), and
+**Where it is used.** the board's per-cell detail view, LINEAGE (ancestry is what a strand is *for*), and
 Expression (a deploy in flight is a rung being formed). Buttons stay plain English — a control says
 "Roll back to 6d1ac83", never "Excise".
 
@@ -883,7 +885,7 @@ above the domain changes. **This is the whole scaling story: the board iterates 
 | THE FORGE (Databricks + GitLab) | HELIX (Google Cloud + GitHub) | Name |
 |---|---|---|
 | The board: cards + filter + New Project | The board: cards grouped by company, filter, "New app" | **Board** |
-| A project card (pills: unsaved / to push / live app outdated) | An app card (pills: unsaved / to push / **drift per env** from THE STRAND) | *App card* |
+| A project card (pills: unsaved / to push / live app outdated) | An app card (pills: unsaved / to push / **drift per env** from the board) | *App card* |
 | Project → Databricks App URL | App → per-env Cloud Run URL + Hosting URL | "Open app" (env-aware) |
 | `⑉ Git` panel: NOW / HISTORY / LINES OF WORK | Same three tabs. History drawn as the helix (§12.1). | **Git** |
 | `⏱ Versions`: last 25 deploys, roll back via worktree redeploy | Cloud Run revisions + Hosting versions; rollback = traffic shift (§6.5), no rebuild | **Versions** |
@@ -905,7 +907,7 @@ above the domain changes. **This is the whole scaling story: the board iterates 
 ### §17.4 — What an app card shows
 
 Top row: avatar (the app's own evolved orb, small), name, company chip. Three **environment pills**
-in a row — DEV / QA / PROD — each carrying that cell's drift chip from THE STRAND (§6.3) and its health
+in a row — DEV / QA / PROD — each carrying that cell's drift chip from the board (§6.3) and its health
 dot. That single row is the whole of the old 4×3 grid, folded into the card. Below, when expanded:
 
 - **changed files** (with COPY), **N to push**, the last save line
@@ -929,7 +931,7 @@ hosting:<site>`. Cloud Build runs as a scoped service account (plan §1: never a
    refusing to pair), pushes;
 2. asks Cloud Build to run the trigger (`gcloud builds triggers run`), streams the log into the job
    drawer;
-3. reads back the new revision + label, writes the LINEAGE row, updates THE STRAND cell.
+3. reads back the new revision + label, writes the LINEAGE row, updates the board cell.
 
 "Everything up-to-date" deliberately does **not** stamp a deploy (Brendan's rule; §17.6).
 
@@ -1076,12 +1078,12 @@ Each phase updates this document: what shipped, what was cut, what we learned (�
 
 | Phase | Name | What ships | Ends when |
 |---|---|---|---|
-| **1** | **Sight** | Packs (§4), the profile split (§5), `domain/fleet.py`, `ports/fleet.py`, the gcloud + GitHub adapters, the Firestore adapter and its rules, THE STRAND read-only, the §11 laws as tested constants with no callers. | The grid is right for all twelve cells, including the three that do not exist, and you trust it more than the GCP console. |
+| **1** | **Sight** | Packs (§4), the profile split (§5), `domain/fleet.py`, `ports/fleet.py`, the gcloud + GitHub adapters, the Firestore adapter and its rules, the board read-only, the §11 laws as tested constants with no callers. *Status 2026-09-17: everything but Firestore is built and the board reads all twelve cells live from the desktop; the hosting half of each cell is not read yet.* | The grid is right for all twelve cells, including the three that do not exist, and you trust it more than the GCP console. |
 | **2** | **Ship and unship (dev only)** | THE RIBOSOME on Cloud Build, `dev` only. **Rollback (§6.5) in the same commit as the first deploy button.** CHECKPOINT. LINEAGE. The §11 laws get their callers. Fleet write tools, born into `BUILD_TOOLS`. | You deploy MES dev from HELIX for a week without opening `dev.ps1` — and roll one back on purpose to prove it. |
 | **3** | **Diagnosis** | VITALS. THE ASSAY (read-only, prod included). THE TRACE. | You diagnose a real production issue from HELIX without a query console. |
 | — | *Maker decision* | Read `MAKER_PACK_CAPABILITIES.md` and decide the maker pack's future with the facts in hand. | A decision, either way, written down. |
 | **4** | **QA and prod** | THE NUCLEUS: the four conditions of §10.2. QA, then prod, both human-only. | A production deploy has gone through HELIX, with its audit row, and you were not nervous. |
-| **5** | **The team** | The CLOUD profile actually ships. Firebase Auth. SCREENING. `rest_fleet.py`. | Someone who is not you uses THE STRAND and cannot reach anything they should not. |
+| **5** | **The team** | The CLOUD profile actually ships. Firebase Auth. SCREENING. `rest_fleet.py`. | Someone who is not you uses the board and cannot reach anything they should not. |
 | **6** | **The dream reaches dev** | The §10.4 toggle. Draft-only, dev-only. | A dream-drafted PR against a fleet repo has been reviewed and merged by a human. |
 
 Phases are sequential. Phase 2 does not start while Phase 1's grid is still lying about a cell.
@@ -1171,6 +1173,7 @@ Still open:
 
 | Date | Phase | What shipped | What was cut | What we learned |
 |---|---|---|---|---|
+| 2026-09-17 (night) | Phase 1 | **The board is live end to end on the desktop profile.** `api/fleet_routes.py` (`GET /api/fleet`, `POST /api/fleet/refresh`, `GET /api/fleet/history`; reads only, refresh off the event loop, one read at a time), `mount_fleet` in `server.py`, the fleet composed **by profile** in `container.py` (DESKTOP → gcloud; CLOUD → `adapters/rest_fleet.py`, which says honestly it is not built), `web/src/pages/Board.tsx` (cards + search; plain names; the synapse dot is the one piece of art), a GitHub-token field in Settings (`github_token`, presence only). `scripts/fleet_read.py` — the adapter bare, from a terminal. `Serving` grew `db` / `read_only` / `flags` from the app's own `/api/health`; a Ready container whose health says `ok:false` is DEGRADED. The real MES-dev export and its live health body are test fixtures (`tests/fixtures/mes_dev/`). `gcloud.cmd` resolved through `shutil.which` (Windows has no `gcloud.exe`). The `sap` pack (Brendan's five SAP tools). 246 tests green in the sandbox; the desktop suite has one pre-existing failure in Brendan's `test_camera.py` that predates this branch (byte-identical to `main`). | The hosting half of a cell: still not read, and now returned as *no reading* (`site=None`) rather than an UNKNOWN half, because an UNKNOWN half dragged every cell to UNKNOWN through worst-of-halves and the first render of the board said nothing at all. | **The first live read of the fleet, 2026-09-17 ~03:45 UTC, through Brian's own gcloud login:** MES dev/qa/prod serving `3dc6631`, and **qa and prod are both `-dirty`** — built from a working tree with uncommitted edits, the exact thing §6.6 exists to catch. WMS/MRP/ECHO carry no commit anywhere (the labels patch has not shipped). MES dev has 53 revisions on the service (nobody has run the cleanup there; it deploys through `backend/deploy.ps1`, not `dev.ps1`), qa 20, prod 17. ECHO dev was last deployed 2026-08-20. Four cells read ABSENT because *the table was wrong*, not Cloud Run — `wms-dev`/`mrp-dev` are really `wms-dev-flask`/`mrp-dev-flask` (§2, corrected). Windows curl fails on `*.run.app` with `CRYPT_E_REVOCATION_OFFLINE` (the machine cannot reach the revocation servers) — Python does not check revocation, so HELIX is unaffected; `--ssl-no-revoke` for curl. PowerShell blocks `gcloud.ps1` (execution policy); `gcloud.cmd` works. |
 | 2026-09-17 | Phase 1 | `adapters/gcloud_fleet.py` (first real read of Cloud Run; provenance from label, then the app's own /api/health, then honestly none), `adapters/github_fleet.py` (HEAD + compare; host-pinned, no redirects), `services/fleet.py` (drift judged from the compare; one HEAD read per repo; never raises), `adapters/memory_state.py`. `ports/fleet.py` split into FleetReader + RepoReader. Plain naming (§12). 225 tests green. | — | The tests caught a real bug on first run: gcloud's "command not found" (rc 127) was being read as Cloud Run's "service not found" — exactly the CLI-vs-credential confusion rule 1 exists for. Also: GitHub's compare API answers the drift question in one call, from the base's point of view, so the direction is flipped once, in the adapter, with a test that pins which way. |
 | 2026-09-17 | — | §17 The command center (the board), mapped from THE FORGE one-to-one (company / app / environment; plain names, theme in the art); §12.2 the orb as organism. 41 Forge screenshots renamed in `IMAGES_ABOUT_FORGE/`. | FORGE RADIO, mascot packs, the file queue (HELIX calls tools directly). | THE FORGE's AI layer is most of what HELIX already is; the command center is a pack and a page, not a new app. Brendan's ten scars (§17.6) transfer directly — the biggest is "a setting is not the truth; the files are." |
 | 2026-09-07 | — | §6.6 (provenance), §10.7 (allowlist + PIN), rollback-depth-by-deletion in §6.5, six §15 questions answered from `dev.ps1`. `scripts/make_shortcut.ps1` added. | The PIN-to-production path: replaced with two-person approval for prod, PIN kept for dev/QA. | The big one: **deploys are `gcloud run deploy --source .` from a working tree**, so no revision carries a commit SHA and THE STRAND cannot answer its headline question until one flag is added to `dev.ps1`. Also: the console *deletes* revisions past five, so rollback depth is a hard floor, not a display setting — and a tidy-up silently shortens how far back you can recover. |
