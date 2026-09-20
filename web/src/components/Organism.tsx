@@ -163,23 +163,40 @@ void main() {
       col += glow * brow * 1.1 * front * uPhaseFace;
       clear = max(clear, eye + brow);
     }
-    // THE LIPS: two curves; the lower drops with uOpen, the corners stay; the cavity is dark
+    // THE MOUTH: two lips around a real cavity. The upper lip lifts a little and the lower lip
+    // drops a lot with uOpen (a jaw, not a slot); the corners rise with a smile; inside is dark
+    // with a tongue of light that brightens with the voice, and a band of teeth under the top lip.
     vec2 m = uv - vec2(0.0, -0.30);
-    float span = 1.0 - smoothstep(0.24, 0.31, abs(m.x));
-    float corner = 1.0 - m.x * m.x * 9.0;                      // 1 at the centre, 0 at the corners
-    float lift = uSmile * 0.075 * min(1.0, m.x * m.x * 9.0);   // the corners rise with a smile, fall with a frown
-    float upper = m.y - lift + 0.03 * corner + 0.03 * uOpen * corner;
-    float lower = m.y - lift + 0.03 * corner - 0.008 - 0.15 * uOpen * corner;
-    float cavity = smoothstep(0.0, 0.006, -upper) * smoothstep(0.0, 0.006, lower) * span;   // between the lips
-    float lipU = 1.0 - smoothstep(0.004, 0.011, abs(upper));
-    float lipL = 1.0 - smoothstep(0.004, 0.011, abs(lower));
-    col = mix(col, ink * 0.5, cavity * front * uPhaseFace);
-    // a glow inside the open mouth, brighter with the voice: the voice is light
-    float inner = cavity * (0.25 + 0.9 * uLevel) * (1.0 - smoothstep(0.0, 0.16 * uOpen + 0.02, abs(m.y + 0.06 * uOpen)));
-    col += glow * inner * front * uPhaseFace;
-    col += glow * max(lipU, lipL) * span * 1.3 * front * uPhaseFace;
-    col += glow * (1.0 - smoothstep(0.0, 0.035, min(abs(upper), abs(lower)))) * span * 0.12 * front * uPhaseFace;
+    float W = 0.27;
+    float xr = clamp(m.x / W, -1.0, 1.0);
+    float c = 1.0 - xr * xr;                                    // 1 at the centre, 0 at the corners
+    float span = 1.0 - smoothstep(W - 0.01, W + 0.02, abs(m.x));
+    float lift = uSmile * 0.075 * xr * xr;                       // the corners rise with a smile, fall with a frown
+    float bow = 0.008 * exp(-m.x * m.x * 900.0);                 // the cupid's bow
+    float yU = lift + 0.011 - bow + uOpen * 0.045 * c;           // the upper lip's lower edge
+    float yL = lift - 0.011 - uOpen * 0.17 * c;                  // the lower lip's upper edge
+    float gap = max(0.0, yU - yL);
+    float cavity = smoothstep(0.0, 0.005, m.y - yL) * (1.0 - smoothstep(-0.005, 0.0, m.y - yU)) * span * step(0.004, gap);
+    float lipU = 1.0 - smoothstep(0.004, 0.012, abs(m.y - yU));
+    float lipL = 1.0 - smoothstep(0.004, 0.012, abs(m.y - yL));
+    float seam = (1.0 - smoothstep(0.003, 0.010, abs(m.y - lift))) * (1.0 - step(0.004, gap));   // the closed line
+    col = mix(col, ink * 0.35, cavity * front * uPhaseFace);
+    float tongue = cavity * (0.15 + 1.1 * uLevel) * (1.0 - smoothstep(0.0, max(gap, 0.02) * 0.9, m.y - yL));
+    col += glow * tongue * 0.9 * front * uPhaseFace;
+    float teeth = cavity * (1.0 - smoothstep(0.0, 0.014, yU - m.y)) * smoothstep(0.03, 0.08, gap);
+    col += vec3(0.85, 0.95, 1.0) * teeth * 0.55 * front * uPhaseFace;
+    col += glow * max(max(lipU, lipL), seam) * span * 1.3 * front * uPhaseFace;
+    col += glow * (1.0 - smoothstep(0.0, 0.04, min(abs(m.y - yU), abs(m.y - yL)))) * span * 0.12 * front * uPhaseFace;
+    // THE VOICE, seen: a waveform of light on the sphere below the mouth while it speaks
+    float wv = uLevel * uOpen;
+    float wy = -0.52 + 0.035 * wv * sin(m.x * 60.0 + t * 30.0) * c;
+    float wave = (1.0 - smoothstep(0.0, 0.006 + 0.004 * wv, abs(uv.y - wy))) * span * smoothstep(0.02, 0.2, wv);
+    col += glow * wave * 0.8 * front * uPhaseFace;
   }
+  // THE HALO: a thin ring of light around the equator, ticking with the syllables
+  float halo = 1.0 - smoothstep(0.0, 0.012, abs(vn.y - 0.62 + 0.03 * sin(t * 0.7)));
+  float ticks = 0.5 + 0.5 * sin(atan(vn.x, vn.z) * 24.0 + t * 2.0);
+  col += mix(uHueB, uColor, 0.6) * halo * (0.25 + 0.55 * uOpen * ticks + 0.3 * uFlash) * (0.6 + 0.4 * front);
 
   gl_FragColor = vec4(col, 1.0);
 }
@@ -248,7 +265,7 @@ function buildScript(text: string): Script {
       for (let k = 0; k < syl; k++) {
         const vowels = (bare.match(/[aeiouy]/gi) || []).length / Math.max(1, bare.length);
         const dur = 0.11 + Math.random() * 0.05 + (heavy ? 0.05 : 0);
-        beats.push({ at: t, dur, open: Math.min(1, 0.35 + vowels * 0.9 + (heavy ? 0.2 : 0) + Math.random() * 0.15) });
+        beats.push({ at: t, dur, open: Math.min(1, 0.45 + vowels * 0.9 + (heavy ? 0.2 : 0) + Math.random() * 0.15) });
         t += dur;
       }
       t += /[,;:]$/.test(word) ? 0.16 : 0.04;                      // a breath at the commas
@@ -277,6 +294,21 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
   // THE IDLE LIFE: every few seconds a small act - a glance aside, a brow flick, a double blink,
   // a head tilt, a half smile - so the face is alive between lines. Thinking gets its own acts:
   // eyes up and away, a furrow, a squint, as if reading something over your shoulder.
+  const local = useRef({ until: 0 });   // a Say line performed on the page's own clock
+  useEffect(() => {
+    const onSay = (e: Event) => {
+      const text = String((e as CustomEvent).detail?.text || "");
+      if (!text) return;
+      const script = buildScript(text);
+      perf.current = { script, t0: performance.now() / 1000, beat: 0, nod: -1, glanceT: 0, endSmile: 0 };
+      local.current.until = performance.now() / 1000 + script.total + 0.4;
+      prev.current.orb = "speaking";           // the orb event that follows must not restart the script
+      firePulseRef.current(true);
+    };
+    window.addEventListener("helix-say", onSay);
+    return () => window.removeEventListener("helix-say", onSay);
+  }, []);
+  const firePulseRef = useRef<(big: boolean) => void>(() => undefined);
   const life = useRef({ next: 2.5, act: "", until: 0, gx: 0, gy: 0, brow: 0, tilt: 0, smile: 0, squint: 0, blinks: 0 });
   // the mouse anywhere on the page turns the head - not only over the canvas
   useEffect(() => {
@@ -323,13 +355,18 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
     flash.current = big ? 1 : 0.5; swell.current = big ? 1 : 0.45;
     onPulse(big);
   };
+  firePulseRef.current = firePulse;
 
   useFrame(({ camera }, dtRaw) => {
     const pointer = mouse.current;
     const dt = Math.min(0.05, dtRaw);
     const s = useHelix.getState();
     const L = baseLook(s);
-    const u = uniforms;
+    // R3F hands the material a COPY of the uniforms object: vectors and colors stay shared (they are
+    // the same instances) but every scalar is copied by value, so writing uniforms.uOpen.value here
+    // never reached the shader - the lips, blinks, brows and pulses were all dead. Write to the
+    // material's own uniforms, always.
+    const u = (mesh.current.material as THREE.ShaderMaterial).uniforms as typeof uniforms;
     u.uTime.value += dt;
     u.uBits.value = bits;
     u.uEnergy.value += (look.energy - u.uEnergy.value) * 0.05;
@@ -338,7 +375,8 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
     stateColor.setRGB(L.color[0], L.color[1], L.color[2]);
     u.uColor.value.lerp(stateColor, 0.06);
     u.uAttend.value += ((s.orb === "listening" ? 1 : 0) - u.uAttend.value) * 0.08;
-    const speaking = s.orb === "speaking";
+    const localSay = performance.now() / 1000 < local.current.until;
+    const speaking = s.orb === "speaking" || localSay;
     const level = speaking ? 0.3 + s.level * 0.9 : s.orb === "transcribing" ? s.level * 0.6 : 0;
     u.uLevel.value += (level - u.uLevel.value) * 0.3;
     u.uPhaseFace.value += ((phase === "face" ? 1 : 0) - u.uPhaseFace.value) * 0.04;
@@ -353,7 +391,7 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
         const last = [...s.bubbles].reverse().find((b) => b.role === "helix");
         perf.current = { script: last ? buildScript(last.text) : null, t0: performance.now() / 1000, beat: 0, nod: -1, glanceT: 0, endSmile: 0 };
       }
-      if (p.orb === "speaking") { perf.current.script = null; perf.current.endSmile = 1; }
+      if (p.orb === "speaking" && !localSay) { perf.current.script = null; perf.current.endSmile = 1; }
       p.orb = s.orb;
     }
     if (s.bubbles.length !== p.bubbles) {
@@ -425,6 +463,7 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
       target = Math.min(1, 0.15 + u.uLevel.value * 0.9 + 0.25 * Math.max(0, Math.sin(m.flutter)) * u.uLevel.value);
       brow = 0.2;
     }
+    if (!speaking && pf.script) { pf.script = null; pf.endSmile = 1; }
     if (!speaking && pf.endSmile > 0) { smile = 0.45 * pf.endSmile; pf.endSmile = Math.max(0, pf.endSmile - dt * 0.5); }
     m.open += (target - m.open) * (speaking ? 0.5 : 0.15);
     u.uOpen.value = m.open;
@@ -446,6 +485,7 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
     if (b.t >= 0) { b.t += dt; u.uBlink.value = Math.sin(Math.min(1, b.t / 0.22) * Math.PI); if (b.t > 0.22) { b.t = -1; u.uBlink.value = 0; } }
 
     mesh.current.rotation.y += dt * 0.1 * look.energy;
+    mesh.current.position.y = 0.012 * Math.sin(u.uTime.value * 1.1) + 0.006 * Math.sin(u.uTime.value * 0.37);   // it breathes
     mesh.current.rotation.x += ((-pointer.y * 0.12 + e.nod * 0.05) - mesh.current.rotation.x) * 0.04;
     mesh.current.scale.setScalar(1 + swell.current * 0.06);
     spores.current.rotation.y -= dt * 0.05; spores.current.rotation.z += dt * 0.02;

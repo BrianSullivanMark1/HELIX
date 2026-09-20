@@ -483,7 +483,7 @@ export default function Talk({ project }: { project?: string } = {}) {
         )}
         <button className="btn shrink-0 text-[13px]" title="HELIX says exactly this, out loud, no model involved - a test line for the face"
           disabled={!text.trim()}
-          onClick={() => { const t = text.trim(); if (!t) return; setText(""); void api.post("/api/say", { text: t }).catch(() => undefined); }}>
+          onClick={() => { const t = text.trim(); if (!t) return; setText(""); window.dispatchEvent(new CustomEvent("helix-say", { detail: { text: t } })); void api.post("/api/say", { text: t }).catch(() => undefined); }}>
           ▶ Say
         </button>
         <button className="btn btn-primary shrink-0" onClick={() => void send()}>
