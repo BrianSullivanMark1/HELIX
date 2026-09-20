@@ -274,6 +274,83 @@ def mount_fleet(app: FastAPI, container) -> None:
 
         return await asyncio.to_thread(read)
 
+    @app.post("/api/fleet/scan")
+    async def fleet_scan(request: Request):
+        """The secrets scan for one app: the linked folder when there is one (git-tracked files
+        only, so ignored files never count), else the branch on GitHub. Findings are masked."""
+        fleet = _fleet()
+        if fleet is None:
+            return _down()
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+        co = company(str(body.get("company") or COMPANIES[0].id))
+        app_key = str(body.get("app") or "").strip().upper()
+        if co is None or app_key not in apps(co.id):
+            return JSONResponse({"error": f"no such app: {app_key or '?'}"}, status_code=404)
+        svc = next(iter(fleet.services(co, app_key)), None)
+        if svc is None:
+            return JSONResponse({"error": "no cells"}, status_code=404)
+        branch = str(body.get("branch") or svc.branch)
+        links = fleet._links() if hasattr(fleet, "_links") else {}
+        folder = getattr(links.get(app_key), "folder", None)
+
+        def run():
+            from helix.domain.secret_scan import scan_files
+            if folder:
+                from pathlib import Path
+                import subprocess
+                root = Path(folder)
+                if not root.is_dir():
+                    return {"error": f"The linked folder does not exist on this PC: {folder}"}
+                try:
+                    ls = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, timeout=60)
+                    names = [n for n in ls.stdout.decode("utf-8", "replace").split("\0") if n] if ls.returncode == 0 else None
+                except Exception:  # noqa: BLE001
+                    names = None
+                if names is None:   # not a git checkout: walk it
+                    names = [str(p.relative_to(root)).replace("\\", "/") for p in root.rglob("*") if p.is_file()][:4000]
+
+                def files():
+                    for n in names:
+                        fp = root / n
+                        try:
+                            yield n, (fp.read_bytes() if fp.stat().st_size <= 400 * 1024 else None)
+                        except OSError:
+                            yield n, None
+                rep = scan_files(files())
+                return {"where": "folder", "folder": folder, "branch": None, **rep.as_dict()}
+            repos = getattr(fleet, "_repos", None)
+            if repos is None or not hasattr(repos, "tree"):
+                return {"error": "This HELIX cannot read the repo's files."}
+            ok, why = repos.available()
+            if not ok:
+                return {"error": why}
+            entries, why_t = repos.tree(svc.repo, branch)
+            if why_t:
+                return {"error": why_t}
+            from helix.domain.secret_scan import scannable
+            entries = entries[:1500]
+
+            def gh_files():
+                budget = 350
+                for e in entries:
+                    if not scannable(e["path"]) or e["size"] > 400 * 1024:
+                        yield e["path"], None
+                        continue
+                    if budget <= 0:
+                        yield e["path"], None
+                        continue
+                    budget -= 1
+                    yield e["path"], repos.blob(svc.repo, e["sha"])
+            rep = scan_files(gh_files())
+            return {"where": "github", "folder": None, "repo": svc.repo, "branch": branch, **rep.as_dict()}
+
+        result = await asyncio.to_thread(run)
+        if "error" in result:
+            return JSONResponse(result, status_code=400)
+        return result
+
     @app.get("/api/fleet/history")
     def fleet_history(company_id: str = Query("", alias="company"), app: str = "", limit: int = 50):
         fleet = _fleet()

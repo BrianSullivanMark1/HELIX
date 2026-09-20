@@ -156,7 +156,10 @@ function glowTexture(): THREE.Texture {
   return tex;
 }
 
-const HELIX = { points: 220, turns: 3.2, radius: 1.75, height: 15, rungEvery: 6 };
+const HELIX = { points: 900, turns: 13, radius: 1.75, height: 60, rungEvery: 6 };
+const TURN_H = HELIX.height / HELIX.turns;          // one full turn along the axis: the wrap of the endless surf
+const END_FADE = 0.16;                              // the strands fade over this much of each end: no cut-off
+function taper(t: number): number { const e = END_FADE; return Math.min(1, t / e, (1 - t) / e); }
 const SIGNALS = 12;
 const TAIL = 9;
 
@@ -192,7 +195,8 @@ function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: 
         const k = (s * n + i) * 3;
         pos[k] = v.x; pos[k + 1] = v.y; pos[k + 2] = v.z;
         const c = i % 23 === 0 ? gold : s === 0 ? cyan : blue;
-        col[k] = c.r; col[k + 1] = c.g; col[k + 2] = c.b;
+        const f = taper(i / (n - 1));
+        col[k] = c.r * f; col[k + 1] = c.g * f; col[k + 2] = c.b * f;
       }
     }
     const sg = new THREE.BufferGeometry();
@@ -211,7 +215,12 @@ function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: 
   }, []);
   const rungRef = useRef<THREE.LineSegments>(null!);
   const twin = useRef<THREE.Group>(null!);
+  const surf = useRef<THREE.Group>(null!);
   const clock = useRef(0);
+  const camera = useThree((st) => st.camera);
+  // THE HAND ON THE STRAND: every node keeps a displacement that eases toward where the cursor
+  // pushes it (in view space, so it bends the way you see it) and springs back when you leave.
+  const bend = useMemo(() => ({ d: new Float32Array(HELIX.points * 2 * 3), tmp: new THREE.Vector3(), tmp2: new THREE.Vector3(), inv: new THREE.Matrix4(), right: new THREE.Vector3(), up: new THREE.Vector3() }), []);
 
   // The strand colors: A on one strand, B on the other, gold every 23rd node. Rewritten when the
   // user picks new colors in Settings (the geometry is shared with the bloom and the twin).
@@ -223,7 +232,8 @@ function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: 
     for (let sIdx = 0; sIdx < 2; sIdx++) {
       for (let i = 0; i < n; i++) {
         const c = i % 23 === 0 ? gold : sIdx === 0 ? a : b;
-        col.setXYZ(sIdx * n + i, c.r, c.g, c.b);
+        const f = taper(i / (n - 1));
+        col.setXYZ(sIdx * n + i, c.r * f, c.g * f, c.b * f);
       }
     }
     col.needsUpdate = true;
@@ -299,17 +309,56 @@ function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: 
     g.position.y = 0.2 + 0.25 * Math.sin(t * 0.23);
     // the distant twin turns the other way, slower
     if (twin.current) { twin.current.rotation.y -= dt * 0.07 + spin.current * dt * 0.3; twin.current.rotation.z = -0.5 + 0.03 * Math.sin(t * 0.3); }
-    // a wave of light climbs the rungs - the rung colors are rewritten every frame (74 rungs, cheap)
+    // THE SURF: the strands slide along their own axis forever - one turn, then wrap, and the
+    // faded ends hide the seam. Faster with the music.
+    if (surf.current) { surf.current.position.y = -((t * (0.35 + beat.level * 1.2)) % TURN_H); }
+    // THE BEND: the cursor pushes the nodes it passes over; they ease out and spring back
+    g.updateMatrixWorld();
+    if (surf.current) surf.current.updateMatrixWorld();
+    const sp = strands.getAttribute("position") as THREE.BufferAttribute;
+    const n = HELIX.points;
+    const B = bend;
+    const m = surf.current ? surf.current.matrixWorld : g.matrixWorld;
+    B.inv.copy(m).invert();
+    B.right.set(1, 0, 0).applyQuaternion(camera.quaternion); B.up.set(0, 1, 0).applyQuaternion(camera.quaternion);
+    const mx = pointer.current.x, my = pointer.current.y, REACH = 0.34;
+    const wake = 1 - Math.pow(0.001, dt);
+    for (let s2 = 0; s2 < 2; s2++) for (let i = 0; i < n; i++) {
+      const idx = s2 * n + i;
+      strandAt(i / (n - 1), s2 as 0 | 1, B.tmp);
+      B.tmp2.copy(B.tmp).applyMatrix4(m).project(camera);
+      const dx = B.tmp2.x - mx, dy = (B.tmp2.y - my) * 0.75;
+      const dd = Math.hypot(dx, dy);
+      let tx = 0, ty = 0, tz = 0;
+      if (dd < REACH && B.tmp2.z < 1) {
+        const f = Math.pow(1 - dd / REACH, 2) * 1.1;
+        const ux = dx / (dd || 1), uy = dy / (dd || 1);
+        // the push, in world space, along the camera's right/up
+        tx = (B.right.x * ux + B.up.x * uy) * f; ty = (B.right.y * ux + B.up.y * uy) * f; tz = (B.right.z * ux + B.up.z * uy) * f;
+      }
+      const k = idx * 3;
+      B.d[k] += (tx - B.d[k]) * wake * 0.8; B.d[k + 1] += (ty - B.d[k + 1]) * wake * 0.8; B.d[k + 2] += (tz - B.d[k + 2]) * wake * 0.8;
+      // world displacement -> local (rotation only)
+      B.tmp2.set(B.d[k], B.d[k + 1], B.d[k + 2]).transformDirection(B.inv).multiplyScalar(Math.hypot(B.d[k], B.d[k + 1], B.d[k + 2]));
+      sp.setXYZ(idx, B.tmp.x + B.tmp2.x, B.tmp.y + B.tmp2.y, B.tmp.z + B.tmp2.z);
+    }
+    sp.needsUpdate = true;
+    // a wave of light climbs the rungs; the rungs follow the bent strands
     const rc = rungRef.current?.geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
     const rpos = rungRef.current?.geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
     if (rc && rpos) {
-      for (let i = 0; i < rc.count; i++) {
-        const y = rpos.getY(i);
+      for (let i = 0; i < rc.count / 2; i++) {
+        const node = Math.min(n - 1, i * HELIX.rungEvery);
+        rpos.setXYZ(i * 2, sp.getX(node), sp.getY(node), sp.getZ(node));
+        rpos.setXYZ(i * 2 + 1, sp.getX(n + node), sp.getY(n + node), sp.getZ(n + node));
+        const y = rpos.getY(i * 2);
         const w = Math.max(0, Math.sin(y * 0.9 - t * 1.6));
-        const k = Math.min(1, 0.12 + 0.95 * w * w * w * w + flash * 0.8);
-        rc.setXYZ(i, 0.25 * k + 0.02, 0.88 * k + 0.05, 0.88 * k + 0.06);
+        const fade = taper(node / (n - 1));
+        const k = Math.min(1, 0.12 + 0.95 * w * w * w * w + flash * 0.8) * fade;
+        rc.setXYZ(i * 2, 0.25 * k + 0.02 * fade, 0.88 * k + 0.05 * fade, 0.88 * k + 0.06 * fade);
+        rc.setXYZ(i * 2 + 1, 0.25 * k + 0.02 * fade, 0.88 * k + 0.05 * fade, 0.88 * k + 0.06 * fade);
       }
-      rc.needsUpdate = true;
+      rc.needsUpdate = true; rpos.needsUpdate = true;
     }
     // lean with the cursor, gently
     const px = pointer.current.x, py = pointer.current.y;
@@ -334,32 +383,34 @@ function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: 
   return (
     <>
       <group ref={group} position={[2.6, 0.2, -1.5]} rotation={[0, 0, 0.42]}>
-        <points geometry={strands}>
-          <pointsMaterial ref={(m) => { if (m) { m.userData.base = 0.26; strandMats.current[0] = m; } }}
-            map={tex} size={0.26} vertexColors transparent depthWrite={false}
-            blending={THREE.AdditiveBlending} sizeAttenuation opacity={1} />
-        </points>
-        {/* the bloom: the same strand points, drawn huge and faint, so every node wears a halo */}
-        <points geometry={strands}>
-          <pointsMaterial ref={(m) => { if (m) { m.userData.base = 0.95; strandMats.current[1] = m; } }}
-            map={tex} size={0.95} vertexColors transparent depthWrite={false}
-            blending={THREE.AdditiveBlending} sizeAttenuation opacity={0.16} />
-        </points>
-        <lineSegments ref={rungRef} geometry={rungs}>
-          <lineBasicMaterial vertexColors transparent opacity={0.9} blending={THREE.AdditiveBlending} depthWrite={false} />
-        </lineSegments>
-        <points ref={signals} geometry={sigGeo}>
-          <pointsMaterial map={tex} size={0.5} vertexColors transparent depthWrite={false}
-            blending={THREE.AdditiveBlending} sizeAttenuation />
-        </points>
+        <group ref={surf}>
+          <points geometry={strands} frustumCulled={false}>
+            <pointsMaterial ref={(m) => { if (m) { m.userData.base = 0.26; strandMats.current[0] = m; } }}
+              map={tex} size={0.26} vertexColors transparent depthWrite={false}
+              blending={THREE.AdditiveBlending} sizeAttenuation opacity={1} />
+          </points>
+          {/* the bloom: the same strand points, drawn huge and faint, so every node wears a halo */}
+          <points geometry={strands} frustumCulled={false}>
+            <pointsMaterial ref={(m) => { if (m) { m.userData.base = 0.95; strandMats.current[1] = m; } }}
+              map={tex} size={0.95} vertexColors transparent depthWrite={false}
+              blending={THREE.AdditiveBlending} sizeAttenuation opacity={0.16} />
+          </points>
+          <lineSegments ref={rungRef} geometry={rungs} frustumCulled={false}>
+            <lineBasicMaterial vertexColors transparent opacity={0.9} blending={THREE.AdditiveBlending} depthWrite={false} />
+          </lineSegments>
+          <points ref={signals} geometry={sigGeo} frustumCulled={false}>
+            <pointsMaterial map={tex} size={0.5} vertexColors transparent depthWrite={false}
+              blending={THREE.AdditiveBlending} sizeAttenuation />
+          </points>
+        </group>
       </group>
       {/* the twin: the same helix far behind and to the left, dim, turning the other way - depth */}
       <group ref={twin} position={[-6.5, 1.5, -9]} rotation={[0, 0, -0.5]} scale={[1.6, 1.6, 1.6]}>
-        <points geometry={strands}>
+        <points geometry={strands} frustumCulled={false}>
           <pointsMaterial map={tex} size={0.22} vertexColors transparent depthWrite={false}
             blending={THREE.AdditiveBlending} sizeAttenuation opacity={0.35} />
         </points>
-        <lineSegments geometry={rungs}>
+        <lineSegments geometry={rungs} frustumCulled={false}>
           <lineBasicMaterial color="#2a8cff" transparent opacity={0.12} blending={THREE.AdditiveBlending} depthWrite={false} />
         </lineSegments>
       </group>
@@ -447,14 +498,14 @@ export function HelixLayer({ colors }: { colors: [string, string] }) {
  * fire along the links node to node, lighting each node they reach and sometimes chaining on.
  * Pure canvas, no data, no pointer events; paused when the tab is hidden.
  */
-export function NeuralLayer() {
+export function NeuralLayer({ density = 1, keepOut }: { density?: number; keepOut?: { x: number; y: number; r: number } | null } = {}) {
   const ref = useRef<HTMLCanvasElement | null>(null);
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas || REDUCED) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const N = 70;
+    const N = Math.round(70 * density);
     const LINK = 165;
     type Node = { x: number; y: number; vx: number; vy: number; r: number; p: number; flash: number; hx: number; hy: number; px: number; py: number };
     type Signal = { a: number; b: number; t: number; v: number; hops: number };
@@ -464,6 +515,7 @@ export function NeuralLayer() {
     // THE HAND IN THE NET: the cursor pushes nodes away (links stretch, then snap with a spark),
     // and a click sends a ring out that throws everything it crosses. Nodes drift home after.
     const mouse = { x: -9999, y: -9999, vx: 0, vy: 0, lx: -9999, ly: -9999 };
+    const beatNow = { level: 0, kick: false, tick: 0 };
     type Ring = { x: number; y: number; r: number; v: number; life: number };
     type Spark = { x: number; y: number; vx: number; vy: number; life: number };
     let rings: Ring[] = [];
@@ -520,6 +572,9 @@ export function NeuralLayer() {
       if (!alive) return;
       const dt = Math.min(0.05, (t - last) / 1000 || 0);
       last = t;
+      const b0 = radioBeat();
+      beatNow.level = b0.level; beatNow.kick = b0.kick; beatNow.tick = t / 1000;
+      if (b0.kick) rings.push({ x: keepOut ? keepOut.x * w : w / 2, y: keepOut ? keepOut.y * h : h / 2, r: keepOut ? keepOut.r * Math.min(w, h) : 0, v: 420 + b0.level * 400, life: 0.7 });   // a kick: a wave through the jelly
       ctx.clearRect(0, 0, w, h);
       mouse.vx = mouse.x - mouse.lx; mouse.vy = mouse.y - mouse.ly; mouse.lx = mouse.x; mouse.ly = mouse.y;
       const speed = Math.min(60, Math.hypot(mouse.vx, mouse.vy));
@@ -538,6 +593,16 @@ export function NeuralLayer() {
           n.px += (dx / d) * f * dt * 8; n.py += (dy / d) * f * dt * 8;
           if (speed > 18 && Math.random() < 0.05) sparks.push({ x: n.x, y: n.y, vx: (dx / d) * 120 + mouse.vx * 4, vy: (dy / d) * 120 + mouse.vy * 4, life: 0.5 });
         }
+        // THE FACE / THE CENTER: the net is a lattice the face breaks through - nodes are kept out
+        // of the circle and gather at its rim, a constellation with a hole in it
+        if (keepOut) {
+          const kx = keepOut.x * w, ky = keepOut.y * h, kr = keepOut.r * Math.min(w, h);
+          const fx = n.hx + n.px - kx, fy = n.hy + n.py - ky;
+          const fd = Math.hypot(fx, fy);
+          if (fd < kr && fd > 0.01) { const push = (kr - fd) * 0.9; n.px += (fx / fd) * push; n.py += (fy / fd) * push; }
+        }
+        // THE MUSIC: bass wobbles the jelly, a kick fires a ring
+        if (beatNow.level > 0.02) { n.px += Math.sin(n.p * 3 + beatNow.tick * 7) * beatNow.level * 40 * dt; n.py += Math.cos(n.p * 2.3 + beatNow.tick * 6) * beatNow.level * 40 * dt; }
         // the rings
         for (const rg of rings) {
           const rdx = n.x - rg.x, rdy = n.y - rg.y;
@@ -581,7 +646,7 @@ export function NeuralLayer() {
         }
       }
       // signals
-      const beat = radioBeat();
+      const beat = beatNow;
       spawnIn -= dt * (1 + beat.level * 4);
       if (spawnIn <= 0) { spawnIn = 0.25 + Math.random() * 0.5; fire(Math.floor(Math.random() * nodes.length), 0); }
       if (beat.kick) { for (let k = 0; k < 6; k++) { const n = nodes[Math.floor(Math.random() * nodes.length)]; n.flash = 1; fire(nodes.indexOf(n), 2); } }
@@ -646,7 +711,7 @@ export function NeuralLayer() {
       window.removeEventListener("mousedown", onDown);
       document.removeEventListener("mouseleave", onLeave);
     };
-  }, []);
+  }, [density, keepOut?.x, keepOut?.y, keepOut?.r]); // eslint-disable-line react-hooks/exhaustive-deps
   if (REDUCED) return null;
   return <div className="board-layer board-mesh"><canvas ref={ref} aria-hidden="true" /></div>;
 }
@@ -798,8 +863,11 @@ function threadBetween(a: Row, b: Row): Thread {
 
 type Action = "dev" | "git" | "deploy";
 
-function AppCard({ card, index, busy, onRead, onAction, onLink }: { card: Card; index: number; busy: boolean; onRead: (app: string) => void; onAction: (app: string, a: Action) => void; onLink: (app: string) => void }) {
+function AppCard({ card, index, busy, queued, onRead, onAction, onLink, collapsed, onToggle }: { card: Card; index: number; busy: boolean; queued?: boolean; onRead: (app: string) => void; onAction: (app: string, a: Action) => void; onLink: (app: string) => void; collapsed?: boolean; onToggle?: () => void }) {
   const ref = useRef<HTMLElement | null>(null);
+  // A PROTOTYPE: an app with no production environment. Marked in the header, never judged.
+  const prototype = !card.envs.some((r) => r.env === "prod" && r.exists);
+  const envsMissing = card.envs.filter((r) => !r.exists).map((r) => r.env);
   const attention = card.needs_attention;
   const unlinked = card.link ? !card.link.linked : false;
   const live = card.envs.filter((r) => r.exists && r.checked_at);
@@ -827,7 +895,7 @@ function AppCard({ card, index, busy, onRead, onAction, onLink }: { card: Card; 
   return (
     <section
       ref={ref}
-      className={`board-card materialize p-4${busy ? " reading" : ""}${attention ? " attention" : ""}${unlinked ? " unlinked" : ""}`}
+      className={`board-card materialize p-4${busy ? " reading" : ""}${attention ? " attention" : ""}${unlinked ? " unlinked" : ""}${collapsed ? " collapsed" : ""}${prototype ? " prototype" : ""}`}
       style={{ "--i": index * 3 } as React.CSSProperties}
       onMouseMove={onMove}
       onMouseLeave={onLeave}
@@ -837,21 +905,24 @@ function AppCard({ card, index, busy, onRead, onAction, onLink }: { card: Card; 
       <i className="glare" aria-hidden="true" />
       <i className="scan" aria-hidden="true" />
       <div className="flex items-center gap-3 relative">
+        <button className="board-fold" onClick={onToggle} title={collapsed ? "Expand" : "Collapse"} aria-label={collapsed ? "Expand" : "Collapse"}>{collapsed ? "▸" : "▾"}</button>
         <div>
-          <div className="board-index">APP {String(index + 1).padStart(2, "0")}</div>
+          <div className="board-index">APP {String(index + 1).padStart(2, "0")}{prototype && <span className="board-proto" title={`No production environment - a prototype. ${envsMissing.length ? "Missing: " + envsMissing.join(", ").toUpperCase() + ". " : ""}Add environments from the gear when it is ready.`}>◇ PROTOTYPE</span>}</div>
           <div className="board-app"><Decoded text={card.app} /></div>
         </div>
         {attention && <Pill text="needs a look" color="var(--working)" />}
+        {collapsed && live.length > 0 && <span className="text-[11px]" style={MUTED}>{up}/{live.length} running</span>}
         <div className="flex-1" />
         {live.length > 0 && <Ring ok={up} total={live.length} warn={attention || dirty} />}
-        <button className="btn text-xs" disabled={busy} onClick={() => onRead(card.app)} title="Read this app's environments now">
-          {busy ? "Reading…" : "Read"}
+        <button className="btn text-xs" disabled={busy || queued} onClick={() => onRead(card.app)} title="Read this app's environments now">
+          {busy ? "Reading…" : queued ? "Queued…" : "Read"}
         </button>
         <button className={`board-gear${unlinked ? " spin" : ""}`} onClick={() => onLink(card.app)}
           title={unlinked ? `Not linked - ${card.link?.why || "set the repo"}` : "This project's settings: repo, branch, folder"} aria-label="Project settings">
           ⚙
         </button>
       </div>
+      {!collapsed && <>
       {unlinked && card.link?.why && (
         <div className="board-unlinked-note">{card.link.why}</div>
       )}
@@ -876,7 +947,11 @@ function AppCard({ card, index, busy, onRead, onAction, onLink }: { card: Card; 
           <EnvRow key={row.key} row={unlinked && row.note === card.link?.why ? { ...row, note: null } : row}
             thread={i < card.envs.length - 1 ? threadBetween(row, card.envs[i + 1]) : null} />
         ))}
+        {prototype && envsMissing.length > 0 && (
+          <div className="board-proto-note">A prototype: no {envsMissing.join(" or ").toUpperCase()} yet. When it is ready, add the missing environments from ⚙ - HELIX will spin them up in windy-celerity the fleet's way (that lane comes with Deploy).</div>
+        )}
       </div>
+      </>}
     </section>
   );
 }
@@ -1007,11 +1082,18 @@ function GitGraph({ doc, serving }: { doc: GitDoc; serving: { env: string; commi
   );
 }
 
-function GitDrawer({ card, onClose }: { card: Card; onClose: () => void }) {
+interface ScanDoc { where: "folder" | "github"; folder: string | null; branch: string | null; files_scanned: number; files_skipped: number; high: number; medium: number; clean: boolean; findings: { path: string; line: number; kind: string; severity: string; excerpt: string }[] }
+
+function GitDrawer({ card, onClose, onBoard }: { card: Card; onClose: () => void; onBoard?: (b: Board) => void }) {
   const head = card.envs.find((r) => r.repo_commit)?.repo_commit ?? null;
   const live = card.envs.filter((r) => r.exists && r.checked_at);
   const [doc, setDoc] = useState<GitDoc | null>(null);
   const [gitErr, setGitErr] = useState<string | null>(null);
+  const [gen, setGen] = useState(0);
+  const [switching, setSwitching] = useState(false);
+  const [scan, setScan] = useState<ScanDoc | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanErr, setScanErr] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     setDoc(null); setGitErr(null);
@@ -1019,8 +1101,24 @@ function GitDrawer({ card, onClose }: { card: Card; onClose: () => void }) {
       .then((d) => { if (alive) setDoc(d); })
       .catch((e: Error) => { if (alive) setGitErr(e.message); });
     return () => { alive = false; };
-  }, [card.app, card.link?.repo, card.link?.branch]);
+  }, [card.app, card.link?.repo, card.link?.branch, gen]);
   const serving = live.filter((r) => r.api?.commit).map((r) => ({ env: r.env, commit: r.api!.commit! }));
+  // THE BRANCH: pick the one the board reads and (later) deploys from. Saved as the project link.
+  const chooseBranch = async (name: string) => {
+    if (!doc || name === doc.branch) return;
+    setSwitching(true);
+    try {
+      const b = await api.put<Board>("/api/fleet/link", { app: card.app, repo: card.link?.custom ? card.link.repo : "", branch: name, folder: card.link?.folder || "" });
+      onBoard?.(b);
+      setScan(null);
+      setGen((g) => g + 1);
+    } catch (e) { setGitErr((e as Error).message); } finally { setSwitching(false); }
+  };
+  const runScan = async () => {
+    setScanning(true); setScanErr(null);
+    try { setScan(await api.post<ScanDoc>("/api/fleet/scan", { app: card.app, branch: doc?.branch })); }
+    catch (e) { setScanErr((e as Error).message); } finally { setScanning(false); }
+  };
   return (
     <Drawer title={card.app} sub="GIT · the repo" onClose={onClose}>
       <div className="space-y-4 text-[13px]">
@@ -1028,8 +1126,19 @@ function GitDrawer({ card, onClose }: { card: Card; onClose: () => void }) {
           <div className="board-kicker mb-1">NOW</div>
           <div className="flex items-center gap-3 flex-wrap">
             <span className="board-chip dim">{card.repo}</span>
-            <span className="board-chip dim">{card.envs[0]?.branch ?? "main"}</span>
-            {head ? <span className="board-chip">HEAD {head}</span> : <span style={MUTED}>HEAD not read - add a GitHub token in Settings</span>}
+            {doc && doc.branches.length > 0 ? (
+              <label className="board-branch" title="The branch this app is read from - and deploys from once the lane is wired">
+                <span>⎇</span>
+                <select value={doc.branch} disabled={switching} onChange={(e) => void chooseBranch(e.target.value)}>
+                  {doc.branches.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
+                  {!doc.branches.some((b) => b.name === doc.branch) && <option value={doc.branch}>{doc.branch}</option>}
+                </select>
+                {switching && <span style={MUTED}>switching…</span>}
+              </label>
+            ) : (
+              <span className="board-chip dim">⎇ {card.envs[0]?.branch ?? "main"}</span>
+            )}
+            {head ? <span className="board-chip">HEAD {head}</span> : <span style={MUTED}>HEAD not read yet</span>}
           </div>
           <div className="mt-2" style={MUTED}>Working tree, staged files and the commit box read from the clone on this PC - wired with the deploy lane.</div>
         </div>
@@ -1057,6 +1166,36 @@ function GitDrawer({ card, onClose }: { card: Card; onClose: () => void }) {
               </div>
               <GitGraph doc={doc} serving={serving} />
             </>
+          )}
+        </div>
+        <div className="board-panel">
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="board-kicker">SECRETS SCAN</div>
+            <div className="flex-1" />
+            <button className="btn btn-primary text-xs" disabled={scanning} onClick={() => void runScan()}>{scanning ? "Scanning…" : "⌕ Scan this branch"}</button>
+          </div>
+          <div className="mt-1" style={MUTED}>Keys, tokens, private keys, passwords in connection strings, committed .env and key files - {card.link?.folder ? "read from the linked folder on this PC (git-tracked files only)" : "read from GitHub"}. Values are masked; nothing leaves this PC.</div>
+          {scanErr && <div className="mt-2" style={{ color: "var(--error)" }}>{scanErr}</div>}
+          {scan && (
+            <div className="mt-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                {scan.clean
+                  ? <Pill text="clean" color="var(--done)" />
+                  : <><Pill text={`${scan.high} must fix`} color="var(--error)" />{scan.medium > 0 && <Pill text={`${scan.medium} look at`} color="var(--working)" />}</>}
+                <span style={MUTED}>{scan.files_scanned} files read · {scan.files_skipped} skipped · {scan.where === "folder" ? scan.folder : `${doc?.repo} @ ${scan.branch}`}</span>
+              </div>
+              {scan.findings.length > 0 && (
+                <div className="board-scan">
+                  {scan.findings.map((f, i) => (
+                    <div key={i} className={`board-scan-row ${f.severity}`}>
+                      <span className="board-scan-kind">{f.kind}</span>
+                      <span className="board-chip mono">{f.path}{f.line ? `:${f.line}` : ""}</span>
+                      <span className="board-scan-ex">{f.excerpt}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
         </div>
         <div className="flex gap-2">
@@ -1200,6 +1339,7 @@ function AddProject({ onClose }: { onClose: () => void }) {
   const [path, setPath] = useState("");
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
+  const [envs, setEnvs] = useState<"dev" | "dev+qa" | "all">("dev");
   return (
     <div className="board-drawer-wrap" onClick={onClose}>
       <div className="board-modal" onClick={(e) => e.stopPropagation()}>
@@ -1237,9 +1377,17 @@ function AddProject({ onClose }: { onClose: () => void }) {
           </div>
         )}
         {door === "new" && (
-          <div className="mt-4 space-y-2 text-[13px]">
+          <div className="mt-4 space-y-3 text-[13px]">
             <input className="w-full" placeholder="App name, e.g. QC Lab" value={name} onChange={(e) => setName(e.target.value)} />
-            <div style={MUTED}>Vite + Flask + one Cloud Run service and one Hosting site per environment, in windy-celerity - the fleet's layout, spun up by HELIX.</div>
+            <div>
+              <div className="board-kicker mb-1">ENVIRONMENTS ON CREATION</div>
+              <div className="flex gap-2 flex-wrap">
+                {([["dev", "DEV only - a prototype", "One environment to build in. Marked PROTOTYPE on the card; add QA and PROD later from the gear."], ["dev+qa", "DEV + QA", "Build and test; production comes when it earns it."], ["all", "DEV + QA + PROD", "The fleet's full layout from day one."]] as const).map(([k, label, hint]) => (
+                  <button key={k} className={`board-envpick${envs === k ? " on" : ""}`} title={hint} onClick={() => setEnvs(k)}>{label}</button>
+                ))}
+              </div>
+            </div>
+            <div style={MUTED}>Vite + Flask + one Cloud Run service and one Hosting site per environment, in windy-celerity - the fleet's layout, spun up by HELIX. The GitHub repo is created <b>private</b>, always.</div>
           </div>
         )}
         <div className="flex items-center gap-3 mt-5">
@@ -1257,6 +1405,12 @@ export default function ConsolePage() {
   const [drawer, setDrawer] = useState<{ app: string; kind: Action } | null>(null);
   const [adding, setAdding] = useState(false);
   const [linking, setLinking] = useState<string | null>(null);
+  // what is folded is remembered on this PC
+  const [folded, setFolded] = useState<Record<string, boolean>>(() => { try { return JSON.parse(localStorage.getItem("helix_console_folds") || "{}"); } catch { return {}; } });
+  const fold = (k: string) => setFolded((f) => { const n = { ...f, [k]: !f[k] }; try { localStorage.setItem("helix_console_folds", JSON.stringify(n)); } catch { /* no storage */ } return n; });
+  const [collapsedCards, setCollapsedCardsState] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem("helix_console_cards") || "[]"); } catch { return []; } });
+  const setCollapsedAll = (v: string[]) => { setCollapsedCardsState(v); try { localStorage.setItem("helix_console_cards", JSON.stringify(v)); } catch { /* no storage */ } };
+  const toggleCard = (app: string) => setCollapsedAll(collapsedCards.includes(app) ? collapsedCards.filter((a) => a !== app) : [...collapsedCards, app]);
   const [colors, setColors] = useState<[string, string]>(["#3fe0e0", "#2a8cff"]);
   useEffect(() => {
     void api.get<{ values?: Record<string, unknown> }>("/api/settings").then((d) => {
@@ -1276,13 +1430,41 @@ export default function ConsolePage() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const refresh = useCallback((app?: string) => {
+  // READS ARE QUEUED, NEVER DROPPED: the backend reads one thing at a time (a dozen gcloud calls
+  // each), so a second Read while one runs used to bounce off with "busy" and look like nothing
+  // happened. Now every Read joins a line and runs in turn; the card shows "queued" meanwhile.
+  const queue = useRef<(string | undefined)[]>([]);
+  const running = useRef(false);
+  const [queued, setQueued] = useState<string[]>([]);
+  const pump = useCallback(() => {
+    if (running.current) return;
+    if (queue.current.length === 0) { setQueued([]); return; }
+    const app = queue.current.shift();
+    running.current = true;
     setBusy(app || "*");
+    setQueued([...queue.current].map((a) => a || "*"));
     void api.post<Board>("/api/fleet/refresh", app ? { app } : {})
       .then((b) => { setBoard(b); setFailed(null); })
       .catch((e: Error) => setFailed(e.message))
-      .finally(() => setBusy(null));
+      .finally(() => { running.current = false; setBusy(null); if (queue.current.length) pump(); else setQueued([]); });
   }, []);
+  const refresh = useCallback((app?: string) => {
+    if (queue.current.includes(app) || (running.current && busy === (app || "*"))) return;
+    queue.current.push(app);
+    pump();
+  }, [pump, busy]);
+  // AUTO-READ: opening the Console with a board older than ten minutes (or never read) reads the
+  // whole company - you should never land on "not read yet".
+  const autoRead = useRef(false);
+  useEffect(() => {
+    if (!board || autoRead.current) return;
+    autoRead.current = true;
+    const at = board.companies[0]?.checked_at ? Date.parse(board.companies[0].checked_at) : 0;
+    const unread = (board.companies[0]?.apps ?? []).some((c) => c.envs.some((r) => r.exists && !r.checked_at));
+    if (!at || Date.now() - at > 10 * 60 * 1000 || unread) refresh();
+  }, [board, refresh]);
+  // and again every ten minutes while the Console is open
+  useEffect(() => { const id = window.setInterval(() => refresh(), 10 * 60 * 1000); return () => window.clearInterval(id); }, [refresh]);
 
   const company = board?.companies[0] ?? null;
   const cards = useMemo(() => (company?.apps ?? []).filter((c) => matches(c, q)), [company, q]);
@@ -1386,13 +1568,36 @@ export default function ConsolePage() {
             </div>
           )}
 
-          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))" }}>
-            {cards.map((card, i) => (
-              <AppCard key={card.app} card={card} index={i} busy={busy === card.app || busy === "*"} onRead={(app) => refresh(app)}
-                onLink={(app) => setLinking(app)}
-                onAction={(app, kind) => kind === "dev" ? navigate({ name: "talk", project: app }) : setDrawer({ app, kind })} />
-            ))}
-          </div>
+          {/* PROJECTS - the first section of many: Slack, Google, Listeners join it as HELIX grows */}
+          <section className={`board-section${folded.projects ? " folded" : ""}`}>
+            <button className="board-section-head" onClick={() => fold("projects")}>
+              <span className="board-section-chev">{folded.projects ? "▸" : "▾"}</span>
+              <span className="board-section-title">PROJECTS</span>
+              <span className="board-section-sub">{cards.length} app{cards.length === 1 ? "" : "s"} · {read.length}/{cells.length} cells read{look > 0 ? ` · ${look} need a look` : ""}</span>
+              <span className="flex-1" />
+              <span className="board-section-tools" onClick={(e) => e.stopPropagation()}>
+                <button className="btn-nav text-xs" onClick={() => setCollapsedAll(cards.map((c) => c.app))}>Collapse all</button>
+                <button className="btn-nav text-xs" onClick={() => setCollapsedAll([])}>Expand all</button>
+              </span>
+            </button>
+            {!folded.projects && (
+              <div className="grid gap-4 mt-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))" }}>
+                {cards.map((card, i) => (
+                  <AppCard key={card.app} card={card} index={i} busy={busy === card.app || busy === "*"} queued={queued.includes(card.app) || queued.includes("*")} onRead={(app) => refresh(app)}
+                    collapsed={collapsedCards.includes(card.app)} onToggle={() => toggleCard(card.app)}
+                    onLink={(app) => setLinking(app)}
+                    onAction={(app, kind) => kind === "dev" ? navigate({ name: "talk", project: app }) : setDrawer({ app, kind })} />
+                ))}
+              </div>
+            )}
+          </section>
+          <section className="board-section soon">
+            <div className="board-section-head" style={{ cursor: "default" }}>
+              <span className="board-section-chev">▸</span>
+              <span className="board-section-title">SLACK · GOOGLE · LISTENERS</span>
+              <span className="board-section-sub">the next sections: the company's channels, calendar and mail, and scheduled listeners that watch and act - coming as HELIX grows into the business</span>
+            </div>
+          </section>
           {company && (
             <div className="mt-2">
               <div className="board-kicker mb-2">LOCAL BUILDS · what HELIX made on this PC</div>
@@ -1403,7 +1608,7 @@ export default function ConsolePage() {
         </div>
       </div>
       {drawer && (() => { const c = company?.apps.find((x) => x.app === drawer.app); if (!c) return null;
-        return drawer.kind === "git" ? <GitDrawer card={c} onClose={() => setDrawer(null)} /> : <DeployDrawer card={c} onClose={() => setDrawer(null)} />; })()}
+        return drawer.kind === "git" ? <GitDrawer card={c} onClose={() => setDrawer(null)} onBoard={(b) => setBoard(b)} /> : <DeployDrawer card={c} onClose={() => setDrawer(null)} />; })()}
       {adding && <AddProject onClose={() => setAdding(false)} />}
       {linking && (() => { const c = company?.apps.find((x) => x.app === linking); if (!c) return null;
         return <LinkProject card={c} onClose={() => setLinking(null)} onSaved={(b) => { setBoard(b); setLinking(null); refresh(c.app); }} />; })()}

@@ -1,0 +1,26 @@
+/* THE WORDMARK - alive in the corner. --beat (0..1) rides in from the radio. */
+.wordmark { display: inline-flex; align-items: center; gap: 10px; padding: 4px 10px 4px 4px; border: none; background: transparent; cursor: pointer; border-radius: 14px; position: relative; isolation: isolate; transition: transform 0.25s; }
+.wordmark:hover { transform: translateY(-1px); }
+.wordmark::before { content: ""; position: absolute; inset: 0; border-radius: 14px; background: radial-gradient(ellipse at 20% 50%, color-mix(in srgb, var(--cyan) 14%, transparent), transparent 70%); opacity: 0; transition: opacity 0.3s; z-index: -1; }
+.wordmark:hover::before { opacity: 1; }
+.wm-mark { display: inline-flex; filter: drop-shadow(0 0 8px color-mix(in srgb, var(--cyan) 70%, transparent)); transition: filter 0.3s; }
+.wordmark:hover .wm-mark, .wordmark.kick .wm-mark { filter: drop-shadow(0 0 14px var(--cyan)) drop-shadow(0 0 28px color-mix(in srgb, #2a8cff 60%, transparent)); }
+.wm-halo { transform-origin: 50% 50%; animation: wm-breathe 3.6s ease-in-out infinite; }
+@keyframes wm-breathe { 0%, 100% { opacity: 0.35; transform: scale(0.9); } 50% { opacity: 0.8; transform: scale(1.05); } }
+.wm-ring { transform-origin: 50% 50%; animation: wm-turn 18s linear infinite; }
+.wm-ring2 { transform-origin: 50% 50%; animation: wm-turn 9s linear infinite reverse; }
+@keyframes wm-turn { to { transform: rotate(360deg); } }
+.wm-strand { stroke-dasharray: 14 50; animation: wm-flow 2.6s linear infinite; }
+.wm-strand.b { animation-direction: reverse; animation-duration: 3.1s; }
+@keyframes wm-flow { to { stroke-dashoffset: -128; } }
+.wm-rungs line { opacity: 0.25; animation: wm-rung 1.9s ease-in-out infinite; }
+@keyframes wm-rung { 0%, 100% { opacity: 0.2; stroke-width: 1.2; } 50% { opacity: 1; stroke-width: 2.2; } }
+.wm-orbit { transform-origin: 24px 24px; animation: wm-orbit 5.5s linear infinite; }
+@keyframes wm-orbit { to { transform: rotate(360deg); } }
+.wm-word { font-family: var(--font-display, inherit); font-weight: 800; font-size: 19px; letter-spacing: 5px; background: linear-gradient(90deg, #dffbff 0%, var(--cyan) 35%, #2a8cff 70%, #dffbff 100%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: wm-shimmer 6s linear infinite; filter: drop-shadow(0 0 10px color-mix(in srgb, var(--cyan) calc(40% + var(--beat, 0) * 60%), transparent)); }
+@keyframes wm-shimmer { to { background-position: -200% 0; } }
+.wm-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 8px var(--cyan), 0 0 16px var(--cyan); animation: wm-dot 2.2s ease-in-out infinite; }
+@keyframes wm-dot { 0%, 100% { opacity: 0.35; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1.15); } }
+.wordmark.kick .wm-word { animation: wm-shimmer 6s linear infinite, wm-kick 0.35s ease-out; }
+@keyframes wm-kick { 0% { transform: scale(1.06); letter-spacing: 6px; } 100% { transform: none; letter-spacing: 5px; } }
+@media (prefers-reduced-motion: reduce) { .wm-halo, .wm-ring, .wm-ring2, .wm-strand, .wm-rungs line, .wm-orbit, .wm-word, .wm-dot { animation: none !important; } }

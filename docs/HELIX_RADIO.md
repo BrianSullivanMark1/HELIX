@@ -4,8 +4,9 @@ One music library for the company, playable from HELIX and from every app we bui
 music videos go into one private bucket; a small API hands out short-lived play links to anyone
 signed in with a Mark1 Google account; the same player drops into any app in a few lines.
 
-Status: designed, bucket commands below. UI shell first (HELIX header button + deck), then the
-API, then the drop-in for the apps. Nothing here is claimed to run until the changelog says so.
+Status: LIVE inside HELIX (2026-09-21): the deck, uploads, playback across pages, station names,
+the gear (backgrounds, intensity, layout), the DJ stage - all through the user's own gcloud login.
+Next: `helix-radio-api` on Cloud Run with Google sign-in, then the drop-in for the apps.
 
 ---
 
@@ -16,7 +17,7 @@ API, then the drop-in for the apps. Nothing here is claimed to run until the cha
 | Bucket `helix-radio-<suffix>` | GCS, windy-celerity, us-west2 | Private. `tracks/`, `videos/`, `art/`, `catalog.json` |
 | `helix-radio-api` | Cloud Run, same project | Catalog, play links, upload links, station names. Verifies a Google sign-in from `mark1online.com` on every call |
 | The player | HELIX header (left of the menu) and one React component for the apps | Deck: now playing, queue, shuffle, volume, upload; grows into a video window; or shows the dancing avatar |
-| The avatar | Same component | Dances to the beat; customizable; hidden when the video is showing if you say so |
+| The DJ | Same component | A mini HELIX head in a headset, jamming in a neural net that takes the song's theme; the head bobs on kicks, the eyes squint on the beat, the LEDs run the bands. Hidden when the video is showing if you say so |
 
 Why an API instead of the bucket directly: a private bucket needs signed URLs, signing needs a
 service account key or impersonation, and we never hand keys to browsers. The API holds the

@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, tokenUrl, STALE_BACKEND } from "../lib/api";
 import { SCENES, loadLook, saveLook, type Look } from "./Backdrop";
+import DjStage from "./DjStage";
 import "./radio.css";
 
 export interface Track { id: string; title: string; artist: string; theme: string; bpm: number | null; kind: "audio" | "video"; mime: string; audio: string | null; video: string | null; uploaded_by: string; at: string }
@@ -99,12 +100,12 @@ const THEMES = ["chill", "hype", "dark", "happy", "focus", "epic"];
 // ---------------------------------------------------------------- the header button
 export function RadioButton({ onClick, open }: { onClick: () => void; open: boolean }) {
   const p = usePlayer();
-  const bars = useRef<HTMLSpanElement[]>([]);
+  const bars = useRef<HTMLSpanElement[]>([]);   // the five rungs of the logo, driven by the bands
   useEffect(() => {
     let raf = 0;
     const step = () => {
       const { bins: b } = radioBeat();
-      bars.current.forEach((el, i) => { if (!el) return; const v = b && p.playing ? b[2 + i * 5] / 255 : 0.12; el.style.transform = `scaleY(${0.15 + v * 0.85})`; });
+      bars.current.forEach((el, i) => { if (!el) return; const v = b && p.playing ? b[2 + i * 5] / 255 : 0.25; el.style.opacity = String(0.25 + v * 0.75); el.style.strokeWidth = String(1.2 + v * 2.2); });
       raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
@@ -112,7 +113,20 @@ export function RadioButton({ onClick, open }: { onClick: () => void; open: bool
   }, [p.playing]);
   return (
     <button className={`btn-nav radio-btn${p.playing ? " on" : ""}${open ? " open" : ""}`} onClick={onClick} title={p.track ? `${p.track.title}${p.track.artist ? " - " + p.track.artist : ""}` : "HELIX RADIO"}>
-      <span className="radio-bars" aria-hidden="true">{[0, 1, 2, 3].map((i) => <span key={i} ref={(el) => { if (el) bars.current[i] = el; }} />)}</span>
+      <span className="radio-logo" aria-hidden="true">
+        <svg viewBox="0 0 40 40" width="30" height="30">
+          <defs>
+            <linearGradient id="rlgA" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#3fe0e0" /><stop offset="1" stopColor="#2a8cff" /></linearGradient>
+            <linearGradient id="rlgB" x1="1" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#ffffff" /><stop offset="1" stopColor="#3fe0e0" /></linearGradient>
+          </defs>
+          <circle className="rl-ring" cx="20" cy="20" r="18" fill="none" stroke="url(#rlgA)" strokeWidth="1.2" />
+          <path className="rl-strand a" d="M12 6 C 28 12, 12 28, 28 34" fill="none" stroke="url(#rlgA)" strokeWidth="2.4" strokeLinecap="round" />
+          <path className="rl-strand b" d="M28 6 C 12 12, 28 28, 12 34" fill="none" stroke="url(#rlgB)" strokeWidth="2.4" strokeLinecap="round" />
+          <g className="rl-rungs" stroke="url(#rlgB)" strokeWidth="1.6" strokeLinecap="round">
+            {[10, 15, 20, 25, 30].map((y, i) => <line key={y} x1={20 - 6 * Math.abs(Math.cos((y - 6) / 28 * Math.PI))} x2={20 + 6 * Math.abs(Math.cos((y - 6) / 28 * Math.PI))} y1={y} y2={y} ref={(el) => { if (el) bars.current[i] = el as unknown as HTMLSpanElement; }} />)}
+          </g>
+        </svg>
+      </span>
       <span className="radio-word">RADIO</span>
     </button>
   );
@@ -148,8 +162,17 @@ export function RadioDeck({ open, onClose, appKey = "default" }: { open: boolean
     <div className="radio-wrap" onClick={onClose}>
       <div className={`radio-deck${look.layout === "compact" ? " compact" : ""}`} onClick={(e) => e.stopPropagation()}>
         <div className="radio-head">
+          <div className="radio-mark" aria-hidden="true">
+            <svg viewBox="0 0 40 40" width="44" height="44">
+              <defs><linearGradient id="rhA" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#3fe0e0" /><stop offset="1" stopColor="#2a8cff" /></linearGradient></defs>
+              <circle cx="20" cy="20" r="18.5" fill="none" stroke="url(#rhA)" strokeWidth="1" strokeDasharray="6 4" className="rh-ring" />
+              <path d="M12 6 C 28 12, 12 28, 28 34" fill="none" stroke="url(#rhA)" strokeWidth="2.6" strokeLinecap="round" className="rh-a" />
+              <path d="M28 6 C 12 12, 28 28, 12 34" fill="none" stroke="#dffbff" strokeWidth="2.6" strokeLinecap="round" className="rh-b" />
+              {[10, 15, 20, 25, 30].map((y) => <line key={y} x1={20 - 6 * Math.abs(Math.cos((y - 6) / 28 * Math.PI))} x2={20 + 6 * Math.abs(Math.cos((y - 6) / 28 * Math.PI))} y1={y} y2={y} stroke="#dffbff" strokeWidth="1.4" strokeLinecap="round" opacity="0.7" />)}
+            </svg>
+          </div>
           <div>
-            <div className="radio-kicker">HELIX RADIO{deck?.bucket ? ` · gs://${deck.bucket}` : ""}</div>
+            <div className="radio-kicker">{p.playing ? <span className="radio-onair">● ON AIR</span> : "HELIX RADIO"}{deck?.bucket ? ` · gs://${deck.bucket}` : ""}</div>
             <div className="radio-station">
               {stationEdit === null ? (
                 <button className="radio-station-name" title="Rename this station" onClick={() => setStationEdit(deck?.station ?? "")}>{deck?.station ?? "HELIX RADIO"} <small>✎</small></button>
@@ -184,9 +207,9 @@ export function RadioDeck({ open, onClose, appKey = "default" }: { open: boolean
           {/* THE STAGE: the video, or the dancer's place */}
           <div className={`radio-stage${isVideo && p.showVideo ? " video" : ""}`}>
             <div ref={video} className="radio-video" style={{ display: isVideo && p.showVideo ? "block" : "none" }} />
-            {!(isVideo && p.showVideo) && <Visualizer playing={p.playing} theme={p.track?.theme || ""} />}
+            {!(isVideo && p.showVideo) && <DjStage playing={p.playing} theme={p.track?.theme || ""} />}
             {isVideo && (
-              <button className="radio-swap" onClick={() => { state.showVideo = !state.showVideo; emit(); }}>{p.showVideo ? "Show the dancer" : "Show the video"}</button>
+              <button className="radio-swap" onClick={() => { state.showVideo = !state.showVideo; emit(); }}>{p.showVideo ? "Show the DJ" : "Show the video"}</button>
             )}
           </div>
 
@@ -233,11 +256,15 @@ export function RadioDeck({ open, onClose, appKey = "default" }: { open: boolean
             {tab === "settings" && (
               <div className="radio-form">
                 <div className="radio-kicker">BACKGROUND · behind the whole app while music plays</div>
-                <div className="radio-scenes">
-                  {SCENES.map((sc) => (
-                    <button key={sc.key} className={`radio-scene${!look.surprise && look.scene === sc.key ? " on" : ""}`} title={sc.blurb} onClick={() => setLook({ scene: sc.key, surprise: false })}>{sc.name}</button>
-                  ))}
-                  <button className={`radio-scene surprise${look.surprise ? " on" : ""}`} title="A different scene for every song, rolled fresh each time" onClick={() => setLook({ surprise: !look.surprise })}>⚄ Surprise me</button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label className="radio-select">
+                    <select value={look.surprise ? "surprise" : look.scene} onChange={(e) => e.target.value === "surprise" ? setLook({ surprise: true }) : setLook({ scene: e.target.value as Look["scene"], surprise: false })}>
+                      {SCENES.map((sc) => <option key={sc.key} value={sc.key}>{sc.name}</option>)}
+                      <option value="surprise">⚄ Surprise me - a new scene every song</option>
+                    </select>
+                    <span className="radio-select-chev">▾</span>
+                  </label>
+                  <span className="radio-muted">{look.surprise ? "A different scene for every song, rolled fresh each time." : SCENES.find((sc) => sc.key === look.scene)?.blurb}</span>
                 </div>
                 <label><span>Intensity <small>how hard the pages move to the music</small></span>
                   <input type="range" min={0.2} max={1.5} step={0.05} value={look.intensity} onChange={(e) => setLook({ intensity: Number(e.target.value) })} /></label>
@@ -302,39 +329,4 @@ function Upload({ onDone }: { onDone: () => void }) {
       </div>
     </div>
   );
-}
-
-/** Bars that dance to the sound - the stage while there is no video (the dancer replaces this). */
-function Visualizer({ playing, theme }: { playing: boolean; theme: string }) {
-  const ref = useRef<HTMLCanvasElement | null>(null);
-  useEffect(() => {
-    const c = ref.current; if (!c) return;
-    const g = c.getContext("2d"); if (!g) return;
-    let raf = 0, t = 0;
-    const hue = theme === "hype" ? 15 : theme === "dark" ? 275 : theme === "happy" ? 45 : theme === "focus" ? 200 : theme === "epic" ? 330 : 185;
-    const step = () => {
-      const w = c.clientWidth, h = c.clientHeight;
-      if (c.width !== w * 2 || c.height !== h * 2) { c.width = w * 2; c.height = h * 2; }
-      g.setTransform(2, 0, 0, 2, 0, 0); g.clearRect(0, 0, w, h);
-      const { bins: b, level } = radioBeat();
-      const n = 48, bw = w / n;
-      t += 0.016;
-      for (let i = 0; i < n; i++) {
-        const v = b && playing ? b[Math.floor(i * (b.length * 0.6) / n)] / 255 : 0.08 + 0.05 * Math.sin(t * 2 + i * 0.4);
-        const bh = Math.max(2, v * h * 0.85);
-        const grad = g.createLinearGradient(0, h - bh, 0, h);
-        grad.addColorStop(0, `hsla(${hue + i * 1.5}, 90%, ${60 + level * 25}%, 0.95)`); grad.addColorStop(1, `hsla(${hue + i * 1.5}, 90%, 40%, 0.15)`);
-        g.fillStyle = grad; g.fillRect(i * bw + 1, h - bh, bw - 2, bh);
-        g.fillStyle = `hsla(${hue + i * 1.5}, 100%, 85%, ${v})`; g.fillRect(i * bw + 1, h - bh - 2, bw - 2, 2);
-      }
-      const r = 28 + level * 34;
-      const rg = g.createRadialGradient(w / 2, h * 0.42, 0, w / 2, h * 0.42, r * 2);
-      rg.addColorStop(0, `hsla(${hue}, 100%, 75%, ${0.35 + level * 0.5})`); rg.addColorStop(1, "transparent");
-      g.fillStyle = rg; g.beginPath(); g.arc(w / 2, h * 0.42, r * 2, 0, Math.PI * 2); g.fill();
-      raf = requestAnimationFrame(step);
-    };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [playing, theme]);
-  return <canvas ref={ref} className="radio-viz" />;
 }

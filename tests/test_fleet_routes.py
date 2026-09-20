@@ -195,7 +195,7 @@ def test_the_routes_are_reads_only():
     """Phase 1 pin: no route on this surface may carry a mutating name."""
     app, _ = _app()
     paths = {r.path for r in app.routes if r.path.startswith("/api/fleet")}
-    assert paths == {"/api/fleet", "/api/fleet/refresh", "/api/fleet/history", "/api/fleet/link", "/api/fleet/git"}  # link edits a setting, never the fleet
+    assert paths == {"/api/fleet", "/api/fleet/refresh", "/api/fleet/history", "/api/fleet/link", "/api/fleet/git", "/api/fleet/scan"}  # link edits a setting; scan reads files; never the fleet
     for verb in ("deploy", "rollback", "delete", "traffic", "secret", "create"):
         assert not any(verb in p for p in paths)
 
@@ -338,3 +338,23 @@ def test_a_failed_cloud_read_carries_what_gcloud_said():
     _, doc = _call(app, "POST", "/api/fleet/refresh", {"app": "MES"})
     dev = doc["companies"][0]["apps"][0]["envs"][0]
     assert "not in a shape" in dev["note"] and "active account" in dev["detail"]
+
+
+def test_the_scan_reads_the_branch_on_github_and_masks(tmp_path):
+    from types import SimpleNamespace
+
+    class _ScanRepos(_Repos):
+        def tree(self, repo, ref, *, timeout_s=30.0):
+            return [{"path": "app.py", "size": 40, "sha": "s1"}, {"path": "backend/.env", "size": 10, "sha": "s2"}, {"path": "logo.png", "size": 9, "sha": "s3"}], None
+
+        def blob(self, repo, sha, *, timeout_s=30.0):
+            return {"s1": b'KEY = "AKIAABCDEFGHIJKLMNOP"\n', "s2": b"X=1\n", "s3": b"\x89PNG"}[sha]
+
+    svc = FleetService(_reader(), _ScanRepos(), MemoryFleetState())
+    app = FastAPI()
+    fleet_routes.mount_fleet(app, SimpleNamespace(fleet=svc, runtime_profile=HelixProfile.DESKTOP))
+    st, doc = _call(app, "POST", "/api/fleet/scan", {"app": "MES"})
+    assert st == 200 and doc["where"] == "github" and doc["branch"] == "main" and doc["clean"] is False
+    kinds = {f["kind"] for f in doc["findings"]}
+    assert "AWS access key" in kinds and "An .env file is committed" in kinds
+    assert all("AKIAABCDEFGHIJKLMNOP" not in f["excerpt"] for f in doc["findings"])

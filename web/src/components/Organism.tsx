@@ -70,6 +70,9 @@ uniform float uPhaseStorm;
 uniform float uAttend;
 uniform float uLevel;     // voice level, smoothed
 uniform float uOpen;      // mouth opening 0..1
+uniform float uWide;      // mouth width 0.5 (an O) .. 1.25 (an E)
+uniform float uTeeth;     // teeth showing 0..1 (F, V, S)
+uniform float uTongue;    // tongue up 0..1 (L, T, D, N)
 uniform float uBlink;
 uniform float uBrow;      // brows lift 0..1
 uniform vec2 uGaze;
@@ -144,31 +147,51 @@ void main() {
       float lid = max(0.06, 1.0 - max(uBlink, uSquint * 0.55));
       float almond = length(vec2(d.x / 0.15, d.y / (0.085 * lid)));
       float eye = 1.0 - smoothstep(0.92, 1.0, almond);
-      float r = length(d - gaze * 0.35);
-      float iris = (1.0 - smoothstep(0.065, 0.085, r)) * smoothstep(0.03, 0.04, r);
-      float irisRays = 0.7 + 0.3 * sin(atan(d.y, d.x) * 18.0 + t * 2.0);
-      float pupil = 1.0 - smoothstep(0.026, 0.036, r);
-      float spec = 1.0 - smoothstep(0.0, 0.022, length(d - vec2(0.03, 0.035)));
-      vec3 eyeCol = mix(mix(ink, glow, 0.12), glow * 1.7 * irisRays, iris);
+      vec2 dg = d - gaze * 0.35;
+      float r = length(dg);
+      float ang = atan(dg.y, dg.x);
+      // the iris: a big warm disc with a darker limbal ring, fibres, and a soft inner gradient
+      float irisR = 0.082 + 0.006 * uSmile;                  // a smile widens the eye a touch
+      float iris = (1.0 - smoothstep(irisR - 0.006, irisR + 0.004, r)) * smoothstep(0.026, 0.036, r);
+      float limbal = smoothstep(irisR - 0.018, irisR - 0.004, r) * (1.0 - smoothstep(irisR - 0.004, irisR + 0.004, r));
+      float fibres = 0.78 + 0.22 * sin(ang * 26.0 + t * 0.8) * sin(ang * 7.0 - t * 0.3);
+      float inner = 1.0 - smoothstep(0.03, irisR, r);
+      float pupil = 1.0 - smoothstep(0.024, 0.034, r);
+      vec3 irisCol = mix(glow * 1.5 * fibres, mix(uHueB, vec3(1.0), 0.35) * 1.3, inner * 0.55);
+      irisCol = mix(irisCol, ink * 0.6, limbal * 0.8);
+      float spec = 1.0 - smoothstep(0.0, 0.020, length(d - vec2(0.028, 0.036)));
+      float spec2 = 1.0 - smoothstep(0.0, 0.010, length(d - vec2(-0.022, -0.026)));
+      vec3 white = mix(ink, glow, 0.16) + vec3(0.06);
+      vec3 eyeCol = mix(white, irisCol, iris);
       eyeCol = mix(eyeCol, vec3(0.0), pupil);
-      eyeCol += vec3(1.0) * spec * 0.9 * lid;
+      eyeCol += vec3(1.0) * (spec * 0.95 + spec2 * 0.45) * lid;
       float mask = eye * front * uPhaseFace;
       col = mix(col, eyeCol, mask);
-      // the lid line, and the brow above it (lifts with uBrow)
+      // the lid lines: the upper lid heavier (lashes), the lower a faint line; a crease above
       float lidLine = (1.0 - smoothstep(0.0, 0.012, abs(almond - 1.0) * 0.1)) * (1.0 - smoothstep(0.15, 0.19, abs(d.x)));
-      col += glow * lidLine * 0.6 * front * uPhaseFace;
-      float knit = max(0.0, -uBrow);                       // a furrow: the brows drop and the inner ends dip
-      vec2 b = uv - vec2(side * (0.30 + knit * 0.03), 0.33 + uBrow * 0.05) - gaze * 0.5;
-      float browCurve = b.y - (0.05 * (1.0 - b.x * b.x * 18.0)) - side * b.x * (0.15 + knit * 0.35);
-      float brow = (1.0 - smoothstep(0.006, 0.016, abs(browCurve))) * (1.0 - smoothstep(0.15, 0.20, abs(b.x)));
-      col += glow * brow * 1.1 * front * uPhaseFace;
+      float upperHalf = smoothstep(-0.01, 0.02, d.y);
+      col += glow * lidLine * (0.35 + 0.65 * upperHalf) * front * uPhaseFace;
+      float crease = (1.0 - smoothstep(0.004, 0.012, abs(d.y - 0.11 - 0.02 * uBrow + d.x * d.x * 2.2))) * (1.0 - smoothstep(0.10, 0.15, abs(d.x)));
+      col += glow * crease * 0.22 * front * uPhaseFace;
+      // the brow: a tapered stroke, thick over the eye, thinning to the ends; lifts with uBrow,
+      // knits with a furrow; a soft glow under it so it reads as a shape, not a line
+      float knit = max(0.0, -uBrow);
+      vec2 b = uv - vec2(side * (0.30 + knit * 0.03), 0.34 + uBrow * 0.05) - gaze * 0.5;
+      float browCurve = b.y - (0.05 * (1.0 - b.x * b.x * 18.0)) - side * b.x * (0.12 + knit * 0.35) - 0.02 * uSmile * (1.0 - b.x * b.x * 20.0);
+      float thick = 0.016 * (1.0 - smoothstep(0.0, 0.18, abs(b.x + side * 0.03))) + 0.005;
+      float brow = (1.0 - smoothstep(thick * 0.6, thick, abs(browCurve))) * (1.0 - smoothstep(0.16, 0.21, abs(b.x)));
+      col += glow * brow * 1.15 * front * uPhaseFace;
+      col += glow * (1.0 - smoothstep(0.0, 0.05, abs(browCurve))) * (1.0 - smoothstep(0.14, 0.2, abs(b.x))) * 0.10 * front * uPhaseFace;
+      // a cheek that warms with a smile
+      float cheek = (1.0 - smoothstep(0.0, 0.16, length(uv - vec2(side * 0.36, -0.12)))) * max(0.0, uSmile) * 0.35;
+      col += mix(glow, vec3(1.0, 0.7, 0.6), 0.3) * cheek * front * uPhaseFace;
       clear = max(clear, eye + brow);
     }
     // THE MOUTH: two lips around a real cavity. The upper lip lifts a little and the lower lip
     // drops a lot with uOpen (a jaw, not a slot); the corners rise with a smile; inside is dark
     // with a tongue of light that brightens with the voice, and a band of teeth under the top lip.
     vec2 m = uv - vec2(0.0, -0.30);
-    float W = 0.27;
+    float W = 0.27 * uWide;
     float xr = clamp(m.x / W, -1.0, 1.0);
     float c = 1.0 - xr * xr;                                    // 1 at the centre, 0 at the corners
     float span = 1.0 - smoothstep(W - 0.01, W + 0.02, abs(m.x));
@@ -178,15 +201,22 @@ void main() {
     float yL = lift - 0.011 - uOpen * 0.17 * c;                  // the lower lip's upper edge
     float gap = max(0.0, yU - yL);
     float cavity = smoothstep(0.0, 0.005, m.y - yL) * (1.0 - smoothstep(-0.005, 0.0, m.y - yU)) * span * step(0.004, gap);
-    float lipU = 1.0 - smoothstep(0.004, 0.012, abs(m.y - yU));
-    float lipL = 1.0 - smoothstep(0.004, 0.012, abs(m.y - yL));
-    float seam = (1.0 - smoothstep(0.003, 0.010, abs(m.y - lift))) * (1.0 - step(0.004, gap));   // the closed line
-    col = mix(col, ink * 0.35, cavity * front * uPhaseFace);
-    float tongue = cavity * (0.15 + 1.1 * uLevel) * (1.0 - smoothstep(0.0, max(gap, 0.02) * 0.9, m.y - yL));
-    col += glow * tongue * 0.9 * front * uPhaseFace;
-    float teeth = cavity * (1.0 - smoothstep(0.0, 0.014, yU - m.y)) * smoothstep(0.03, 0.08, gap);
-    col += vec3(0.85, 0.95, 1.0) * teeth * 0.55 * front * uPhaseFace;
-    col += glow * max(max(lipU, lipL), seam) * span * 1.3 * front * uPhaseFace;
+    float openK = smoothstep(0.004, 0.03, gap);                  // 0 closed .. 1 open: one soft line when shut, two lips when open
+    float lipU = (1.0 - smoothstep(0.004, 0.012, abs(m.y - yU))) * openK;
+    float lipL = (1.0 - smoothstep(0.005, 0.016, abs(m.y - yL - 0.004 * c))) * openK;       // the lower lip is fuller
+    float lipShine = (1.0 - smoothstep(0.0, 0.012, abs(m.y - yL - 0.012 * c))) * c * 0.35 * (0.4 + 0.6 * openK);
+    float seam = (1.0 - smoothstep(0.004, 0.012, abs(m.y - lift - bow * 0.5))) * (1.0 - openK);   // the closed mouth: one calm line
+    col = mix(col, mix(base, ink, 0.55), cavity * front * uPhaseFace);
+    float tongueBase = cavity * (0.12 + 0.6 * uLevel) * (1.0 - smoothstep(0.0, max(gap, 0.02) * 0.9, m.y - yL));
+    float tongueUp = cavity * uTongue * (1.0 - smoothstep(0.0, max(gap, 0.02) * 0.7, abs(m.y - (yL + gap * 0.55)))) * (1.0 - smoothstep(0.0, W * 0.5, abs(m.x)));
+    col += mix(glow, vec3(1.0, 0.55, 0.6), 0.35) * (tongueBase * 0.7 + tongueUp * 0.9) * front * uPhaseFace;
+    float teethBand = cavity * (1.0 - smoothstep(0.0, 0.016, yU - m.y)) * max(smoothstep(0.03, 0.08, gap), uTeeth * step(0.004, gap));
+    col += vec3(0.85, 0.95, 1.0) * teethBand * 0.6 * front * uPhaseFace;
+    col += glow * max(max(lipU, lipL), seam) * span * 1.05 * front * uPhaseFace;
+    col += mix(glow, vec3(1.0), 0.5) * lipShine * span * front * uPhaseFace;
+    // dimples at the corners when smiling
+    float dimple = max(0.0, uSmile) * (1.0 - smoothstep(0.0, 0.05, length(vec2(abs(m.x) - W - 0.02, m.y - lift * 1.1))));
+    col += glow * dimple * 0.5 * front * uPhaseFace;
     col += glow * (1.0 - smoothstep(0.0, 0.04, min(abs(m.y - yU), abs(m.y - yL)))) * span * 0.12 * front * uPhaseFace;
     // THE VOICE, seen: a waveform of light on the sphere below the mouth while it speaks
     float wv = uLevel * uOpen;
@@ -240,36 +270,73 @@ function useBitsTexture(hue: number) {
 // for an exclamation, a squint and a nod on the words that carry weight. Timed at speaking pace
 // (~2.6 words/s), which is what the OS voice and the mimed orb both run at; the real voice may
 // drift a little, and the face keeps a gentle idle flutter once its script runs out.
-interface Beat { at: number; dur: number; open: number }
-interface Line { at: number; end: number; brow: number; smile: number; tilt: number; glance: number; nods: number[] }
+interface Beat { at: number; dur: number; open: number; wide: number; teeth: number; tongue: number; hold?: boolean }
+// THE MOUTH SHAPES (visemes), South-Park style: one shape per sound, snapped to, held, then the
+// next. A a wide open jaw, O a round mouth, E/I a wide grin, M/B/P shut, F/V teeth on the lip,
+// L/T/D/N the tongue up behind the teeth, S/Z/etc. a narrow slit with teeth.
+const VISEME: Record<string, [number, number, number, number]> = {           // open, wide, teeth, tongue
+  a: [0.85, 1.0, 0, 0], e: [0.45, 1.22, 0.2, 0], i: [0.35, 1.25, 0.3, 0], y: [0.35, 1.2, 0.3, 0],
+  o: [0.7, 0.62, 0, 0], u: [0.5, 0.52, 0, 0], w: [0.4, 0.5, 0, 0], q: [0.45, 0.55, 0, 0],
+  m: [0.0, 1.0, 0, 0], b: [0.0, 1.0, 0, 0], p: [0.0, 1.0, 0, 0],
+  f: [0.15, 1.05, 1, 0], v: [0.15, 1.05, 1, 0],
+  l: [0.45, 0.95, 0, 1], t: [0.35, 1.0, 0.4, 1], d: [0.35, 1.0, 0.3, 1], n: [0.3, 1.0, 0.2, 1],
+  s: [0.22, 1.1, 0.8, 0], z: [0.22, 1.1, 0.8, 0], c: [0.3, 1.05, 0.5, 0], k: [0.4, 1.0, 0.2, 0], g: [0.4, 1.0, 0.2, 0],
+  j: [0.3, 0.95, 0.5, 0], x: [0.3, 1.05, 0.5, 0], h: [0.4, 1.0, 0, 0], r: [0.35, 0.9, 0.1, 0],
+};
+function visemesFor(word: string, at: number, dur: number, heavy: boolean): Beat[] {
+  const letters = word.toLowerCase().replace(/[^a-z]/g, "");
+  if (!letters) return [];
+  // merge doubles and vowel runs so "moon" is m-oo-n, not m-o-o-n
+  const groups: string[] = [];
+  for (const ch of letters) { const last = groups[groups.length - 1]; if (last && (last[0] === ch || (/[aeiou]/.test(last[0]) && /[aeiou]/.test(ch)))) continue; groups.push(ch); }
+  const each = dur / groups.length;
+  return groups.map((ch, i) => {
+    const v = VISEME[ch] || [0.3, 1.0, 0, 0];
+    return { at: at + i * each, dur: Math.max(0.04, each * 0.95), open: Math.min(1, v[0] * (heavy ? 1.15 : 1)), wide: v[1], teeth: v[2], tongue: v[3] };
+  });
+}
+interface Line { at: number; end: number; brow: number; smile: number; tilt: number; glance: number; nods: number[]; squint?: number }
 interface Script { beats: Beat[]; lines: Line[]; total: number }
 const WEIGHT = /^(not|never|must|always|now|done|ready|live|prod|production|failed|error|warning|yes|no|stop|every|all|nothing)$/i;
+// the mood of a sentence, from its words: bright words lift the brows and the corners, dark ones
+// lower them; "checking" words get the eyes-up look of someone working on it
+const BRIGHT = /\b(great|awesome|done|ready|live|perfect|nice|good|love|happy|yes|sure|thanks|welcome|cool|works|passed|green|clean|success|glad)\b/i;
+const DARK = /\b(sorry|failed|error|cannot|can't|couldn't|down|broken|wrong|missing|refused|denied|problem|unfortunately|no\b)/i;
+const CHECKING = /\b(check|checking|look|looking|grab|grabbing|fetch|fetching|read|reading|one (sec|second|moment)|hold on|wait|let me)\b/i;
+function mood(sentence: string): { brow: number; smile: number; squint: number } {
+  const m = { brow: 0, smile: 0, squint: 0 };
+  if (BRIGHT.test(sentence)) { m.brow += 0.35; m.smile += 0.5; }
+  if (DARK.test(sentence)) { m.brow -= 0.45; m.smile -= 0.35; }
+  if (CHECKING.test(sentence)) { m.brow += 0.2; m.squint += 0.3; }
+  return m;
+}
 /** The same script, but timed by the voice itself: one entry per spoken word with its offset and
  *  duration. Syllables are spread across the word's real duration; sentence expressions come from
  *  the punctuation as before. Used when the backend synthesized the line for the page. */
 function buildTimedScript(words: { t: number; d: number; w: string }[]): Script {
   const beats: Beat[] = []; const lines: Line[] = [];
   let line: Line | null = null;
+  let sentence = "";
   for (const wd of words) {
     const bare = wd.w.replace(/[^A-Za-z0-9']/g, "");
+    sentence += wd.w + " ";
     if (!line) {
       line = { at: wd.t, end: wd.t, brow: 0.1 + Math.random() * 0.25, smile: 0.15 + Math.random() * 0.15,
                tilt: (Math.random() - 0.5) * 0.05, glance: Math.random() < 0.45 ? (Math.random() < 0.5 ? -1 : 1) : 0, nods: [] };
     }
     const heavy = WEIGHT.test(bare) || (bare.length > 2 && bare === bare.toUpperCase()) || /\d/.test(bare);
     if (heavy) line.nods.push(wd.t);
-    const syl = Math.max(1, Math.round(bare.length / 2.8));
-    const vowels = (bare.match(/[aeiouy]/gi) || []).length / Math.max(1, bare.length);
-    const dur = Math.max(0.06, wd.d / syl);
-    for (let k = 0; k < syl; k++) beats.push({ at: wd.t + k * dur, dur: dur * 0.92, open: Math.min(1, 0.45 + vowels * 0.9 + (heavy ? 0.2 : 0) + Math.random() * 0.15) });
+    beats.push(...visemesFor(bare, wd.t, Math.max(0.08, wd.d), heavy));
     line.end = wd.t + wd.d;
     if (/[.!?]$/.test(wd.w)) {
       const q = /\?$/.test(wd.w), bang = /!$/.test(wd.w);
-      line.brow = q ? 0.8 : bang ? 1 : line.brow; line.smile = bang ? 0.55 : q ? 0.05 : line.smile; line.tilt = q ? (Math.random() < 0.5 ? -1 : 1) * 0.09 : line.tilt;
-      lines.push(line); line = null;
+      const md = mood(sentence);
+      line.brow = (q ? 0.8 : bang ? 1 : line.brow) + md.brow; line.smile = (bang ? 0.55 : q ? 0.05 : line.smile) + md.smile; line.squint = md.squint;
+      line.tilt = q ? (Math.random() < 0.5 ? -1 : 1) * 0.09 : line.tilt;
+      lines.push(line); line = null; sentence = "";
     }
   }
-  if (line) lines.push(line);
+  if (line) { const md = mood(sentence); line.brow += md.brow; line.smile += md.smile; line.squint = md.squint; lines.push(line); }
   const last = words[words.length - 1];
   return { beats, lines, total: last ? last.t + last.d + 0.2 : 0 };
 }
@@ -281,9 +348,10 @@ function buildScript(text: string): Script {
   for (const raw of sentences) {
     const sent = raw.trim(); if (!sent) continue;
     const q = /\?$/.test(sent), bang = /!$/.test(sent);
+    const md = mood(sent);
     const line: Line = {
-      at: t, end: t, brow: q ? 0.8 : bang ? 1 : 0.1 + Math.random() * 0.25,
-      smile: bang ? 0.55 : q ? 0.05 : 0.15 + Math.random() * 0.15,
+      at: t, end: t, brow: (q ? 0.8 : bang ? 1 : 0.1 + Math.random() * 0.25) + md.brow,
+      smile: (bang ? 0.55 : q ? 0.05 : 0.2 + Math.random() * 0.15) + md.smile, squint: md.squint,
       tilt: q ? (Math.random() < 0.5 ? -1 : 1) * 0.09 : (Math.random() - 0.5) * 0.05,
       glance: Math.random() < 0.45 ? (Math.random() < 0.5 ? -1 : 1) : 0, nods: [],
     };
@@ -293,12 +361,9 @@ function buildScript(text: string): Script {
       const heavy = WEIGHT.test(bare) || (bare.length > 2 && bare === bare.toUpperCase()) || /\d/.test(bare);
       if (heavy) line.nods.push(t);
       const syl = Math.max(1, Math.round(bare.length / 2.8));
-      for (let k = 0; k < syl; k++) {
-        const vowels = (bare.match(/[aeiouy]/gi) || []).length / Math.max(1, bare.length);
-        const dur = 0.11 + Math.random() * 0.05 + (heavy ? 0.05 : 0);
-        beats.push({ at: t, dur, open: Math.min(1, 0.45 + vowels * 0.9 + (heavy ? 0.2 : 0) + Math.random() * 0.15) });
-        t += dur;
-      }
+      const wdur = syl * (0.11 + Math.random() * 0.05 + (heavy ? 0.05 : 0));
+      beats.push(...visemesFor(bare, t, wdur, heavy));
+      t += wdur;
       t += /[,;:]$/.test(word) ? 0.16 : 0.04;                      // a breath at the commas
     }
     line.end = t;
@@ -462,7 +527,7 @@ function Cortex({ hue, mouse, level }: { hue: number; mouse: React.MutableRefObj
   );
 }
 
-function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) => void }) {
+function Body({ look, onPulse, mini = false }: { look: OrganismLook; onPulse: (big: boolean) => void; mini?: boolean }) {
   const mesh = useRef<THREE.Mesh>(null!);
   const spores = useRef<THREE.Points>(null!);
   const gazeRef = useRef({ x: 0, y: 0 });
@@ -472,9 +537,14 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
   const flash = useRef(0);
   const swell = useRef(0);
   const prev = useRef({ orb: "idle", hue: "none", bubbles: 0 });
-  const mouth = useRef({ open: 0, flutter: 0 });
+  const mouth = useRef({ open: 0, flutter: 0, wide: 1, teeth: 0, tongue: 0, snap: false });
   const mouse = useRef({ x: 0, y: 0 });
   const levelRef = useRef(0);
+  const errand = useRef({ k: 0, target: 0, spin: 0 });
+  // THE WHEEL (the docked face): every few seconds an act - a spin, a bounce, a think, a peek -
+  // so the little head in the corner is alive while you work elsewhere
+  const wheel = useRef({ next: 3, act: "", t: 0, dur: 0 });
+  const rig = useRef<THREE.Group>(null!);
   const perf = useRef<{ script: Script | null; t0: number; beat: number; nod: number; glanceT: number; endSmile: number }>({ script: null, t0: 0, beat: 0, nod: -1, glanceT: 0, endSmile: 0 });
   const expr = useRef({ brow: 0, smile: 0, tilt: 0, squint: 0, nod: 0, glance: 0 });
   // THE IDLE LIFE: every few seconds a small act - a glance aside, a brow flick, a double blink,
@@ -540,7 +610,7 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
     uColor: { value: new THREE.Color(0.16, 0.55, 1.0) },
     uHueA: { value: hueToRgb(look.hue, 0.85, 0.55) }, uHueB: { value: hueToRgb(look.hue + 40, 0.9, 0.62) },
     uPhaseFace: { value: phase === "face" ? 1 : 0 }, uPhaseStorm: { value: phase === "storm" ? 1 : 0 },
-    uAttend: { value: 0 }, uLevel: { value: 0 }, uOpen: { value: 0 }, uBlink: { value: 0 }, uBrow: { value: 0 },
+    uAttend: { value: 0 }, uLevel: { value: 0 }, uOpen: { value: 0 }, uWide: { value: 1 }, uTeeth: { value: 0 }, uTongue: { value: 0 }, uBlink: { value: 0 }, uBrow: { value: 0 },
     uGaze: { value: new THREE.Vector2() }, uEnergy: { value: look.energy },
     uFace: { value: new THREE.Vector2() }, uTilt: { value: 0 }, uSmile: { value: 0 }, uSquint: { value: 0 },
   }), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -636,10 +706,21 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
     const e = expr.current;
     const pf = perf.current;
     let target = 0;
-    let brow = 0, smile = s.orb === "idle" ? 0.12 : 0, tilt = 0, squint = 0;
+    let brow = 0.05, smile = s.orb === "idle" ? 0.30 : 0.1, tilt = 0, squint = 0;
     // the idle / thinking acts
     const lf = life.current;
-    const thinking = s.orb === "thinking";
+    const wh = wheel.current;
+    if (mini) {
+      wh.next -= dt;
+      if (wh.next <= 0 && !wh.act) {
+        const acts = ["spin", "bounce", "think", "peek", "nod", "spin", "bounce"];
+        wh.act = acts[Math.floor(Math.random() * acts.length)]; wh.t = 0;
+        wh.dur = wh.act === "think" ? 2.6 : wh.act === "spin" ? 1.3 : wh.act === "bounce" ? 1.1 : 1.6;
+        wh.next = 4 + Math.random() * 6;
+      }
+      if (wh.act) { wh.t += dt; if (wh.t >= wh.dur) wh.act = ""; }
+    }
+    const thinking = s.orb === "thinking" || (mini && wh.act === "think");
     const now = u.uTime.value;
     if (!speaking) {
       lf.next -= dt;
@@ -649,7 +730,7 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
           : ["glance", "glance", "flick", "doubleblink", "tilt", "halfsmile", "settle"];
         lf.act = acts[Math.floor(Math.random() * acts.length)];
         lf.until = now + (thinking ? 1.2 + Math.random() * 1.6 : 0.6 + Math.random() * 1.2);
-        lf.next = thinking ? 1.2 + Math.random() * 1.6 : 2.2 + Math.random() * 4;
+        lf.next = thinking ? 1.2 + Math.random() * 1.6 : (mini ? 1.4 : 2.2) + Math.random() * (mini ? 2.5 : 4);
         const side = Math.random() < 0.5 ? -1 : 1;
         lf.gx = 0; lf.gy = 0; lf.brow = 0; lf.tilt = 0; lf.smile = 0; lf.squint = 0;
         if (lf.act === "glance") { lf.gx = side * 0.7; lf.gy = (Math.random() - 0.4) * 0.4; }
@@ -672,11 +753,17 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
       const tt = local.current.audio ? local.current.audio.currentTime : performance.now() / 1000 - pf.t0;   // the audio's clock when we have it; wall clock otherwise
       while (pf.beat < sc.beats.length && sc.beats[pf.beat].at + sc.beats[pf.beat].dur < tt) pf.beat++;
       const b = sc.beats[pf.beat];
-      if (b && tt >= b.at) target = b.open * Math.sin(Math.min(1, (tt - b.at) / b.dur) * Math.PI) * (an ? 0.35 + 0.85 * u.uLevel.value : 0.6 + 0.4 * Math.min(1, u.uLevel.value + 0.5));
-      else if (tt > sc.total) { m.flutter += dt * 11; target = 0.12 + 0.35 * Math.max(0, Math.sin(m.flutter)); }   // the script ran out, the voice has not
+      if (b && tt >= b.at) {
+        // South Park: snap to the shape and hold it for the sound; a short ease at the edges
+        const k = (tt - b.at) / b.dur;
+        const edge = Math.min(1, k / 0.18, (1 - k) / 0.18);
+        target = b.open * (0.55 + 0.45 * edge) * (an ? 0.45 + 0.7 * u.uLevel.value : 0.75 + 0.25 * Math.min(1, u.uLevel.value + 0.5));
+        m.wide = b.wide; m.teeth = b.teeth; m.tongue = b.tongue; m.snap = true;
+      } else if (tt > sc.total) { m.flutter += dt * 11; target = 0.12 + 0.35 * Math.max(0, Math.sin(m.flutter)); m.wide = 1; m.teeth = 0; m.tongue = 0; m.snap = false; }   // the script ran out, the voice has not
+      else { m.wide = 1; m.teeth = 0; m.tongue = 0; m.snap = false; }
       const line = sc.lines.find((l) => tt >= l.at - 0.1 && tt < l.end + 0.3) || sc.lines[sc.lines.length - 1];
       if (line) {
-        brow = line.brow; smile = line.smile; tilt = line.tilt;
+        brow = line.brow; smile = line.smile; tilt = line.tilt; squint = line.squint || 0;
         if (line.glance && tt < line.at + 0.7) e.glance += (line.glance * 0.6 - e.glance) * 0.12;
         const nodAt = line.nods.find((n) => tt >= n && tt < n + 0.35);
         if (nodAt !== undefined && pf.nod !== nodAt) { pf.nod = nodAt; e.nod = 1; squint = 0.5; }
@@ -688,8 +775,11 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
     }
     if (!speaking && pf.script) { pf.script = null; pf.endSmile = 1; }
     if (!speaking && pf.endSmile > 0) { smile = 0.45 * pf.endSmile; pf.endSmile = Math.max(0, pf.endSmile - dt * 0.5); }
-    m.open += (target - m.open) * (speaking ? 0.5 : 0.15);
+    m.open += (target - m.open) * (speaking ? (m.snap ? 0.75 : 0.5) : 0.15);
     u.uOpen.value = m.open;
+    u.uWide.value += ((speaking ? m.wide : 1) - u.uWide.value) * 0.55;
+    u.uTeeth.value += ((speaking ? m.teeth : 0) - u.uTeeth.value) * 0.5;
+    u.uTongue.value += ((speaking ? m.tongue : 0) - u.uTongue.value) * 0.5;
     e.brow += (brow - e.brow) * 0.12; e.smile += (smile - e.smile) * 0.08; e.tilt += (tilt - e.tilt) * 0.06;
     e.squint += (squint - e.squint) * 0.1; e.nod *= Math.pow(0.03, dt); if (speaking && !sc) e.glance *= Math.pow(0.05, dt);
     u.uBrow.value = e.brow + flash.current * 0.8;
@@ -707,10 +797,35 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
     if (b.next <= 0) { b.t = 0; b.next = lf.blinks > 0 ? 0.32 : 2.2 + Math.random() * 3.5; if (lf.blinks > 0) lf.blinks--; }
     if (b.t >= 0) { b.t += dt; u.uBlink.value = Math.sin(Math.min(1, b.t / 0.22) * Math.PI); if (b.t > 0.22) { b.t = -1; u.uBlink.value = 0; } }
 
-    mesh.current.rotation.y += dt * 0.1 * look.energy;
+    // THE ERRAND: while thinking the face recedes and turns away (off to fetch), and when it has
+    // something to say it comes back through the lattice with a pulse. `errand` eases 0..1.
+    const er = errand.current;
+    const wantAway = thinking ? 1 : 0;
+    if (wantAway !== er.target) { er.target = wantAway; if (!wantAway) { firePulse(true); er.spin = 1; } }
+    er.k += (er.target - er.k) * (1 - Math.pow(0.02, dt));
+    er.spin *= Math.pow(0.05, dt);
+    const away = er.k;
+    mesh.current.rotation.y += dt * (0.1 * look.energy + away * 1.6 + er.spin * 3.5);
     mesh.current.position.y = 0.012 * Math.sin(u.uTime.value * 1.1) + 0.006 * Math.sin(u.uTime.value * 0.37);   // it breathes
     mesh.current.rotation.x += ((-pointer.y * 0.12 + e.nod * 0.05) - mesh.current.rotation.x) * 0.04;
     mesh.current.scale.setScalar(1 + swell.current * 0.06);
+    // the whole head (face, cortex, spores) goes on the errand together
+    if (mini) {
+      // the docked head: it idles with a bob, and the wheel's acts play on top
+      const k = wh.act ? Math.min(1, wh.t / wh.dur) : 0;
+      const spinA = wh.act === "spin" ? (1 - Math.cos(k * Math.PI)) * Math.PI : 0;                 // one full turn, eased
+      const bounce = wh.act === "bounce" ? Math.abs(Math.sin(k * Math.PI * 3)) * 0.35 * (1 - k * 0.5) : 0;
+      const peek = wh.act === "peek" ? Math.sin(k * Math.PI) * 0.55 : 0;
+      const nod = wh.act === "nod" ? Math.sin(k * Math.PI * 4) * 0.18 : 0;
+      rig.current.position.set(peek, 0.08 * Math.sin(u.uTime.value * 1.6) + bounce, 0);
+      rig.current.rotation.set(nod, spinA + peek * 0.6, 0);
+      rig.current.scale.setScalar(1 + bounce * 0.15);
+    } else {
+      rig.current.position.set(away * 1.4, away * 0.9, -away * 3.2);
+      rig.current.rotation.set(-away * 0.3, away * 0.8, 0);
+      rig.current.scale.setScalar(1 - away * 0.35);
+    }
+    u.uFlash.value = Math.max(u.uFlash.value, er.spin * 0.6);
     spores.current.rotation.y -= dt * 0.05; spores.current.rotation.z += dt * 0.02;
     const sm = spores.current.material as THREE.PointsMaterial;
     sm.color.copy(u.uHueA.value).lerp(stateColor, 0.4);
@@ -721,7 +836,7 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
   const tap = () => void api.post("/api/shell/tap").catch(() => undefined);
 
   return (
-    <group>
+    <group ref={rig}>
       <mesh ref={mesh} onClick={tap}>
         <sphereGeometry args={[1.02, 128, 128]} />
         <shaderMaterial vertexShader={VERT} fragmentShader={FRAG} uniforms={uniforms} />
@@ -798,31 +913,49 @@ function useHelixColors() {
 /** The room's 2D half: the neural net and the vignette. The helix rides inside the face's canvas. */
 function Room() {
   return (
-    <div className="board-stage" style={{ position: "fixed", zIndex: 0, opacity: 0.55, pointerEvents: "none" }} aria-hidden="true">
-      <NeuralLayer />
-      <div className="board-layer" style={{ background: "radial-gradient(ellipse at 50% 48%, rgba(8,11,15,0.7) 0%, rgba(8,11,15,0.25) 34%, transparent 60%)" }} />
+    <div className="board-stage" style={{ position: "fixed", zIndex: 0, opacity: 0.9, pointerEvents: "none" }} aria-hidden="true">
+      <NeuralLayer density={2.2} keepOut={{ x: 0.5, y: 0.5, r: 0.36 }} />
     </div>
   );
 }
 
-export default function Organism({ look }: { look: OrganismLook }) {
+export default function Organism({ look, mini = false, onClick }: { look: OrganismLook; mini?: boolean; onClick?: () => void }) {
   const [curtain, setCurtain] = useState(0);
   const [epoch, setEpoch] = useState(0);     // a lost context that never comes back: remount the canvas
   const colors = useHelixColors();
+  if (mini) {
+    return (
+      <div className="face-dock" onClick={onClick} title="Talk to HELIX" role="button">
+        <Canvas key={epoch} camera={{ position: [0, 0.1, 3.4], fov: 40 }} gl={{ antialias: true, alpha: true }} dpr={[1, 2]} style={{ pointerEvents: "none" }}
+          onCreated={({ gl }) => { gl.domElement.addEventListener("webglcontextlost", () => window.setTimeout(() => setEpoch((e) => e + 1), 2500)); }}>
+          <ContextGuard />
+          <Body look={look} onPulse={() => undefined} mini />
+        </Canvas>
+      </div>
+    );
+  }
   return (
     <>
       <Room />
       <div className="fixed inset-0" style={{ zIndex: 0 }}>
         <Canvas key={epoch} camera={{ position: [0, 0.2, 4.2], fov: 42 }} gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
           dpr={[1, 2]} style={{ pointerEvents: "auto" }}
-          onCreated={({ gl }) => {
+          onCreated={({ gl, scene }) => {
+            scene.fog = new THREE.Fog("#080b0f", 10, 42);     // the strands run off into the dark, never cut
             let timer = 0;
             gl.domElement.addEventListener("webglcontextlost", () => { timer = window.setTimeout(() => setEpoch((e) => e + 1), 2500); });
             gl.domElement.addEventListener("webglcontextrestored", () => { window.clearTimeout(timer); });
           }}>
           <ContextGuard />
-          <group position={[0, -0.3, -7]} scale={0.75}>
-            <HelixBackdrop colors={colors} position={[1.2, 0.4, 0]} scale={1} />
+          {/* the strands: one wide behind the face, two thin ones crossing it, all turning with the mouse */}
+          <group position={[0, -0.2, -7]} scale={0.8}>
+            <HelixBackdrop colors={colors} position={[0, 0.3, 0]} scale={1} />
+          </group>
+          <group position={[-7.5, 1.5, -17]} rotation={[0.2, 0, 0.35]} scale={0.8}>
+            <HelixBackdrop colors={colors} position={[0, 0, 0]} scale={1} />
+          </group>
+          <group position={[8, -2, -19]} rotation={[-0.1, 0, -0.45]} scale={0.7}>
+            <HelixBackdrop colors={colors} position={[0, 0, 0]} scale={1} />
           </group>
           <Body look={look} onPulse={(big) => { if (big) setCurtain((c) => c + 1); }} />
         </Canvas>

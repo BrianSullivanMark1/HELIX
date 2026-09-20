@@ -354,3 +354,30 @@
 @keyframes board-edge-in { to { stroke-dashoffset: 0; } }
 @keyframes board-served { 0%, 100% { opacity: 0.5; transform: scale(1); } 50% { opacity: 1; transform: scale(1.18); } }
 @media (prefers-reduced-motion: reduce) { .board-graph-row, .board-graph-node, .board-graph-edge, .board-graph-served { animation: none; stroke-dashoffset: 0; } }
+
+/* the branch picker and the scan */
+.board-branch { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--cyan); }
+.board-branch select { font: inherit; font-size: 12px; padding: 4px 8px; border-radius: 8px; background: rgba(0, 0, 0, 0.3); border: 1px solid color-mix(in srgb, var(--cyan) 40%, var(--line)); color: var(--text); }
+.board-scan { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; max-height: 260px; overflow: auto; }
+.board-scan-row { display: grid; grid-template-columns: 170px auto 1fr; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent); font-size: 12px; }
+.board-scan-row.high .board-scan-kind { color: var(--error); }
+.board-scan-row.medium .board-scan-kind { color: var(--working); }
+.board-scan-ex { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ------------------------------------------------------------------ sections and folding */
+.board-section { position: relative; }
+.board-section-head { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgba(8, 11, 15, 0.55); font: inherit; color: var(--text); text-align: left; cursor: pointer; transition: border-color 0.2s, box-shadow 0.2s; }
+.board-section-head:hover { border-color: color-mix(in srgb, var(--cyan) 45%, var(--line)); box-shadow: 0 0 18px color-mix(in srgb, var(--cyan) 12%, transparent); }
+.board-section-chev { color: var(--cyan); width: 14px; }
+.board-section-title { font-family: var(--font-display, inherit); font-weight: 700; letter-spacing: 4px; font-size: 13px; color: var(--cyan); text-shadow: 0 0 10px color-mix(in srgb, var(--cyan) 50%, transparent); }
+.board-section-sub { font-size: 12px; color: var(--muted); }
+.board-section-tools { display: inline-flex; gap: 2px; }
+.board-section.soon { opacity: 0.55; }
+.board-section.soon .board-section-head { border-style: dashed; }
+.board-fold { width: 22px; height: 22px; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--muted); font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
+.board-fold:hover { color: var(--cyan); border-color: var(--line); }
+.board-card.collapsed { padding-bottom: 12px; }
+.board-proto { margin-left: 10px; font-size: 10px; letter-spacing: 2px; color: var(--gold); text-shadow: 0 0 8px color-mix(in srgb, var(--gold) 60%, transparent); animation: board-proto 3s ease-in-out infinite; }
+@keyframes board-proto { 0%, 100% { opacity: 0.75; } 50% { opacity: 1; } }
+.board-card.prototype .corners::before, .board-card.prototype .corners::after { border-color: var(--gold); }
+.board-proto-note { margin-top: 10px; font-size: 12px; line-height: 1.45; color: var(--gold); padding: 8px 10px; border-radius: 8px; border: 1px dashed color-mix(in srgb, var(--gold) 40%, transparent); background: color-mix(in srgb, var(--gold) 6%, transparent); }

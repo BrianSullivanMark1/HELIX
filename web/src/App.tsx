@@ -13,6 +13,7 @@ import Settings from "./pages/Settings";
 import Sparks from "./components/Sparks";
 import { RadioButton, RadioDeck } from "./components/Radio";
 import Backdrop from "./components/Backdrop";
+import Wordmark from "./components/Wordmark";
 import "./shine.css";
 import Studio from "./pages/Studio";
 import Vault from "./pages/Vault";
@@ -185,13 +186,7 @@ export default function App() {
         className="absolute top-0 left-0 right-0 flex items-center px-5 py-3"
         style={{ zIndex: 29 }}
       >
-        <button
-          className="font-display text-glow-cyan text-[17px] font-bold tracking-[3px] bg-transparent border-none"
-          style={{ color: "var(--cyan)" }}
-          onClick={() => navigate({ name: "console" })}
-        >
-          ◉ HELIX
-        </button>
+        <Wordmark onClick={() => navigate({ name: "console" })} />
         <div className="flex-1" />
         {!brain.ok && page.name !== "settings" && (
           <button className="brain-warn" title="Open Settings -> The brain and connect Claude (a Claude Code sign-in token or an API key)"
@@ -242,11 +237,9 @@ export default function App() {
       </main>
 
       {/* the docked orb: HELIX is one click away on every page; Talk is the full orb */}
-      {!onConsole && (
-        <button className="orb-dock" title="Talk to HELIX" onClick={() => navigate({ name: "talk" })} style={{ zIndex: 25 }}>
-          <span className="orb-dock-core" />
-        </button>
-      )}
+      {!onConsole && !off && (body.style === "cell"
+        ? <Organism look={body.look} mini onClick={() => navigate({ name: "talk" })} />
+        : <button className="orb-dock" title="Talk to HELIX" onClick={() => navigate({ name: "talk" })} style={{ zIndex: 25 }}><span className="orb-dock-core" /></button>)}
 
       {/* The dream chip: a session of self-improvement is drafting in the background right now.
           Small and out of the way (under the nav, clear of the legend strip and the input row);

@@ -225,3 +225,26 @@ class GithubRepos:
                 "at": str(author.get("date") or ""),
             })
         return [c for c in out if c["sha"]], None
+
+    # ---------------------------------------------------------------- the secrets scan
+
+    def tree(self, repo: str, ref: str, *, timeout_s: float = 30.0) -> tuple[list[dict], str | None]:
+        """[{path, size, sha}] for every blob on the ref (one recursive read; GitHub truncates
+        past ~100k entries, far beyond any of ours)."""
+        status, doc, _ = self._get(f"repos/{quote(repo)}/git/trees/{quote(ref, safe='')}?recursive=1", timeout_s)
+        if status != 200 or not doc:
+            return [], self._problem(status, repo, ref)
+        out = [{"path": str(e.get("path") or ""), "size": int(e.get("size") or 0), "sha": str(e.get("sha") or "")}
+               for e in (doc.get("tree") or []) if isinstance(e, dict) and e.get("type") == "blob"]
+        return out, None
+
+    def blob(self, repo: str, sha: str, *, timeout_s: float = 30.0) -> bytes | None:
+        """The bytes of one blob (base64 through the API), or None."""
+        import base64
+        status, doc, _ = self._get(f"repos/{quote(repo)}/git/blobs/{quote(sha, safe='')}", timeout_s)
+        if status != 200 or not doc or doc.get("encoding") != "base64":
+            return None
+        try:
+            return base64.b64decode(str(doc.get("content") or "").replace("\n", ""))
+        except Exception:  # noqa: BLE001
+            return None

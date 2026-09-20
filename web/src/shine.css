@@ -80,3 +80,8 @@
 @media (prefers-reduced-motion: reduce) {
   .btn::before, .board-actions .act::before, .btn-primary::after, .board-actions .act.ship::after, .mic .ring, .brain-warn, .brain-warn i, .btn-nav.nav-burn, .attach-chip.has-img { animation: none !important; }
 }
+
+/* ---------------------------------------------------------------- the docked face */
+.face-dock { position: fixed; right: 18px; bottom: 18px; width: 150px; height: 150px; z-index: 25; cursor: pointer; border-radius: 50%; transition: transform 0.25s, filter 0.25s; filter: drop-shadow(0 0 16px color-mix(in srgb, var(--cyan) 35%, transparent)); }
+.face-dock:hover { transform: scale(1.08); filter: drop-shadow(0 0 26px color-mix(in srgb, var(--cyan) 70%, transparent)); }
+.face-dock canvas { pointer-events: none !important; }

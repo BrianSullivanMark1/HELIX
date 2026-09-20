@@ -56,7 +56,10 @@ export default function Backdrop() {
       const dt = Math.min(0.05, (now - last) / 1000); last = now; t += dt;
       const beat = radioBeat();
       if (beat.theme !== lastTheme) { lastTheme = beat.theme; if (look.surprise && beat.playing) pick(); }
-      const [h0, h1] = THEME_HUE[beat.theme] || THEME_HUE[""];
+      // the palette drifts around the color wheel (a full turn every ~90 s) - the theme sets where it starts
+      const [b0, b1] = THEME_HUE[beat.theme] || THEME_HUE[""];
+      const drift = (t * 4) % 360;
+      const h0 = b0 + drift, h1 = b1 + drift;
       const lvl = beat.level * look.intensity, kick = beat.kick;
       const amp = 0.25 + 0.75 * look.intensity;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -65,7 +68,7 @@ export default function Backdrop() {
       // ---------------------------------------------------------------- nebula
       if (scene === "nebula") {
         type Blob = { x: number; y: number; r: number; hue: number; vx: number; vy: number; ph: number };
-        const blobs = (objs.blobs as Blob[]) || (objs.blobs = Array.from({ length: 7 + Math.floor(R() * 4) }, () => ({ x: R() * w, y: R() * h, r: (0.18 + R() * 0.22) * Math.max(w, h), hue: h0 + R() * (h1 - h0), vx: (R() - 0.5) * 18, vy: (R() - 0.5) * 12, ph: R() * 6 })));
+        const blobs = (objs.blobs as Blob[]) || (objs.blobs = Array.from({ length: 7 + Math.floor(R() * 4) }, () => ({ x: R() * w, y: R() * h, r: (0.18 + R() * 0.22) * Math.max(w, h), hue: b0 + R() * (b1 - b0), vx: (R() - 0.5) * 18, vy: (R() - 0.5) * 12, ph: R() * 6 })));
         ctx.fillStyle = "rgba(8,11,15,0.35)"; ctx.fillRect(0, 0, w, h);
         ctx.globalCompositeOperation = "lighter";
         for (const b of blobs) {
@@ -73,21 +76,21 @@ export default function Backdrop() {
           if (b.x < -b.r) b.x = w + b.r; if (b.x > w + b.r) b.x = -b.r; if (b.y < -b.r) b.y = h + b.r; if (b.y > h + b.r) b.y = -b.r;
           const r = b.r * (0.85 + 0.15 * Math.sin(t * 0.7 + b.ph) + lvl * 0.35 + (kick ? 0.12 : 0));
           const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, r);
-          g.addColorStop(0, `hsla(${b.hue}, 85%, 55%, ${(0.10 + 0.16 * lvl) * amp})`); g.addColorStop(1, "transparent");
+          g.addColorStop(0, `hsla(${b.hue + drift}, 85%, 55%, ${(0.10 + 0.16 * lvl) * amp})`); g.addColorStop(1, "transparent");
           ctx.fillStyle = g; ctx.beginPath(); ctx.arc(b.x, b.y, r, 0, Math.PI * 2); ctx.fill();
         }
         ctx.globalCompositeOperation = "source-over";
       }
       // ---------------------------------------------------------------- grid
       if (scene === "grid") {
-        const st = (objs.g as { off: number; hue: number; tilt: number }) || (objs.g = { off: 0, hue: h0 + R() * (h1 - h0), tilt: 0.35 + R() * 0.25 });
+        const st = (objs.g as { off: number; hue: number; tilt: number }) || (objs.g = { off: 0, hue: b0 + R() * (b1 - b0), tilt: 0.35 + R() * 0.25 });
         st.off = (st.off + dt * (0.35 + lvl * 1.6)) % 1;
         ctx.clearRect(0, 0, w, h);
         const horizon = h * (0.42 + 0.06 * Math.sin(t * 0.2));
         const glow = ctx.createLinearGradient(0, horizon - 120, 0, horizon + 40);
-        glow.addColorStop(0, "transparent"); glow.addColorStop(1, `hsla(${st.hue}, 90%, 60%, ${(0.10 + 0.5 * lvl + (kick ? 0.25 : 0)) * amp})`);
+        glow.addColorStop(0, "transparent"); glow.addColorStop(1, `hsla(${st.hue + drift}, 90%, 60%, ${(0.10 + 0.5 * lvl + (kick ? 0.25 : 0)) * amp})`);
         ctx.fillStyle = glow; ctx.fillRect(0, horizon - 120, w, 160);
-        ctx.strokeStyle = `hsla(${st.hue}, 90%, 62%, ${(0.18 + 0.4 * lvl) * amp})`; ctx.lineWidth = 1;
+        ctx.strokeStyle = `hsla(${st.hue + drift}, 90%, 62%, ${(0.18 + 0.4 * lvl) * amp})`; ctx.lineWidth = 1;
         for (let i = 0; i < 18; i++) {
           const z = (i + st.off) / 18;
           const y = horizon + Math.pow(z, 2.2) * (h - horizon);
@@ -104,20 +107,20 @@ export default function Backdrop() {
       if (scene === "rain") {
         type Col = { y: number; v: number; hue: number };
         const size = 15, n = Math.ceil(w / size);
-        const cols = (objs.cols as Col[]) || (objs.cols = Array.from({ length: n }, () => ({ y: -R() * h, v: 120 + R() * 260, hue: h0 + R() * (h1 - h0) })));
+        const cols = (objs.cols as Col[]) || (objs.cols = Array.from({ length: n }, () => ({ y: -R() * h, v: 120 + R() * 260, hue: b0 + R() * (b1 - b0) })));
         ctx.fillStyle = "rgba(8,11,15,0.28)"; ctx.fillRect(0, 0, w, h);
         ctx.font = `${size}px ui-monospace, Menlo, Consolas, monospace`;
         for (let i = 0; i < n; i++) {
           const c = cols[i];
           c.y += c.v * dt * (0.6 + lvl * 2.4 + (kick ? 1 : 0));
           if (c.y > h + 40) { c.y = -R() * 200; c.v = 120 + Math.random() * 260; }
-          ctx.fillStyle = `hsla(${c.hue}, 90%, ${70 + lvl * 25}%, ${(0.35 + lvl * 0.5) * amp})`;
+          ctx.fillStyle = `hsla(${c.hue + drift}, 90%, ${70 + lvl * 25}%, ${(0.35 + lvl * 0.5) * amp})`;
           ctx.fillText(Math.random() < 0.5 ? "0" : "1", i * size, c.y);
         }
       }
       // ---------------------------------------------------------------- aurora
       if (scene === "aurora") {
-        const ribs = (objs.ribs as { hue: number; ph: number; k: number; y: number }[]) || (objs.ribs = Array.from({ length: 4 }, (_, i) => ({ hue: h0 + R() * (h1 - h0), ph: R() * 6, k: 0.6 + R() * 1.2, y: 0.25 + i * 0.16 + R() * 0.08 })));
+        const ribs = (objs.ribs as { hue: number; ph: number; k: number; y: number }[]) || (objs.ribs = Array.from({ length: 4 }, (_, i) => ({ hue: b0 + R() * (b1 - b0), ph: R() * 6, k: 0.6 + R() * 1.2, y: 0.25 + i * 0.16 + R() * 0.08 })));
         ctx.fillStyle = "rgba(8,11,15,0.3)"; ctx.fillRect(0, 0, w, h);
         ctx.globalCompositeOperation = "lighter";
         for (const r of ribs) {
@@ -129,7 +132,7 @@ export default function Backdrop() {
           }
           ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
           const g = ctx.createLinearGradient(0, h * r.y - 80, 0, h * r.y + 260);
-          g.addColorStop(0, `hsla(${r.hue}, 90%, 60%, ${(0.16 + 0.3 * lvl) * amp})`); g.addColorStop(1, "transparent");
+          g.addColorStop(0, `hsla(${r.hue + drift}, 90%, 60%, ${(0.16 + 0.3 * lvl) * amp})`); g.addColorStop(1, "transparent");
           ctx.fillStyle = g; ctx.fill();
         }
         ctx.globalCompositeOperation = "source-over";
@@ -137,7 +140,7 @@ export default function Backdrop() {
       // ---------------------------------------------------------------- warp
       if (scene === "warp") {
         type Star = { x: number; y: number; z: number; hue: number };
-        const stars = (objs.stars as Star[]) || (objs.stars = Array.from({ length: 260 }, () => ({ x: (R() - 0.5) * 2, y: (R() - 0.5) * 2, z: R(), hue: h0 + R() * (h1 - h0) })));
+        const stars = (objs.stars as Star[]) || (objs.stars = Array.from({ length: 260 }, () => ({ x: (R() - 0.5) * 2, y: (R() - 0.5) * 2, z: R(), hue: b0 + R() * (b1 - b0) })));
         const sp = (objs.sp as { v: number }) || (objs.sp = { v: 0.25 });
         sp.v += ((0.2 + lvl * 1.6 + (kick ? 1.2 : 0)) - sp.v) * 0.08;
         ctx.fillStyle = `rgba(8,11,15,${0.35 - lvl * 0.15})`; ctx.fillRect(0, 0, w, h);
@@ -146,7 +149,7 @@ export default function Backdrop() {
           const pz = s.z; s.z -= sp.v * dt; if (s.z <= 0.02) { s.z = 1; s.x = (Math.random() - 0.5) * 2; s.y = (Math.random() - 0.5) * 2; }
           const x1 = w / 2 + (s.x / pz) * w * 0.5, y1 = h / 2 + (s.y / pz) * h * 0.5;
           const x2 = w / 2 + (s.x / s.z) * w * 0.5, y2 = h / 2 + (s.y / s.z) * h * 0.5;
-          ctx.strokeStyle = `hsla(${s.hue}, 80%, 75%, ${(0.25 + (1 - s.z) * 0.7) * amp})`; ctx.lineWidth = (1 - s.z) * 2.2 + 0.3;
+          ctx.strokeStyle = `hsla(${s.hue + drift}, 80%, 75%, ${(0.25 + (1 - s.z) * 0.7) * amp})`; ctx.lineWidth = (1 - s.z) * 2.2 + 0.3;
           ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
         }
         ctx.globalCompositeOperation = "source-over";
@@ -154,7 +157,7 @@ export default function Backdrop() {
       // ---------------------------------------------------------------- pulse
       if (scene === "pulse") {
         const rings = (objs.rings as { r: number; hue: number; a: number }[]) || (objs.rings = []);
-        const hue = h0 + ((objs.hh as number) ?? (objs.hh = R())) * (h1 - h0);
+        const hue = h0 + ((objs.hh as number) ?? (objs.hh = R())) * (h1 - h0);   // rings are short-lived: born already drifted
         if (kick || (beat.playing && Math.random() < dt * 0.4)) rings.push({ r: 0, hue: hue + (Math.random() - 0.5) * 30, a: 0.7 + lvl * 0.3 });
         if (!beat.playing && Math.random() < dt * 0.25) rings.push({ r: 0, hue, a: 0.35 });
         ctx.fillStyle = "rgba(8,11,15,0.32)"; ctx.fillRect(0, 0, w, h);
