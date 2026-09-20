@@ -24,6 +24,8 @@ export function tokenUrl(path: string): string {
   return `${path}${path.includes("?") ? "&" : "?"}t=${encodeURIComponent(token)}`;
 }
 
+export const STALE_BACKEND = "The page is newer than the Python that is running. Restart HELIX: Settings > Updates > Restart HELIX (or quit and launch it again).";
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
@@ -39,11 +41,18 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       const data = await res.json();
       detail = data.error || detail;
     } catch {
-      /* body wasn't JSON */
+      // not JSON: an older backend answered this /api path with the page itself (405 / HTML)
+      if (res.status === 405 || res.status === 404) detail = STALE_BACKEND;
     }
     throw new Error(detail);
   }
-  return (await res.json()) as T;
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    // 200 with HTML: the SPA catch-all of a backend that predates this route
+    throw new Error(STALE_BACKEND);
+  }
 }
 
 export interface FramesMeta {

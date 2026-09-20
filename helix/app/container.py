@@ -776,6 +776,16 @@ class Container:
             _LOG.warning("fleet unavailable", exc_info=True)
             self.runtime_profile = None
             self.fleet = None
+        # HELIX RADIO (docs/HELIX_RADIO.md): the bucket through the user's own gcloud, like the fleet.
+        try:
+            from helix.adapters.gcs_radio import GcsRadio
+            from helix.services.radio import RadioService
+            self.radio = RadioService(
+                GcsRadio(lambda: self.settings.get("radio_bucket"), cache_dir=self.paths.data / "radio_cache"),
+                station_override=lambda: self.settings.get("radio_station"))
+        except Exception:  # noqa: BLE001
+            _LOG.warning("radio unavailable", exc_info=True)
+            self.radio = None
         self.subscription._tools = self.tools  # late-bind (tools → services ctor cycle, like agents)
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM,

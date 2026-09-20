@@ -195,7 +195,7 @@ def test_the_routes_are_reads_only():
     """Phase 1 pin: no route on this surface may carry a mutating name."""
     app, _ = _app()
     paths = {r.path for r in app.routes if r.path.startswith("/api/fleet")}
-    assert paths == {"/api/fleet", "/api/fleet/refresh", "/api/fleet/history", "/api/fleet/link"}  # link edits a setting, never the fleet
+    assert paths == {"/api/fleet", "/api/fleet/refresh", "/api/fleet/history", "/api/fleet/link", "/api/fleet/git"}  # link edits a setting, never the fleet
     for verb in ("deploy", "rollback", "delete", "traffic", "secret", "create"):
         assert not any(verb in p for p in paths)
 
@@ -287,3 +287,54 @@ def test_a_repo_that_does_not_answer_makes_the_card_unlinked_with_the_reason():
     _, doc = _call(app, "POST", "/api/fleet/refresh", {"app": "MES"})
     mes = doc["companies"][0]["apps"][0]
     assert mes["link"]["linked"] is False and "not found" in mes["link"]["why"]
+
+
+# ------------------------------------------------------------------------------ the git graph
+
+class _GraphRepos(_Repos):
+    def branches(self, repo, *, timeout_s=20.0):
+        return [{"name": "main", "sha": "c3"}, {"name": "v3", "sha": "b2"}], None
+
+    def commits(self, repo, ref, *, limit=40, timeout_s=20.0):
+        if ref == "main":
+            return [{"sha": "c3", "parents": ["c2"], "subject": "three", "author": "b", "at": "2026-09-19T03:00:00Z"},
+                    {"sha": "c2", "parents": ["c1"], "subject": "two", "author": "b", "at": "2026-09-19T02:00:00Z"},
+                    {"sha": "c1", "parents": [], "subject": "one", "author": "b", "at": "2026-09-19T01:00:00Z"}], None
+        return [{"sha": "b2", "parents": ["c2"], "subject": "branch", "author": "k", "at": "2026-09-19T02:30:00Z"},
+                {"sha": "c2", "parents": ["c1"], "subject": "two", "author": "b", "at": "2026-09-19T02:00:00Z"}], None
+
+
+def test_the_git_graph_merges_branch_tips_and_sorts_by_time():
+    from types import SimpleNamespace
+    svc = FleetService(_reader(), _GraphRepos(), MemoryFleetState())
+    app = FastAPI()
+    fleet_routes.mount_fleet(app, SimpleNamespace(fleet=svc, runtime_profile=HelixProfile.DESKTOP))
+    st, doc = _call(app, "GET", "/api/fleet/git?app_name=mes")
+    assert st == 200 and doc["repo"] == "BrendanSullivanMark1/BRMS_MES_WEB_VERSION" and doc["branch"] == "main"
+    assert [c["sha"] for c in doc["commits"]] == ["c3", "b2", "c2", "c1"]
+    assert [b["name"] for b in doc["branches"]] == ["main", "v3"]
+    st, doc = _call(app, "GET", "/api/fleet/git?app_name=nope")
+    assert st == 404
+
+
+def test_a_failed_cloud_read_carries_what_gcloud_said():
+    from types import SimpleNamespace
+    from helix.ports.fleet import CellRead
+
+    class _Bad:
+        def available(self):
+            return True, None
+
+        def read_cell(self, service, *, timeout_s=30.0):
+            return CellRead(service=service, ok=False, problem="gcloud answered, but not in a shape HELIX understands.",
+                            detail="ERROR: (gcloud.run.services.describe) You do not currently have an active account selected.")
+
+        def read_all(self, services, *, timeout_s=90.0):
+            return [self.read_cell(s) for s in services]
+
+    svc = FleetService(_Bad(), _Repos(), MemoryFleetState())
+    app = FastAPI()
+    fleet_routes.mount_fleet(app, SimpleNamespace(fleet=svc, runtime_profile=HelixProfile.DESKTOP))
+    _, doc = _call(app, "POST", "/api/fleet/refresh", {"app": "MES"})
+    dev = doc["companies"][0]["apps"][0]["envs"][0]
+    assert "not in a shape" in dev["note"] and "active account" in dev["detail"]

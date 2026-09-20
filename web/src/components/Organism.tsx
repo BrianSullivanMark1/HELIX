@@ -13,6 +13,7 @@
 // the tempo. Brendan's star (Orb.tsx) is untouched; orb_style swaps between the two.
 import { Canvas, useFrame } from "@react-three/fiber";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type React from "react";
 import * as THREE from "three";
 import { api } from "../lib/api";
 import { useHelix } from "../lib/store";
@@ -243,6 +244,36 @@ interface Beat { at: number; dur: number; open: number }
 interface Line { at: number; end: number; brow: number; smile: number; tilt: number; glance: number; nods: number[] }
 interface Script { beats: Beat[]; lines: Line[]; total: number }
 const WEIGHT = /^(not|never|must|always|now|done|ready|live|prod|production|failed|error|warning|yes|no|stop|every|all|nothing)$/i;
+/** The same script, but timed by the voice itself: one entry per spoken word with its offset and
+ *  duration. Syllables are spread across the word's real duration; sentence expressions come from
+ *  the punctuation as before. Used when the backend synthesized the line for the page. */
+function buildTimedScript(words: { t: number; d: number; w: string }[]): Script {
+  const beats: Beat[] = []; const lines: Line[] = [];
+  let line: Line | null = null;
+  for (const wd of words) {
+    const bare = wd.w.replace(/[^A-Za-z0-9']/g, "");
+    if (!line) {
+      line = { at: wd.t, end: wd.t, brow: 0.1 + Math.random() * 0.25, smile: 0.15 + Math.random() * 0.15,
+               tilt: (Math.random() - 0.5) * 0.05, glance: Math.random() < 0.45 ? (Math.random() < 0.5 ? -1 : 1) : 0, nods: [] };
+    }
+    const heavy = WEIGHT.test(bare) || (bare.length > 2 && bare === bare.toUpperCase()) || /\d/.test(bare);
+    if (heavy) line.nods.push(wd.t);
+    const syl = Math.max(1, Math.round(bare.length / 2.8));
+    const vowels = (bare.match(/[aeiouy]/gi) || []).length / Math.max(1, bare.length);
+    const dur = Math.max(0.06, wd.d / syl);
+    for (let k = 0; k < syl; k++) beats.push({ at: wd.t + k * dur, dur: dur * 0.92, open: Math.min(1, 0.45 + vowels * 0.9 + (heavy ? 0.2 : 0) + Math.random() * 0.15) });
+    line.end = wd.t + wd.d;
+    if (/[.!?]$/.test(wd.w)) {
+      const q = /\?$/.test(wd.w), bang = /!$/.test(wd.w);
+      line.brow = q ? 0.8 : bang ? 1 : line.brow; line.smile = bang ? 0.55 : q ? 0.05 : line.smile; line.tilt = q ? (Math.random() < 0.5 ? -1 : 1) * 0.09 : line.tilt;
+      lines.push(line); line = null;
+    }
+  }
+  if (line) lines.push(line);
+  const last = words[words.length - 1];
+  return { beats, lines, total: last ? last.t + last.d + 0.2 : 0 };
+}
+
 function buildScript(text: string): Script {
   const beats: Beat[] = []; const lines: Line[] = [];
   let t = 0.25;
@@ -277,6 +308,160 @@ function buildScript(text: string): Script {
   return { beats, lines, total: t };
 }
 
+/** THE CORTEX: a net of neurons over the skull, behind and above the face. It breathes, signals
+ *  run along the links as bright sparks and hop on, and the mouse is a hand in it: neurons near the
+ *  cursor light up and lean toward it, and a click sends a wave across the whole net. Colors stay
+ *  in the hue (never white-out): dim links, lit nodes, hot sparks. */
+function Cortex({ hue, mouse, level }: { hue: number; mouse: React.MutableRefObject<{ x: number; y: number }>; level: React.MutableRefObject<number> }) {
+  const group = useRef<THREE.Group>(null!);
+  const N = 170, R = 1.07, LINK = 0.40, MAXFIRE = 28;
+  const data = useMemo(() => {
+    const home: THREE.Vector3[] = [];
+    while (home.length < N) {
+      const u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2;
+      const r = Math.sqrt(1 - u * u);
+      const v = new THREE.Vector3(r * Math.cos(th), u, r * Math.sin(th));
+      if (v.z > 0.45 && v.y < 0.6 && v.y > -0.7) continue;      // not over the face
+      if (v.y < -0.75) continue;                                 // not under the chin
+      home.push(v.multiplyScalar(R));
+    }
+    const links: [number, number][] = [];
+    for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) if (home[i].distanceTo(home[j]) < LINK) links.push([i, j]);
+    const ppos = new Float32Array(N * 3), pcol = new Float32Array(N * 3), psize = new Float32Array(N);
+    const lpos = new Float32Array(links.length * 6), lcol = new Float32Array(links.length * 6);
+    const pg = new THREE.BufferGeometry(); pg.setAttribute("position", new THREE.BufferAttribute(ppos, 3)); pg.setAttribute("color", new THREE.BufferAttribute(pcol, 3));
+    const lg = new THREE.BufferGeometry(); lg.setAttribute("position", new THREE.BufferAttribute(lpos, 3)); lg.setAttribute("color", new THREE.BufferAttribute(lcol, 3));
+    const spos = new Float32Array(MAXFIRE * 3), scol = new Float32Array(MAXFIRE * 3);
+    const sg = new THREE.BufferGeometry(); sg.setAttribute("position", new THREE.BufferAttribute(spos, 3)); sg.setAttribute("color", new THREE.BufferAttribute(scol, 3));
+    const pos = home.map((v) => v.clone());
+    const adj: number[][] = Array.from({ length: N }, () => []);
+    links.forEach(([a, b], i) => { adj[a].push(i); adj[b].push(i); });
+    return { home, pos, links, adj, pg, lg, sg, ppos, pcol, psize, lpos, lcol, spos, scol,
+             heat: new Float32Array(N), fire: [] as { link: number; t: number; dir: number; hopped: boolean }[], wave: -1, waveFrom: new THREE.Vector3() };
+  }, []);
+  const glowTex = useMemo(() => {
+    const c = document.createElement("canvas"); c.width = c.height = 32;
+    const g = c.getContext("2d")!; const gr = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+    gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(0.35, "rgba(255,255,255,0.55)"); gr.addColorStop(1, "rgba(255,255,255,0)");
+    g.fillStyle = gr; g.fillRect(0, 0, 32, 32);
+    return new THREE.CanvasTexture(c);
+  }, []);
+  const tmp = useMemo(() => new THREE.Vector3(), []);
+  const tmp2 = useMemo(() => new THREE.Vector3(), []);
+  const dim = useMemo(() => new THREE.Color(), []);
+  const lit = useMemo(() => new THREE.Color(), []);
+  const hot = useMemo(() => new THREE.Color(), []);
+  const time = useRef(0);
+  // a click anywhere: a wave from where the cursor is on the head
+  useEffect(() => {
+    const down = () => { data.wave = 0; };
+    window.addEventListener("mousedown", down);
+    return () => window.removeEventListener("mousedown", down);
+  }, [data]);
+  useFrame(({ camera }, dtRaw) => {
+    const dt = Math.min(0.05, dtRaw);
+    const d = data;
+    time.current += dt;
+    const h = ((hue % 360) + 360) % 360 / 360;
+    dim.setHSL(h, 0.85, 0.30); lit.setHSL(h, 0.9, 0.62); hot.setHSL((h + 0.08) % 1, 1.0, 0.78);
+    group.current.rotation.y = 0.18 * Math.sin(time.current * 0.11);           // a slow sway, never across the face
+    group.current.updateMatrixWorld();
+    const mx = mouse.current.x, my = mouse.current.y;
+    let nearest = -1, nearestD = 9;
+    for (let i = 0; i < N; i++) {
+      tmp.copy(d.home[i]).applyMatrix4(group.current.matrixWorld);
+      const facing = tmp.z > -0.15;                                             // toward the camera
+      tmp2.copy(tmp).project(camera);
+      const dist = Math.hypot(tmp2.x - mx, (tmp2.y - my) * 0.75);
+      const near = facing ? Math.max(0, 1 - dist / 0.30) : 0;
+      if (facing && dist < nearestD) { nearestD = dist; nearest = i; }
+      d.heat[i] = Math.max(d.heat[i] * Math.pow(0.12, dt), near * near);
+    }
+    // the wave from a click
+    if (d.wave >= 0) {
+      if (d.wave === 0 && nearest >= 0) d.waveFrom.copy(d.home[nearest]);
+      d.wave += dt * 2.6;
+      for (let i = 0; i < N; i++) {
+        const ring = Math.abs(d.home[i].distanceTo(d.waveFrom) - d.wave * 1.2);
+        if (ring < 0.16) d.heat[i] = Math.max(d.heat[i], 1 - ring / 0.16);
+      }
+      if (d.wave > 1.6) d.wave = -1;
+    }
+    // neurons lean toward the cursor and breathe; the mesh positions follow
+    for (let i = 0; i < N; i++) {
+      const hm = d.home[i], p = d.pos[i], ht = d.heat[i];
+      const breathe = 1 + 0.012 * Math.sin(time.current * 1.3 + i * 0.7);
+      tmp.copy(hm).multiplyScalar(breathe);
+      if (ht > 0.02 && nearest >= 0) tmp.lerp(d.home[nearest], ht * 0.22);       // lean toward the hand
+      p.lerp(tmp, 1 - Math.pow(0.02, dt));
+      d.ppos[i * 3] = p.x; d.ppos[i * 3 + 1] = p.y; d.ppos[i * 3 + 2] = p.z;
+    }
+    // signals: born now and then (more with the voice, more under the hand), run, hop once
+    const born = dt * (1.2 + 5 * level.current + (nearest >= 0 && d.heat[nearest] > 0.5 ? 6 : 0));
+    if (Math.random() < born && d.links.length && d.fire.length < MAXFIRE) {
+      const from = nearest >= 0 && d.heat[nearest] > 0.5 && d.adj[nearest].length ? d.adj[nearest][Math.floor(Math.random() * d.adj[nearest].length)] : Math.floor(Math.random() * d.links.length);
+      d.fire.push({ link: from, t: 0, dir: Math.random() < 0.5 ? 1 : -1, hopped: false });
+    }
+    for (const f of d.fire) {
+      f.t += dt * 1.9;
+      if (!f.hopped && f.t > 0.8) {
+        f.hopped = true;
+        const [a, b] = d.links[f.link];
+        const head = f.dir > 0 ? b : a;
+        d.heat[head] = Math.max(d.heat[head], 0.85);
+        if (Math.random() < 0.55 && d.fire.length < MAXFIRE) {
+          const options = d.adj[head].filter((k) => k !== f.link);
+          if (options.length) { const nx = options[Math.floor(Math.random() * options.length)]; d.fire.push({ link: nx, t: 0, dir: d.links[nx][0] === head ? 1 : -1, hopped: false }); }
+        }
+      }
+    }
+    d.fire = d.fire.filter((f) => f.t < 1);
+    const litLink = new Float32Array(d.links.length);
+    d.spos.fill(0); d.scol.fill(0);
+    d.fire.forEach((f, k) => {
+      litLink[f.link] = Math.max(litLink[f.link], 1 - Math.abs(f.t - 0.5) * 0.6);
+      const [a, b] = d.links[f.link];
+      const A = d.pos[f.dir > 0 ? a : b], B = d.pos[f.dir > 0 ? b : a];
+      tmp.copy(A).lerp(B, Math.min(1, f.t)).multiplyScalar(1.01);
+      d.spos[k * 3] = tmp.x; d.spos[k * 3 + 1] = tmp.y; d.spos[k * 3 + 2] = tmp.z;
+      d.scol[k * 3] = hot.r; d.scol[k * 3 + 1] = hot.g; d.scol[k * 3 + 2] = hot.b;
+    });
+    for (let i = 0; i < N; i++) {
+      const ht = Math.min(1, d.heat[i]);
+      d.pcol[i * 3] = dim.r + (lit.r - dim.r) * ht + hot.r * ht * ht * 0.5;
+      d.pcol[i * 3 + 1] = dim.g + (lit.g - dim.g) * ht + hot.g * ht * ht * 0.5;
+      d.pcol[i * 3 + 2] = dim.b + (lit.b - dim.b) * ht + hot.b * ht * ht * 0.5;
+    }
+    d.links.forEach(([a, b], i) => {
+      const A = d.pos[a], B = d.pos[b];
+      d.lpos[i * 6] = A.x; d.lpos[i * 6 + 1] = A.y; d.lpos[i * 6 + 2] = A.z; d.lpos[i * 6 + 3] = B.x; d.lpos[i * 6 + 4] = B.y; d.lpos[i * 6 + 5] = B.z;
+      const ht = Math.min(1, Math.max(litLink[i], (d.heat[a] + d.heat[b]) * 0.5));
+      const k = 0.22 + 0.78 * ht;
+      const r = dim.r * k + lit.r * ht * 0.7, g = dim.g * k + lit.g * ht * 0.7, bl = dim.b * k + lit.b * ht * 0.7;
+      d.lcol[i * 6] = r; d.lcol[i * 6 + 1] = g; d.lcol[i * 6 + 2] = bl; d.lcol[i * 6 + 3] = r; d.lcol[i * 6 + 4] = g; d.lcol[i * 6 + 5] = bl;
+    });
+    (d.pg.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    (d.pg.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+    (d.lg.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    (d.lg.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+    (d.sg.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    (d.sg.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+  });
+  return (
+    <group ref={group}>
+      <lineSegments geometry={data.lg} raycast={() => undefined}>
+        <lineBasicMaterial vertexColors transparent opacity={0.7} blending={THREE.AdditiveBlending} depthWrite={false} />
+      </lineSegments>
+      <points geometry={data.pg} raycast={() => undefined}>
+        <pointsMaterial map={glowTex} vertexColors size={0.07} transparent opacity={0.9} depthWrite={false} blending={THREE.AdditiveBlending} sizeAttenuation />
+      </points>
+      <points geometry={data.sg} raycast={() => undefined}>
+        <pointsMaterial map={glowTex} vertexColors size={0.11} transparent opacity={1} depthWrite={false} depthTest={false} blending={THREE.AdditiveBlending} sizeAttenuation />
+      </points>
+    </group>
+  );
+}
+
 function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) => void }) {
   const mesh = useRef<THREE.Mesh>(null!);
   const spores = useRef<THREE.Points>(null!);
@@ -289,16 +474,45 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
   const prev = useRef({ orb: "idle", hue: "none", bubbles: 0 });
   const mouth = useRef({ open: 0, flutter: 0 });
   const mouse = useRef({ x: 0, y: 0 });
+  const levelRef = useRef(0);
   const perf = useRef<{ script: Script | null; t0: number; beat: number; nod: number; glanceT: number; endSmile: number }>({ script: null, t0: 0, beat: 0, nod: -1, glanceT: 0, endSmile: 0 });
   const expr = useRef({ brow: 0, smile: 0, tilt: 0, squint: 0, nod: 0, glance: 0 });
   // THE IDLE LIFE: every few seconds a small act - a glance aside, a brow flick, a double blink,
   // a head tilt, a half smile - so the face is alive between lines. Thinking gets its own acts:
   // eyes up and away, a furrow, a squint, as if reading something over your shoulder.
-  const local = useRef({ until: 0 });   // a Say line performed on the page's own clock
+  const local = useRef<{ until: number; audio: HTMLAudioElement | null; ctx: AudioContext | null; analyser: AnalyserNode | null; buf: Uint8Array | null }>({ until: 0, audio: null, ctx: null, analyser: null, buf: null });   // a Say line performed here
   useEffect(() => {
     const onSay = (e: Event) => {
-      const text = String((e as CustomEvent).detail?.text || "");
+      const d = (e as CustomEvent).detail as { text?: string; words?: { t: number; d: number; w: string }[]; audio?: HTMLAudioElement } | undefined;
+      const text = String(d?.text || "");
       if (!text) return;
+      if (d?.audio) {
+        // the voice's own timing: the script runs on the audio's clock, the level on its signal
+        const audio = d.audio;
+        const script = d.words && d.words.length ? buildTimedScript(d.words) : buildScript(text);
+        const start = () => {
+          perf.current = { script, t0: 0, beat: 0, nod: -1, glanceT: 0, endSmile: 0 };
+          local.current.audio = audio;
+          local.current.until = Infinity;
+          prev.current.orb = "speaking";
+          firePulseRef.current(true);
+          try {
+            if (!local.current.ctx) local.current.ctx = new AudioContext();
+            const ctx = local.current.ctx;
+            const src = ctx.createMediaElementSource(audio);
+            const an = ctx.createAnalyser(); an.fftSize = 512; an.smoothingTimeConstant = 0.5;
+            src.connect(an); an.connect(ctx.destination);
+            local.current.analyser = an; local.current.buf = new Uint8Array(an.frequencyBinCount);
+            void ctx.resume();
+          } catch { local.current.analyser = null; }
+        };
+        const stop = () => { local.current.until = 0; local.current.audio = null; local.current.analyser = null; };
+        audio.addEventListener("playing", start, { once: true });
+        audio.addEventListener("ended", stop, { once: true });
+        audio.addEventListener("error", stop, { once: true });
+        audio.addEventListener("pause", stop, { once: true });
+        return;
+      }
       const script = buildScript(text);
       perf.current = { script, t0: performance.now() / 1000, beat: 0, nod: -1, glanceT: 0, endSmile: 0 };
       local.current.until = performance.now() / 1000 + script.total + 0.4;
@@ -377,8 +591,17 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
     u.uAttend.value += ((s.orb === "listening" ? 1 : 0) - u.uAttend.value) * 0.08;
     const localSay = performance.now() / 1000 < local.current.until;
     const speaking = s.orb === "speaking" || localSay;
-    const level = speaking ? 0.3 + s.level * 0.9 : s.orb === "transcribing" ? s.level * 0.6 : 0;
+    let level = speaking ? 0.3 + s.level * 0.9 : s.orb === "transcribing" ? s.level * 0.6 : 0;
+    const an = local.current.analyser, buf = local.current.buf;
+    if (localSay && an && buf) {
+      // the measured voice: low-mid energy of the playing line, 0..1
+      an.getByteFrequencyData(buf as Uint8Array<ArrayBuffer>);
+      let sum = 0; const n = Math.min(48, buf.length);
+      for (let i = 2; i < n; i++) sum += buf[i];
+      level = Math.min(1, (sum / (n - 2)) / 110);
+    }
     u.uLevel.value += (level - u.uLevel.value) * 0.3;
+    levelRef.current = u.uLevel.value;
     u.uPhaseFace.value += ((phase === "face" ? 1 : 0) - u.uPhaseFace.value) * 0.04;
     u.uPhaseStorm.value += ((phase === "storm" ? 1 : 0) - u.uPhaseStorm.value) * 0.04;
 
@@ -446,10 +669,10 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
     const lifeGy = !speaking && now < lf.until ? lf.gy : 0;
     const sc = pf.script;
     if (speaking && sc) {
-      const tt = performance.now() / 1000 - pf.t0;   // wall clock: the voice does not slow down when the frames do
+      const tt = local.current.audio ? local.current.audio.currentTime : performance.now() / 1000 - pf.t0;   // the audio's clock when we have it; wall clock otherwise
       while (pf.beat < sc.beats.length && sc.beats[pf.beat].at + sc.beats[pf.beat].dur < tt) pf.beat++;
       const b = sc.beats[pf.beat];
-      if (b && tt >= b.at) target = b.open * Math.sin(Math.min(1, (tt - b.at) / b.dur) * Math.PI) * (0.6 + 0.4 * Math.min(1, u.uLevel.value + 0.5));
+      if (b && tt >= b.at) target = b.open * Math.sin(Math.min(1, (tt - b.at) / b.dur) * Math.PI) * (an ? 0.35 + 0.85 * u.uLevel.value : 0.6 + 0.4 * Math.min(1, u.uLevel.value + 0.5));
       else if (tt > sc.total) { m.flutter += dt * 11; target = 0.12 + 0.35 * Math.max(0, Math.sin(m.flutter)); }   // the script ran out, the voice has not
       const line = sc.lines.find((l) => tt >= l.at - 0.1 && tt < l.end + 0.3) || sc.lines[sc.lines.length - 1];
       if (line) {
@@ -506,6 +729,7 @@ function Body({ look, onPulse }: { look: OrganismLook; onPulse: (big: boolean) =
       <points ref={spores} geometry={sporeGeo} raycast={() => undefined}>
         <pointsMaterial map={glow} size={0.03} transparent opacity={0.7} depthWrite={false} blending={THREE.AdditiveBlending} sizeAttenuation />
       </points>
+      <Cortex hue={look.hue} mouse={mouse} level={levelRef} />
     </group>
   );
 }

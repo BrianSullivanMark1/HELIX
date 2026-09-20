@@ -90,6 +90,24 @@ class GithubRepos:
                 doc = None
         return status, doc, body[:400]
 
+    def _get_list(self, path: str, timeout_s: float) -> tuple[int, list, str]:
+        """Like _get for endpoints that answer with a JSON array."""
+        token = (self._token() or "").strip()
+        if not token:
+            return -1, [], ""
+        url = f"https://{API_HOST}/{path.lstrip('/')}"
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                   "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "HELIX-fleet"}
+        status, body = self._http(url, headers, timeout_s)
+        docs: list = []
+        if body:
+            try:
+                parsed = json.loads(body)
+                docs = [d for d in parsed if isinstance(d, dict)] if isinstance(parsed, list) else []
+            except ValueError:
+                docs = []
+        return status, docs, body[:400]
+
     @staticmethod
     def _problem(status: int) -> str:
         if status == -1:
@@ -145,3 +163,34 @@ class GithubRepos:
                    "diverged": "diverged"}.get(gh, "unknown")
         return CompareRead(repo=repo, serving=serving, head=head, ok=True, status=flipped,
                            behind_by=ahead_of_base, ahead_by=behind_base)
+
+
+    # ---------------------------------------------------------------- the graph (Git drawer)
+
+    def branches(self, repo: str, *, timeout_s: float = 20.0) -> tuple[list[dict], str | None]:
+        """[{name, sha}] for the repo, newest-activity first is not available here - alphabetical."""
+        status, docs, _ = self._get_list(f"repos/{quote(repo)}/branches?per_page=60", timeout_s)
+        if status != 200:
+            return [], self._problem(status)
+        out = [{"name": str(d.get("name") or ""), "sha": str((d.get("commit") or {}).get("sha") or "")} for d in docs]
+        return [b for b in out if b["name"] and b["sha"]], None
+
+    def commits(self, repo: str, sha_or_branch: str, *, limit: int = 40, timeout_s: float = 20.0) -> tuple[list[dict], str | None]:
+        """[{sha, parents[], subject, author, at}] walking back from a ref. One page."""
+        limit = max(1, min(100, int(limit)))
+        status, docs, _ = self._get_list(
+            f"repos/{quote(repo)}/commits?sha={quote(sha_or_branch)}&per_page={limit}", timeout_s)
+        if status != 200:
+            return [], self._problem(status)
+        out = []
+        for d in docs:
+            c = d.get("commit") or {}
+            author = (c.get("author") or {})
+            out.append({
+                "sha": str(d.get("sha") or ""),
+                "parents": [str(p.get("sha") or "") for p in (d.get("parents") or []) if isinstance(p, dict)],
+                "subject": str(c.get("message") or "").split("\n", 1)[0][:120],
+                "author": str(author.get("name") or (d.get("author") or {}).get("login") or ""),
+                "at": str(author.get("date") or ""),
+            })
+        return [c for c in out if c["sha"]], None

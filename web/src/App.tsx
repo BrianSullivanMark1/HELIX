@@ -10,6 +10,9 @@ import ConsolePage from "./pages/Console";
 import Talk from "./pages/Talk";
 import Dream from "./pages/Dream";
 import Settings from "./pages/Settings";
+import Sparks from "./components/Sparks";
+import { RadioButton, RadioDeck } from "./components/Radio";
+import "./shine.css";
 import Studio from "./pages/Studio";
 import Vault from "./pages/Vault";
 import Viewer from "./pages/Viewer";
@@ -39,6 +42,7 @@ export default function App() {
   const connectModal = useHelix((s) => s.connectModal);
   const lightbox = useHelix((s) => s.lightbox);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [radioOpen, setRadioOpen] = useState(false);
   // HELIX IS OFF: the backend quit (Settings -> Power, the last tab rule, or a crash). The stream
   // stops trying, the WebGL pages unmount, and one calm screen says how to start it again.
   const [off, setOff] = useState<string | null>(null);
@@ -65,16 +69,27 @@ export default function App() {
   // Updates waiting (Settings -> Updates): the built face is behind its source, or the Python
   // changed since launch. Polled gently; the Settings button pulses until it is dealt with.
   const [updates, setUpdates] = useState(false);
+  // THE BRAIN: when no Claude is connected the header says so in glowing amber, left of the nav,
+  // and the menu burns orange until it is fixed - out of the way, impossible to miss.
+  const [brain, setBrain] = useState<{ ok: boolean; line: string }>({ ok: true, line: "" });
   useEffect(() => {
     let alive = true;
     const check = () => {
       void api.get<{ face?: { stale?: boolean }; backend?: { stale?: boolean } }>("/api/face/status")
         .then((s) => { if (alive) setUpdates(Boolean(s.face?.stale || s.backend?.stale)); })
         .catch(() => undefined);
+      void api.get<{ brain?: { tone?: string; line?: string }; secrets?: Record<string, boolean> }>("/api/settings")
+        .then((d) => {
+          if (!alive) return;
+          const connected = Boolean(d.secrets?.claude_code_oauth_token || d.secrets?.claude_api_key);
+          setBrain({ ok: connected, line: connected ? "" : "Claude is not connected" });
+        })
+        .catch(() => undefined);
     };
     check();
     const id = window.setInterval(check, 30000);
-    return () => { alive = false; window.clearInterval(id); };
+    window.addEventListener("helix-settings-saved", check);
+    return () => { alive = false; window.clearInterval(id); window.removeEventListener("helix-settings-saved", check); };
   }, []);
 
   useEffect(() => {
@@ -158,6 +173,8 @@ export default function App() {
     <div className="h-full w-full relative overflow-hidden">
       <div className="atmosphere" style={{ zIndex: 1 }} />
       {onConsole && (body.style === "cell" ? <Organism look={body.look} /> : <Orb />)}
+      <Sparks />
+      <RadioDeck open={radioOpen} onClose={() => setRadioOpen(false)} />
       <StateColor />
 
       {/* reveal strip */}
@@ -173,25 +190,33 @@ export default function App() {
           ◉ HELIX
         </button>
         <div className="flex-1" />
+        {!brain.ok && page.name !== "settings" && (
+          <button className="brain-warn" title="Open Settings -> The brain and connect Claude (a Claude Code sign-in token or an API key)"
+            onClick={() => navigate({ name: "settings" })}>
+            <i /> {brain.line} · connect it in Settings
+          </button>
+        )}
         <div className="glass rounded-xl px-1 py-0.5 flex gap-0.5 items-center">
           <button className="btn-nav" style={page.name === "console" || page.name === "menu" || page.name === "board" ? { color: "var(--cyan)" } : undefined}
             onClick={() => navigate({ name: "console" })}>▦ Console</button>
           <button className="btn-nav" style={page.name === "talk" ? { color: "var(--cyan)" } : undefined}
             onClick={() => navigate({ name: "talk" })}>◉ Talk</button>
           <span style={{ width: 1, height: 18, background: "var(--line)", margin: "0 4px" }} />
+          <RadioButton open={radioOpen} onClick={() => setRadioOpen((o) => !o)} />
           <div className="relative">
-            <button className={`btn-nav${updates && page.name !== "settings" ? " nav-alert" : ""}`} title={updates ? "Updates waiting - open Settings" : "Menu"}
+            <button className={`btn-nav${!brain.ok && page.name !== "settings" ? " nav-burn" : updates && page.name !== "settings" ? " nav-alert" : ""}`} title={!brain.ok ? "Claude is not connected - open Settings" : updates ? "Updates waiting - open Settings" : "Menu"}
               onClick={() => setMenuOpen((m) => !m)}>☰</button>
             {menuOpen && (
               <div className="glass rounded-xl p-1 absolute right-0 mt-1 flex flex-col min-w-[190px]" style={{ zIndex: 40 }}
                 onMouseLeave={() => setMenuOpen(false)}>
                 {([
-                  ["⚙ Settings" + (updates ? "  ●" : ""), { name: "settings" }],
+                  ["⚙ Settings" + (!brain.ok ? "  ▲ connect Claude" : updates ? "  ●" : ""), { name: "settings" }],
                   ["◐ Dream journal", { name: "dream" }],
                 ] as [string, Page][]).map(([label, target]) => (
-                  <button key={label} className="btn-nav text-left" style={updates && target.name === "settings" ? { color: "var(--working)" } : undefined}
+                  <button key={label} className="btn-nav text-left" style={target.name === "settings" && !brain.ok ? { color: "#ff8a3d" } : updates && target.name === "settings" ? { color: "var(--working)" } : undefined}
                     onClick={() => { setMenuOpen(false); navigate(target); }}>{label}</button>
                 ))}
+                <button className="btn-nav text-left" onClick={() => { setMenuOpen(false); setRadioOpen(true); }}>♫ HELIX radio</button>
                 <div className="px-3 pt-1 text-[10px] tracking-wider" style={{ color: "var(--muted)" }} title="When the page you are looking at was built (UTC)">
                   build {__HELIX_BUILD__}
                 </div>

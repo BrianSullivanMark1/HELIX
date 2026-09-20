@@ -8,7 +8,6 @@ NEVER bundles data/ — a shipped build starts blank (no keys, no history, nobod
 """
 from __future__ import annotations
 
-
 import json
 import os
 import shutil

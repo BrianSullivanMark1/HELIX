@@ -1,0 +1,82 @@
+/* SHINE - the cheap flash that drags the eye. A gloss sweeps across every button on hover, the
+   primary and lane buttons carry a slow idle shimmer, the input bar's buttons are round and lit,
+   the mic is a Meet-style circle with rings that breathe while HELIX listens, attachment previews
+   glow, and the header burns amber when Claude is not connected. Sits beside theme.css (Brendan's),
+   never rewrites it. Motion is off under prefers-reduced-motion. */
+
+:root { --spark-hue: 190; }
+
+/* ---------------------------------------------------------------- the gloss on every button */
+.btn, .board-actions .act, .board-gear, .btn-primary { position: relative; overflow: hidden; isolation: isolate; }
+.btn::before, .board-actions .act::before {
+  content: ""; position: absolute; inset: -40% -60%; pointer-events: none; z-index: 1;
+  background: linear-gradient(115deg, transparent 38%, rgba(255, 255, 255, 0.22) 48%, rgba(120, 230, 255, 0.35) 50%, rgba(255, 255, 255, 0.22) 52%, transparent 62%);
+  transform: translateX(-70%); opacity: 0; transition: opacity 0.2s;
+}
+.btn:hover::before, .board-actions .act:hover::before { opacity: 1; animation: shine-sweep 0.7s ease-out forwards; }
+@keyframes shine-sweep { from { transform: translateX(-70%); } to { transform: translateX(70%); } }
+.btn > *, .board-actions .act > * { position: relative; z-index: 2; }
+
+/* the primary and the Deploy lane: a slow idle shimmer so the important verbs never go dark */
+.btn-primary::after, .board-actions .act.ship::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 0; border-radius: inherit;
+  background: linear-gradient(100deg, transparent 30%, rgba(120, 230, 255, 0.14) 50%, transparent 70%);
+  background-size: 250% 100%; animation: shine-idle 4.5s ease-in-out infinite;
+}
+.board-actions .act.ship::after { background: linear-gradient(100deg, transparent 30%, rgba(240, 190, 90, 0.16) 50%, transparent 70%); background-size: 250% 100%; }
+@keyframes shine-idle { 0% { background-position: 120% 0; } 60%, 100% { background-position: -120% 0; } }
+.btn-primary:hover, .board-actions .act:hover { box-shadow: 0 0 18px color-mix(in srgb, var(--cyan) 30%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--cyan) 40%, transparent); }
+.btn:disabled::before, .btn:disabled::after { display: none; }
+
+/* ---------------------------------------------------------------- the header's warning */
+.brain-warn {
+  display: inline-flex; align-items: center; gap: 8px; margin-right: 12px; padding: 6px 12px; border-radius: 999px;
+  font: inherit; font-size: 12px; letter-spacing: 0.6px; color: #ffb066; background: rgba(255, 138, 61, 0.08);
+  border: 1px solid rgba(255, 138, 61, 0.45); text-shadow: 0 0 10px rgba(255, 138, 61, 0.9), 0 0 22px rgba(255, 138, 61, 0.5);
+  animation: brain-warn 2.4s ease-in-out infinite; cursor: pointer;
+}
+.brain-warn i { width: 7px; height: 7px; border-radius: 50%; background: #ff8a3d; box-shadow: 0 0 10px #ff8a3d, 0 0 20px #ff8a3d; animation: brain-dot 1.2s ease-in-out infinite; }
+@keyframes brain-warn { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 18px 0 rgba(255, 138, 61, 0.35); } }
+@keyframes brain-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.45; transform: scale(0.7); } }
+.btn-nav.nav-burn { color: #ff8a3d; text-shadow: 0 0 10px #ff8a3d, 0 0 22px rgba(255, 138, 61, 0.7); animation: nav-burn 1.4s ease-in-out infinite; }
+@keyframes nav-burn { 0%, 100% { text-shadow: 0 0 8px #ff8a3d; } 50% { text-shadow: 0 0 16px #ff8a3d, 0 0 32px #ff8a3d; } }
+
+/* ---------------------------------------------------------------- the mic */
+.mic {
+  position: relative; width: 46px; height: 46px; border-radius: 50%; flex: none; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); background: radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.08), transparent 60%), var(--panel-hi);
+  color: var(--muted); cursor: pointer; transition: color 0.2s, border-color 0.2s, box-shadow 0.25s, transform 0.15s; overflow: visible; user-select: none;
+}
+.mic svg { position: relative; z-index: 2; }
+.mic:hover { transform: translateY(-1px); color: var(--cyan); border-color: var(--cyan-dim); }
+.mic.off { color: #6f8290; }
+.mic.off::after { content: ""; position: absolute; width: 26px; height: 2px; background: #6f8290; transform: rotate(-45deg); border-radius: 2px; z-index: 3; box-shadow: 0 0 6px rgba(0, 0, 0, 0.8); }
+.mic.asleep { color: #e0a13f; border-color: rgba(224, 161, 63, 0.5); }
+.mic.live { color: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 16px color-mix(in srgb, var(--cyan) 30%, transparent), inset 0 0 10px color-mix(in srgb, var(--cyan) 12%, transparent); }
+.mic .ring { position: absolute; inset: 0; border-radius: 50%; border: 1px solid var(--cyan); opacity: 0; pointer-events: none; }
+.mic.live .ring { animation: mic-ring 2.6s ease-out infinite; }
+.mic.live .r2 { animation-delay: 0.85s; } .mic.live .r3 { animation-delay: 1.7s; }
+@keyframes mic-ring { 0% { transform: scale(1); opacity: 0.55; } 100% { transform: scale(2.1); opacity: 0; } }
+.mic.hearing { box-shadow: 0 0 26px color-mix(in srgb, var(--cyan) 55%, transparent), inset 0 0 14px color-mix(in srgb, var(--cyan) 25%, transparent); }
+.mic.hearing .ring { animation-duration: 1.1s; border-width: 2px; }
+.mic .lvl { position: absolute; inset: 4px; border-radius: 50%; pointer-events: none; z-index: 1;
+  background: radial-gradient(circle, color-mix(in srgb, var(--cyan) 45%, transparent) 0%, transparent 70%); opacity: 0; transform: scale(0.4); transition: opacity 0.1s; }
+.mic.hearing .lvl, .mic.held .lvl { opacity: calc(0.25 + var(--level, 0) * 0.9); transform: scale(calc(0.5 + var(--level, 0) * 0.9)); }
+.mic.held { transform: scale(1.08); border-color: #fff; color: #fff; }
+
+/* ---------------------------------------------------------------- the input bar */
+.talk-bar .btn { border-radius: 12px; }
+.talk-bar .btn-primary { background: linear-gradient(135deg, rgba(63, 224, 224, 0.16), rgba(42, 140, 255, 0.10)); }
+.talk-bar textarea:focus { box-shadow: 0 0 0 1px color-mix(in srgb, var(--cyan) 45%, transparent), 0 0 24px color-mix(in srgb, var(--cyan) 14%, transparent); }
+
+/* ---------------------------------------------------------------- attachments glow */
+.attach-chip { transition: box-shadow 0.25s, transform 0.2s; }
+.attach-chip.has-img { padding: 4px 10px 4px 4px; box-shadow: 0 0 14px color-mix(in srgb, var(--cyan) 22%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--cyan) 30%, transparent); animation: attach-breathe 3s ease-in-out infinite; }
+.attach-chip:hover { transform: translateY(-1px); }
+.attach-thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; box-shadow: 0 0 10px color-mix(in srgb, var(--cyan) 45%, transparent); }
+.attach-doc { font-size: 18px; filter: drop-shadow(0 0 6px color-mix(in srgb, var(--cyan) 60%, transparent)); }
+@keyframes attach-breathe { 0%, 100% { box-shadow: 0 0 12px color-mix(in srgb, var(--cyan) 18%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--cyan) 30%, transparent); } 50% { box-shadow: 0 0 22px color-mix(in srgb, var(--cyan) 38%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--cyan) 55%, transparent); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .btn::before, .board-actions .act::before, .btn-primary::after, .board-actions .act.ship::after, .mic .ring, .brain-warn, .brain-warn i, .btn-nav.nav-burn, .attach-chip.has-img { animation: none !important; }
+}

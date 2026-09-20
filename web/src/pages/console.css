@@ -328,3 +328,29 @@
 .board-form label.warn > span { color: var(--error); }
 .board-form label.warn input { border-color: color-mix(in srgb, var(--error) 60%, var(--line)); }
 @media (prefers-reduced-motion: reduce) { .board-card.unlinked, .board-gear.spin { animation: none; } }
+
+/* the tool's own words under a failed read, folded */
+.board-detail { margin-top: 4px; }
+.board-detail summary { cursor: pointer; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+.board-detail pre { margin: 4px 0 0; padding: 8px; border-radius: 8px; background: rgba(0, 0, 0, 0.35); border: 1px solid var(--line); font-size: 11px; white-space: pre-wrap; word-break: break-word; color: #c8d6dc; max-height: 160px; overflow: auto; }
+
+/* ------------------------------------------------------------------ the git graph */
+.board-graph { display: flex; gap: 8px; max-height: 420px; overflow: auto; padding-right: 4px; }
+.board-graph-svg { display: block; }
+.board-graph-rows { flex: 1; min-width: 0; }
+.board-graph-row { display: flex; align-items: center; gap: 8px; min-width: 0; border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent); animation: board-row-in 0.35s ease-out both; }
+.board-graph-subject { flex: 1; min-width: 0; font-size: 13px; }
+.board-graph-meta { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.board-chip.mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.board-ref { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--cyan); white-space: nowrap; }
+.board-ref.main { border-color: var(--cyan); box-shadow: 0 0 8px color-mix(in srgb, var(--cyan) 30%, transparent); }
+.board-ref.served { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 50%, var(--line)); }
+.board-ref.served.prod { background: color-mix(in srgb, var(--gold) 12%, transparent); box-shadow: 0 0 10px color-mix(in srgb, var(--gold) 35%, transparent); }
+.board-graph-node { animation: board-node-in 0.4s ease-out both; transform-origin: center; transform-box: fill-box; }
+.board-graph-edge { stroke-dasharray: 400; stroke-dashoffset: 400; animation: board-edge-in 0.9s ease-out forwards; }
+.board-graph-served { animation: board-served 2.2s ease-in-out infinite; transform-origin: center; transform-box: fill-box; }
+@keyframes board-row-in { from { opacity: 0; transform: translateX(6px); } to { opacity: 1; transform: none; } }
+@keyframes board-node-in { from { opacity: 0; transform: scale(0.2); } to { opacity: 1; transform: scale(1); } }
+@keyframes board-edge-in { to { stroke-dashoffset: 0; } }
+@keyframes board-served { 0%, 100% { opacity: 0.5; transform: scale(1); } 50% { opacity: 1; transform: scale(1.18); } }
+@media (prefers-reduced-motion: reduce) { .board-graph-row, .board-graph-node, .board-graph-edge, .board-graph-served { animation: none; stroke-dashoffset: 0; } }

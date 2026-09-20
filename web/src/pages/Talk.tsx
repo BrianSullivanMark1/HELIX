@@ -255,6 +255,25 @@ export default function Talk({ project }: { project?: string } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attachments]);
 
+  // THE TEST LINE: ask for the line word-timed; play it here and hand the face the audio and the
+  // word boundaries, so the lips follow the sound. If the backend fell back to its own voice, the
+  // face performs on its own clock from the text.
+  const sayLine = async (t: string) => {
+    try {
+      const r = await api.post<{ ok: boolean; spoken: string | boolean; url?: string; words?: { t: number; d: number; w: string }[]; seconds?: number }>("/api/say", { text: t });
+      if (r.spoken === "page" && r.url) {
+        const audio = new Audio(tokenUrl(r.url));
+        audio.preload = "auto";
+        window.dispatchEvent(new CustomEvent("helix-say", { detail: { text: t, words: r.words || [], audio } }));
+        await audio.play();
+      } else {
+        window.dispatchEvent(new CustomEvent("helix-say", { detail: { text: t } }));
+      }
+    } catch {
+      window.dispatchEvent(new CustomEvent("helix-say", { detail: { text: t } }));
+    }
+  };
+
   const toggleCamera = () => {
     if (camera) void api.post(`/api/camera/${camera.id}/cancel`).catch(() => undefined);
     else void api.post("/api/camera/open").catch(() => undefined);
@@ -262,10 +281,8 @@ export default function Talk({ project }: { project?: string } = {}) {
 
   const statusLine = busy
     ? status
-    : STATE_LINES[orb] ?? (status || idleLine);
+    : STATE_LINES[orb] ?? ((/Connect Claude in Settings/i.test(status) ? "" : status) || idleLine);
 
-  const voiceTone =
-    voice?.tone === "on" ? "var(--cyan)" : voice?.tone === "warn" ? "#e0a13f" : "#aebcc3";
 
   return (
     <div
@@ -337,16 +354,6 @@ export default function Talk({ project }: { project?: string } = {}) {
           : statusLine}
       </div>
 
-      {/* voice button */}
-      {voice?.supported && !arFull && (
-        <button
-          className="btn mb-3 text-[13px]"
-          style={{ borderColor: voiceTone, color: voiceTone, pointerEvents: "auto" }}
-          onClick={() => void api.post("/api/shell/voice", { op: "toggle" })}
-        >
-          {voice.label}
-        </button>
-      )}
 
       {/* suggestion chip */}
       {suggestion && !arFull && (
@@ -375,11 +382,11 @@ export default function Talk({ project }: { project?: string } = {}) {
       {attachments.length > 0 && (
         <div className="flex gap-2 mb-2 flex-wrap max-w-[820px]" style={{ pointerEvents: "auto" }}>
           {attachments.map((a) => (
-            <span key={a.id} className="glass rounded-lg px-2.5 py-1 text-xs flex items-center gap-2">
+            <span key={a.id} className={`attach-chip glass rounded-lg px-2.5 py-1 text-xs flex items-center gap-2${a.preview ? " has-img" : ""}`}>
               {a.preview ? (
-                <img src={a.preview} alt="" className="w-[26px] h-[26px] object-cover rounded" />
+                <img src={a.preview} alt="" className="attach-thumb" />
               ) : (
-                <span>📄</span>
+                <span className="attach-doc">📄</span>
               )}
               <span className="elide max-w-[160px]">{a.name}</span>
               <button className="btn-nav px-1"
@@ -392,28 +399,25 @@ export default function Talk({ project }: { project?: string } = {}) {
       )}
 
       {/* input row */}
-      <div className="w-full max-w-[820px] flex items-end gap-2" style={{ pointerEvents: "auto" }}>
-        {voice?.supported && voice.listening && (
+      <div className="talk-bar w-full max-w-[820px] flex items-end gap-2" style={{ pointerEvents: "auto" }}>
+        {voice?.supported && (
           <button
             ref={pttRef}
-            className={`btn text-[13px] shrink-0 ptt-gauge ${ptt ? "held" : ""}`}
-            onMouseDown={() => {
-              setPtt(true);
-              void api.post("/api/shell/voice", { op: "ptt_start" });
+            className={`mic ${voice.enabled && voice.listening && !voice.muted ? "live" : voice.enabled ? "asleep" : "off"} ${ptt ? "held" : ""} ${orb === "listening" || orb === "transcribing" ? "hearing" : ""}`}
+            title={!voice.enabled ? "Voice is off - click to turn it on" : voice.muted ? "Asleep - click to wake" : "Listening for the wake word. Hold to talk right now."}
+            onClick={() => { if (!ptt) void api.post("/api/shell/voice", { op: !voice.enabled ? "toggle" : voice.muted ? "wake" : "sleep" }); }}
+            onMouseDown={(e) => {
+              if (!(voice.enabled && voice.listening) || busy) return;
+              e.preventDefault();
+              pttRef.current?.setAttribute("data-held", "1");
+              window.setTimeout(() => { if (pttRef.current?.getAttribute("data-held")) { setPtt(true); void api.post("/api/shell/voice", { op: "ptt_start" }); } }, 180);
             }}
-            onMouseUp={() => {
-              setPtt(false);
-              void api.post("/api/shell/voice", { op: "ptt_stop" });
-            }}
-            onMouseLeave={() => {
-              if (ptt) {
-                setPtt(false);
-                void api.post("/api/shell/voice", { op: "ptt_stop" });
-              }
-            }}
-            disabled={busy}
+            onMouseUp={() => { pttRef.current?.removeAttribute("data-held"); if (ptt) { setPtt(false); void api.post("/api/shell/voice", { op: "ptt_stop" }); } }}
+            onMouseLeave={() => { pttRef.current?.removeAttribute("data-held"); if (ptt) { setPtt(false); void api.post("/api/shell/voice", { op: "ptt_stop" }); } }}
           >
-            🎤 Hold to Talk
+            <i className="ring r1" /><i className="ring r2" /><i className="ring r3" />
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+            <span className="lvl" />
           </button>
         )}
         <label className="btn shrink-0 text-[13px]" title="Attach files">
@@ -469,21 +473,9 @@ export default function Talk({ project }: { project?: string } = {}) {
             ■ Stop
           </button>
         )}
-        {voice?.enabled && voice.listening && !voice.muted && (
-          <button className="btn shrink-0 text-[13px]"
-            onClick={() => void api.post("/api/shell/voice", { op: "sleep" })}>
-            😴 Sleep
-          </button>
-        )}
-        {voice?.enabled && voice.muted && (
-          <button className="btn shrink-0 text-[13px]"
-            onClick={() => void api.post("/api/shell/voice", { op: "wake" })}>
-            ▶ Wake
-          </button>
-        )}
         <button className="btn shrink-0 text-[13px]" title="HELIX says exactly this, out loud, no model involved - a test line for the face"
           disabled={!text.trim()}
-          onClick={() => { const t = text.trim(); if (!t) return; setText(""); window.dispatchEvent(new CustomEvent("helix-say", { detail: { text: t } })); void api.post("/api/say", { text: t }).catch(() => undefined); }}>
+          onClick={() => { const t = text.trim(); if (!t) return; setText(""); void sayLine(t); }}>
           ▶ Say
         </button>
         <button className="btn btn-primary shrink-0" onClick={() => void send()}>

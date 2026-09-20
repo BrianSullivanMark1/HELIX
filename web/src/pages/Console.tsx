@@ -50,6 +50,7 @@ interface Row {
   repo_commit: string | null;
   checked_at: string | null;
   note: string | null;
+  detail?: string | null;
   needs_attention: boolean;
   api: Serving | null;
   site: Serving | null;
@@ -650,14 +651,6 @@ function Ring({ ok, total, warn }: { ok: number; total: number; warn: boolean })
   );
 }
 
-function Tile({ n, label, color }: { n: string | number; label: string; color?: string }) {
-  return (
-    <div className="board-tile materialize" style={color ? ({ "--tile-color": color } as React.CSSProperties) : undefined}>
-      <div className="n">{n}</div>
-      <div className="l">{label}</div>
-    </div>
-  );
-}
 
 // ================================================================== rows + cards
 
@@ -718,6 +711,12 @@ function EnvRow({ row, thread }: { row: Row; thread: Thread }) {
       {row.note && (
         <div className="text-[12px] mt-1 pl-6" style={{ color: row.needs_attention || api?.dirty ? "var(--working)" : "var(--muted)" }}>
           {row.note}
+          {row.detail && (
+            <details className="board-detail">
+              <summary>what the tool said</summary>
+              <pre>{row.detail}</pre>
+            </details>
+          )}
         </div>
       )}
     </div>
@@ -856,9 +855,108 @@ function Drawer({ title, sub, onClose, children }: { title: string; sub?: string
   );
 }
 
+// ================================================================== the git graph
+
+interface GitCommit { sha: string; parents: string[]; subject: string; author: string; at: string }
+interface GitDoc { repo: string; branch: string; branches: { name: string; sha: string }[]; commits: GitCommit[]; problem?: string | null }
+
+/** Lanes for a list of commits, newest first: a commit takes the lane that was waiting for its
+ *  sha (a child expected it), else a fresh one; its first parent inherits the lane, other parents
+ *  open lanes. The same idea every git GUI draws. Returns lane per commit and the edges. */
+function layoutGraph(commits: GitCommit[]) {
+  const lanes: (string | null)[] = [];
+  const laneOf = new Map<string, number>();
+  const edges: { from: number; to: number; fromLane: number; toLane: number }[] = [];
+  const rowOf = new Map<string, number>();
+  commits.forEach((c, i) => rowOf.set(c.sha, i));
+  commits.forEach((c, row) => {
+    let lane = lanes.indexOf(c.sha);
+    if (lane < 0) { lane = lanes.indexOf(null); if (lane < 0) { lane = lanes.length; lanes.push(null); } }
+    laneOf.set(c.sha, lane);
+    lanes[lane] = null;
+    // any other lane also waiting for this sha (a merge child) joins here
+    lanes.forEach((v, k) => { if (v === c.sha) { lanes[k] = null; } });
+    c.parents.forEach((p, k) => {
+      let pl: number;
+      const existing = lanes.indexOf(p);
+      if (existing >= 0) pl = existing;
+      else if (k === 0) { pl = lane; lanes[lane] = p; }
+      else { pl = lanes.indexOf(null); if (pl < 0) { pl = lanes.length; lanes.push(null); } lanes[pl] = p; }
+      const prow = rowOf.get(p);
+      if (prow !== undefined) edges.push({ from: row, to: prow, fromLane: lane, toLane: pl });
+      else edges.push({ from: row, to: commits.length, fromLane: lane, toLane: pl });   // runs off the bottom
+    });
+  });
+  return { laneOf, edges, width: Math.max(1, lanes.length) };
+}
+
+const LANE_COLORS = ["#3fe0e0", "#2a8cff", "#f0be5a", "#c86dff", "#5adf8a", "#ff7a7a", "#ffa94d"];
+
+function GitGraph({ doc, serving }: { doc: GitDoc; serving: { env: string; commit: string }[] }) {
+  const { laneOf, edges, width } = useMemo(() => layoutGraph(doc.commits), [doc]);
+  const ROW = 34, COL = 18, LEFT = 14, TOP = 18;
+  const gw = LEFT * 2 + COL * Math.max(width - 1, 0) + 8;
+  const tips = new Map<string, string[]>();
+  doc.branches.forEach((b) => { tips.set(b.sha, [...(tips.get(b.sha) || []), b.name]); });
+  const served = new Map<string, string[]>();
+  serving.forEach((s) => { const k = doc.commits.find((c) => c.sha.startsWith(s.commit))?.sha; if (k) served.set(k, [...(served.get(k) || []), s.env]); });
+  const H = TOP + ROW * doc.commits.length;
+  return (
+    <div className="board-graph">
+      <svg className="board-graph-svg" width={gw} height={H} style={{ flex: "none" }}>
+        {edges.map((e, i) => {
+          const x1 = LEFT + e.fromLane * COL, y1 = TOP + e.from * ROW, x2 = LEFT + e.toLane * COL, y2 = TOP + e.to * ROW;
+          const col = LANE_COLORS[(e.fromLane === e.toLane ? e.toLane : e.toLane) % LANE_COLORS.length];
+          const d = x1 === x2 ? `M${x1},${y1} L${x2},${y2}` : `M${x1},${y1} C${x1},${y1 + ROW * 0.6} ${x2},${y2 - ROW * 0.6} ${x2},${y2}`;
+          return <path key={i} d={d} stroke={col} strokeWidth={2} fill="none" opacity={0.75} className="board-graph-edge" style={{ animationDelay: `${i * 30}ms` }} />;
+        })}
+        {doc.commits.map((c, i) => {
+          const lane = laneOf.get(c.sha) ?? 0;
+          const x = LEFT + lane * COL, y = TOP + i * ROW;
+          const col = LANE_COLORS[lane % LANE_COLORS.length];
+          const isTip = tips.has(c.sha), isServed = served.has(c.sha), merge = c.parents.length > 1;
+          return (
+            <g key={c.sha} className="board-graph-node" style={{ animationDelay: `${i * 40}ms` }}>
+              {isServed && <circle cx={x} cy={y} r={9} fill="none" stroke="var(--gold)" strokeWidth={1.5} className="board-graph-served" />}
+              <circle cx={x} cy={y} r={merge ? 4 : 5} fill={merge ? "var(--panel)" : col} stroke={col} strokeWidth={2} />
+              {isTip && <circle cx={x} cy={y} r={2} fill="#fff" />}
+            </g>
+          );
+        })}
+      </svg>
+      <div className="board-graph-rows">
+        {doc.commits.map((c, i) => {
+          const lane = laneOf.get(c.sha) ?? 0;
+          const names = tips.get(c.sha) || [], envs = served.get(c.sha) || [];
+          return (
+            <div key={c.sha} className="board-graph-row" style={{ height: ROW, animationDelay: `${i * 40}ms` }}>
+              <span className="board-chip mono" style={{ color: LANE_COLORS[lane % LANE_COLORS.length] }}>{c.sha.slice(0, 7)}</span>
+              {names.map((n) => <span key={n} className={`board-ref${n === doc.branch ? " main" : ""}`}>⎇ {n}</span>)}
+              {envs.map((e) => <span key={e} className={`board-ref served${e === "prod" ? " prod" : ""}`}>▲ {e}</span>)}
+              <span className="elide board-graph-subject" title={c.subject}>{c.subject}</span>
+              <span className="board-graph-meta">{c.author}{c.at ? ` · ${ago(c.at)}` : ""}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function GitDrawer({ card, onClose }: { card: Card; onClose: () => void }) {
   const head = card.envs.find((r) => r.repo_commit)?.repo_commit ?? null;
   const live = card.envs.filter((r) => r.exists && r.checked_at);
+  const [doc, setDoc] = useState<GitDoc | null>(null);
+  const [gitErr, setGitErr] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setDoc(null); setGitErr(null);
+    void api.get<GitDoc>(`/api/fleet/git?app_name=${encodeURIComponent(card.app)}`)
+      .then((d) => { if (alive) setDoc(d); })
+      .catch((e: Error) => { if (alive) setGitErr(e.message); });
+    return () => { alive = false; };
+  }, [card.app, card.link?.repo, card.link?.branch]);
+  const serving = live.filter((r) => r.api?.commit).map((r) => ({ env: r.env, commit: r.api!.commit! }));
   return (
     <Drawer title={card.app} sub="GIT · the repo" onClose={onClose}>
       <div className="space-y-4 text-[13px]">
@@ -884,7 +982,18 @@ function GitDrawer({ card, onClose }: { card: Card; onClose: () => void }) {
         </div>
         <div className="board-panel">
           <div className="board-kicker mb-1">HISTORY · LINES OF WORK</div>
-          <div style={MUTED}>The commit graph and branches come from the clone on this PC - next round, with the deploy lane.</div>
+          {doc === null && gitErr === null && <div style={MUTED}>Reading the graph from GitHub…</div>}
+          {gitErr && <div style={{ color: "var(--error)" }}>{gitErr}</div>}
+          {doc && doc.commits.length === 0 && <div style={MUTED}>{doc.problem || "No commits came back."}</div>}
+          {doc && doc.commits.length > 0 && (
+            <>
+              <div className="flex items-center gap-2 flex-wrap mb-2 text-[12px]" style={MUTED}>
+                <span>{doc.commits.length} commits · {doc.branches.length} branch{doc.branches.length === 1 ? "" : "es"}</span>
+                <span>· ⎇ a branch tip · ▲ what an environment is serving · hollow = merge</span>
+              </div>
+              <GitGraph doc={doc} serving={serving} />
+            </>
+          )}
         </div>
         <div className="flex gap-2">
           <a className="btn text-xs" href={`https://github.com/${card.repo}`} target="_blank" rel="noreferrer noopener">Open on GitHub ↗</a>
@@ -1142,23 +1251,23 @@ export default function ConsolePage() {
               </div>
             </div>
             <div className="flex-1" />
-            <div className="board-tiles">
-              <Tile n={cells.length} label="cells" />
-              <Tile n={read.length ? up : "–"} label="up" color={read.length && up === read.length ? "var(--done)" : undefined} />
-              <Tile n={read.length ? look : "–"} label="need a look" color={look > 0 ? "var(--working)" : undefined} />
-              <Tile n={company?.checked_at ? ago(company.checked_at) : "never"} label="last read" color="var(--cyan)" />
+            <div className="flex flex-col items-end gap-1.5">
+              <div className="flex items-center gap-2">
+                <button className="btn btn-primary text-xs" disabled={busy !== null} onClick={() => refresh()}>
+                  {busy === "*" ? "Reading the fleet…" : "⟳ Refresh"}
+                </button>
+                <button className="btn btn-primary text-xs" onClick={() => setAdding(true)}>＋ Add a project</button>
+              </div>
+              <div className="text-[11px] tracking-wider" style={MUTED} title={`${cells.length} cells, ${read.length ? up : "-"} up, ${read.length ? look : "-"} need a look`}>
+                {company?.checked_at ? `last read ${ago(company.checked_at)}` : "not read yet"} · {read.length ? `${up}/${read.length} up` : `${cells.length} cells`}{look > 0 ? ` · ${look} need a look` : ""}
+              </div>
             </div>
-            <button className="btn btn-primary text-xs self-center" disabled={busy !== null} onClick={() => refresh()}>
-              {busy === "*" ? "Reading the fleet…" : "Refresh"}
-            </button>
           </div>
 
           <div className="flex items-center gap-1 flex-wrap">
             {TABS.map(([label, key]) => (
               <button key={key} className={`board-tab${tab === key ? " on" : ""}`} onClick={() => setTab(key)}>{label}</button>
             ))}
-            <div className="flex-1" />
-            <button className="btn btn-primary text-xs" onClick={() => setAdding(true)}>＋ Add a project</button>
           </div>
           {tab === "apps" && (
             <div className="text-[13px] max-w-[820px]" style={MUTED}>

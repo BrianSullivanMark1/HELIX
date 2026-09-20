@@ -207,6 +207,7 @@ class Cell:
     checked_at: datetime | None = None
     note: str | None = None              # ONE plain sentence a human may read; ASCII, no paths
     repo_ok: bool | None = None          # did the repo answer for this cell's HEAD (None: not asked)
+    detail: str | None = None            # what the tool actually said when a read failed (for the human, not the model)
 
     @property
     def health(self) -> Health:

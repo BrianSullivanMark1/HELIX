@@ -79,6 +79,7 @@ def cell_dict(c: Cell) -> dict[str, Any]:
         "checked_at": _ts(c.checked_at),
         "note": c.note,
         "repo_ok": c.repo_ok,
+        "detail": c.detail,
         "needs_attention": c.needs_attention,
         "api": serving_dict(c.api),
         "site": serving_dict(c.site),
@@ -232,6 +233,46 @@ def mount_fleet(app: FastAPI, container) -> None:
             stored.pop(app_name, None)
         settings.set(SETTING, stored)
         return board_dict(fleet, profile=_profile())
+
+    @app.get("/api/fleet/git")
+    async def fleet_git(app_name: str = "", company_id: str = ""):
+        """The Git drawer's graph: branches and the last commits of the linked branch (plus the tips
+        of the other branches), read from GitHub with the one token. Read-only."""
+        fleet = _fleet()
+        if fleet is None:
+            return _down()
+        co = company(company_id or COMPANIES[0].id)
+        app_key = app_name.strip().upper()
+        if co is None or app_key not in apps(co.id):
+            return JSONResponse({"error": f"no such app: {app_key or '?'}"}, status_code=404)
+        svc = next(iter(fleet.services(co, app_key)), None)
+        if svc is None:
+            return JSONResponse({"error": "no cells"}, status_code=404)
+        repos = getattr(fleet, "_repos", None)
+        if repos is None or not hasattr(repos, "commits"):
+            return JSONResponse({"error": "This HELIX cannot read commit history."}, status_code=501)
+        ok, why = repos.available()
+        if not ok:
+            return JSONResponse({"error": why, "repo": svc.repo, "branch": svc.branch}, status_code=409)
+
+        def read():
+            branches, why_b = repos.branches(svc.repo)
+            commits, why_c = repos.commits(svc.repo, svc.branch, limit=40)
+            seen = {c["sha"] for c in commits}
+            extra = 0
+            for b in branches:
+                if b["sha"] in seen or b["name"] == svc.branch or extra >= 6:
+                    continue
+                more, _ = repos.commits(svc.repo, b["sha"], limit=12)
+                for c in more:
+                    if c["sha"] not in seen:
+                        seen.add(c["sha"]); commits.append(c)
+                extra += 1
+            commits.sort(key=lambda c: c["at"], reverse=True)
+            return {"repo": svc.repo, "branch": svc.branch, "branches": branches, "commits": commits,
+                    "problem": why_c or why_b}
+
+        return await asyncio.to_thread(read)
 
     @app.get("/api/fleet/history")
     def fleet_history(company_id: str = Query("", alias="company"), app: str = "", limit: int = 50):

@@ -104,7 +104,7 @@ class FleetService:
             return Cell(service=svc, drift=Drift.UNKNOWN, checked_at=now)
         if not r.ok:
             return Cell(service=svc, api=None, site=None, drift=Drift.UNKNOWN, checked_at=now,
-                        note=r.problem)
+                        note=r.problem, detail=(getattr(r, "detail", None) or None))
 
         repo_commit = head.commit if (head and head.ok) else None
         serving = r.api.commit if r.api else None
