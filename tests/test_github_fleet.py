@@ -70,13 +70,31 @@ def test_no_token_is_its_own_sentence_and_no_request_is_made():
 
 
 @pytest.mark.parametrize("status,expect", [
-    (404, gh.NOT_FOUND), (403, gh.RATE_LIMITED), (429, gh.RATE_LIMITED),
-    (0, gh.UNREACHABLE), (500, gh.BAD_OUTPUT),
+    (404, gh.NOT_FOUND.format(repo="o/n")), (403, gh.RATE_LIMITED), (429, gh.RATE_LIMITED),
+    (0, gh.UNREACHABLE), (500, gh.BAD_OUTPUT.format(repo="o/n", status=500)), (301, gh.MOVED.format(repo="o/n")),
 ])
 def test_failure_kinds_are_named(status, expect):
     http = Http({"/commits/main": (status, "")})
     r = gh.GithubRepos(lambda: "t", http_get=http).read_head("o/n", "main")
     assert not r.ok and r.problem == expect
+
+
+def test_a_missing_branch_falls_back_to_the_default_and_says_so():
+    """GitHub's 422 'No commit found for SHA: main' - the repo uses master. Read master, keep the
+    sentence so the card can say which branch it actually read."""
+    import json
+    http = Http({
+        "/commits/main": (422, json.dumps({"message": "No commit found for SHA: main"})),
+        "/commits/master": (200, json.dumps({"sha": "abcdef1234567", "commit": {"message": "hi", "committer": {"date": "2026-09-01T00:00:00Z"}}})),
+        "/repos/o/n": (200, json.dumps({"default_branch": "master"})),   # after the commits needles: the fake matches first-needle-in-url
+    })
+    r = gh.GithubRepos(lambda: "t", http_get=http).read_head("o/n", "main")
+    assert r.ok and r.branch == "master" and r.commit == "abcdef1"
+    assert r.problem == gh.NO_BRANCH.format(repo="o/n", branch="main", default="master")
+    # no default branch either: refused with the branch sentence
+    http2 = Http({"/commits/main": (422, ""), "/repos/o/n": (404, "")})
+    r2 = gh.GithubRepos(lambda: "t", http_get=http2).read_head("o/n", "main")
+    assert not r2.ok and "no branch called main" in r2.problem
 
 
 def test_a_repo_not_shaped_owner_slash_name_is_refused_before_any_request():

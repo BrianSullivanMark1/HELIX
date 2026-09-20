@@ -93,7 +93,7 @@ def test_no_serving_commit_means_unknown_with_a_plain_sentence_never_clean():
     (cell,) = [c for c in FleetService(Reader(reads), repos, MemoryFleetState(), clock=lambda: NOW)
                .read_app(CO, "WMS") if c.service.env is Env.DEV]
     assert cell.drift is Drift.UNKNOWN
-    assert "No commit was recorded" in cell.note
+    assert "no version stamp" in cell.note
     assert repos.compare_calls == [], "nothing to compare against"
 
 

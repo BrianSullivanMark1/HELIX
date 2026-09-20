@@ -10,10 +10,11 @@
 // network theme lives in the art: a double helix turning behind the board with signals running
 // its strands (Three.js, like the orb), a neural net that fires across the page (canvas), HUD
 // frames on the cards, and the lineage thread that joins DEV -> QA -> PROD.
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { api } from "../lib/api";
+import { radioBeat } from "../components/Radio";
 import "./console.css";
 import Menu from "./Menu";
 import { useHelix } from "../lib/store";
@@ -84,14 +85,24 @@ const HEALTH_COLOR: Record<Serving["health"], string> = {
   unknown: "var(--muted)",
 };
 
+// Plain words, THE FORGE's way: what is running vs what is in GitHub.
 const DRIFT_LABEL: Record<Row["drift"], string> = {
-  clean: "up to date",
-  behind: "behind",
-  ahead: "ahead of the repo",
-  diverged: "diverged",
+  clean: "matches GitHub",
+  behind: "behind GitHub",
+  ahead: "newer than GitHub",
+  diverged: "differs from GitHub",
   rolled_back: "rolled back",
-  unknown: "drift unknown",
+  unknown: "not compared",
 };
+const DRIFT_TITLE: Record<Row["drift"], string> = {
+  clean: "What is running is exactly the latest commit on the branch.",
+  behind: "GitHub has newer commits than what is running - a deploy would bring them.",
+  ahead: "What is running is not in the branch's history - someone deployed something unpushed.",
+  diverged: "What is running and the branch have gone different ways.",
+  rolled_back: "Traffic was moved back to an older revision on purpose.",
+  unknown: "HELIX could not compare - no version stamp on the deploy, or GitHub could not be read.",
+};
+const HEALTH_LABEL: Record<Row["health"], string> = { ok: "running", degraded: "struggling", down: "down", absent: "not deployed", unknown: "unknown" };
 
 const DRIFT_COLOR: Record<Row["drift"], string> = {
   clean: "var(--done)",
@@ -267,16 +278,23 @@ function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: 
     // then it settles. While it runs the rung wave is driven faster too.
     const pu = pulse.current;
     pu.next -= dt;
+    // THE RADIO: when a song plays, the helix keeps its beat - a kick fires the pulse, the bass
+    // swells it, the spin follows the energy. Silent radio, nothing changes.
+    const beat = radioBeat();
+    const kick = beat.kick;
+    if (kick && pu.t < 0) { pu.t = 0; pu.next = 6 + Math.random() * 5; }
     if (pu.next <= 0) { pu.t = 0; pu.next = 6 + Math.random() * 5; }
     let flash = 0;
     if (pu.t >= 0) {
-      pu.t += dt;
+      pu.t += dt * (beat.playing ? 2.2 : 1);
       flash = Math.max(0, Math.sin(Math.min(1, pu.t / 1.1) * Math.PI));
       if (pu.t > 1.1) pu.t = -1;
     }
+    flash = Math.max(flash, beat.level * 0.7);
+    spin.current += beat.level * beat.level * dt * 1.4;
     for (const m of strandMats.current) { if (m) m.size = m.userData.base * (1 + 0.9 * flash); }
     // a slow breath, and a sway
-    const breath = 1 + 0.025 * Math.sin(t * 0.6) + 0.04 * flash;
+    const breath = 1 + 0.025 * Math.sin(t * 0.6) + 0.04 * flash + 0.05 * beat.level;
     g.scale.setScalar(breath);
     g.position.y = 0.2 + 0.25 * Math.sin(t * 0.23);
     // the distant twin turns the other way, slower
@@ -353,6 +371,49 @@ function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: 
   );
 }
 
+/** ONE WEBGL CONTEXT PER CANVAS, RELEASED ON UNMOUNT. Browsers keep about sixteen WebGL contexts
+ *  alive and silently kill the oldest when a new one arrives ("THREE.WebGLRenderer: Context Lost",
+ *  seen 2026-09-21 - the face went black). Every canvas mounts this: it lets the browser RESTORE a
+ *  lost context instead of abandoning it (three re-uploads everything on restore). R3F releases
+ *  the context itself on unmount; the Talk page now opens one context, not two. */
+export function ContextGuard() {
+  const gl = useThree((st) => st.gl);
+  useEffect(() => {
+    const el = gl.domElement;
+    const lost = (e: Event) => { e.preventDefault(); };
+    el.addEventListener("webglcontextlost", lost);
+    return () => { el.removeEventListener("webglcontextlost", lost); };   // R3F itself disposes and releases the context on unmount
+  }, [gl]);
+  return null;
+}
+
+/** The helix as a group for ANOTHER canvas (the face's), so a page never opens two contexts. */
+export function HelixBackdrop({ colors, position = [0, 0, -6], scale = 0.9 }: { colors: [string, string]; position?: [number, number, number]; scale?: number }) {
+  const pointer = usePointer();
+  return (
+    <group position={position} scale={scale}>
+      <HelixScene pointer={pointer} colors={colors} />
+    </group>
+  );
+}
+
+function usePointer() {
+  const pointer = useRef({ x: 0, y: 0, vx: 0, vy: 0 });
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      const nx = (e.clientX / window.innerWidth) * 2 - 1;
+      const ny = -((e.clientY / window.innerHeight) * 2 - 1);
+      pointer.current.vx += nx - pointer.current.x;
+      pointer.current.vy += ny - pointer.current.y;
+      pointer.current.x = nx;
+      pointer.current.y = ny;
+    };
+    window.addEventListener("mousemove", move);
+    return () => window.removeEventListener("mousemove", move);
+  }, []);
+  return pointer;
+}
+
 export function HelixLayer({ colors }: { colors: [string, string] }) {
   const pointer = useRef({ x: 0, y: 0, vx: 0, vy: 0 });
   useEffect(() => {
@@ -372,6 +433,7 @@ export function HelixLayer({ colors }: { colors: [string, string] }) {
     <div className="board-layer board-helix">
       <Canvas dpr={[1, 1.5]} camera={{ fov: 48, position: [0, 0, 9.5] }} gl={{ antialias: true, alpha: true }}
         onCreated={({ scene }) => { scene.fog = new THREE.Fog("#080b0f", 10, 24); }}>
+        <ContextGuard />
         <HelixScene pointer={pointer} colors={colors} />
       </Canvas>
     </div>
@@ -519,8 +581,10 @@ export function NeuralLayer() {
         }
       }
       // signals
-      spawnIn -= dt;
+      const beat = radioBeat();
+      spawnIn -= dt * (1 + beat.level * 4);
       if (spawnIn <= 0) { spawnIn = 0.25 + Math.random() * 0.5; fire(Math.floor(Math.random() * nodes.length), 0); }
+      if (beat.kick) { for (let k = 0; k < 6; k++) { const n = nodes[Math.floor(Math.random() * nodes.length)]; n.flash = 1; fire(nodes.indexOf(n), 2); } }
       const keep: Signal[] = [];
       for (const s of signals) {
         s.t += s.v * dt;
@@ -677,20 +741,20 @@ function EnvRow({ row, thread }: { row: Row; thread: Thread }) {
           : thread === "changed" ? "The commit changed between these environments"
             : "One side could not say which commit it serves"} />}
       {/* line 1: the environment and its two verdicts - is it up, has the repo moved on */}
-      <div className="flex items-center gap-3 text-[13px]">
+      <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-[13px]">
         <Lamp health={row.health} />
         <span className="board-env">{env}</span>
         {unread ? (
           <span style={MUTED}>not read yet</span>
         ) : (
           <>
-            <span style={{ color: HEALTH_COLOR[row.health], minWidth: 56, letterSpacing: 1 }}>{row.health}</span>
+            <span style={{ color: HEALTH_COLOR[row.health], minWidth: 56, letterSpacing: 1 }} title={row.health === "ok" ? "The service answers and says it is healthy" : row.health}>{HEALTH_LABEL[row.health]}</span>
             <Pill
-              text={DRIFT_LABEL[row.drift] + (row.drift === "behind" && row.behind_by != null ? ` by ${row.behind_by}` : "")}
+              text={row.drift === "behind" && row.behind_by != null ? `${row.behind_by} commit${row.behind_by === 1 ? "" : "s"} behind GitHub` : DRIFT_LABEL[row.drift]}
               color={DRIFT_COLOR[row.drift]}
-              title={row.repo_commit ? `repo HEAD is ${row.repo_commit}` : undefined}
+              title={DRIFT_TITLE[row.drift] + (row.repo_commit ? ` GitHub is at ${row.repo_commit}.` : "")}
             />
-            {api?.dirty && <Pill text="dirty" color="var(--error)" title="Built from a working tree with uncommitted changes" />}
+            {api?.dirty && <Pill text="unsaved changes" color="var(--error)" title="Deployed from a folder with uncommitted changes - not exactly what is in GitHub" />}
             {api?.is_split && <Pill text={`split ${api.traffic_percent}%`} color="var(--working)" />}
             {api?.read_only && <Pill text="read-only" color="var(--amber)" />}
             {api?.flags?.appCheckRequired === true && <Pill text="AppCheck" color="var(--cyan)" />}
@@ -702,7 +766,7 @@ function EnvRow({ row, thread }: { row: Row; thread: Thread }) {
         <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-[12px] mt-1.5 pl-6" style={MUTED}>
           {api.commit
             ? <Decoded text={api.commit} className="board-chip" />
-            : <span className="board-chip dim">commit not recorded</span>}
+            : <span className="board-chip dim" title="This deploy was not stamped with its commit. Deploys from HELIX are.">no version stamp</span>}
           {api.revision && <span className="font-mono">{api.revision}</span>}
           {api.deployed_at && <span>{when(api.deployed_at)}{api.deployed_by ? ` · ${api.deployed_by}` : ""}</span>}
           {api.db && <span>db <span style={{ color: "var(--text)" }}>{api.db}</span></span>}
@@ -823,7 +887,7 @@ function matches(card: Card, q: string): boolean {
   const hay = [card.app, card.repo || "",
     ...card.envs.flatMap((r) => [r.env, r.run_service || "", r.note || "", r.drift, r.health,
       r.api?.commit || "", r.api?.revision || "", r.api?.db || "", r.api?.deployed_by || "",
-      r.api?.dirty ? "dirty" : "", r.api?.is_split ? "split" : "", r.api?.read_only ? "read-only" : "",
+      r.api?.dirty ? "dirty unsaved" : "", r.api?.is_split ? "split" : "", r.api?.read_only ? "read-only" : "",
       r.api?.flags?.appCheckRequired ? "appcheck" : "", r.needs_attention ? "attention" : ""])]
     .join(" ").toLowerCase();
   return q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
@@ -975,8 +1039,8 @@ function GitDrawer({ card, onClose }: { card: Card; onClose: () => void }) {
           {live.map((r) => (
             <div key={r.key} className="flex items-center gap-3 py-1">
               <span className="board-env" style={{ color: r.env === "prod" ? "var(--gold)" : "var(--text)" }}>{r.env.toUpperCase()}</span>
-              {r.api?.commit ? <span className="board-chip">{r.api.commit}{r.api.dirty ? " -dirty" : ""}</span> : <span className="board-chip dim">commit not recorded</span>}
-              <span style={MUTED}>{DRIFT_LABEL[r.drift]}{r.behind_by != null ? ` by ${r.behind_by}` : ""}</span>
+              {r.api?.commit ? <span className="board-chip">{r.api.commit}{r.api.dirty ? " + unsaved changes" : ""}</span> : <span className="board-chip dim">no version stamp</span>}
+              <span style={MUTED}>{r.drift === "behind" && r.behind_by != null ? `${r.behind_by} behind GitHub` : DRIFT_LABEL[r.drift]}</span>
             </div>
           ))}
         </div>
@@ -1008,7 +1072,7 @@ function DeployDrawer({ card, onClose }: { card: Card; onClose: () => void }) {
   const row = card.envs.find((r) => r.env === env);
   const checks: { ok: boolean | null; text: string }[] = [
     { ok: row?.exists ?? false, text: row?.exists ? "The service exists on Cloud Run" : "No service in this environment - never created from here (rule 5)" },
-    { ok: row?.checked_at ? row.health === "ok" : null, text: row?.checked_at ? `Serving ${row.api?.revision ?? "?"} - ${row.health}` : "Not read yet" },
+    { ok: row?.checked_at ? row.health === "ok" : null, text: row?.checked_at ? `Running ${row.api?.revision ?? "?"} - ${HEALTH_LABEL[row.health]}` : "Not read yet" },
     { ok: row?.api?.commit ? !row.api.dirty : null, text: row?.api?.dirty ? "What is serving was built from a dirty tree" : row?.api?.commit ? `Serving commit ${row.api.commit}` : "Commit not recorded on the serving revision" },
     { ok: true, text: card.app === "MES" ? "Env vars: backend/deploy.ps1 is the only source (rule 2)" : "No --set-env-vars, --vpc-connector or --service-account will be passed (rule 1)" },
     { ok: env === "prod" ? null : true, text: env === "prod" ? "Production: allowlisted identity + a second person's confirm + an audit row (§10.2)" : "Dev / QA: your gcloud login is enough" },

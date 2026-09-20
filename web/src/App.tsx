@@ -12,6 +12,7 @@ import Dream from "./pages/Dream";
 import Settings from "./pages/Settings";
 import Sparks from "./components/Sparks";
 import { RadioButton, RadioDeck } from "./components/Radio";
+import Backdrop from "./components/Backdrop";
 import "./shine.css";
 import Studio from "./pages/Studio";
 import Vault from "./pages/Vault";
@@ -172,6 +173,8 @@ export default function App() {
   return (
     <div className="h-full w-full relative overflow-hidden">
       <div className="atmosphere" style={{ zIndex: 1 }} />
+      {/* THE BACKDROP paints first: everything else (the face, the pages) sits on top of it */}
+      <Backdrop />
       {onConsole && (body.style === "cell" ? <Organism look={body.look} /> : <Orb />)}
       <Sparks />
       <RadioDeck open={radioOpen} onClose={() => setRadioOpen(false)} />

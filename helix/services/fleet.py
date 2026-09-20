@@ -135,13 +135,14 @@ class FleetService:
             return None
         if head is not None and not head.ok:
             return head.problem
+        branch_note = (head.problem + " ") if (head is not None and head.ok and head.problem) else ""
         if r.api and r.api.commit is None:
-            return "No commit was recorded for this revision, so drift cannot be judged."
+            return branch_note + "This deploy carries no version stamp, so HELIX cannot tell whether it matches GitHub. Deploys made from HELIX are stamped."
         if r.api and r.api.dirty:
-            return "Built from a working tree with uncommitted changes - not reproducible from the repo."
+            return branch_note + "Deployed from a folder with unsaved (uncommitted) changes, so what is running is not exactly what is in GitHub."
         if r.api and r.api.is_split:
-            return f"Traffic is split: this revision carries {r.api.traffic_percent}%."
-        return None
+            return branch_note + f"Traffic is split: this revision carries {r.api.traffic_percent}%."
+        return branch_note.strip() or None
 
     # ---------------------------------------------------------------- what we last saw
 

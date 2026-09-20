@@ -5,6 +5,7 @@
 // name, and the video window for music videos (or the dancer, coming next). Hidden never deleted.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, tokenUrl, STALE_BACKEND } from "../lib/api";
+import { SCENES, loadLook, saveLook, type Look } from "./Backdrop";
 import "./radio.css";
 
 export interface Track { id: string; title: string; artist: string; theme: string; bpm: number | null; kind: "audio" | "video"; mime: string; audio: string | null; video: string | null; uploaded_by: string; at: string }
@@ -26,13 +27,34 @@ function ensureAnalyser() {
     bins = new Uint8Array(analyser.frequencyBinCount);
   } catch { analyser = null; }
 }
-/** The beat, for anything that wants to dance: 0..1 low-band energy and the raw bins. */
-export function radioBeat(): { level: number; bins: Uint8Array | null } {
-  if (!analyser || !bins) return { level: 0, bins: null };
+/** The beat, for anything that wants to dance: 0..1 low-band energy, a kick flag on the onset
+ *  (energy jumping above its recent average), the raw bins, the theme. Read once per frame by
+ *  everyone; the analysis is cached for the frame so ten readers cost one FFT. */
+let beatFrame = -1;
+let beatCache = { level: 0, kick: false, bins: null as Uint8Array | null, playing: false, theme: "" };
+let energyAvg = 0, lastKick = 0;
+export function radioBeat(): { level: number; kick: boolean; bins: Uint8Array | null; playing: boolean; theme: string } {
+  const now = performance.now();
+  if (now - beatFrame < 8) return beatCache;
+  beatFrame = now;
+  if (!analyser || !bins || media.paused) { beatCache = { level: 0, kick: false, bins: null, playing: false, theme: state.track?.theme || "" }; return beatCache; }
   analyser.getByteFrequencyData(bins as Uint8Array<ArrayBuffer>);
   let sum = 0; for (let i = 1; i < 12; i++) sum += bins[i];
-  return { level: Math.min(1, sum / 11 / 190), bins };
+  const level = Math.min(1, sum / 11 / 190);
+  energyAvg = energyAvg * 0.96 + level * 0.04;
+  const kick = level > 0.28 && level > energyAvg * 1.35 && now - lastKick > 220;
+  if (kick) lastKick = now;
+  beatCache = { level, kick, bins, playing: true, theme: state.track?.theme || "" };
+  return beatCache;
 }
+// The element lives in the document for the whole session, in a hidden host: a media element that
+// is REMOVED from the document pauses itself (that is the spec), which is why the radio used to
+// stop when the deck closed. The deck borrows it into the video window and hands it back.
+const parking = document.createElement("div");
+parking.setAttribute("aria-hidden", "true");
+parking.style.cssText = "position:fixed;width:1px;height:1px;left:-9999px;top:-9999px;overflow:hidden;";
+parking.appendChild(media);
+document.body.appendChild(parking);
 
 interface PlayerState { track: Track | null; playing: boolean; queue: Track[]; shuffle: boolean; volume: number; showVideo: boolean; t: number; dur: number }
 const listeners = new Set<() => void>();
@@ -104,25 +126,27 @@ export function RadioDeck({ open, onClose, appKey = "default" }: { open: boolean
   const [q, setQ] = useState("");
   const [bucketEdit, setBucketEdit] = useState("");
   const [stationEdit, setStationEdit] = useState<string | null>(null);
-  const [tab, setTab] = useState<"tracks" | "upload" | "station">("tracks");
+  const [tab, setTab] = useState<"tracks" | "upload" | "settings">("tracks");
+  const [look, setLookState] = useState<Look>(() => loadLook());
+  const setLook = (patch: Partial<Look>) => { const next = { ...look, ...patch }; setLookState(next); saveLook(next); };
   const video = useRef<HTMLDivElement | null>(null);
   const load = useCallback(() => {
     void api.get<Deck>(`/api/radio?app_key=${encodeURIComponent(appKey)}`).then((d) => { setDeck(d); setErr(null); }).catch((e: Error) => setErr(e.message));
   }, [appKey]);
   useEffect(() => { if (open) load(); }, [open, load]);
-  // the one <video> element is adopted by whichever deck is open
+  // the one <video> element is borrowed by the open deck, and PARKED (never detached) after
   useEffect(() => {
     const host = video.current;
     if (!host || !open) return;
     host.appendChild(media);
-    return () => { if (media.parentElement === host) host.removeChild(media); };
+    return () => { parking.appendChild(media); };
   }, [open, p.track?.id, p.showVideo]);
   const tracks = useMemo(() => (deck?.tracks ?? []).filter((t) => !q || `${t.title} ${t.artist} ${t.theme} ${t.uploaded_by}`.toLowerCase().includes(q.toLowerCase())), [deck, q]);
   const isVideo = p.track?.kind === "video";
   if (!open) return null;
   return (
     <div className="radio-wrap" onClick={onClose}>
-      <div className="radio-deck" onClick={(e) => e.stopPropagation()}>
+      <div className={`radio-deck${look.layout === "compact" ? " compact" : ""}`} onClick={(e) => e.stopPropagation()}>
         <div className="radio-head">
           <div>
             <div className="radio-kicker">HELIX RADIO{deck?.bucket ? ` · gs://${deck.bucket}` : ""}</div>
@@ -140,7 +164,8 @@ export function RadioDeck({ open, onClose, appKey = "default" }: { open: boolean
           </div>
           <div className="flex-1" />
           <div className="radio-tabs">
-            {(["tracks", "upload", "station"] as const).map((k) => <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{k === "tracks" ? `Tracks${deck ? ` · ${deck.count}` : ""}` : k === "upload" ? "＋ Upload" : "Station"}</button>)}
+            {(["tracks", "upload"] as const).map((k) => <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{k === "tracks" ? `Tracks${deck ? ` · ${deck.count}` : ""}` : "＋ Upload"}</button>)}
+            <button className={`radio-gear${tab === "settings" ? " on" : ""}`} title="Radio settings: background, layout, station, bucket" onClick={() => setTab(tab === "settings" ? "tracks" : "settings")}>⚙</button>
           </div>
           <button className="btn text-xs" onClick={onClose}>✕</button>
         </div>
@@ -205,9 +230,23 @@ export function RadioDeck({ open, onClose, appKey = "default" }: { open: boolean
               </>
             )}
             {tab === "upload" && <Upload onDone={() => { setTab("tracks"); load(); }} />}
-            {tab === "station" && (
+            {tab === "settings" && (
               <div className="radio-form">
-                <div className="radio-kicker">THIS STATION</div>
+                <div className="radio-kicker">BACKGROUND · behind the whole app while music plays</div>
+                <div className="radio-scenes">
+                  {SCENES.map((sc) => (
+                    <button key={sc.key} className={`radio-scene${!look.surprise && look.scene === sc.key ? " on" : ""}`} title={sc.blurb} onClick={() => setLook({ scene: sc.key, surprise: false })}>{sc.name}</button>
+                  ))}
+                  <button className={`radio-scene surprise${look.surprise ? " on" : ""}`} title="A different scene for every song, rolled fresh each time" onClick={() => setLook({ surprise: !look.surprise })}>⚄ Surprise me</button>
+                </div>
+                <label><span>Intensity <small>how hard the pages move to the music</small></span>
+                  <input type="range" min={0.2} max={1.5} step={0.05} value={look.intensity} onChange={(e) => setLook({ intensity: Number(e.target.value) })} /></label>
+                <div className="radio-kicker mt-2">LAYOUT</div>
+                <div className="radio-scenes">
+                  <button className={`radio-scene${look.layout === "full" ? " on" : ""}`} onClick={() => setLook({ layout: "full" })}>Full deck</button>
+                  <button className={`radio-scene${look.layout === "compact" ? " on" : ""}`} onClick={() => setLook({ layout: "compact" })}>Compact</button>
+                </div>
+                <div className="radio-kicker mt-2">THIS STATION</div>
                 <p className="radio-muted">The name shows on every copy of HELIX and in every app that keys on <b>{appKey}</b>. Each app can carry its own; a local name below wins on this PC only.</p>
                 <label><span>Name in the catalog ({appKey})</span><input defaultValue={deck?.stations?.[appKey] ?? ""} placeholder={deck?.stations?.default ?? "HELIX RADIO"} onBlur={(e) => void api.put("/api/radio/station", { app: appKey, name: e.target.value }).then(load).catch((x: Error) => setErr(x.message))} /></label>
                 <label><span>Local name, this PC only</span><input placeholder="leave empty to use the catalog" onBlur={(e) => void api.put("/api/radio/station", { local: e.target.value }).then(load).catch((x: Error) => setErr(x.message))} /></label>

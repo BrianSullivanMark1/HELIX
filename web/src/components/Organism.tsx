@@ -17,7 +17,7 @@ import type React from "react";
 import * as THREE from "three";
 import { api } from "../lib/api";
 import { useHelix } from "../lib/store";
-import { HelixLayer, NeuralLayer } from "../pages/Console";
+import { ContextGuard, HelixBackdrop, NeuralLayer } from "../pages/Console";
 import "../pages/console.css";
 import { baseLook } from "./Orb";
 
@@ -781,7 +781,7 @@ function Curtain({ trigger, hue }: { trigger: number; hue: number }) {
 
 /** The room behind the face: the Console's helix and neural net, dimmed, so the avatar sits in
  *  the same world as the rest of HELIX (and the net still breaks under the mouse here). */
-function Room() {
+function useHelixColors() {
   const [colors, setColors] = useState<[string, string]>(["#3fe0e0", "#2a8cff"]);
   useEffect(() => {
     const read = () => void api.get<{ values?: Record<string, unknown> }>("/api/settings").then((d) => {
@@ -792,9 +792,13 @@ function Room() {
     window.addEventListener("helix-settings-saved", read);
     return () => window.removeEventListener("helix-settings-saved", read);
   }, []);
+  return colors;
+}
+
+/** The room's 2D half: the neural net and the vignette. The helix rides inside the face's canvas. */
+function Room() {
   return (
     <div className="board-stage" style={{ position: "fixed", zIndex: 0, opacity: 0.55, pointerEvents: "none" }} aria-hidden="true">
-      <HelixLayer colors={colors} />
       <NeuralLayer />
       <div className="board-layer" style={{ background: "radial-gradient(ellipse at 50% 48%, rgba(8,11,15,0.7) 0%, rgba(8,11,15,0.25) 34%, transparent 60%)" }} />
     </div>
@@ -803,12 +807,23 @@ function Room() {
 
 export default function Organism({ look }: { look: OrganismLook }) {
   const [curtain, setCurtain] = useState(0);
+  const [epoch, setEpoch] = useState(0);     // a lost context that never comes back: remount the canvas
+  const colors = useHelixColors();
   return (
     <>
       <Room />
       <div className="fixed inset-0" style={{ zIndex: 0 }}>
-        <Canvas camera={{ position: [0, 0.2, 4.2], fov: 42 }} gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
-          dpr={[1, 2]} style={{ pointerEvents: "auto" }}>
+        <Canvas key={epoch} camera={{ position: [0, 0.2, 4.2], fov: 42 }} gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
+          dpr={[1, 2]} style={{ pointerEvents: "auto" }}
+          onCreated={({ gl }) => {
+            let timer = 0;
+            gl.domElement.addEventListener("webglcontextlost", () => { timer = window.setTimeout(() => setEpoch((e) => e + 1), 2500); });
+            gl.domElement.addEventListener("webglcontextrestored", () => { window.clearTimeout(timer); });
+          }}>
+          <ContextGuard />
+          <group position={[0, -0.3, -7]} scale={0.75}>
+            <HelixBackdrop colors={colors} position={[1.2, 0.4, 0]} scale={1} />
+          </group>
           <Body look={look} onPulse={(big) => { if (big) setCurtain((c) => c + 1); }} />
         </Canvas>
       </div>

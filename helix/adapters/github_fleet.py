@@ -23,11 +23,13 @@ from helix.ports.fleet import CompareRead, RepoRead
 API_HOST = "api.github.com"
 _BODY_CAP = 256 * 1024
 
-NO_TOKEN = "No GitHub token is connected. Connect GitHub in Settings to read repositories."
-NOT_FOUND = "GitHub says that repository or branch does not exist, or the token cannot see it."
+NO_TOKEN = "No GitHub token is connected. Click the gear on any card and paste one."
+NOT_FOUND = "GitHub cannot find {repo}, or this token is not allowed to see it. Check the repo name in the gear, and that you are a collaborator on it."
+NO_BRANCH = "{repo} has no branch called {branch}. Pick the branch in the gear - this repo's default is {default}."
+MOVED = "{repo} was renamed or moved on GitHub. Put its new name in the gear."
 RATE_LIMITED = "GitHub is rate-limiting this token right now. Try again in a few minutes."
-UNREACHABLE = "GitHub could not be reached."
-BAD_OUTPUT = "GitHub answered, but not in a shape HELIX understands."
+UNREACHABLE = "GitHub could not be reached. Check the internet connection."
+BAD_OUTPUT = "GitHub answered {repo} with status {status}, which HELIX could not read."
 
 HttpGet = Callable[[str, dict, float], tuple[int, str]]   # (url, headers, timeout) -> (status, body)
 
@@ -109,16 +111,27 @@ class GithubRepos:
         return status, docs, body[:400]
 
     @staticmethod
-    def _problem(status: int) -> str:
+    def _problem(status: int, repo: str = "the repo", branch: str = "", default: str = "?") -> str:
         if status == -1:
             return NO_TOKEN
         if status in (403, 429):
             return RATE_LIMITED
         if status == 404:
-            return NOT_FOUND
+            return NOT_FOUND.format(repo=repo)
+        if status in (301, 302, 307, 308):
+            return MOVED.format(repo=repo)
+        if status == 422 and branch:
+            return NO_BRANCH.format(repo=repo, branch=branch, default=default)
         if status == 0:
             return UNREACHABLE
-        return BAD_OUTPUT
+        return BAD_OUTPUT.format(repo=repo, status=status)
+
+    def default_branch(self, repo: str, *, timeout_s: float = 20.0) -> str | None:
+        """The repo's default branch (main, master, v3...), or None when GitHub will not say."""
+        status, doc, _ = self._get(f"repos/{quote(repo)}", timeout_s)
+        if status != 200 or not doc:
+            return None
+        return str(doc.get("default_branch") or "") or None
 
     # ---------------------------------------------------------------- reads
 
@@ -129,16 +142,34 @@ class GithubRepos:
                             detail="repo must be 'owner/name'")
         status, doc, raw = self._get(
             f"repos/{quote(owner)}/{quote(name)}/commits/{quote(branch, safe='')}", timeout_s)
+        if status == 422:
+            # GitHub's "No commit found for SHA: main" - the branch is not there. Read the repo's
+            # default branch instead and SAY so (the cell keeps its own branch name).
+            default = self.default_branch(repo, timeout_s=timeout_s)
+            if default and default != branch:
+                status, doc, raw = self._get(
+                    f"repos/{quote(owner)}/{quote(name)}/commits/{quote(default, safe='')}", timeout_s)
+                if status == 200 and doc and doc.get("sha"):
+                    head = self._head_from(repo, default, doc)
+                    return RepoRead(repo=repo, branch=default, ok=True, commit=head.commit, full_sha=head.full_sha,
+                                    subject=head.subject, committed_at=head.committed_at,
+                                    problem=NO_BRANCH.format(repo=repo, branch=branch, default=default))
+            return RepoRead(repo=repo, branch=branch, ok=False,
+                            problem=self._problem(422, repo, branch, default or "unknown"), detail=raw)
         if status != 200 or not doc:
-            return RepoRead(repo=repo, branch=branch, ok=False, problem=self._problem(status),
+            return RepoRead(repo=repo, branch=branch, ok=False, problem=self._problem(status, repo, branch),
                             detail=raw)
+        if not doc.get("sha"):
+            return RepoRead(repo=repo, branch=branch, ok=False, problem=BAD_OUTPUT.format(repo=repo, status=status), detail=raw)
+        return self._head_from(repo, branch, doc)
+
+    @staticmethod
+    def _head_from(repo: str, branch: str, doc: dict) -> RepoRead:
         sha = str(doc.get("sha") or "")
         commit = doc.get("commit") or {}
         message = str(commit.get("message") or "")
         when = ((commit.get("committer") or {}).get("date")
                 or (commit.get("author") or {}).get("date"))
-        if not sha:
-            return RepoRead(repo=repo, branch=branch, ok=False, problem=BAD_OUTPUT, detail=raw)
         return RepoRead(repo=repo, branch=branch, ok=True, commit=sha[:7], full_sha=sha,
                         subject=message.splitlines()[0][:120] if message else None,
                         committed_at=_ts(when))
@@ -171,7 +202,7 @@ class GithubRepos:
         """[{name, sha}] for the repo, newest-activity first is not available here - alphabetical."""
         status, docs, _ = self._get_list(f"repos/{quote(repo)}/branches?per_page=60", timeout_s)
         if status != 200:
-            return [], self._problem(status)
+            return [], self._problem(status, repo)
         out = [{"name": str(d.get("name") or ""), "sha": str((d.get("commit") or {}).get("sha") or "")} for d in docs]
         return [b for b in out if b["name"] and b["sha"]], None
 
@@ -181,7 +212,7 @@ class GithubRepos:
         status, docs, _ = self._get_list(
             f"repos/{quote(repo)}/commits?sha={quote(sha_or_branch)}&per_page={limit}", timeout_s)
         if status != 200:
-            return [], self._problem(status)
+            return [], self._problem(status, repo)
         out = []
         for d in docs:
             c = d.get("commit") or {}
