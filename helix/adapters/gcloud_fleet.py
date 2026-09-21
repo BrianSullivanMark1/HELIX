@@ -68,10 +68,15 @@ Runner = Callable[[list[str], float], Ran]
 HttpGet = Callable[[str, float], tuple[int, str]]   # (status, body) - never raises
 
 
+# On Windows every gcloud.cmd spawn opened a console window on the left of the screen ("I see
+# consoles opening up", 2026-09-21). CREATE_NO_WINDOW keeps the read silent; output is captured.
+_QUIET = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 def _real_runner(argv: list[str], timeout_s: float) -> Ran:
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace", creationflags=_QUIET)
         return Ran(p.returncode, p.stdout or "", p.stderr or "")
     except FileNotFoundError:
         return Ran(127, "", "not found")

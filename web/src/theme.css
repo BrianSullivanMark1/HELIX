@@ -40,15 +40,12 @@ html, body, #root {
 
 /* Glass panels — the HUD look. */
 .glass {
-  background: color-mix(in srgb, var(--panel) 78%, transparent);
+  background: color-mix(in srgb, var(--panel) 90%, transparent);
   border: 1px solid var(--line);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
 }
 .glass-hi {
-  background: color-mix(in srgb, var(--panel-hi) 85%, transparent);
+  background: color-mix(in srgb, var(--panel-hi) 94%, transparent);
   border: 1px solid var(--line);
-  backdrop-filter: blur(14px);
 }
 
 .text-glow-cyan { text-shadow: 0 0 18px color-mix(in srgb, var(--cyan) 55%, transparent); }
@@ -94,10 +91,9 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 .btn-danger:hover { border-color: var(--error); }
 
 .card {
-  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
   border: 1px solid var(--line);
   border-radius: 14px;
-  backdrop-filter: blur(10px);
   transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
 }
 .card:hover {

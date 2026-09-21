@@ -1,0 +1,22 @@
+/* THE STRANDBAR - one progress language for the whole app (components/Strandbar.tsx). */
+.strandbar { position: relative; width: 100%; }
+.strandbar canvas { display: block; }
+.strandbar.failed canvas { animation: strand-shake 0.5s cubic-bezier(.36,.07,.19,.97) both; }
+@keyframes strand-shake {
+  10%, 90% { transform: translateX(-1px); } 20%, 80% { transform: translateX(2px); }
+  30%, 50%, 70% { transform: translateX(-3px); } 40%, 60% { transform: translateX(3px); }
+}
+.strand-words {
+  position: absolute; left: 6px; right: 6px; top: 100%; margin-top: 2px;
+  display: flex; align-items: baseline; gap: 6px; font-size: 10px; letter-spacing: 2.2px; text-transform: uppercase;
+  color: var(--muted); pointer-events: none; white-space: nowrap; overflow: hidden;
+}
+.strandbar.compact .strand-words { font-size: 9px; letter-spacing: 1.6px; }
+.strand-word { color: hsl(190 80% 70%); animation: strand-word-in 0.45s ease both; }
+.strand-word.done { color: hsl(44 95% 66%); text-shadow: 0 0 10px hsl(44 95% 60% / .7); }
+.strand-word.failed { color: hsl(12 90% 64%); text-shadow: 0 0 10px hsl(12 90% 55% / .6); }
+.strand-word.cancelled { color: var(--muted); }
+@keyframes strand-word-in { from { opacity: 0; transform: translateY(3px); letter-spacing: 5px; } to { opacity: 1; transform: none; } }
+.strand-note { color: var(--muted); text-transform: none; letter-spacing: .3px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.strand-pct { margin-left: auto; font-variant-numeric: tabular-nums; color: hsl(190 60% 80%); letter-spacing: .5px; }
+.strandbar.done .strand-pct { color: hsl(44 95% 70%); }

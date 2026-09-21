@@ -124,7 +124,8 @@ class FleetService:
         note = self._note(r, head, drift)
         return Cell(service=svc, api=r.api, site=r.site, repo_commit=repo_commit, drift=drift,
                     behind_by=behind_by, checked_at=now, note=note,
-                    repo_ok=(bool(head.ok) if head is not None else None))
+                    repo_ok=(bool(head.ok) if head is not None else None),
+                    served_revisions=tuple(getattr(r, "served_revisions", ()) or ()))
 
     @staticmethod
     def _note(r: CellRead, head: RepoRead | None, drift: Drift) -> str | None:

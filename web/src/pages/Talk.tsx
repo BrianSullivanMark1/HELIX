@@ -18,6 +18,29 @@ const STATE_LINES: Record<string, string> = {
   speaking: "Speaking…",
 };
 
+/** THE STATE SIGN (Brian, 2026-09-22: "reduce the need to read"): instead of the words
+ *  Listening / Thinking / Speaking, an animation - ears = bars breathing with the mic level,
+ *  thinking = three sparks orbiting, speaking = a waveform. The word stays as the tooltip. */
+function StateSign({ state, level }: { state: string; level: number }) {
+  const kind = state === "listening" || state === "transcribing" ? "ears" : state === "thinking" ? "think" : state === "speaking" ? "voice" : "";
+  if (!kind) return null;
+  return (
+    <span className={`state-sign ${kind}`} data-tip={STATE_LINES[state]} aria-label={STATE_LINES[state]}>
+      {kind === "ears" && [0, 1, 2, 3, 4].map((i) => <i key={i} style={{ animationDelay: `${i * 0.12}s`, height: `${6 + level * 14 + (i === 2 ? 4 : 0)}px` }} />)}
+      {kind === "think" && [0, 1, 2].map((i) => <b key={i} style={{ animationDelay: `${i * 0.4}s` }} />)}
+      {kind === "voice" && [0, 1, 2, 3, 4, 5, 6].map((i) => <i key={i} style={{ animationDelay: `${i * 0.09}s` }} />)}
+    </span>
+  );
+}
+
+const ICONS = {
+  clip: <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" d="M21 11.5 12.5 20a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.5 3.5 0 0 1 5 5l-8.5 8.5a1.5 1.5 0 0 1-2.1-2.1L15.5 7" /></svg>,
+  camera: <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z" /><circle cx="12" cy="13" r="3.2" fill="none" stroke="currentColor" strokeWidth="1.8" /></svg>,
+  video: <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="3" y="7" width="13" height="10" rx="2" fill="none" stroke="currentColor" strokeWidth="1.8" /><path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" d="m16 10 5-2v8l-5-2z" /></svg>,
+  say: <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M4 9v6h4l5 4V5L8 9H4Z" /><path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" /></svg>,
+  joke: <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.8" /><path fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" d="M8 10h.01M16 10h.01" /><path fill="currentColor" d="M7.5 13.5h9c-.6 3-2.6 4.5-4.5 4.5s-3.9-1.5-4.5-4.5Z" /></svg>,
+};
+
 /**
  * Sleep-talk: while HELIX dreams, each murmur (services/murmur.py) surfaces as one soft italic line
  * above the status pill — it condenses in, drifts upward for a few seconds, and thins away. The
@@ -147,6 +170,7 @@ export default function Talk({ project }: { project?: string } = {}) {
   const idleLine = useHelix((s) => s.idleLine);
   const busy = useHelix((s) => s.busy);
   const orb = useHelix((s) => s.orb);
+  const level = useHelix((s) => s.level);
   const legend = useHelix((s) => s.legend);
   const voice = useHelix((s) => s.voice);
   const suggestion = useHelix((s) => s.suggestion);
@@ -278,6 +302,26 @@ export default function Talk({ project }: { project?: string } = {}) {
     if (camera) void api.post(`/api/camera/${camera.id}/cancel`).catch(() => undefined);
     else void api.post("/api/camera/open").catch(() => undefined);
   };
+  // THE CAMERA MENU: photo or a video clip; both open the panel, the hint says which button
+  const [camMenu, setCamMenu] = useState(false);
+  const [camHint, setCamHint] = useState("");
+  const openCamera = (clip: boolean) => {
+    setCamMenu(false);
+    if (!camera) void api.post("/api/camera/open").catch(() => undefined);
+    setCamHint(clip ? "The panel is opening - press ⏺ Clip when it is live." : "The panel is opening - press Snap when it is live.");
+    window.setTimeout(() => setCamHint(""), 6000);
+  };
+  // TELL A JOKE: a line from the web (filtered), said out loud by the voice, acted by the face
+  const [joke, setJoke] = useState<{ text: string; busy: boolean } | null>(null);
+  const tellJoke = async () => {
+    setJoke({ text: "", busy: true });
+    try {
+      const r = await api.get<{ joke: string; source: string }>("/api/joke");
+      setJoke({ text: r.joke, busy: false });
+      await sayLine(r.joke);
+      window.setTimeout(() => setJoke(null), Math.min(20000, 3000 + r.joke.length * 60));
+    } catch (e) { setJoke({ text: (e as Error).message || "No joke came back.", busy: false }); window.setTimeout(() => setJoke(null), 4000); }
+  };
 
   const statusLine = busy
     ? status
@@ -286,7 +330,7 @@ export default function Talk({ project }: { project?: string } = {}) {
 
   return (
     <div
-      className={`h-full flex flex-col items-center pt-12 pb-5 px-6 ${docked ? "console-docked" : ""}`}
+      className={`h-full flex flex-col items-center pt-12 pb-11 px-6 ${docked ? "console-docked" : ""}`}
       style={{ pointerEvents: "none", justifyContent: arFull ? "flex-end" : undefined }}
     >
       {/* where this conversation sits, and the way back to the Console */}
@@ -351,6 +395,9 @@ export default function Talk({ project }: { project?: string } = {}) {
       >
         {arFull && bubbles.length > 0 && bubbles[bubbles.length - 1].role === "helix"
           ? `${bubbles[bubbles.length - 1].text.slice(0, 160)}${bubbles[bubbles.length - 1].text.length > 160 ? "…" : ""}`
+          : joke ? (joke.busy ? <StateSign state="thinking" level={0} /> : <span className="joke-line">{joke.text}</span>)
+          : camHint ? camHint
+          : !busy && STATE_LINES[orb] ? <StateSign state={orb} level={level} />
           : statusLine}
       </div>
 
@@ -420,8 +467,8 @@ export default function Talk({ project }: { project?: string } = {}) {
             <span className="lvl" />
           </button>
         )}
-        <label className="btn shrink-0 text-[13px]" title="Attach files">
-          📎
+        <label className="talk-ic shrink-0" data-tip="Attach files - or drop them on the box, or paste">
+          {ICONS.clip}
           <input
             type="file"
             multiple
@@ -432,14 +479,21 @@ export default function Talk({ project }: { project?: string } = {}) {
             }}
           />
         </label>
-        <button
-          className="btn shrink-0 text-[13px]"
-          title={camera ? "Close the camera" : "Open the camera — show me a part, a board, a wiring job"}
-          style={camera ? { borderColor: "var(--cyan)", color: "var(--cyan)" } : undefined}
-          onClick={toggleCamera}
-        >
-          📷
-        </button>
+        <span className="relative shrink-0">
+          <button
+            className={`talk-ic${camera ? " on" : ""}`}
+            data-tip={camera ? "Close the camera" : "The camera: a photo, or a video clip"}
+            onClick={() => (camera ? toggleCamera() : setCamMenu((m) => !m))}
+          >
+            {ICONS.camera}
+          </button>
+          {camMenu && !camera && (
+            <div className="talk-menu" onMouseLeave={() => setCamMenu(false)}>
+              <button onClick={() => openCamera(false)}>{ICONS.camera}<span><b>Photo</b><small>one frame, ask about it</small></span></button>
+              <button onClick={() => openCamera(true)}>{ICONS.video}<span><b>Video clip</b><small>a few seconds, read in order</small></span></button>
+            </div>
+          )}
+        </span>
         <textarea
           ref={inputRef}
           value={text}
@@ -473,10 +527,14 @@ export default function Talk({ project }: { project?: string } = {}) {
             ■ Stop
           </button>
         )}
-        <button className="btn shrink-0 text-[13px]" title="HELIX says exactly this, out loud, no model involved - a test line for the face"
+        <button className={`talk-ic joke${joke?.busy ? " busy" : ""}`} data-tip="Tell a joke - the voice says one, the face acts it"
+          disabled={Boolean(joke?.busy)} onClick={() => void tellJoke()}>
+          {ICONS.joke}
+        </button>
+        <button className="talk-say shrink-0" data-tip="HELIX says exactly this, out loud, no model involved - a test line for the face"
           disabled={!text.trim()}
           onClick={() => { const t = text.trim(); if (!t) return; setText(""); void sayLine(t); }}>
-          ▶ Say
+          {ICONS.say}<span>Say</span>
         </button>
         <button className="btn btn-primary shrink-0" onClick={() => void send()}>
           Send

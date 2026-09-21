@@ -15,6 +15,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { api } from "../lib/api";
 import { radioBeat } from "../components/Radio";
+import StatusFace, { STATUS_LABEL, type FaceStatus } from "../components/StatusFace";
+import { TasksSection } from "../components/Tasks";
+import { VaultCard } from "../components/Vault";
+import Strandbar from "../components/Strandbar";
+import { useTaskCounts } from "../lib/jobs";
+import { bendEvery, density, dprCap, frameMs2D, glows, loop, perf } from "../lib/perf";
 import "./console.css";
 import Menu from "./Menu";
 import { useHelix } from "../lib/store";
@@ -52,6 +58,7 @@ interface Row {
   checked_at: string | null;
   note: string | null;
   detail?: string | null;
+  served?: string[];
   needs_attention: boolean;
   api: Serving | null;
   site: Serving | null;
@@ -171,8 +178,10 @@ function strandAt(t: number, s: 0 | 1, out: THREE.Vector3): THREE.Vector3 {
 
 /** The double helix: two strands of glowing points, rungs between them, signals travelling the
  *  strands, and a drift of dust for depth. Turns slowly; leans with the cursor. */
-function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: number; y: number; vx: number; vy: number }>; colors: [string, string] }) {
+function HelixScene({ pointer, colors, tempo = 1, spinRate = 1, bendable = true }: { pointer: React.MutableRefObject<{ x: number; y: number; vx: number; vy: number }>; colors: [string, string]; tempo?: number; spinRate?: number; bendable?: boolean }) {
   const group = useRef<THREE.Group>(null!);
+  const frameNo = useRef(0);
+  const surfPos = useRef(0);      // the strands' travel along their own axis, integrated (never a jump when the speed changes)
   const strandMats = useRef<THREE.PointsMaterial[]>([]);
   const pulse = useRef({ next: 5, t: -1 });
   const spin = useRef(0);
@@ -283,7 +292,10 @@ function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: 
     spin.current += p.vx * 0.9;
     p.vx *= 0.5; p.vy *= 0.5;
     spin.current *= 0.94;
-    g.rotation.y += dt * 0.12 + spin.current * dt;
+    // THE TURN about its own long axis: quicker than it was, quicker still in the background
+    // (spinRate), and it breathes - slow, then fast, then slow again over ~14 s
+    const breathe = 0.55 + 0.45 * Math.sin(t * 0.45 + spinRate);
+    g.rotation.y += dt * (0.22 + 0.5 * breathe) * spinRate + spin.current * dt;
     // the pulse: every 6-11 s a flash runs the whole helix - every node brightens and swells,
     // then it settles. While it runs the rung wave is driven faster too.
     const pu = pulse.current;
@@ -301,7 +313,8 @@ function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: 
       if (pu.t > 1.1) pu.t = -1;
     }
     flash = Math.max(flash, beat.level * 0.7);
-    spin.current += beat.level * beat.level * dt * 1.4;
+    spin.current += beat.level * beat.level * dt * 1.0 * breathe;
+    g.rotation.y += dt * beat.level * 0.7 * breathe + (beat.kick ? 0.05 * breathe : 0);   // a song turns it; a kick nudges it
     for (const m of strandMats.current) { if (m) m.size = m.userData.base * (1 + 0.9 * flash); }
     // a slow breath, and a sway
     const breath = 1 + 0.025 * Math.sin(t * 0.6) + 0.04 * flash + 0.05 * beat.level;
@@ -311,13 +324,25 @@ function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: 
     if (twin.current) { twin.current.rotation.y -= dt * 0.07 + spin.current * dt * 0.3; twin.current.rotation.z = -0.5 + 0.03 * Math.sin(t * 0.3); }
     // THE SURF: the strands slide along their own axis forever - one turn, then wrap, and the
     // faded ends hide the seam. Faster with the music.
-    if (surf.current) { surf.current.position.y = -((t * (0.35 + beat.level * 1.2)) % TURN_H); }
-    // THE BEND: the cursor pushes the nodes it passes over; they ease out and spring back
-    g.updateMatrixWorld();
-    if (surf.current) surf.current.updateMatrixWorld();
+    // The pace is integrated, and it OSCILLATES: slow, then fast, then slow (Brian: "the music helix
+    // moves too fast - it should oscillate between slow and fast"); the music rides on top of the
+    // breath instead of driving it flat out, and a kick gives one shove.
+    if (surf.current) {
+      const pace = (0.45 + 0.75 * breathe) * tempo * (1 + beat.level * 1.1 * breathe) + (beat.kick ? 0.6 : 0);
+      surfPos.current = (surfPos.current + dt * pace) % TURN_H;
+      surf.current.position.y = -surfPos.current;
+    }
+    // THE BEND: the cursor pushes the nodes it passes over; they ease out and spring back.
+    // 1800 projections a frame: the far strands never bend (nobody can tell), and on a slow
+    // machine the near one bends every 2nd or 3rd frame (the ease hides it).
+    frameNo.current++;
     const sp = strands.getAttribute("position") as THREE.BufferAttribute;
     const n = HELIX.points;
     const B = bend;
+    const doBend = bendable && frameNo.current % bendEvery() === 0;
+    g.updateMatrixWorld();
+    if (surf.current) surf.current.updateMatrixWorld();
+    if (doBend) {
     const m = surf.current ? surf.current.matrixWorld : g.matrixWorld;
     B.inv.copy(m).invert();
     B.right.set(1, 0, 0).applyQuaternion(camera.quaternion); B.up.set(0, 1, 0).applyQuaternion(camera.quaternion);
@@ -343,6 +368,7 @@ function HelixScene({ pointer, colors }: { pointer: React.MutableRefObject<{ x: 
       sp.setXYZ(idx, B.tmp.x + B.tmp2.x, B.tmp.y + B.tmp2.y, B.tmp.z + B.tmp2.z);
     }
     sp.needsUpdate = true;
+    }
     // a wave of light climbs the rungs; the rungs follow the bent strands
     const rc = rungRef.current?.geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
     const rpos = rungRef.current?.geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
@@ -439,11 +465,11 @@ export function ContextGuard() {
 }
 
 /** The helix as a group for ANOTHER canvas (the face's), so a page never opens two contexts. */
-export function HelixBackdrop({ colors, position = [0, 0, -6], scale = 0.9 }: { colors: [string, string]; position?: [number, number, number]; scale?: number }) {
+export function HelixBackdrop({ colors, position = [0, 0, -6], scale = 0.9, tempo = 1, spinRate = 1, bendable = true }: { colors: [string, string]; position?: [number, number, number]; scale?: number; tempo?: number; spinRate?: number; bendable?: boolean }) {
   const pointer = usePointer();
   return (
     <group position={position} scale={scale}>
-      <HelixScene pointer={pointer} colors={colors} />
+      <HelixScene pointer={pointer} colors={colors} tempo={tempo} spinRate={spinRate} bendable={bendable} />
     </group>
   );
 }
@@ -467,6 +493,7 @@ function usePointer() {
 
 export function HelixLayer({ colors }: { colors: [string, string] }) {
   const pointer = useRef({ x: 0, y: 0, vx: 0, vy: 0 });
+  const level = usePerfLevel();
   useEffect(() => {
     const move = (e: MouseEvent) => {
       const nx = (e.clientX / window.innerWidth) * 2 - 1;
@@ -482,7 +509,7 @@ export function HelixLayer({ colors }: { colors: [string, string] }) {
   if (REDUCED) return null;
   return (
     <div className="board-layer board-helix">
-      <Canvas dpr={[1, 1.5]} camera={{ fov: 48, position: [0, 0, 9.5] }} gl={{ antialias: true, alpha: true }}
+      <Canvas dpr={[1, dprCap()]} key={level} camera={{ fov: 48, position: [0, 0, 9.5] }} gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
         onCreated={({ scene }) => { scene.fog = new THREE.Fog("#080b0f", 10, 24); }}>
         <ContextGuard />
         <HelixScene pointer={pointer} colors={colors} />
@@ -498,16 +525,33 @@ export function HelixLayer({ colors }: { colors: [string, string] }) {
  * fire along the links node to node, lighting each node they reach and sometimes chaining on.
  * Pure canvas, no data, no pointer events; paused when the tab is hidden.
  */
-export function NeuralLayer({ density = 1, keepOut }: { density?: number; keepOut?: { x: number; y: number; r: number } | null } = {}) {
+const density_ = density;
+/** The governor's level as React state, so a canvas can re-seed when the machine turns out slow. */
+export function usePerfLevel(): string {
+  const [level, setLevel] = useState(perf.level);
+  useEffect(() => { const on = () => setLevel(perf.level); window.addEventListener("helix-perf", on); return () => window.removeEventListener("helix-perf", on); }, []);
+  return level;
+}
+export function NeuralLayer({ density = 1, keepOut, follow, depth = false, breach = false }: { density?: number; keepOut?: { x: number; y: number; r: number } | null; follow?: React.MutableRefObject<{ x: number; y: number; r: number } | null>; depth?: boolean; breach?: boolean } = {}) {
   const ref = useRef<HTMLCanvasElement | null>(null);
+  const level = usePerfLevel();
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas || REDUCED) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const N = Math.round(70 * density);
+    const N = Math.round(70 * density * density_());
     const LINK = 165;
-    type Node = { x: number; y: number; vx: number; vy: number; r: number; p: number; flash: number; hx: number; hy: number; px: number; py: number };
+    let due = 0;
+    // THE 3D LATTICE (Brian, 2026-09-22): with a face in the net, the nodes crowd its rim and thin
+    // out with distance, the near ones bigger and brighter, so the head reads as pushing through
+    // the lattice toward you. `z` is a node's depth (1 = at the rim, in front; 0 = far back).
+    // HERE'S JOHNNY (Brian, 2026-09-22): with `breach`, the net is a sparse membrane the head
+    // breaks THROUGH - nodes in its way are thrown out past the rim with a spark, the links they
+    // leave stretch white and snap, and the moment the head moves on or draws back they drift home
+    // and the links knit again with a small flash. No shell crowds the rim, nothing cages the head.
+    type Node = { x: number; y: number; vx: number; vy: number; r: number; p: number; flash: number; hx: number; hy: number; px: number; py: number; z: number; shell: boolean; inside: boolean; torn: boolean };
+    const ko = () => (follow && follow.current) || keepOut || null;
     type Signal = { a: number; b: number; t: number; v: number; hops: number };
     let nodes: Node[] = [];
     let signals: Signal[] = [];
@@ -516,7 +560,7 @@ export function NeuralLayer({ density = 1, keepOut }: { density?: number; keepOu
     // and a click sends a ring out that throws everything it crosses. Nodes drift home after.
     const mouse = { x: -9999, y: -9999, vx: 0, vy: 0, lx: -9999, ly: -9999 };
     const beatNow = { level: 0, kick: false, tick: 0 };
-    type Ring = { x: number; y: number; r: number; v: number; life: number };
+    type Ring = { x: number; y: number; r: number; v: number; life: number; hue?: string };
     type Spark = { x: number; y: number; vx: number; vy: number; life: number };
     let rings: Ring[] = [];
     let sparks: Spark[] = [];
@@ -530,21 +574,41 @@ export function NeuralLayer({ density = 1, keepOut }: { density?: number; keepOu
       const r = canvas.getBoundingClientRect();
       rings.push({ x: e.clientX - r.left, y: e.clientY - r.top, r: 0, v: 520, life: 1 });
     };
+    // A TASK FINISHED (CURRENT TASKS): a wave rolls through the whole net from the middle - gold
+    // when it is done, ember when it failed.
+    const onWave = (e: Event) => {
+      const kind = String((e as CustomEvent).detail?.kind || "done");
+      const k = ko();
+      const x = k ? k.x * w : w / 2, y = k ? k.y * h : h / 2;
+      rings.push({ x, y, r: k ? k.r * Math.min(w, h) : 0, v: 640, life: 1, hue: kind === "done" ? "255,200,80" : "255,110,70" });
+      window.setTimeout(() => rings.push({ x, y, r: k ? k.r * Math.min(w, h) : 0, v: 520, life: 0.8, hue: kind === "done" ? "255,220,140" : "255,140,100" }), 180);
+      for (const n of nodes) if (Math.random() < 0.5) n.flash = Math.max(n.flash, 0.9);
+    };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mousedown", onDown);
+    window.addEventListener("helix-wave", onWave);
     document.addEventListener("mouseleave", onLeave);
 
     const seed = () => {
-      nodes = Array.from({ length: N }, () => {
-        const x = Math.random() * w, y = Math.random() * h;
-        return { x, y, hx: x, hy: y, px: 0, py: 0,
-          vx: (Math.random() - 0.5) * 14, vy: (Math.random() - 0.5) * 14,
+      const k = ko();
+      nodes = Array.from({ length: N }, (_, i) => {
+        let x = Math.random() * w, y = Math.random() * h, z = 0.15 + Math.random() * 0.5;
+        if (k && depth && !breach && i < N * 0.55) {
+          // more than half the nodes crowd the rim: a shell 1.0..1.9 radii out, densest at the rim
+          const kr = k.r * Math.min(w, h);
+          const rad = kr * (1.02 + Math.pow(Math.random(), 1.8) * 0.9);
+          const a = Math.random() * Math.PI * 2;
+          x = k.x * w + Math.cos(a) * rad; y = k.y * h + Math.sin(a) * rad;
+          z = 1 - (rad - kr) / (kr * 0.9);
+        }
+        return { x, y, hx: x, hy: y, px: 0, py: 0, z, shell: Boolean(k && depth && !breach && i < N * 0.55), inside: false, torn: false,
+          vx: (Math.random() - 0.5) * 14 * (0.4 + 0.6 * z), vy: (Math.random() - 0.5) * 14 * (0.4 + 0.6 * z),
           r: 1.2 + Math.random() * 2.0, p: Math.random() * Math.PI * 2, flash: 0 };
       });
     };
     const size = () => {
       const parent = canvas.parentElement;
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const dpr = Math.min(1.25, window.devicePixelRatio || 1);   // a full-window 2D layer: 1.25x at most (2x was four times the pixels)
       w = parent ? parent.clientWidth : window.innerWidth;
       h = parent ? parent.clientHeight : window.innerHeight;
       canvas.width = Math.floor(w * dpr);
@@ -570,11 +634,20 @@ export function NeuralLayer({ density = 1, keepOut }: { density?: number; keepOu
     };
     const step = (t: number) => {
       if (!alive) return;
+      // the governor's budget: 60 fps at full, 30 when lean, 20 when minimal
+      if (t < due) { raf = requestAnimationFrame(step); return; }
+      due = t + frameMs2D() - 1;
       const dt = Math.min(0.05, (t - last) / 1000 || 0);
       last = t;
+      const glow = glows();
       const b0 = radioBeat();
+      const keepOut = ko();
       beatNow.level = b0.level; beatNow.kick = b0.kick; beatNow.tick = t / 1000;
       if (b0.kick) rings.push({ x: keepOut ? keepOut.x * w : w / 2, y: keepOut ? keepOut.y * h : h / 2, r: keepOut ? keepOut.r * Math.min(w, h) : 0, v: 420 + b0.level * 400, life: 0.7 });   // a kick: a wave through the jelly
+      const kx0 = keepOut ? keepOut.x * w : w / 2, ky0 = keepOut ? keepOut.y * h : h / 2, kr0 = keepOut ? keepOut.r * Math.min(w, h) : 0;
+      // depth per node from where it is NOW relative to the rim (a roaming face re-ranks the net)
+      if (depth && keepOut) for (const n of nodes) { const d = Math.hypot(n.x - kx0, n.y - ky0); n.z += ((d < kr0 * 1.9 ? 1 - Math.max(0, d - kr0) / (kr0 * 0.9) : 0.15) - n.z) * 0.04; }
+      const zOf = (n: Node) => (depth && keepOut ? Math.max(0.12, Math.min(1, n.z)) : 1);
       ctx.clearRect(0, 0, w, h);
       mouse.vx = mouse.x - mouse.lx; mouse.vy = mouse.y - mouse.ly; mouse.lx = mouse.x; mouse.ly = mouse.y;
       const speed = Math.min(60, Math.hypot(mouse.vx, mouse.vy));
@@ -600,6 +673,19 @@ export function NeuralLayer({ density = 1, keepOut }: { density?: number; keepOu
           const fx = n.hx + n.px - kx, fy = n.hy + n.py - ky;
           const fd = Math.hypot(fx, fy);
           if (fd < kr && fd > 0.01) { const push = (kr - fd) * 0.9; n.px += (fx / fd) * push; n.py += (fy / fd) * push; }
+          if (breach) {
+            // the head ARRIVES on a node: it is torn out of the sheet with a spark
+            const inside = fd < kr * 1.05;
+            if (inside && !n.inside) { n.flash = 1; n.torn = true; for (let q = 0; q < 2; q++) sparks.push({ x: n.x, y: n.y, vx: (fx / fd) * (140 + Math.random() * 120), vy: (fy / fd) * (140 + Math.random() * 120), life: 0.5 }); }
+            n.inside = inside;
+            // and HEALS when the head has gone and it is nearly home again: a small knit-flash
+            if (n.torn && !inside && Math.hypot(n.px, n.py) < 14) { n.torn = false; n.flash = Math.max(n.flash, 0.55); }
+          }
+          // the rim breathes outward - the near shell swells toward you and settles, like a chest
+          if (depth && fd > 0.01 && fd < kr * 2.2) { const sw = Math.sin(beatNow.tick * 0.9 + n.p) * 6 * n.z; n.px += (fx / fd) * sw * dt * 4; n.py += (fy / fd) * sw * dt * 4; }
+          // the shell is the face's: when the head moves (the stage), its near nodes drift after it
+          // and settle on its rim again, so the halo travels with the head
+          if (n.shell && fd > 0.01) { const want = kr * (1.06 + 0.7 * ((n.p * 7) % 1)); const tx = kx + (fx / fd) * want, ty = ky + (fy / fd) * want; n.hx += (tx - n.hx) * Math.min(1, dt * 2.2); n.hy += (ty - n.hy) * Math.min(1, dt * 2.2); }
         }
         // THE MUSIC: bass wobbles the jelly, a kick fires a ring
         if (beatNow.level > 0.02) { n.px += Math.sin(n.p * 3 + beatNow.tick * 7) * beatNow.level * 40 * dt; n.py += Math.cos(n.p * 2.3 + beatNow.tick * 6) * beatNow.level * 40 * dt; }
@@ -631,6 +717,7 @@ export function NeuralLayer({ density = 1, keepOut }: { density?: number; keepOu
           if (d2 > LINK * LINK) continue;
           const k = 1 - Math.sqrt(d2) / LINK;
           const lit = Math.max(a.flash, b.flash);
+          const zl = 0.28 + 0.72 * (zOf(a) + zOf(b)) * 0.5;      // links between near nodes are the bright ones
           // a link under strain (either end pushed far from home) brightens white, then snaps
           const strain = Math.min(1, (Math.hypot(a.px, a.py) + Math.hypot(b.px, b.py)) / 90);
           if (strain > 0.85 && Math.random() < 0.08) {
@@ -639,9 +726,9 @@ export function NeuralLayer({ density = 1, keepOut }: { density?: number; keepOu
             continue;
           }
           ctx.strokeStyle = strain > 0.4
-            ? `rgba(${Math.round(63 + 190 * strain)},${Math.round(224 + 31 * strain)},255,${(0.3 * k + 0.5 * strain).toFixed(3)})`
-            : `rgba(63,224,224,${(0.3 * k * k + 0.45 * lit * k).toFixed(3)})`;
-          ctx.lineWidth = lit > 0.3 || strain > 0.4 ? 1.4 : 1;
+            ? `rgba(${Math.round(63 + 190 * strain)},${Math.round(224 + 31 * strain)},255,${((0.3 * k + 0.5 * strain) * zl).toFixed(3)})`
+            : `rgba(63,224,224,${((0.3 * k * k + 0.45 * lit * k) * zl).toFixed(3)})`;
+          ctx.lineWidth = (lit > 0.3 || strain > 0.4 ? 1.4 : 1) * (0.7 + 0.6 * zl);
           ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
         }
       }
@@ -668,15 +755,15 @@ export function NeuralLayer({ density = 1, keepOut }: { density?: number; keepOu
         ctx.strokeStyle = grad; ctx.lineWidth = 1.6;
         ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(x, y); ctx.stroke();
         ctx.fillStyle = "rgba(220,255,255,0.95)";
-        ctx.shadowColor = "#3fe0e0"; ctx.shadowBlur = 10;
+        if (glow) { ctx.shadowColor = "#3fe0e0"; ctx.shadowBlur = 10; }
         ctx.beginPath(); ctx.arc(x, y, 1.8, 0, Math.PI * 2); ctx.fill();
         ctx.shadowBlur = 0;
       }
       signals = keep;
       // the rings and sparks
       for (const rg of rings) {
-        ctx.strokeStyle = `rgba(200,255,255,${(0.55 * rg.life).toFixed(3)})`; ctx.lineWidth = 2 * rg.life + 0.5;
-        ctx.shadowColor = "#3fe0e0"; ctx.shadowBlur = 18 * rg.life;
+        ctx.strokeStyle = `rgba(${rg.hue || "200,255,255"},${(0.55 * rg.life).toFixed(3)})`; ctx.lineWidth = 2 * rg.life + 0.5;
+        if (glow) { ctx.shadowColor = rg.hue ? `rgb(${rg.hue})` : "#3fe0e0"; ctx.shadowBlur = 18 * rg.life; }
         ctx.beginPath(); ctx.arc(rg.x, rg.y, rg.r, 0, Math.PI * 2); ctx.stroke(); ctx.shadowBlur = 0;
       }
       for (const sp of sparks) {
@@ -685,10 +772,11 @@ export function NeuralLayer({ density = 1, keepOut }: { density?: number; keepOu
       }
       // nodes: a slow twinkle, and a flash when a signal lands
       for (const n of nodes) {
-        const glow = 0.6 + 0.35 * Math.sin(n.p) + n.flash * 0.6;
-        const r = n.r + n.flash * 2.5;
-        if (n.flash > 0.05) { ctx.shadowColor = "#3fe0e0"; ctx.shadowBlur = 14 * n.flash; }
-        ctx.fillStyle = `rgba(${Math.round(63 + 160 * n.flash)},${Math.round(224 + 31 * n.flash)},${Math.round(224 + 31 * n.flash)},${Math.min(1, glow).toFixed(3)})`;
+        const z = zOf(n);
+        const glow = (0.6 + 0.35 * Math.sin(n.p) + n.flash * 0.6) * (0.3 + 0.7 * z);
+        const r = (n.r + n.flash * 2.5) * (0.55 + 1.15 * z);
+        if (glow && n.flash > 0.3) { ctx.shadowColor = "#3fe0e0"; ctx.shadowBlur = 14 * n.flash; }   // only a landing signal glows; the near shell reads by size and light
+        ctx.fillStyle = `rgba(${Math.round(63 + 160 * n.flash + 60 * z)},${Math.round(224 + 31 * n.flash)},${Math.round(224 + 31 * n.flash)},${Math.min(1, glow).toFixed(3)})`;
         ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fill();
         ctx.shadowBlur = 0;
       }
@@ -709,11 +797,57 @@ export function NeuralLayer({ density = 1, keepOut }: { density?: number; keepOu
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("helix-wave", onWave);
       document.removeEventListener("mouseleave", onLeave);
     };
-  }, [density, keepOut?.x, keepOut?.y, keepOut?.r]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [density, keepOut?.x, keepOut?.y, keepOut?.r, depth, level]); // eslint-disable-line react-hooks/exhaustive-deps
   if (REDUCED) return null;
   return <div className="board-layer board-mesh"><canvas ref={ref} aria-hidden="true" /></div>;
+}
+
+// ================================================================== the rail
+
+/** THE RAIL (Brian, 2026-09-22): a narrow menu on the left with the page's sections and what is in
+ *  each - click to jump. It reads the DOM ids the sections carry (sec-*, app-*). Folds to a strip. */
+function Rail({ cards, tasks }: { cards: Card[]; tasks: { running: number; done: number; failed: number } }) {
+  const [open, setOpen] = useState<boolean>(() => { try { return localStorage.getItem("helix_rail") !== "0"; } catch { return true; } });
+  const jump = (id: string) => { const el = document.getElementById(id); if (el) el.scrollIntoView({ behavior: "smooth", block: "start" }); };
+  const toggle = () => setOpen((o) => { try { localStorage.setItem("helix_rail", o ? "0" : "1"); } catch { /* fine */ } return !o; });
+  const face = (c: Card): FaceStatus => c.envs.some((r) => r.exists && r.checked_at && r.health === "down") ? "down" : c.needs_attention ? "degraded" : c.envs.some((r) => r.exists && !r.checked_at) ? "unknown" : c.envs.some((r) => r.exists) ? "ok" : "absent";
+  return (
+    <nav className={`board-rail${open ? " open" : ""}`} aria-label="Sections">
+      <button className="board-rail-toggle" onClick={toggle} data-tip={open ? "Fold the rail" : "Sections"}>{open ? "‹" : "›"}</button>
+      {open && (
+        <>
+          <button className="board-rail-sec" onClick={() => jump("sec-tasks")}>
+            <span className="board-rail-name">TASKS</span>
+            <span className="board-rail-sub">{tasks.running ? <b className="run">{tasks.running} running</b> : "quiet"}{tasks.done ? <> · <b className="gold">{tasks.done}</b></> : null}{tasks.failed ? <> · <b className="red">{tasks.failed}</b></> : null}</span>
+          </button>
+          <button className="board-rail-sec" onClick={() => jump("sec-projects")}>
+            <span className="board-rail-name">PROJECTS</span>
+            <span className="board-rail-sub">{cards.length} apps</span>
+          </button>
+          <div className="board-rail-items">
+            {cards.map((c) => (
+              <button key={c.app} className="board-rail-item" onClick={() => jump(`app-${c.app}`)}>
+                <StatusFace status={face(c)} size={16} />
+                <span>{c.app}</span>
+                {!c.envs.some((r) => r.env === "prod" && r.exists) && <i className="board-rail-proto" title="prototype">◇</i>}
+              </button>
+            ))}
+          </div>
+          <button className="board-rail-sec dim" onClick={() => jump("sec-next")}>
+            <span className="board-rail-name">SLACK · GOOGLE</span>
+            <span className="board-rail-sub">coming</span>
+          </button>
+          <button className="board-rail-sec" onClick={() => jump("sec-builds")}>
+            <span className="board-rail-name">BUILDS</span>
+            <span className="board-rail-sub">on this PC</span>
+          </button>
+        </>
+      )}
+    </nav>
+  );
 }
 
 // ================================================================== small pieces
@@ -743,21 +877,6 @@ function Decoded({ text, className, style }: { text: string; className?: string;
   return <span className={className} style={style}>{shown}</span>;
 }
 
-function Lamp({ health }: { health: Serving["health"] }) {
-  const c = HEALTH_COLOR[health];
-  const lit = health === "ok" || health === "degraded" || health === "down";
-  return (
-    <span
-      className={`board-lamp${lit ? " lit " + health : ""}`}
-      title={health}
-      style={{
-        background: c, color: c,
-        boxShadow: lit ? `0 0 10px ${c}, 0 0 24px color-mix(in srgb, ${c} 45%, transparent)` : "none",
-        opacity: lit ? 1 : 0.5,
-      }}
-    />
-  );
-}
 
 function Pill({ text, color, title }: { text: string; color: string; title?: string }) {
   return (
@@ -769,90 +888,77 @@ function Pill({ text, color, title }: { text: string; color: string; title?: str
 }
 
 /** The ring on a card: how many of its live environments are up. */
-function Ring({ ok, total, warn }: { ok: number; total: number; warn: boolean }) {
-  const r = 14, c = 2 * Math.PI * r;
-  const frac = total ? ok / total : 0;
-  return (
-    <svg className={`board-ring${warn ? " warn" : ""}`} viewBox="0 0 34 34" aria-hidden="true">
-      <circle className="track" cx="17" cy="17" r={r} />
-      <circle className="arc" cx="17" cy="17" r={r} strokeDasharray={c} strokeDashoffset={c * (1 - frac)} />
-    </svg>
-  );
-}
 
 
 // ================================================================== rows + cards
 
 type Thread = "same" | "changed" | "unknown" | null;
 
-function EnvRow({ row, thread }: { row: Row; thread: Thread }) {
-  const api = row.api;
+function EnvRow({ row, thread, busy, queued, onCreate }: { row: Row; thread: Thread; busy?: boolean; queued?: boolean; onCreate?: () => void }) {
   const env = row.env.toUpperCase();
-  if (!row.exists) {
-    return (
-      <div className={`board-row ${row.env} flex items-center gap-3 py-2.5 text-[13px]`} style={MUTED}>
-        {thread && <span className={`board-thread ${thread}`} />}
-        <Lamp health="absent" />
-        <span className="board-env" style={{ opacity: 0.55 }}>{env}</span>
-        <span>not deployed in this environment</span>
-      </div>
-    );
+  const api = row.api;
+  const unread = row.exists && !row.checked_at;
+  const [why, setWhy] = useState(false);
+  const status: FaceStatus = !row.exists ? "absent" : busy ? "reading" : queued ? "queued" : unread ? "unknown" : row.health === "ok" ? "ok" : row.health === "degraded" ? "degraded" : row.health === "down" ? "down" : "unknown";
+  const words: string[] = [];
+  if (row.exists && row.checked_at) {
+    words.push(`${env} is ${STATUS_LABEL[status]}${api?.revision ? ` on ${api.revision}` : ""}${api?.deployed_at ? `, deployed ${when(api.deployed_at)}${api.deployed_by ? ` by ${api.deployed_by}` : ""}` : ""}.`);
+    words.push(DRIFT_TITLE[row.drift] + (row.repo_commit ? ` GitHub is at ${row.repo_commit}.` : ""));
+    if (api && !api.commit) words.push("This deploy carries no version stamp, so HELIX cannot compare it with GitHub. Deploys made from HELIX are stamped.");
+    if (api?.dirty) words.push("Deployed from a folder with unsaved (uncommitted) changes, so what is running is not exactly what is in GitHub.");
+    if (api?.db) words.push(`Database: ${api.db}${api.read_only ? " (read-only)" : ""}.`);
+    if (row.note) words.push(row.note);
+  } else if (!row.exists) {
+    words.push(`${env} is not deployed. A prototype until it is - add it from the gear when it is ready.`);
+  } else {
+    words.push(`${env} has not been read yet.`);
   }
-  const unread = !row.checked_at;
   return (
-    <div className={`board-row ${row.env} py-2.5`}>
-      {thread && <span className={`board-thread ${thread}`} title={
-        thread === "same" ? "Same commit as the environment below - one line of descent"
-          : thread === "changed" ? "The commit changed between these environments"
-            : "One side could not say which commit it serves"} />}
-      {/* line 1: the environment and its two verdicts - is it up, has the repo moved on */}
-      <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-[13px]">
-        <Lamp health={row.health} />
+    <div className={`board-row${!row.exists ? " absent" : ""}`} style={{ position: "relative" }}>
+      {thread && <i className={`board-thread ${thread}`} aria-hidden="true" />}
+      <div className="flex items-center gap-x-2.5 text-[13px]">
+        <StatusFace status={status} size={30} title={`${env}: ${STATUS_LABEL[status]} - click for the words`} onClick={() => setWhy((w) => !w)}
+          attention={row.exists && Boolean(row.checked_at) && (row.needs_attention || Boolean(api?.dirty))} />
         <span className="board-env">{env}</span>
-        {unread ? (
-          <span style={MUTED}>not read yet</span>
+        {/* the face says running / not deployed / not read: only what needs a look stays in words */}
+        {!row.exists ? (
+          onCreate && (
+            <button className="board-create" onClick={onCreate} data-tip={`Create the ${env} environment - a gated, deliberate act: the plan is shown first, nothing runs until it is confirmed`}>
+              <i aria-hidden="true">✦</i> Create
+            </button>
+          )
+        ) : unread ? (
+          (busy || queued) ? <Strandbar progress={null} state="running" height={10} words={false} compact /> : null
         ) : (
           <>
-            <span style={{ color: HEALTH_COLOR[row.health], minWidth: 56, letterSpacing: 1 }} title={row.health === "ok" ? "The service answers and says it is healthy" : row.health}>{HEALTH_LABEL[row.health]}</span>
-            <Pill
-              text={row.drift === "behind" && row.behind_by != null ? `${row.behind_by} commit${row.behind_by === 1 ? "" : "s"} behind GitHub` : DRIFT_LABEL[row.drift]}
-              color={DRIFT_COLOR[row.drift]}
-              title={DRIFT_TITLE[row.drift] + (row.repo_commit ? ` GitHub is at ${row.repo_commit}.` : "")}
-            />
-            {api?.dirty && <Pill text="unsaved changes" color="var(--error)" title="Deployed from a folder with uncommitted changes - not exactly what is in GitHub" />}
-            {api?.is_split && <Pill text={`split ${api.traffic_percent}%`} color="var(--working)" />}
-            {api?.read_only && <Pill text="read-only" color="var(--amber)" />}
-            {api?.flags?.appCheckRequired === true && <Pill text="AppCheck" color="var(--cyan)" />}
+            {row.health !== "ok" && <span style={{ color: HEALTH_COLOR[row.health], letterSpacing: 1 }}>{HEALTH_LABEL[row.health]}</span>}
+            {(row.drift === "behind" || row.drift === "ahead" || row.drift === "diverged") && (
+              <Pill
+                text={row.drift === "behind" && row.behind_by != null ? `${row.behind_by} behind` : DRIFT_LABEL[row.drift]}
+                color={DRIFT_COLOR[row.drift]}
+                title={DRIFT_TITLE[row.drift] + (row.repo_commit ? ` GitHub is at ${row.repo_commit}.` : "")}
+              />
+            )}
+            {api?.dirty && <span className="board-dot warn" title="Deployed with unsaved changes - not exactly what is in GitHub" />}
+            {api?.is_split && <span className="board-dot" style={{ background: "var(--working)" }} title={`Traffic split: ${api.traffic_percent}%`} />}
+            {api?.read_only && <span className="board-dot" style={{ background: "var(--amber)" }} title="Read-only database" />}
+            {api?.commit ? <Decoded text={api.commit} className="board-chip mono" /> : null}
           </>
         )}
+        <div className="flex-1" />
+        <button className={`board-why${why ? " on" : ""}`} onClick={() => setWhy((w) => !w)} title="What this means, in plain words" aria-label="Explain">?</button>
       </div>
-      {/* line 2: what exactly is serving - commit, revision, when, from which database */}
-      {!unread && api && (
-        <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-[12px] mt-1.5 pl-6" style={MUTED}>
-          {api.commit
-            ? <Decoded text={api.commit} className="board-chip" />
-            : <span className="board-chip dim" title="This deploy was not stamped with its commit. Deploys from HELIX are.">no version stamp</span>}
-          {api.revision && <span className="font-mono">{api.revision}</span>}
-          {api.deployed_at && <span>{when(api.deployed_at)}{api.deployed_by ? ` · ${api.deployed_by}` : ""}</span>}
-          {api.db && <span>db <span style={{ color: "var(--text)" }}>{api.db}</span></span>}
-        </div>
-      )}
-      {row.note && (
-        <div className="text-[12px] mt-1 pl-6" style={{ color: row.needs_attention || api?.dirty ? "var(--working)" : "var(--muted)" }}>
-          {row.note}
-          {row.detail && (
-            <details className="board-detail">
-              <summary>what the tool said</summary>
-              <pre>{row.detail}</pre>
-            </details>
-          )}
+      {why && (
+        <div className="board-why-pop" onClick={() => setWhy(false)}>
+          {words.map((w, i) => <p key={i}>{w}</p>)}
+          {api?.revision && <p className="dim">{api.revision}{api.deployed_at ? ` · ${when(api.deployed_at)}` : ""}{api.deployed_by ? ` · ${api.deployed_by}` : ""}</p>}
+          {row.detail && <pre>{row.detail}</pre>}
         </div>
       )}
     </div>
   );
 }
 
-/** The thread between two neighbouring environments: same commit, a changed one, or unread. */
 function threadBetween(a: Row, b: Row): Thread {
   if (!a.exists || !b.exists) return null;
   if (!a.checked_at || !b.checked_at) return null;
@@ -861,9 +967,9 @@ function threadBetween(a: Row, b: Row): Thread {
   return ca === cb ? "same" : "changed";
 }
 
-type Action = "dev" | "git" | "deploy";
+type Action = "dev" | "git" | "deploy" | "create";
 
-function AppCard({ card, index, busy, queued, onRead, onAction, onLink, collapsed, onToggle }: { card: Card; index: number; busy: boolean; queued?: boolean; onRead: (app: string) => void; onAction: (app: string, a: Action) => void; onLink: (app: string) => void; collapsed?: boolean; onToggle?: () => void }) {
+function AppCard({ card, index, busy, queued, onRead, onAction, onLink, collapsed, onToggle }: { card: Card; index: number; busy: boolean; queued?: boolean; onRead: (app: string) => void; onAction: (app: string, a: Action, env?: string) => void; onLink: (app: string) => void; collapsed?: boolean; onToggle?: () => void }) {
   const ref = useRef<HTMLElement | null>(null);
   // A PROTOTYPE: an app with no production environment. Marked in the header, never judged.
   const prototype = !card.envs.some((r) => r.env === "prod" && r.exists);
@@ -895,6 +1001,7 @@ function AppCard({ card, index, busy, queued, onRead, onAction, onLink, collapse
   return (
     <section
       ref={ref}
+      id={`app-${card.app}`}
       className={`board-card materialize p-4${busy ? " reading" : ""}${attention ? " attention" : ""}${unlinked ? " unlinked" : ""}${collapsed ? " collapsed" : ""}${prototype ? " prototype" : ""}`}
       style={{ "--i": index * 3 } as React.CSSProperties}
       onMouseMove={onMove}
@@ -905,17 +1012,20 @@ function AppCard({ card, index, busy, queued, onRead, onAction, onLink, collapse
       <i className="glare" aria-hidden="true" />
       <i className="scan" aria-hidden="true" />
       <div className="flex items-center gap-3 relative">
-        <button className="board-fold" onClick={onToggle} title={collapsed ? "Expand" : "Collapse"} aria-label={collapsed ? "Expand" : "Collapse"}>{collapsed ? "▸" : "▾"}</button>
-        <div>
-          <div className="board-index">APP {String(index + 1).padStart(2, "0")}{prototype && <span className="board-proto" title={`No production environment - a prototype. ${envsMissing.length ? "Missing: " + envsMissing.join(", ").toUpperCase() + ". " : ""}Add environments from the gear when it is ready.`}>◇ PROTOTYPE</span>}</div>
-          <div className="board-app"><Decoded text={card.app} /></div>
-        </div>
+        <button className="board-title" onClick={onToggle} title={collapsed ? "Expand" : "Collapse"}>
+          <span className={`board-fold${collapsed ? "" : " open"}`} aria-hidden="true">▸</span>
+          <span>
+            <span className="board-index">APP {String(index + 1).padStart(2, "0")}{prototype && <span className="board-proto" title={`No production environment - a prototype. ${envsMissing.length ? "Missing: " + envsMissing.join(", ").toUpperCase() + ". " : ""}Add environments from the gear when it is ready.`}>◇ PROTOTYPE</span>}</span>
+            <span className="board-app"><Decoded text={card.app} /></span>
+          </span>
+        </button>
         {attention && <Pill text="needs a look" color="var(--working)" />}
         {collapsed && live.length > 0 && <span className="text-[11px]" style={MUTED}>{up}/{live.length} running</span>}
         <div className="flex-1" />
-        {live.length > 0 && <Ring ok={up} total={live.length} warn={attention || dirty} />}
+        <StatusFace status={busy ? "reading" : queued ? "queued" : live.length === 0 ? "unknown" : attention || up < live.length ? "degraded" : prototype ? "prototype" : "ok"} size={40}
+          title={busy ? "Reading" : queued ? "Queued" : live.length === 0 ? "Not read yet" : `${up} of ${live.length} running${attention ? " - needs a look" : ""}${dirty ? " - unsaved changes deployed" : ""}`} />
         <button className="btn text-xs" disabled={busy || queued} onClick={() => onRead(card.app)} title="Read this app's environments now">
-          {busy ? "Reading…" : queued ? "Queued…" : "Read"}
+          {busy ? <Strandbar progress={null} state="running" height={10} words={false} compact /> : queued ? "Queued" : "Read"}
         </button>
         <button className={`board-gear${unlinked ? " spin" : ""}`} onClick={() => onLink(card.app)}
           title={unlinked ? `Not linked - ${card.link?.why || "set the repo"}` : "This project's settings: repo, branch, folder"} aria-label="Project settings">
@@ -932,24 +1042,22 @@ function AppCard({ card, index, busy, queued, onRead, onAction, onLink, collapse
         <button className="act" onClick={() => onAction(card.app, "git")} title="The repo: what is committed, what is not, the lines of work">⎇ Git</button>
         <button className="act ship" onClick={() => onAction(card.app, "deploy")} title="Ship an environment, or roll one back">▲ Deploy</button>
       </div>
-      {card.repo && (
-        <div className="flex items-center gap-2 mt-2">
-          <span className="board-chip dim elide" title={card.repo}>{card.repo}</span>
-          {live.length > 0 && (
-            <span className="board-pulse ml-auto" title={`${live.length} environment${live.length === 1 ? "" : "s"} read`}>
-              {card.envs.filter((r) => r.exists).map((r) => <i key={r.key} className={r.checked_at ? r.health : ""} />)}
-            </span>
-          )}
-        </div>
-      )}
+      <div className="flex items-center gap-2 mt-2">
+        {card.link?.folder && (
+          <button className="board-folder" title={`Open ${card.link.folder} in Explorer`}
+            onClick={() => void api.post("/api/fleet/open_folder", { app: card.app }).catch((e: Error) => window.alert(e.message))}>
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.2a1.5 1.5 0 0 1 1.1.5L11 7h8.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5v-11Z" /></svg>
+            <span className="elide">{card.link.folder.split(/[\\/]/).pop()}</span>
+          </button>
+        )}
+        {card.repo && <a className="board-chip dim elide" title={`${card.repo} on GitHub`} href={`https://github.com/${card.repo}`} target="_blank" rel="noreferrer noopener">⎇ {card.repo.split("/")[1]}</a>}
+      </div>
       <div className="mt-3 pl-1">
         {card.envs.map((row, i) => (
-          <EnvRow key={row.key} row={unlinked && row.note === card.link?.why ? { ...row, note: null } : row}
-            thread={i < card.envs.length - 1 ? threadBetween(row, card.envs[i + 1]) : null} />
+          <EnvRow key={row.key} row={unlinked && row.note === card.link?.why ? { ...row, note: null } : row} busy={busy} queued={queued}
+            thread={i < card.envs.length - 1 ? threadBetween(row, card.envs[i + 1]) : null}
+            onCreate={prototype && envsMissing.includes(row.env) ? () => onAction(card.app, "create", row.env) : undefined} />
         ))}
-        {prototype && envsMissing.length > 0 && (
-          <div className="board-proto-note">A prototype: no {envsMissing.join(" or ").toUpperCase()} yet. When it is ready, add the missing environments from ⚙ - HELIX will spin them up in windy-celerity the fleet's way (that lane comes with Deploy).</div>
-        )}
       </div>
       </>}
     </section>
@@ -973,22 +1081,40 @@ function matches(card: Card, q: string): boolean {
 type Tab = "apps" | "tasks" | "agents" | "models" | "knowledge";
 const TABS: [string, Tab][] = [["Apps", "apps"], ["Protocols", "tasks"], ["Agents", "agents"], ["Holograms", "models"], ["Vault", "knowledge"]];
 
+/** The tabs' pictures (Brian, 2026-09-22): each one moves when its tab is on or hovered - the
+ *  hexagons of Apps breathe, Protocols' arrow runs its loop, the Agent blinks, the Hologram turns,
+ *  the Vault's shackle lifts. Plain SVG + CSS, nothing drawn per frame. */
+function TabIcon({ tab }: { tab: Tab }) {
+  const P = { fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  switch (tab) {
+    case "apps": return <svg className="tab-ic apps" viewBox="0 0 24 24" width="15" height="15" {...P}><path className="hex a" d="M12 3l5 3v6l-5 3-5-3V6z" /><path className="hex b" d="M6 12l4 2.3V19l-4 2.3L2 19v-4.7z" transform="translate(1 -1) scale(.8)" /><path className="hex c" d="M18 12l4 2.3V19l-4 2.3L14 19v-4.7z" transform="translate(-1 -1) scale(.8)" /></svg>;
+    case "tasks": return <svg className="tab-ic tasks" viewBox="0 0 24 24" width="15" height="15" {...P}><path className="loop" d="M4 12a8 8 0 0 1 14-5.3" /><path className="loop b" d="M20 12a8 8 0 0 1-14 5.3" /><path className="tip" d="M18 3v4h-4" /><path className="tip" d="M6 21v-4h4" /></svg>;
+    case "agents": return <svg className="tab-ic agents" viewBox="0 0 24 24" width="15" height="15" {...P}><rect x="4" y="7" width="16" height="12" rx="4" /><path d="M12 3v4M9 3h6" /><circle className="eye" cx="9" cy="13" r="1.4" fill="currentColor" stroke="none" /><circle className="eye" cx="15" cy="13" r="1.4" fill="currentColor" stroke="none" /></svg>;
+    case "models": return <svg className="tab-ic models" viewBox="0 0 24 24" width="15" height="15" {...P}><g className="cube"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" /><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5" /></g></svg>;
+    case "knowledge": return <svg className="tab-ic vault" viewBox="0 0 24 24" width="15" height="15" {...P}><rect x="5" y="11" width="14" height="10" rx="2" /><path className="shackle" d="M8 11V7.5a4 4 0 0 1 8 0V11" /><circle cx="12" cy="16" r="1.5" fill="currentColor" stroke="none" /></svg>;
+  }
+}
+
 /** The right-hand drawer THE FORGE opens for Git and Deploy. UI first (Brian, 2026-09-19): the
  *  reads are live where the fleet has them; every verb that would change a service is shown,
  *  named, and disabled until its lane is wired behind the domain's checks. */
-function Drawer({ title, sub, onClose, children }: { title: string; sub?: string; onClose: () => void; children: React.ReactNode }) {
+/** A WINDOW: centred, wide, with the room dimmed behind it. Nothing docks over it. */
+function Drawer({ title, sub, onClose, children, wide, tools }: { title: string; sub?: string; onClose: () => void; children: React.ReactNode; wide?: boolean; tools?: React.ReactNode }) {
+  useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); }; window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [onClose]);
   return (
-    <div className="board-drawer-wrap" onClick={onClose}>
-      <aside className="board-drawer" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center gap-3 mb-3">
+    <div className="board-drawer-wrap centred" onClick={onClose}>
+      <aside className={`board-window${wide ? " wide" : ""}`} onClick={(e) => e.stopPropagation()}>
+        <i className="corners" aria-hidden="true" />
+        <div className="board-window-head">
           <div>
             <div className="board-kicker">{sub}</div>
-            <div className="board-app" style={{ fontSize: 17 }}>{title}</div>
+            <div className="board-app" style={{ fontSize: 20 }}>{title}</div>
           </div>
           <div className="flex-1" />
+          {tools}
           <button className="btn text-xs" onClick={onClose}>✕</button>
         </div>
-        {children}
+        <div className="board-window-body">{children}</div>
       </aside>
     </div>
   );
@@ -1031,53 +1157,167 @@ function layoutGraph(commits: GitCommit[]) {
 
 const LANE_COLORS = ["#3fe0e0", "#2a8cff", "#f0be5a", "#c86dff", "#5adf8a", "#ff7a7a", "#ffa94d"];
 
-function GitGraph({ doc, serving }: { doc: GitDoc; serving: { env: string; commit: string }[] }) {
+/** THE STRANDS: the commit graph drawn as DNA - each lane a glowing strand with light running
+ *  along it, commits as beads (a merge is a knot of two strands), branch tips as bright caps, and
+ *  the environments as gold rings on whatever they are serving. Hover a bead for the words; click
+ *  to pin them. Nothing is text until you ask. */
+/** THE STRANDS (Brian, 2026-09-22): the lines between commits are little double helices - two
+ *  strands winding round the path with rungs, turning on their own, and LIQUID under the mouse:
+ *  the hand pushes the strand aside and it springs back. One canvas under the SVG nodes (the
+ *  nodes keep the hit-testing), on the governor's 2D budget, sprites for the glow. */
+function GitStrands({ edges, width, height, left, top, col, row }: { edges: { from: number; to: number; fromLane: number; toLane: number }[]; width: number; height: number; left: number; top: number; col: number; row: number }) {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const c = ref.current; if (!c) return;
+    const g = c.getContext("2d"); if (!g) return;
+    const dpr = Math.min(1.5, window.devicePixelRatio || 1);
+    c.width = Math.round(width * dpr); c.height = Math.round(height * dpr);
+    const hueOf = (hex: string) => { const r = parseInt(hex.slice(1, 3), 16) / 255, gg = parseInt(hex.slice(3, 5), 16) / 255, b = parseInt(hex.slice(5, 7), 16) / 255; const mx = Math.max(r, gg, b), mn = Math.min(r, gg, b), d = mx - mn; if (!d) return 190; let h = mx === r ? ((gg - b) / d) % 6 : mx === gg ? (b - r) / d + 2 : (r - gg) / d + 4; h = Math.round(h * 60); return h < 0 ? h + 360 : h; };
+    // every edge sampled once: the points along its path and their tangents; each sample keeps a push
+    type Pt = { x: number; y: number; tx: number; ty: number; px: number; py: number };
+    const strands = edges.map((e) => {
+      const x1 = left + e.fromLane * col, y1 = top + e.from * row, x2 = left + e.toLane * col, y2 = top + e.to * row;
+      const n = Math.max(6, Math.round(Math.hypot(x2 - x1, y2 - y1) / 4));
+      const pts: Pt[] = [];
+      for (let i = 0; i <= n; i++) {
+        const t = i / n;
+        let x: number, y: number, tx: number, ty: number;
+        if (x1 === x2) { x = x1; y = y1 + (y2 - y1) * t; tx = 0; ty = 1; }
+        else {                                        // the same cubic the SVG used
+          const c1y = y1 + row * 0.7, c2y = y2 - row * 0.7, u = 1 - t;
+          x = u * u * u * x1 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x2;
+          y = u * u * u * y1 + 3 * u * u * t * c1y + 3 * u * t * t * c2y + t * t * t * y2;
+          const dx = 3 * u * u * (x1 - x1) + 6 * u * t * (x2 - x1) + 3 * t * t * (x2 - x2);
+          const dy = 3 * u * u * (c1y - y1) + 6 * u * t * (c2y - c1y) + 3 * t * t * (y2 - c2y);
+          const l = Math.hypot(dx, dy) || 1; tx = dx / l; ty = dy / l;
+        }
+        pts.push({ x, y, tx, ty, px: 0, py: 0 });
+      }
+      return { pts, hue: hueOf(LANE_COLORS[e.toLane % LANE_COLORS.length]), phase: Math.random() * 6.28, len: Math.hypot(x2 - x1, y2 - y1) };
+    });
+    const mouse = { x: -9999, y: -9999 };
+    const onMove = (e: MouseEvent) => { const r = c.getBoundingClientRect(); mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top; };
+    const onLeave = () => { mouse.x = -9999; mouse.y = -9999; };
+    c.parentElement?.addEventListener("mousemove", onMove); c.parentElement?.addEventListener("mouseleave", onLeave);
+    let t = 0;
+    const R = 4.2, TURN = 14, REACH = 42;
+    const stop = loop((dt) => {
+      t += dt;
+      g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, width, height);
+      const glow = glows();
+      for (const s of strands) {
+        // the liquid: each sample is pushed off the cursor, eases back
+        for (const p of s.pts) {
+          const dx = p.x + p.px - mouse.x, dy = p.y + p.py - mouse.y, d = Math.hypot(dx, dy);
+          if (d < REACH && d > 0.01) { const f = (1 - d / REACH) * 26; p.px += (dx / d) * f * dt * 6; p.py += (dy / d) * f * dt * 6; }
+          p.px *= Math.pow(0.08, dt); p.py *= Math.pow(0.08, dt);
+        }
+        const spin = t * 2.4 + s.phase;
+        // rungs first, then the two strands as short lit segments, back one dimmer
+        for (let k = 0; k < 2; k++) {
+          let prev: { x: number; y: number } | null = null;
+          for (let i = 0; i < s.pts.length; i++) {
+            const p = s.pts[i]; const along = (i / (s.pts.length - 1)) * s.len;
+            const a = along / TURN * Math.PI * 2 + spin + k * Math.PI;
+            const off = Math.cos(a) * R, depth = (Math.sin(a) + 1) / 2;
+            const nx = -p.ty, ny = p.tx;
+            const x = p.x + p.px + nx * off, y = p.y + p.py + ny * off;
+            if (prev) {
+              g.strokeStyle = `hsla(${s.hue}, 90%, ${50 + depth * 35}%, ${0.25 + 0.65 * depth})`;
+              g.lineWidth = 0.9 + depth * 1.5;
+              g.beginPath(); g.moveTo(prev.x, prev.y); g.lineTo(x, y); g.stroke();
+            }
+            if (k === 0 && i % 4 === 2) {   // a rung to the other strand
+              const a2 = a + Math.PI, off2 = Math.cos(a2) * R;
+              g.strokeStyle = `hsla(${s.hue}, 80%, 80%, ${0.18 + 0.4 * Math.abs(Math.cos(a))})`; g.lineWidth = 0.8;
+              g.beginPath(); g.moveTo(x, y); g.lineTo(p.x + p.px + nx * off2, p.y + p.py + ny * off2); g.stroke();
+            }
+            if (glow && depth > 0.92 && i % 3 === 0) { g.fillStyle = `hsla(${s.hue}, 100%, 85%, 0.9)`; g.beginPath(); g.arc(x, y, 1.2, 0, Math.PI * 2); g.fill(); }
+            prev = { x, y };
+          }
+        }
+      }
+    });
+    return () => { stop(); c.parentElement?.removeEventListener("mousemove", onMove); c.parentElement?.removeEventListener("mouseleave", onLeave); };
+  }, [edges, width, height, left, top, col, row]);
+  return <canvas ref={ref} className="board-strands-canvas" style={{ width, height }} aria-hidden="true" />;
+}
+
+function GitGraph({ doc, serving, onPick }: { doc: GitDoc; serving: { env: string; commit: string }[]; onPick?: (c: GitCommit | null) => void }) {
   const { laneOf, edges, width } = useMemo(() => layoutGraph(doc.commits), [doc]);
-  const ROW = 34, COL = 18, LEFT = 14, TOP = 18;
-  const gw = LEFT * 2 + COL * Math.max(width - 1, 0) + 8;
+  const [hover, setHover] = useState<string | null>(null);
+  const [pinned, setPinned] = useState<string | null>(null);
+  const ROW = 30, COL = 26, LEFT = 22, TOP = 22;
+  const gw = LEFT * 2 + COL * Math.max(width - 1, 0) + 12;
   const tips = new Map<string, string[]>();
   doc.branches.forEach((b) => { tips.set(b.sha, [...(tips.get(b.sha) || []), b.name]); });
   const served = new Map<string, string[]>();
   serving.forEach((s) => { const k = doc.commits.find((c) => c.sha.startsWith(s.commit))?.sha; if (k) served.set(k, [...(served.get(k) || []), s.env]); });
-  const H = TOP + ROW * doc.commits.length;
+  const H = TOP + ROW * doc.commits.length + 10;
+  const active = pinned || hover;
+  const activeCommit = active ? doc.commits.find((c) => c.sha === active) || null : null;
+  useEffect(() => { onPick?.(pinned ? doc.commits.find((c) => c.sha === pinned) || null : null); }, [pinned, doc, onPick]);
   return (
-    <div className="board-graph">
-      <svg className="board-graph-svg" width={gw} height={H} style={{ flex: "none" }}>
-        {edges.map((e, i) => {
-          const x1 = LEFT + e.fromLane * COL, y1 = TOP + e.from * ROW, x2 = LEFT + e.toLane * COL, y2 = TOP + e.to * ROW;
-          const col = LANE_COLORS[(e.fromLane === e.toLane ? e.toLane : e.toLane) % LANE_COLORS.length];
-          const d = x1 === x2 ? `M${x1},${y1} L${x2},${y2}` : `M${x1},${y1} C${x1},${y1 + ROW * 0.6} ${x2},${y2 - ROW * 0.6} ${x2},${y2}`;
-          return <path key={i} d={d} stroke={col} strokeWidth={2} fill="none" opacity={0.75} className="board-graph-edge" style={{ animationDelay: `${i * 30}ms` }} />;
-        })}
+    <div className="board-strands">
+      <div className="board-strands-stack" style={{ width: gw, height: H }}>
+      <GitStrands edges={edges} width={gw} height={H} left={LEFT} top={TOP} col={COL} row={ROW} />
+      <svg className="board-strands-svg" width={gw} height={H}>
+        <defs>
+          {LANE_COLORS.map((c, i) => (
+            <linearGradient key={i} id={`lane${i}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={c} stopOpacity="0.95" /><stop offset="1" stopColor={c} stopOpacity="0.35" /></linearGradient>
+          ))}
+          <filter id="strandGlow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.2" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
+        </defs>
         {doc.commits.map((c, i) => {
           const lane = laneOf.get(c.sha) ?? 0;
           const x = LEFT + lane * COL, y = TOP + i * ROW;
           const col = LANE_COLORS[lane % LANE_COLORS.length];
-          const isTip = tips.has(c.sha), isServed = served.has(c.sha), merge = c.parents.length > 1;
+          const isTip = tips.has(c.sha), envs = served.get(c.sha) || [], merge = c.parents.length > 1;
+          const on = active === c.sha;
           return (
-            <g key={c.sha} className="board-graph-node" style={{ animationDelay: `${i * 40}ms` }}>
-              {isServed && <circle cx={x} cy={y} r={9} fill="none" stroke="var(--gold)" strokeWidth={1.5} className="board-graph-served" />}
-              <circle cx={x} cy={y} r={merge ? 4 : 5} fill={merge ? "var(--panel)" : col} stroke={col} strokeWidth={2} />
-              {isTip && <circle cx={x} cy={y} r={2} fill="#fff" />}
+            <g key={c.sha} className="board-graph-node" style={{ animationDelay: `${i * 30}ms`, cursor: "pointer" }}
+              onMouseEnter={() => setHover(c.sha)} onMouseLeave={() => setHover(null)} onClick={() => setPinned((p) => (p === c.sha ? null : c.sha))}>
+              <circle cx={x} cy={y} r={14} fill="transparent" />
+              {envs.length > 0 && <circle cx={x} cy={y} r={10} fill="none" stroke="var(--gold)" strokeWidth={1.5} className="board-graph-served" />}
+              {envs.some((e) => e === "prod") && <circle cx={x} cy={y} r={13} fill="none" stroke="var(--gold)" strokeWidth={0.8} opacity={0.6} strokeDasharray="2 3" />}
+              <circle cx={x} cy={y} r={on ? 7 : merge ? 4.5 : 5.5} fill={merge ? "#0b1218" : col} stroke={on ? "#fff" : col} strokeWidth={merge ? 2.4 : 1.6} filter="url(#strandGlow)" />
+              {isTip && <circle cx={x} cy={y} r={2.2} fill="#fff" />}
+              {on && <circle cx={x} cy={y} r={11} fill="none" stroke="#fff" strokeWidth={0.8} opacity={0.5} />}
             </g>
           );
         })}
       </svg>
-      <div className="board-graph-rows">
-        {doc.commits.map((c, i) => {
+      </div>
+      <div className="board-strands-rows">
+        {doc.commits.map((c) => {
           const lane = laneOf.get(c.sha) ?? 0;
           const names = tips.get(c.sha) || [], envs = served.get(c.sha) || [];
+          const on = active === c.sha;
           return (
-            <div key={c.sha} className="board-graph-row" style={{ height: ROW, animationDelay: `${i * 40}ms` }}>
+            <div key={c.sha} className={`board-strand-row${on ? " on" : ""}`} style={{ height: ROW }}
+              onMouseEnter={() => setHover(c.sha)} onMouseLeave={() => setHover(null)} onClick={() => setPinned((p) => (p === c.sha ? null : c.sha))}>
               <span className="board-chip mono" style={{ color: LANE_COLORS[lane % LANE_COLORS.length] }}>{c.sha.slice(0, 7)}</span>
               {names.map((n) => <span key={n} className={`board-ref${n === doc.branch ? " main" : ""}`}>⎇ {n}</span>)}
               {envs.map((e) => <span key={e} className={`board-ref served${e === "prod" ? " prod" : ""}`}>▲ {e}</span>)}
-              <span className="elide board-graph-subject" title={c.subject}>{c.subject}</span>
-              <span className="board-graph-meta">{c.author}{c.at ? ` · ${ago(c.at)}` : ""}</span>
+              <span className="elide board-graph-subject">{c.subject}</span>
             </div>
           );
         })}
       </div>
+      {activeCommit && (
+        <div className={`board-strand-card${pinned ? " pinned" : ""}`}>
+          <div className="board-kicker">{pinned ? "PINNED · click again to release" : "COMMIT"}</div>
+          <div className="text-[14px] mt-1">{activeCommit.subject}</div>
+          <div className="text-[12px] mt-1" style={MUTED}>{activeCommit.author}{activeCommit.at ? ` · ${new Date(activeCommit.at).toLocaleString()}` : ""}</div>
+          <div className="flex items-center gap-2 flex-wrap mt-2">
+            <span className="board-chip mono">{activeCommit.sha.slice(0, 12)}</span>
+            {(tips.get(activeCommit.sha) || []).map((n) => <span key={n} className="board-ref">⎇ {n}</span>)}
+            {(served.get(activeCommit.sha) || []).map((e) => <span key={e} className="board-ref served">▲ {e}</span>)}
+            {activeCommit.parents.length > 1 && <span className="board-ref">merge of {activeCommit.parents.length}</span>}
+          </div>
+          <a className="text-[12px] mt-2 inline-block" style={{ color: "var(--cyan)" }} href={`https://github.com/${doc.repo}/commit/${activeCommit.sha}`} target="_blank" rel="noreferrer noopener">Open on GitHub ↗</a>
+        </div>
+      )}
     </div>
   );
 }
@@ -1119,8 +1359,21 @@ function GitDrawer({ card, onClose, onBoard }: { card: Card; onClose: () => void
     try { setScan(await api.post<ScanDoc>("/api/fleet/scan", { app: card.app, branch: doc?.branch })); }
     catch (e) { setScanErr((e as Error).message); } finally { setScanning(false); }
   };
+  // THE MERGE CHECK: would this branch fold into main cleanly? Read from the linked clone.
+  const [mergeInto, setMergeInto] = useState("main");
+  const [merge, setMerge] = useState<{ clean: boolean; conflicts: string[]; ahead: number; behind: number; base: string } | null>(null);
+  const [mergeErr, setMergeErr] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const runMerge = async () => {
+    if (!doc) return;
+    setChecking(true); setMergeErr(null); setMerge(null);
+    try { setMerge(await api.post("/api/fleet/merge_check", { app: card.app, from: doc.branch, into: mergeInto })); }
+    catch (e) { setMergeErr((e as Error).message); } finally { setChecking(false); }
+  };
   return (
-    <Drawer title={card.app} sub="GIT · the repo" onClose={onClose}>
+    <Drawer title={card.app} sub="GIT · the strands" onClose={onClose} wide
+      tools={<a className="btn text-xs" href={`https://github.com/${card.repo}`} target="_blank" rel="noreferrer noopener">GitHub ↗</a>}>
+      <div className="board-git">
       <div className="space-y-4 text-[13px]">
         <div className="board-panel">
           <div className="board-kicker mb-1">NOW</div>
@@ -1140,7 +1393,31 @@ function GitDrawer({ card, onClose, onBoard }: { card: Card; onClose: () => void
             )}
             {head ? <span className="board-chip">HEAD {head}</span> : <span style={MUTED}>HEAD not read yet</span>}
           </div>
-          <div className="mt-2" style={MUTED}>Working tree, staged files and the commit box read from the clone on this PC - wired with the deploy lane.</div>
+          {doc && doc.branches.length > 1 && (
+            <div className="board-merge mt-3">
+              <div className="board-kicker mb-1">FOLD THIS BRANCH INTO</div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <label className="board-branch"><span>⎇</span>
+                  <select value={mergeInto} onChange={(e) => setMergeInto(e.target.value)}>
+                    {doc.branches.filter((b) => b.name !== doc.branch).map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
+                  </select>
+                </label>
+                <button className="btn btn-primary text-xs board-wait" disabled={checking || !doc} onClick={() => void runMerge()}>{checking ? <Strandbar progress={null} state="running" height={10} words={false} compact /> : "Check for conflicts"}</button>
+                <button className="btn text-xs" disabled title="Merging from HELIX lands with the conflict editor - next round">Merge</button>
+              </div>
+              {mergeErr && <div className="mt-2" style={{ color: "var(--error)" }}>{mergeErr}</div>}
+              {merge && (
+                <div className="mt-2">
+                  {merge.clean
+                    ? <div className="flex items-center gap-2"><Pill text="merges cleanly" color="var(--done)" /><span style={MUTED}>{doc.branch} is {merge.ahead} commit{merge.ahead === 1 ? "" : "s"} ahead of {mergeInto}{merge.behind ? ` and ${merge.behind} behind` : ""} · common ancestor {merge.base}</span></div>
+                    : <div>
+                        <div className="flex items-center gap-2"><Pill text={`${merge.conflicts.length} file${merge.conflicts.length === 1 ? "" : "s"} conflict`} color="var(--error)" /><span style={MUTED}>{doc.branch} vs {mergeInto} · these need a decision in the conflict editor (next round)</span></div>
+                        <div className="board-scan mt-2">{merge.conflicts.map((f) => <div key={f} className="board-scan-row high"><span className="board-scan-kind">conflict</span><span className="board-chip mono">{f}</span><span /></div>)}</div>
+                      </div>}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         <div className="board-panel">
           <div className="board-kicker mb-1">SERVING</div>
@@ -1168,11 +1445,13 @@ function GitDrawer({ card, onClose, onBoard }: { card: Card; onClose: () => void
             </>
           )}
         </div>
+      </div>
+      <div className="space-y-4 text-[13px]">
         <div className="board-panel">
           <div className="flex items-center gap-3 flex-wrap">
             <div className="board-kicker">SECRETS SCAN</div>
             <div className="flex-1" />
-            <button className="btn btn-primary text-xs" disabled={scanning} onClick={() => void runScan()}>{scanning ? "Scanning…" : "⌕ Scan this branch"}</button>
+            <button className="btn btn-primary text-xs board-wait" disabled={scanning} onClick={() => void runScan()}>{scanning ? <Strandbar progress={null} state="running" height={10} words={false} compact /> : "⌕ Scan this branch"}</button>
           </div>
           <div className="mt-1" style={MUTED}>Keys, tokens, private keys, passwords in connection strings, committed .env and key files - {card.link?.folder ? "read from the linked folder on this PC (git-tracked files only)" : "read from GitHub"}. Values are masked; nothing leaves this PC.</div>
           {scanErr && <div className="mt-2" style={{ color: "var(--error)" }}>{scanErr}</div>}
@@ -1198,61 +1477,192 @@ function GitDrawer({ card, onClose, onBoard }: { card: Card; onClose: () => void
             </div>
           )}
         </div>
-        <div className="flex gap-2">
-          <a className="btn text-xs" href={`https://github.com/${card.repo}`} target="_blank" rel="noreferrer noopener">Open on GitHub ↗</a>
-        </div>
+      </div>
       </div>
     </Drawer>
   );
 }
 
-function DeployDrawer({ card, onClose }: { card: Card; onClose: () => void }) {
-  const [env, setEnv] = useState<"dev" | "qa" | "prod">("dev");
+interface DeployStatus { running: boolean; job: { kind: string; app: string; env: string; to?: string; by?: string } | null; log: string[]; recent: { id: string; at: string; kind: string; app: string; env: string; by?: string; ok?: boolean; to?: string; planned?: boolean }[] }
+interface Targets { served: string[]; current: string | null; targets: string[] }
+
+/** THE DEPLOY WINDOW: an environment picked at the top; the revisions of that environment as a
+ *  strand of beads (the live one lit gold, earlier ones dimmer, the ones you may roll back to
+ *  clickable); Ship on the right with pre-flight; the gates for prod (type it, then say yes);
+ *  the log streaming in as it runs; the audit trail under it. */
+function DeployDrawer({ card, onClose, env: envIn, mode: modeIn }: { card: Card; onClose: () => void; env?: string; mode?: "deploy" | "create" }) {
+  const [env, setEnv] = useState<"dev" | "qa" | "prod">((envIn as "dev" | "qa" | "prod") || "dev");
   const row = card.envs.find((r) => r.env === env);
+  const [st, setSt] = useState<DeployStatus | null>(null);
+  const [tg, setTg] = useState<Targets | null>(null);
+  const [who, setWho] = useState<{ identity: string | null; prod: boolean } | null>(null);
+  const [consoleRoot, setConsoleRoot] = useState<string>("");
+  const [pick, setPick] = useState<string | null>(null);          // a revision picked on the strand
+  const [gate, setGate] = useState<{ verb: "deploy" | "rollback" | "create"; env: string; to?: string } | null>(modeIn === "create" ? { verb: "create", env: envIn || "qa" } : null);
+  const [phrase, setPhrase] = useState("");
+  const [sure, setSure] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [plan, setPlan] = useState<{ service: string; site: string | null; steps: { what: string; cmd: string }[]; note: string } | null>(null);
+  const logRef = useRef<HTMLDivElement | null>(null);
+  const load = useCallback(() => {
+    void api.get<DeployStatus>("/api/deploy/status").then(setSt).catch(() => undefined);
+    void api.get<Targets>(`/api/deploy/targets?app_name=${encodeURIComponent(card.app)}&env=${env}`).then(setTg).catch(() => setTg(null));
+  }, [card.app, env]);
+  useEffect(() => { load(); void api.get<{ identity: string | null; prod: boolean }>("/api/deploy/identity").then(setWho).catch(() => undefined);
+    void api.get<{ values?: Record<string, unknown> }>("/api/settings").then((d) => setConsoleRoot(String(d.values?.console_root || ""))).catch(() => undefined); }, [load]);
+  useEffect(() => {
+    const onLine = (e: Event) => { const d = (e as CustomEvent).detail as { line?: string; t?: string }; setSt((s) => s ? { ...s, running: d.t === "deploy", log: d.line ? [...s.log, d.line].slice(-400) : s.log } : s); if (d.t === "deploy_done") load(); };
+    window.addEventListener("helix-deploy", onLine);
+    return () => window.removeEventListener("helix-deploy", onLine);
+  }, [load]);
+  useEffect(() => { logRef.current?.scrollTo({ top: 1e9 }); }, [st?.log.length]);
+  const isProd = env === "prod";
+  const exists = row?.exists ?? false;
   const checks: { ok: boolean | null; text: string }[] = [
-    { ok: row?.exists ?? false, text: row?.exists ? "The service exists on Cloud Run" : "No service in this environment - never created from here (rule 5)" },
+    { ok: exists, text: exists ? "The service exists on Cloud Run" : "No service in this environment - never created by a deploy (rule 5)" },
     { ok: row?.checked_at ? row.health === "ok" : null, text: row?.checked_at ? `Running ${row.api?.revision ?? "?"} - ${HEALTH_LABEL[row.health]}` : "Not read yet" },
-    { ok: row?.api?.commit ? !row.api.dirty : null, text: row?.api?.dirty ? "What is serving was built from a dirty tree" : row?.api?.commit ? `Serving commit ${row.api.commit}` : "Commit not recorded on the serving revision" },
-    { ok: true, text: card.app === "MES" ? "Env vars: backend/deploy.ps1 is the only source (rule 2)" : "No --set-env-vars, --vpc-connector or --service-account will be passed (rule 1)" },
-    { ok: env === "prod" ? null : true, text: env === "prod" ? "Production: allowlisted identity + a second person's confirm + an audit row (§10.2)" : "Dev / QA: your gcloud login is enough" },
+    { ok: row?.api?.commit ? !row.api.dirty : null, text: row?.api?.dirty ? "What is running was built from unsaved changes" : row?.api?.commit ? `Running commit ${row.api.commit}` : "No version stamp on the running revision" },
+    { ok: true, text: card.app === "MES" ? "Env vars: backend/deploy.ps1 is the only source (rule 2)" : card.app === "ECHO" ? "Env vars: dev.ps1's ECHO block, never hand-typed" : "No --set-env-vars, --vpc-connector or --service-account (rule 1)" },
+    { ok: consoleRoot ? true : false, text: consoleRoot ? `dev.ps1 wrapped from ${consoleRoot}` : "The console checkout is not set - set it below" },
+    { ok: isProd ? (who?.prod ?? null) : true, text: isProd ? (who?.identity ? `${who.identity} ${who.prod ? "may" : "may NOT"} touch production` : "No gcloud account signed in") : `Dev / QA: ${who?.identity || "your gcloud login"} is enough` },
   ];
+  const canShip = exists && !!consoleRoot && (!isProd || !!who?.prod) && !st?.running;
+  const go = async () => {
+    if (!gate) return;
+    setErr(null);
+    try {
+      if (gate.verb === "deploy") await api.post("/api/deploy", { app: card.app, env: gate.env, phrase, sure });
+      else if (gate.verb === "rollback") await api.post("/api/deploy/rollback", { app: card.app, env: gate.env, to: gate.to, phrase, sure });
+      else { const r = await api.post<{ service: string; site: string | null; steps: { what: string; cmd: string }[]; note: string }>("/api/deploy/create_plan", { app: card.app, env: gate.env, typed: phrase, sure }); setPlan(r); }
+      setGate(null); setPhrase(""); setSure(false); load();
+    } catch (e) { setErr((e as Error).message); }
+  };
+  const saveRoot = (v: string) => void api.put("/api/deploy/console_root", { path: v }).then(() => { setConsoleRoot(v); setErr(null); }).catch((e: Error) => setErr(e.message));
+  const served = tg?.served ?? [];
   return (
-    <Drawer title={card.app} sub="DEPLOY · ship or roll back" onClose={onClose}>
-      <div className="space-y-4 text-[13px]">
-        <div className="flex gap-2">
-          {(["dev", "qa", "prod"] as const).map((e) => (
-            <button key={e} className={`board-envpick${env === e ? " on" : ""}${e === "prod" ? " prod" : ""}`} onClick={() => setEnv(e)}>
-              {e.toUpperCase()}
-            </button>
-          ))}
-        </div>
-        <div className="board-panel">
-          <div className="board-kicker mb-2">PRE-FLIGHT</div>
-          {checks.map((c, i) => (
-            <div key={i} className="flex items-start gap-2 py-1">
-              <span style={{ color: c.ok === true ? "var(--done)" : c.ok === false ? "var(--error)" : "var(--muted)", width: 14 }}>{c.ok === true ? "●" : c.ok === false ? "●" : "○"}</span>
-              <span>{c.text}</span>
+    <Drawer title={card.app} sub="DEPLOY · ship, roll back, grow" onClose={onClose} wide
+      tools={<div className="flex gap-2">{(["dev", "qa", "prod"] as const).map((e) => <button key={e} className={`board-envpick${env === e ? " on" : ""}${e === "prod" ? " prod" : ""}`} onClick={() => { setEnv(e); setPick(null); setGate(null); }}>{e.toUpperCase()}</button>)}</div>}>
+      <div className="board-deploy">
+        <div className="space-y-4 text-[13px]">
+          <div className="board-panel">
+            <div className="board-kicker mb-2">THE REVISIONS · {env.toUpperCase()} {exists ? "" : "· not deployed"}</div>
+            {!exists ? (
+              <div style={MUTED}>{card.app} has no {env.toUpperCase()} yet. Create it deliberately below - never from a deploy.</div>
+            ) : served.length === 0 ? (
+              <div style={MUTED}>{row?.checked_at ? "No revisions came back from the last read." : "Read the app to see its revisions."}</div>
+            ) : (
+              <div className="board-revs">
+                <svg className="board-revs-svg" width="100%" height={Math.max(60, served.length * 34 + 20)} viewBox={`0 0 40 ${Math.max(60, served.length * 34 + 20)}`} preserveAspectRatio="none">
+                  <path d={`M20 6 ${served.map((_, i) => `L20 ${16 + i * 34}`).join(" ")}`} stroke="var(--gold)" strokeWidth="5" opacity="0.15" fill="none" />
+                  <path d={`M20 6 ${served.map((_, i) => `L20 ${16 + i * 34}`).join(" ")}`} stroke="var(--gold)" strokeWidth="1.5" opacity="0.7" fill="none" className="board-graph-edge" />
+                </svg>
+                <div className="board-revs-list">
+                  {served.map((r, i) => {
+                    const live = r === tg?.current, can = (tg?.targets || []).includes(r), on = pick === r;
+                    return (
+                      <div key={r} className={`board-rev${live ? " live" : ""}${can ? " can" : ""}${on ? " on" : ""}`} onClick={() => can && setPick(on ? null : r)} title={live ? "Serving now" : can ? "A revision that served - click to roll back to it" : "Not a rollback target"}>
+                        <span className="board-rev-bead" />
+                        <span className="board-chip mono">{r}</span>
+                        {live && <Pill text="serving" color="var(--gold)" />}
+                        {i === 0 && !live && <Pill text="newest" color="var(--cyan)" />}
+                        {on && <button className="btn btn-primary text-xs ml-auto" onClick={(e) => { e.stopPropagation(); setGate({ verb: "rollback", env, to: r }); }}>↶ Roll back to this</button>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="board-panel">
+            <div className="board-kicker mb-2">PRE-FLIGHT</div>
+            {checks.map((c, i) => (
+              <div key={i} className="flex items-start gap-2 py-1">
+                <span style={{ color: c.ok === true ? "var(--done)" : c.ok === false ? "var(--error)" : "var(--muted)", width: 14 }}>{c.ok === true ? "●" : c.ok === false ? "●" : "○"}</span>
+                <span>{c.text}</span>
+              </div>
+            ))}
+            {!consoleRoot && (
+              <div className="mt-2 flex items-center gap-2">
+                <input className="flex-1" placeholder="C:\\Users\\you\\...\\BRMS_MES_WEB_VERSION" onKeyDown={(e) => { if (e.key === "Enter") saveRoot((e.target as HTMLInputElement).value); }} />
+                <span className="text-xs" style={MUTED}>the folder with dev.ps1 · Enter</span>
+              </div>
+            )}
+            <div className="flex items-center gap-3 flex-wrap mt-3">
+              <button className="btn btn-primary" disabled={!canShip} onClick={() => setGate({ verb: "deploy", env })}>▲ Ship {env.toUpperCase()}</button>
+              {!exists && <button className="btn board-create" disabled={!who?.prod} title={who?.prod ? "" : "Creating an environment is for Brian, Brendan and Kate"} onClick={() => setGate({ verb: "create", env })}>＋ Create {env.toUpperCase()}</button>}
+              {st?.running && <span className="text-xs" style={{ color: "var(--working)" }}>a {st.job?.kind} is running on {st.job?.app} {st.job?.env}…</span>}
             </div>
-          ))}
+            {err && <div className="mt-2" style={{ color: "var(--error)" }}>{err}</div>}
+          </div>
+          {plan && (
+            <div className="board-panel board-plan">
+              <div className="board-kicker mb-1">THE PLAN · {card.app} {plan.service}</div>
+              {plan.steps.map((s, i) => <div key={i} className="board-plan-step"><span className="board-plan-n">{i + 1}</span><div><div>{s.what}</div><code>{s.cmd}</code></div></div>)}
+              <div className="mt-2 text-xs" style={{ color: "var(--working)" }}>{plan.note}</div>
+            </div>
+          )}
         </div>
-        <div className="board-panel">
-          <div className="board-kicker mb-1">WHAT SHIPS</div>
-          <div style={MUTED}>The working tree of the clone on this PC, as <span className="board-chip dim">gcloud run deploy --source .</span> with a <span className="board-chip dim">version=&lt;sha&gt;</span> label, then the Hosting site - the wrapped <span className="board-chip dim">dev.ps1</span> flow, never rewritten.</div>
-        </div>
-        <div className="flex items-center gap-3 flex-wrap">
-          <button className="btn btn-primary" disabled title="Wired next round, behind check_deploy and the four production conditions">▲ Deploy {env.toUpperCase()}</button>
-          <button className="btn" disabled title="A traffic shift to a revision that served - no build, no flags">↶ Roll back</button>
-          <span className="text-xs" style={{ color: "var(--working)" }}>UI only - the lane is wired after this layout is signed off</span>
+        <div className="space-y-4 text-[13px]">
+          <div className="board-panel board-term">
+            <div className="flex items-center gap-2">
+              <div className="board-kicker">THE RUN</div>
+              <span className={`board-term-dot${st?.running ? " on" : ""}`} />
+              <div className="flex-1" />
+              {st?.job && <span className="text-xs" style={MUTED}>{st.job.kind} · {st.job.app} {st.job.env}{st.job.to ? ` → ${st.job.to}` : ""}{st.job.by ? ` · ${st.job.by}` : ""}</span>}
+            </div>
+            <div ref={logRef} className="board-term-log">
+              {(st?.log || []).length === 0 && <div style={MUTED}>Nothing has run yet. The lines of the next ship or rollback stream here.</div>}
+              {(st?.log || []).map((l, i) => <div key={i} className={`board-term-line${/error|failed|denied/i.test(l) ? " bad" : /\[helix\]/.test(l) ? " helix" : /https?:\/\//.test(l) ? " url" : ""}`}>{l}</div>)}
+            </div>
+          </div>
+          <div className="board-panel">
+            <div className="board-kicker mb-1">THE TRAIL · what was done, by whom</div>
+            {(st?.recent || []).length === 0 && <div style={MUTED}>No deploys or rollbacks from HELIX yet.</div>}
+            {(st?.recent || []).slice(0, 8).map((r) => (
+              <div key={r.id} className="flex items-center gap-2 py-1 text-[12px]">
+                <span style={{ color: r.planned ? "var(--working)" : r.ok === true ? "var(--done)" : r.ok === false ? "var(--error)" : "var(--muted)" }}>●</span>
+                <span className="board-chip dim">{r.kind}</span><span>{r.app} {r.env}{r.to ? ` → ${r.to}` : ""}</span>
+                <span className="ml-auto" style={MUTED}>{r.by?.split("@")[0]} · {ago(r.at)}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
+      {gate && (
+        <div className="board-gate-wrap" onClick={() => setGate(null)}>
+          <div className={`board-gate${gate.env === "prod" ? " prod" : ""}`} onClick={(e) => e.stopPropagation()}>
+            <div className="board-kicker">{gate.env === "prod" ? "PRODUCTION · the gate" : `${gate.env.toUpperCase()} · confirm`}</div>
+            <div className="board-app mt-1" style={{ fontSize: 18 }}>
+              {gate.verb === "deploy" ? `Ship ${card.app} to ${gate.env.toUpperCase()}` : gate.verb === "rollback" ? `Roll ${card.app} ${gate.env.toUpperCase()} back to ${gate.to}` : `Create ${card.app} ${gate.env.toUpperCase()}`}
+            </div>
+            <div className="mt-2 text-[13px]" style={MUTED}>
+              {gate.verb === "deploy" && `dev.ps1 -App ${card.app.toLowerCase()} -Action be-deploy -Env ${gate.env}, from ${consoleRoot || "the console checkout"}. Signed in as ${who?.identity || "?"}. An audit row is written first.`}
+              {gate.verb === "rollback" && `A traffic shift to a revision that already served - no build, no flags. The current revision stays in Cloud Run to roll forward to.`}
+              {gate.verb === "create" && `This shows the exact plan - the Cloud Run service, its env vars from dev.ps1, the Hosting site - and runs nothing. Running it is the next step, with the plan read beside a person.`}
+            </div>
+            {(gate.env === "prod" || gate.verb === "create") && (
+              <label className="block mt-3">
+                <span className="board-kicker">{gate.verb === "create" ? `TYPE THE APP'S NAME: ${card.app}` : `TYPE: ${gate.verb} prod`}</span>
+                <input className="w-full mt-1" autoFocus value={phrase} onChange={(e) => setPhrase(e.target.value)} placeholder={gate.verb === "create" ? card.app : `${gate.verb} prod`} />
+              </label>
+            )}
+            <label className="flex items-center gap-2 mt-3 text-[13px]">
+              <input type="checkbox" checked={sure} onChange={(e) => setSure(e.target.checked)} /> Are you sure? Yes, do it.
+            </label>
+            {err && <div className="mt-2 text-[12px]" style={{ color: "var(--error)" }}>{err}</div>}
+            <div className="flex items-center gap-2 mt-4">
+              <button className={`btn ${gate.env === "prod" ? "btn-danger" : "btn-primary"}`} disabled={!sure || ((gate.env === "prod" || gate.verb === "create") && !phrase.trim())} onClick={() => void go()}>
+                {gate.verb === "deploy" ? "▲ Ship" : gate.verb === "rollback" ? "↶ Roll back" : "Show the plan"}
+              </button>
+              <button className="btn" onClick={() => setGate(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </Drawer>
   );
 }
 
-/** Add a project: THE FORGE's new-project wizard, three doors. UI first. */
-/** THE GEAR: where this project lives. Repo + branch (what the board reads and, later, deploys
- *  from), the folder it is worked on from, and the one GitHub token the whole board uses - with
- *  a button straight to GitHub's token page so "get a token" is one click, not a search. */
 function LinkProject({ card, onClose, onSaved }: { card: Card; onClose: () => void; onSaved: (b: Board) => void }) {
   const link = card.link;
   const [repo, setRepo] = useState(link?.custom ? link.repo || "" : "");
@@ -1402,7 +1812,7 @@ function AddProject({ onClose }: { onClose: () => void }) {
 export default function ConsolePage() {
   const navigate = useHelix((s) => s.navigate);
   const [tab, setTab] = useState<Tab>("apps");
-  const [drawer, setDrawer] = useState<{ app: string; kind: Action } | null>(null);
+  const [drawer, setDrawer] = useState<{ app: string; kind: Action; env?: string } | null>(null);
   const [adding, setAdding] = useState(false);
   const [linking, setLinking] = useState<string | null>(null);
   // what is folded is remembered on this PC
@@ -1475,53 +1885,49 @@ export default function ConsolePage() {
   const look = (company?.apps ?? []).filter((c) => c.needs_attention).length
     + read.filter((r) => r.api?.dirty && !r.needs_attention).length;
   const title = useDecode("CONSOLE", 22, 45);
+  const taskCounts = useTaskCounts();
 
   return (
     <div className="board-stage" style={{ pointerEvents: "auto" }}>
       <HelixLayer colors={colors} />
       <NeuralLayer />
       <div className="board-layer board-hud" />
-      {busy && <div className="board-radar" aria-hidden="true" />}
-      {busy && <div className="board-progress" aria-hidden="true" />}
       <i className="board-corner tl" /><i className="board-corner tr" />
       <i className="board-corner bl" /><i className="board-corner br" />
 
-      <div className="h-full overflow-y-auto pt-16 px-8 pb-12 relative">
+      <Rail cards={company?.apps ?? []} tasks={taskCounts} />
+      <div className="h-full overflow-y-auto pt-16 px-8 pb-12 relative board-scroll">
         <div className="max-w-[1140px] mx-auto space-y-5">
           <div className="flex items-end gap-4 flex-wrap">
             <div>
               <div className="board-kicker">{company?.label ?? "the company"} · everything you build and run</div>
               <div className="font-display font-bold flex items-center gap-3">
                 <span className="text-glow-cyan text-[22px]" style={{ color: "var(--cyan)" }}>⬡</span>
-                <span className="board-title">{title}</span>
-              </div>
-            </div>
-            <div className="flex-1" />
-            <div className="flex flex-col items-end gap-1.5">
-              <div className="flex items-center gap-2">
-                <button className="btn btn-primary text-xs" disabled={busy !== null} onClick={() => refresh()}>
-                  {busy === "*" ? "Reading the fleet…" : "⟳ Refresh"}
-                </button>
-                <button className="btn btn-primary text-xs" onClick={() => setAdding(true)}>＋ Add a project</button>
-              </div>
-              <div className="text-[11px] tracking-wider" style={MUTED} title={`${cells.length} cells, ${read.length ? up : "-"} up, ${read.length ? look : "-"} need a look`}>
-                {company?.checked_at ? `last read ${ago(company.checked_at)}` : "not read yet"} · {read.length ? `${up}/${read.length} up` : `${cells.length} cells`}{look > 0 ? ` · ${look} need a look` : ""}
+                <span className="board-title" data-tip="Every app the company runs, in every environment: what is serving, which commit, from which database, whether the repo has moved on. Read from Cloud Run and each app's own health endpoint - nothing here is guessed.">{title}</span>
+                <span className="board-readline" title={`${cells.length} cells, ${read.length ? up : "-"} up, ${read.length ? look : "-"} need a look`}>
+                  {company?.checked_at ? `read ${ago(company.checked_at)}` : "not read yet"} · {read.length ? `${up}/${read.length} up` : `${cells.length} cells`}{look > 0 ? ` · ${look} need a look` : ""}
+                </span>
               </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-1 flex-wrap">
-            {TABS.map(([label, key]) => (
-              <button key={key} className={`board-tab${tab === key ? " on" : ""}`} onClick={() => setTab(key)}>{label}</button>
-            ))}
-          </div>
-          {tab === "apps" && (
-            <div className="text-[13px] max-w-[820px]" style={MUTED}>
-              Every app the company runs, in every environment: what is serving, which commit, from which
-              database, and whether the repo has moved on. Read from Cloud Run and each app's own health
-              endpoint — nothing here is guessed. Dev opens the orb on a project; Git and Deploy are THE FORGE's lanes.
+          {/* ONE LINE (Brian, 2026-09-22): the tabs on the left, Refresh and Add a project on the right,
+              clear of the header's nav */}
+          <div className="board-tabrow">
+            <div className="flex items-center gap-1 flex-wrap">
+              {TABS.map(([label, key]) => (
+                <button key={key} className={`board-tab${tab === key ? " on" : ""}`} onClick={() => setTab(key)}><TabIcon tab={key} />{label}</button>
+              ))}
             </div>
-          )}
+            <div className="flex-1" />
+            <button className="btn btn-primary text-xs board-wait" disabled={busy !== null} onClick={() => refresh()} data-tip="Read every app and environment again from Cloud Run and each app's health endpoint">
+              {busy === "*" ? <Strandbar progress={null} state="running" height={10} words={false} compact /> : "⟳ Refresh"}
+            </button>
+            <button className="btn btn-primary text-xs" onClick={() => setAdding(true)} data-tip="A new app: folder, private repo, environments">＋ Add a project</button>
+          </div>
+
+          {/* THE VAULT (secrets) sits above Brendan's knowledge vaults on the Vault tab */}
+          {tab === "knowledge" && <VaultCard />}
           {tab !== "apps" && <Menu tab={tab} embedded />}
 
           {notReady.length > 0 && (
@@ -1568,8 +1974,12 @@ export default function ConsolePage() {
             </div>
           )}
 
+          {/* CURRENT TASKS - what HELIX is doing right now, and what it finished (gold) or dropped (ember) */}
+          <div id="sec-tasks" />
+          <TasksSection folded={Boolean(folded.tasks)} onFold={() => fold("tasks")} />
+
           {/* PROJECTS - the first section of many: Slack, Google, Listeners join it as HELIX grows */}
-          <section className={`board-section${folded.projects ? " folded" : ""}`}>
+          <section id="sec-projects" className={`board-section${folded.projects ? " folded" : ""}`}>
             <button className="board-section-head" onClick={() => fold("projects")}>
               <span className="board-section-chev">{folded.projects ? "▸" : "▾"}</span>
               <span className="board-section-title">PROJECTS</span>
@@ -1586,12 +1996,12 @@ export default function ConsolePage() {
                   <AppCard key={card.app} card={card} index={i} busy={busy === card.app || busy === "*"} queued={queued.includes(card.app) || queued.includes("*")} onRead={(app) => refresh(app)}
                     collapsed={collapsedCards.includes(card.app)} onToggle={() => toggleCard(card.app)}
                     onLink={(app) => setLinking(app)}
-                    onAction={(app, kind) => kind === "dev" ? navigate({ name: "talk", project: app }) : setDrawer({ app, kind })} />
+                    onAction={(app, kind, env) => kind === "dev" ? navigate({ name: "talk", project: app }) : setDrawer({ app, kind, env })} />
                 ))}
               </div>
             )}
           </section>
-          <section className="board-section soon">
+          <section id="sec-next" className="board-section soon">
             <div className="board-section-head" style={{ cursor: "default" }}>
               <span className="board-section-chev">▸</span>
               <span className="board-section-title">SLACK · GOOGLE · LISTENERS</span>
@@ -1599,7 +2009,7 @@ export default function ConsolePage() {
             </div>
           </section>
           {company && (
-            <div className="mt-2">
+            <div className="mt-2" id="sec-builds">
               <div className="board-kicker mb-2">LOCAL BUILDS · what HELIX made on this PC</div>
               <Menu tab="apps" embedded />
             </div>
@@ -1608,7 +2018,7 @@ export default function ConsolePage() {
         </div>
       </div>
       {drawer && (() => { const c = company?.apps.find((x) => x.app === drawer.app); if (!c) return null;
-        return drawer.kind === "git" ? <GitDrawer card={c} onClose={() => setDrawer(null)} onBoard={(b) => setBoard(b)} /> : <DeployDrawer card={c} onClose={() => setDrawer(null)} />; })()}
+        return drawer.kind === "git" ? <GitDrawer card={c} onClose={() => setDrawer(null)} onBoard={(b) => setBoard(b)} /> : <DeployDrawer card={c} onClose={() => setDrawer(null)} env={drawer.env} mode={drawer.kind === "create" ? "create" : "deploy"} />; })()}
       {adding && <AddProject onClose={() => setAdding(false)} />}
       {linking && (() => { const c = company?.apps.find((x) => x.app === linking); if (!c) return null;
         return <LinkProject card={c} onClose={() => setLinking(null)} onSaved={(b) => { setBoard(b); setLinking(null); refresh(c.app); }} />; })()}

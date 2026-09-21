@@ -225,10 +225,13 @@ def test_rollback_depth_default_matches_what_the_console_actually_keeps():
 
 # ---------------------------------------------------------------------------- production is human-only
 
-def test_production_allowlist_is_exactly_two_people():
+def test_production_allowlist_is_exactly_three_people():
+    """Brian, Brendan and Kate (decision 2026-09-19). Adding a name is a deliberate edit here, with a
+    changelog row - never a setting."""
     assert fleet.PROD_ALLOWLIST == frozenset({
         "brian_sullivan@mark1online.com",
         "brendan_sullivan@mark1online.com",
+        "kate@mark1online.com",
     })
 
 

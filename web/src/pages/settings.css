@@ -77,7 +77,6 @@
   padding: 14px 16px; border-radius: 14px;
   background: linear-gradient(160deg, color-mix(in srgb, var(--panel-hi) 78%, transparent), color-mix(in srgb, var(--panel) 66%, transparent));
   border: 1px solid color-mix(in srgb, var(--cyan) 16%, var(--line));
-  backdrop-filter: blur(12px);
   transition: border-color 0.2s, transform 0.12s, box-shadow 0.2s;
 }
 .st-card:hover { border-color: color-mix(in srgb, var(--cyan) 45%, var(--line)); transform: translateY(-1px); box-shadow: 0 10px 30px rgba(0,0,0,0.35), 0 0 24px color-mix(in srgb, var(--cyan) 8%, transparent); }
@@ -216,3 +215,12 @@
 .st-spin { display: inline-block; animation: st-spin 1s linear infinite; }
 
 .board-chip.dim { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; padding: 2px 7px; border-radius: 6px; border: 1px solid var(--line); color: var(--muted); }
+
+/* THE TOOLS card (2026-09-22) */
+.st-tool { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: rgba(0,0,0,.2); }
+.st-tool-dot { flex: 0 0 auto; width: 10px; height: 10px; margin-top: 5px; border-radius: 50%; background: var(--working); box-shadow: 0 0 10px var(--working); animation: st-tool-pulse 1.4s ease-in-out infinite; }
+.st-tool-dot.ok { background: var(--done); box-shadow: 0 0 8px var(--done); animation: none; }
+@keyframes st-tool-pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
+.st-tool-label { font-weight: 600; font-size: 13px; }
+.st-tool-value { font-size: 12px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
+.st-tool-fix { font-size: 12px; color: var(--working); margin-top: 2px; }

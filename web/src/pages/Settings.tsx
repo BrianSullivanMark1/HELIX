@@ -9,6 +9,8 @@ import type { ReactNode } from "react";
 import { api } from "../lib/api";
 import { useHelix } from "../lib/store";
 import "./settings.css";
+import { perf, setMode, type Mode } from "../lib/perf";
+import { VaultCard } from "../components/Vault";
 
 interface SettingsData {
   values: Record<string, unknown>;
@@ -133,6 +135,26 @@ export default function Settings() {
   const [q, setQ] = useState("");
   const [closed, setClosed] = useState<Record<string, boolean>>({});
   const [face, setFace] = useState<FaceStatus | null>(null);
+  // THE TOOLS (2026-09-22): what the deploy lane needs on this PC - each row says the fix.
+  interface ToolRow { key: string; label: string; ok: boolean; value: string | null; fix: string }
+  const [tools, setTools] = useState<{ tools: ToolRow[]; needs: string[]; ok: boolean } | null>(null);
+  const [toolEdits, setToolEdits] = useState<Record<string, string>>({});
+  const [toolNote, setToolNote] = useState("");
+  const [perfMode, setPerfMode] = useState<Mode>(perf.mode);
+  const [fpsOn, setFpsOn] = useState<boolean>(() => { try { return localStorage.getItem("helix_fps") === "1"; } catch { return false; } });
+  const toggleFps = (v: boolean) => { setFpsOn(v); try { localStorage.setItem("helix_fps", v ? "1" : "0"); } catch { /* fine */ } window.dispatchEvent(new Event("helix-fps-toggle")); };
+  const [perfLine, setPerfLine] = useState("");
+  useEffect(() => { const id = window.setInterval(() => setPerfLine(`${perf.fps} fps, ${perf.frameMs} ms a frame, drawing at ${perf.level}`), 1000); return () => window.clearInterval(id); }, []);
+  const readTools = useCallback(() => { void api.get<{ tools: ToolRow[]; needs: string[]; ok: boolean }>("/api/deploy/tools").then(setTools).catch(() => setTools(null)); }, []);
+  useEffect(() => { readTools(); }, [readTools]);
+  const saveTool = async (key: string) => {
+    const v = (toolEdits[key] ?? "").trim();
+    try {
+      if (key === "console_root") await api.put("/api/deploy/console_root", { path: v });
+      else if (key === "firebase_project") await api.put("/api/settings", { values: { firebase_project: v } });
+      setToolNote("Saved."); readTools(); window.dispatchEvent(new Event("helix-settings-saved"));
+    } catch (e) { setToolNote((e as Error).message); }
+  };
   const [building, setBuilding] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [buildNote, setBuildNote] = useState("");
@@ -381,6 +403,51 @@ export default function Settings() {
           </div>
         ),
       },
+      {
+        id: "tools", group: "board", icon: "⚒", title: "The tools on this PC",
+        what: "what shipping needs here: gcloud signed in, the Firebase CLI, the console checkout, the token - and how to fix each",
+        keys: "tools gcloud firebase cli console dev.ps1 checkout project deploy missing fix",
+        body: (
+          <div className="space-y-2">
+            {tools === null && <div className="st-note">Checking the tools…</div>}
+            {tools?.tools.map((r) => (
+              <div key={r.key} className="st-tool">
+                <span className={`st-tool-dot${r.ok ? " ok" : ""}`} aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="st-tool-label">{r.label}</span>
+                    <span className="st-tool-value elide">{r.value || (r.ok ? "ready" : "missing")}</span>
+                  </div>
+                  {!r.ok && r.fix && <div className="st-tool-fix">{r.fix}</div>}
+                  {(r.key === "console_root" || r.key === "firebase_project") && (
+                    <div className="flex items-center gap-2 mt-1">
+                      <input className="flex-1" placeholder={r.key === "console_root" ? "C:\\Users\\you\\Desktop\\BRMS_MES_WEB_APP\\BRMS_MES_WEB_VERSION" : "the Firebase project id"}
+                        value={toolEdits[r.key] ?? r.value ?? ""} onChange={(e) => setToolEdits((t) => ({ ...t, [r.key]: e.target.value }))}
+                        onKeyDown={(e) => { if (e.key === "Enter") void saveTool(r.key); }} />
+                      <button className="btn text-xs" onClick={() => void saveTool(r.key)}>Save</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+            <div className="flex items-center gap-3">
+              <button className="btn text-xs" onClick={() => { setTools(null); readTools(); }}>⟳ Check again</button>
+              <span className="st-note">{toolNote || (tools?.ok ? "Everything shipping needs is here." : "The menu button glows until every row is green.")}</span>
+            </div>
+          </div>
+        ),
+      },
+      {
+        id: "vault", group: "board", icon: "⚿", title: "The vault",
+        what: "the company's secrets in Google Cloud Secret Manager - create, rotate, delete; values never show",
+        keys: "vault secrets secret manager rotate delete password key token",
+        body: (
+          <div className="space-y-2">
+            <VaultCard compact />
+            <div className="st-note">Apps read a secret when their container starts, so a rotation takes after a redeploy or a bounce. Deleting is Brian, Brendan and Kate, with the name typed back.</div>
+          </div>
+        ),
+      },
       // ---------------------------------------------------------------- dreaming
       {
         id: "dream-window", group: "dreaming", icon: "◐", title: "The window",
@@ -601,6 +668,21 @@ export default function Settings() {
         ),
       },
       {
+        id: "performance", group: "voice", icon: "⚡", title: "Performance",
+        what: "how much of the art this PC draws - Auto steps down on its own when frames run long",
+        keys: "performance speed fps slow lag frame rate quality lean minimal auto",
+        body: (
+          <div className="space-y-3">
+            <div className="flex gap-2 flex-wrap">
+              {([["auto", "Auto", "measures the frame time; steps down when it is slow, back up when it is not"], ["full", "Full", "1.5x pixels on the faces, the whole lattice, every glow, the backdrop"], ["lean", "Lean", "1.25x pixels, a thinner lattice, no glow halos, 2D at 30 fps"], ["minimal", "Minimal", "1x pixels, half the lattice, no backdrop scene, 2D at 20 fps"]] as [Mode, string, string][]).map(([m, label, d]) => (
+                <Choice key={m} on={perfMode === m} title={label} detail={d} onPick={() => { setMode(m); setPerfMode(m); }} />
+              ))}
+            </div>
+            <div className="st-note">Right now: {perfLine}. The menu (☰) shows the live number.</div>
+          </div>
+        ),
+      },
+      {
         id: "helix-art", group: "voice", icon: "⬡", title: "The helix",
         what: "the two strand colors behind the Console", keys: "helix colors art strand console background theme",
         body: (
@@ -703,7 +785,7 @@ export default function Settings() {
       },
     ];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, edits, secretEdits, gmailAddr, gmailPw, calUrl, cameras, dream, dreamNote, liveDream, dreamRunning, face, building, restarting, buildNote]);
+  }, [data, edits, secretEdits, gmailAddr, gmailPw, calUrl, cameras, dream, dreamNote, liveDream, dreamRunning, face, building, restarting, buildNote, tools, toolEdits, toolNote, perfMode, perfLine]);
 
   if (!data) return null;
 
@@ -722,17 +804,18 @@ export default function Settings() {
   const needs: Partial<Record<GroupId, boolean>> = {
     updates: updatesWaiting,
     brain: !brainOn,
-    board: !data.secrets.github_token,
+    board: !data.secrets.github_token || Boolean(tools && !tools.ok),
   };
+  const toolsMissing = tools ? tools.needs.length : 0;
   const cards: { g: GroupId; k: string; v: string; d: string; color?: string; needs?: boolean }[] = [
     { g: "updates", k: "Updates", v: face === null ? "Unknown" : updatesWaiting ? (face.face.stale && face.backend.stale ? "Face + backend" : face.face.stale ? "Face to build" : "Backend to restart") : "Up to date",
       d: updatesWaiting ? "changes on disk are not running yet" : "what you see is what is on disk",
       color: updatesWaiting ? "var(--working)" : "var(--done)", needs: updatesWaiting },
     { g: "brain", k: "The brain", v: data.secrets.claude_code_oauth_token ? "Subscription" : data.secrets.claude_api_key ? "API key" : "Not set",
       d: data.brain.line, color: brainOn ? "var(--done)" : "var(--working)", needs: !brainOn },
-    { g: "board", k: "The Board", v: data.secrets.github_token ? "GitHub linked" : "GitHub token needed",
-      d: data.secrets.github_token ? "drift is judged against each repo's HEAD" : "without it the Board reads Cloud Run only — no drift",
-      color: data.secrets.github_token ? "var(--done)" : "var(--working)", needs: !data.secrets.github_token },
+    { g: "board", k: "The Board", v: toolsMissing ? `${toolsMissing} tool${toolsMissing === 1 ? "" : "s"} to fix` : data.secrets.github_token ? "GitHub linked" : "GitHub token needed",
+      d: toolsMissing ? tools!.tools.filter((r) => !r.ok).map((r) => r.label).join(", ") : data.secrets.github_token ? "drift is judged against each repo's HEAD" : "without it the Board reads Cloud Run only — no drift",
+      color: data.secrets.github_token && !toolsMissing ? "var(--done)" : "var(--working)", needs: !data.secrets.github_token || toolsMissing > 0 },
     { g: "dreaming", k: "Dreaming", v: dreamRunning ? "Dreaming now" : Boolean(val("dream_enabled")) ? `Nightly at ${String(val("dream_start") ?? "23:00")}` : "Off",
       d: dream?.status || liveDream?.line || (Boolean(val("dream_enabled")) ? `${Number(val("dream_hours") ?? 8)} hours, ${Boolean(val("dream_auto_apply")) ? "applies green changes itself" : "every draft waits for you"}` : "no night sessions"),
       color: dreamRunning ? "var(--working)" : Boolean(val("dream_enabled")) ? "var(--cyan)" : undefined },
@@ -802,6 +885,11 @@ export default function Settings() {
                 <div className="st-lead mb-4">
                   This is <b>HELIX</b> on your machine. Everything here is yours alone — nothing you change
                   affects anyone else. Click any card to jump to it.
+                </div>
+                <div className="mb-4">
+                  <Switch checked={fpsOn} onChange={toggleFps}>
+                    Show the frame rate — a small badge under the menu with the live fps and the level the art is drawing at ({perfLine || "measuring…"})
+                  </Switch>
                 </div>
                 <div className="st-cards">
                   {cards.map((c, i) => (

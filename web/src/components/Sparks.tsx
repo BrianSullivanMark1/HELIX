@@ -39,7 +39,7 @@ export default function Sparks() {
     document.body.appendChild(mirror);
     let embers: Ember[] = [];
     let raf = 0, last = 0, alive = true, w = 0, h = 0;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const dpr = Math.min(1.25, window.devicePixelRatio || 1);
     const resize = () => { w = window.innerWidth; h = window.innerHeight; canvas.width = w * dpr; canvas.height = h * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); };
     resize();
     window.addEventListener("resize", resize);

@@ -776,16 +776,66 @@ class Container:
             _LOG.warning("fleet unavailable", exc_info=True)
             self.runtime_profile = None
             self.fleet = None
+        # CURRENT TASKS: the register every long-running thing reports into (uploads, reads, deploys,
+        # scans, fetches). Kept on disk so finished work survives a restart; pushed to the page live.
+        try:
+            from helix.services.jobs import Jobs
+            self.jobs = Jobs(self.paths.data / "jobs.json",
+                             push=lambda ev: getattr(self, "hub_push", lambda e: None)(ev))
+        except Exception:  # noqa: BLE001
+            _LOG.warning("task register unavailable", exc_info=True)
+            self.jobs = None
         # HELIX RADIO (docs/HELIX_RADIO.md): the bucket through the user's own gcloud, like the fleet.
         try:
             from helix.adapters.gcs_radio import GcsRadio
             from helix.services.radio import RadioService
             self.radio = RadioService(
                 GcsRadio(lambda: self.settings.get("radio_bucket"), cache_dir=self.paths.data / "radio_cache"),
-                station_override=lambda: self.settings.get("radio_station"))
+                station_override=lambda: self.settings.get("radio_station"),
+                jobs=self.jobs, cache_gb=lambda: self.settings.get("radio_cache_gb"))
         except Exception:  # noqa: BLE001
             _LOG.warning("radio unavailable", exc_info=True)
             self.radio = None
+        # THE DEPLOY LANE: dev.ps1 wrapped, rollback as a traffic shift, every action gated and audited.
+        try:
+            from helix.adapters.console_scripts import ConsoleScripts
+            from helix.services.deploy import Audit, DeployService
+            from helix.api.deploy_routes import gcloud_identity
+            self.deploy = DeployService(
+                ConsoleScripts(lambda: self.settings.get("console_root")), self.fleet,
+                audit=Audit(self.paths.data / "deploy_audit.jsonl"),
+                push=lambda ev: getattr(self, "hub_push", lambda e: None)(ev),
+                identity=gcloud_identity,
+                profile=lambda: getattr(getattr(self, "runtime_profile", None), "value", "desktop"),
+                jobs=self.jobs) if self.fleet is not None else None
+        except Exception:  # noqa: BLE001
+            _LOG.warning("deploy lane unavailable", exc_info=True)
+            self.deploy = None
+        # THE VAULT: the company's secrets in Google Cloud Secret Manager through the person's own
+        # gcloud (like the fleet). Create and rotate are tasks with an audit row; delete is gated like
+        # production (allowlist, typed name, Are you sure, and a second yes when something reads it).
+        try:
+            from helix.adapters.gcp_secret_manager import GcpSecrets
+            from helix.services.vault import VaultService
+            from helix.api.deploy_routes import gcloud_identity as _vault_identity
+            from helix.services.deploy import Audit as _VaultAudit
+            from helix.domain.fleet import GCP_PROJECT as _VAULT_PROJECT
+            from helix.domain.project_links import SETTING as _LINKS, links_from as _links_from
+
+            def _vault_folders() -> dict[str, str]:
+                out = {app: link.folder for app, link in _links_from(self.settings.get(_LINKS)).items() if link.folder}
+                root = str(self.settings.get("console_root") or "").strip()
+                if root:
+                    out.setdefault("CONSOLE", root)
+                return out
+
+            self.vault = VaultService(
+                GcpSecrets(_VAULT_PROJECT), policy_path=self.paths.data / "vault_policy.json",
+                audit=_VaultAudit(self.paths.data / "deploy_audit.jsonl"),
+                identity=_vault_identity, jobs=self.jobs, folders=_vault_folders)
+        except Exception:  # noqa: BLE001
+            _LOG.warning("vault unavailable", exc_info=True)
+            self.vault = None
         self.subscription._tools = self.tools  # late-bind (tools → services ctor cycle, like agents)
         self.conversation = ConversationService(
             self.chat, self.tools, self.store, self.store, self.clock, CONSOLE_SYSTEM,

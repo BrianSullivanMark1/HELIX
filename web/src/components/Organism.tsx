@@ -17,7 +17,10 @@ import type React from "react";
 import * as THREE from "three";
 import { api } from "../lib/api";
 import { useHelix } from "../lib/store";
-import { ContextGuard, HelixBackdrop, NeuralLayer } from "../pages/Console";
+import { useJobs } from "../lib/jobs";
+import { radioBeat } from "./Radio";
+import { ContextGuard, HelixBackdrop, NeuralLayer, usePerfLevel } from "../pages/Console";
+import { dprCap } from "../lib/perf";
 import "../pages/console.css";
 import { baseLook } from "./Orb";
 
@@ -80,6 +83,7 @@ uniform vec2 uFace;      // where the face sits on the sphere: it slides toward 
 uniform float uTilt;     // head tilt, radians
 uniform float uSmile;    // corners of the mouth: -1 down .. 1 up
 uniform float uSquint;   // lids half-closed 0..1 (thinking, emphasis)
+uniform float uWink;     // one eye shut: sign = which eye (-1 left, 1 right), magnitude = how far
 uniform float uEnergy;
 uniform float uPulse;
 uniform float uFlash;     // whole-body flash 0..1
@@ -144,7 +148,8 @@ void main() {
       vec2 c = vec2(side * 0.30, 0.16) + gaze;
       vec2 d = uv - c;
       // the eye: an almond, lids close it
-      float lid = max(0.06, 1.0 - max(uBlink, uSquint * 0.55));
+      float wink = side * uWink > 0.0 ? abs(uWink) : 0.0;
+      float lid = max(0.06, 1.0 - max(max(uBlink, uSquint * 0.55), wink));
       float almond = length(vec2(d.x / 0.15, d.y / (0.085 * lid)));
       float eye = 1.0 - smoothstep(0.92, 1.0, almond);
       vec2 dg = d - gaze * 0.35;
@@ -241,7 +246,7 @@ function hueToRgb(h: number, s: number, l: number): THREE.Color {
 function useBitsTexture(hue: number) {
   return useMemo(() => {
     const c = document.createElement("canvas");
-    c.width = 512; c.height = 512;
+    c.width = 384; c.height = 384;
     const g = c.getContext("2d")!;
     const tex = new THREE.CanvasTexture(c);
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -259,7 +264,7 @@ function useBitsTexture(hue: number) {
     };
     for (let r = 0; r < rows; r++) draw(r);
     tex.needsUpdate = true;
-    const id = window.setInterval(() => { for (let k = 0; k < 3; k++) draw(Math.floor(Math.random() * rows)); tex.needsUpdate = true; }, 90);
+    const id = window.setInterval(() => { if (document.hidden) return; for (let k = 0; k < 2; k++) draw(Math.floor(Math.random() * rows)); tex.needsUpdate = true; }, 140);
     (tex as THREE.CanvasTexture & { _stop?: () => void })._stop = () => window.clearInterval(id);
     return tex;
   }, [hue]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -442,9 +447,11 @@ function Cortex({ hue, mouse, level }: { hue: number; mouse: React.MutableRefObj
       if (facing && dist < nearestD) { nearestD = dist; nearest = i; }
       d.heat[i] = Math.max(d.heat[i] * Math.pow(0.12, dt), near * near);
     }
+    // a wave on its own every so often (the docked head has no hand in it)
+    if (d.wave < 0 && Math.random() < dt * 0.12) { d.wave = 0; d.waveFrom.copy(d.home[Math.floor(Math.random() * N)]); }
     // the wave from a click
     if (d.wave >= 0) {
-      if (d.wave === 0 && nearest >= 0) d.waveFrom.copy(d.home[nearest]);
+      if (d.wave === 0 && nearest >= 0 && mouse.current.x !== 0) d.waveFrom.copy(d.home[nearest]);
       d.wave += dt * 2.6;
       for (let i = 0; i < N; i++) {
         const ring = Math.abs(d.home[i].distanceTo(d.waveFrom) - d.wave * 1.2);
@@ -462,7 +469,7 @@ function Cortex({ hue, mouse, level }: { hue: number; mouse: React.MutableRefObj
       d.ppos[i * 3] = p.x; d.ppos[i * 3 + 1] = p.y; d.ppos[i * 3 + 2] = p.z;
     }
     // signals: born now and then (more with the voice, more under the hand), run, hop once
-    const born = dt * (1.2 + 5 * level.current + (nearest >= 0 && d.heat[nearest] > 0.5 ? 6 : 0));
+    const born = dt * (2.2 + 5 * level.current + (nearest >= 0 && d.heat[nearest] > 0.5 ? 6 : 0));
     if (Math.random() < born && d.links.length && d.fire.length < MAXFIRE) {
       const from = nearest >= 0 && d.heat[nearest] > 0.5 && d.adj[nearest].length ? d.adj[nearest][Math.floor(Math.random() * d.adj[nearest].length)] : Math.floor(Math.random() * d.links.length);
       d.fire.push({ link: from, t: 0, dir: Math.random() < 0.5 ? 1 : -1, hopped: false });
@@ -527,8 +534,82 @@ function Cortex({ hue, mouse, level }: { hue: number; mouse: React.MutableRefObj
   );
 }
 
-function Body({ look, onPulse, mini = false }: { look: OrganismLook; onPulse: (big: boolean) => void; mini?: boolean }) {
+export type OrganismMode = "full" | "mini" | "dj" | "stage";
+
+/** THE ORBITS (Brian, 2026-09-22: "get rid of the outline wrapping his face"): the docked head's
+ *  company is not a lattice but three thin tilted rings with motes riding them like electrons - the
+ *  head is a nucleus at work. The rings precess slowly; the motes run faster the busier HELIX is
+ *  (the same level the lattice used to fire on), and a burst of them scatters on a big pulse.
+ *  One line loop per ring, one points cloud; nothing per node, nothing blurred. */
+function Orbits({ hue, level }: { hue: number; level: React.MutableRefObject<number> }) {
+  const RINGS = 3, PER = 5, R = 1.42;
+  const rings = useRef<THREE.Group[]>([]);
+  const data = useMemo(() => {
+    const tilts = Array.from({ length: RINGS }, (_, i) => new THREE.Euler(0.9 + i * 0.55, i * 1.9, 0.35 - i * 0.5));
+    const seg = 96, ring = new Float32Array((seg + 1) * 3);
+    for (let i = 0; i <= seg; i++) { const a = (i / seg) * Math.PI * 2; ring[i * 3] = Math.cos(a) * R; ring[i * 3 + 1] = 0; ring[i * 3 + 2] = Math.sin(a) * R; }
+    const rg = new THREE.BufferGeometry(); rg.setAttribute("position", new THREE.BufferAttribute(ring, 3));
+    const N = RINGS * PER;
+    const pos = new Float32Array(N * 3), col = new Float32Array(N * 3);
+    const pg = new THREE.BufferGeometry(); pg.setAttribute("position", new THREE.BufferAttribute(pos, 3)); pg.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    const phase = Array.from({ length: N }, (_, i) => (i % PER) / PER * Math.PI * 2 + Math.random() * 0.4);
+    const speed = Array.from({ length: RINGS }, (_, i) => 0.55 + i * 0.22);
+    return { tilts, rg, pg, pos, col, phase, speed, t: 0, tmp: new THREE.Vector3(), q: new THREE.Quaternion(), c: new THREE.Color(), c2: new THREE.Color() };
+  }, []);
+  const glowTex = useMemo(() => {
+    const c = document.createElement("canvas"); c.width = c.height = 32;
+    const g = c.getContext("2d")!; const gr = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+    gr.addColorStop(0, "rgba(255,255,255,1)"); gr.addColorStop(0.3, "rgba(255,255,255,0.6)"); gr.addColorStop(1, "rgba(255,255,255,0)");
+    g.fillStyle = gr; g.fillRect(0, 0, 32, 32);
+    return new THREE.CanvasTexture(c);
+  }, []);
+  useFrame((_, dtRaw) => {
+    const dt = Math.min(0.05, dtRaw);
+    const d = data;
+    const busy = Math.max(0, Math.min(1, level.current));
+    d.t += dt * (1 + busy * 2.2);
+    const h = ((hue % 360) + 360) % 360 / 360;
+    d.c.setHSL(h, 0.9, 0.7); d.c2.setHSL((h + 0.1) % 1, 1, 0.85);
+    for (let r = 0; r < RINGS; r++) {
+      const g = rings.current[r]; if (!g) continue;
+      g.rotation.set(d.tilts[r].x + 0.12 * Math.sin(d.t * 0.21 + r), d.tilts[r].y + d.t * 0.07 * (r % 2 ? -1 : 1), d.tilts[r].z);
+      g.updateMatrixWorld();
+      for (let k = 0; k < PER; k++) {
+        const i = r * PER + k;
+        const a = d.phase[i] + d.t * d.speed[r] * (r % 2 ? -1 : 1);
+        d.tmp.set(Math.cos(a) * R, 0, Math.sin(a) * R).applyMatrix4(g.matrixWorld);
+        d.pos[i * 3] = d.tmp.x; d.pos[i * 3 + 1] = d.tmp.y; d.pos[i * 3 + 2] = d.tmp.z;
+        // the motes in front of the head burn brighter (they are nearer the light)
+        const front = (d.tmp.z / R + 1) / 2;
+        const mix = 0.35 + 0.65 * front + busy * 0.3;
+        d.col[i * 3] = d.c.r * (1 - front) + d.c2.r * front * mix; d.col[i * 3 + 1] = d.c.g * (1 - front) + d.c2.g * front * mix; d.col[i * 3 + 2] = d.c.b * (1 - front) + d.c2.b * front * mix;
+      }
+    }
+    (d.pg.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+    (d.pg.attributes.color as THREE.BufferAttribute).needsUpdate = true;
+  });
+  const ringColor = useMemo(() => new THREE.Color().setHSL(((hue % 360) + 360) % 360 / 360, 0.8, 0.6), [hue]);
+  return (
+    <group>
+      {Array.from({ length: RINGS }, (_, i) => (
+        <group key={i} ref={(el) => { if (el) rings.current[i] = el; }}>
+          <lineLoop geometry={data.rg} raycast={() => undefined}><lineBasicMaterial color={ringColor} transparent opacity={0.22 + i * 0.03} depthWrite={false} blending={THREE.AdditiveBlending} /></lineLoop>
+        </group>
+      ))}
+      <points geometry={data.pg} raycast={() => undefined}>
+        <pointsMaterial map={glowTex} vertexColors size={0.15} transparent opacity={0.95} depthWrite={false} blending={THREE.AdditiveBlending} sizeAttenuation />
+      </points>
+    </group>
+  );
+}
+
+function Body({ look, onPulse, mini = false, mode = mini ? "mini" : "full", roam, box }: { look: OrganismLook; onPulse: (big: boolean) => void; mini?: boolean; mode?: OrganismMode; roam?: React.MutableRefObject<{ x: number; y: number; r: number } | null>; box?: React.RefObject<HTMLElement | null> }) {
   const mesh = useRef<THREE.Mesh>(null!);
+  // THE DJ (the radio deck) and THE STAGE (the face leaping to the front of the Console): their
+  // own acts ride on top of the face's life - a head-bang on the kick, a shrug, a grin, a wink,
+  // the zoom-off before a music video; on the stage the head roams and the lattice follows it.
+  const dj = useRef({ bang: 0, groove: 0, shrug: { t: -1 }, mood: { act: "", t: 0, dur: 0, next: 4 }, wink: { t: -1, side: 1 }, off: { t: -1, dir: 1 }, peek: { t: -1 }, ease: 0 });
+  const roamT = useRef(0);
   const spores = useRef<THREE.Points>(null!);
   const gazeRef = useRef({ x: 0, y: 0 });
   const stateColor = useMemo(() => new THREE.Color(), []);
@@ -592,14 +673,36 @@ function Body({ look, onPulse, mini = false }: { look: OrganismLook; onPulse: (b
     window.addEventListener("helix-say", onSay);
     return () => window.removeEventListener("helix-say", onSay);
   }, []);
+  useEffect(() => {
+    if (mode !== "dj") return;
+    const onCue = (e: Event) => {
+      const cue = String((e as CustomEvent).detail?.cue || "");
+      const d = dj.current;
+      if (cue === "video-in") { d.wink = { t: 0, side: Math.random() < 0.5 ? -1 : 1 }; d.off = { t: 0, dir: Math.random() < 0.5 ? -1 : 1 }; }
+      if (cue === "resume") { d.peek = { t: 0 }; }
+      if (cue === "wink") { d.wink = { t: 0, side: 1 }; }
+      if (cue === "back") { d.off = { t: -1, dir: 1 }; d.peek = { t: -1 }; }
+    };
+    window.addEventListener("helix-dj", onCue);
+    return () => window.removeEventListener("helix-dj", onCue);
+  }, [mode]);
   const firePulseRef = useRef<(big: boolean) => void>(() => undefined);
   const life = useRef({ next: 2.5, act: "", until: 0, gx: 0, gy: 0, brow: 0, tilt: 0, smile: 0, squint: 0, blinks: 0 });
   // the mouse anywhere on the page turns the head - not only over the canvas
   useEffect(() => {
-    const move = (e: MouseEvent) => { mouse.current.x = (e.clientX / window.innerWidth) * 2 - 1; mouse.current.y = -((e.clientY / window.innerHeight) * 2 - 1); };
+    const move = (e: MouseEvent) => {
+      const el = box?.current;
+      if (el) {
+        const r = el.getBoundingClientRect();
+        mouse.current.x = Math.max(-1.6, Math.min(1.6, ((e.clientX - r.left) / Math.max(1, r.width)) * 2 - 1));
+        mouse.current.y = Math.max(-1.6, Math.min(1.6, -(((e.clientY - r.top) / Math.max(1, r.height)) * 2 - 1)));
+        return;
+      }
+      mouse.current.x = (e.clientX / window.innerWidth) * 2 - 1; mouse.current.y = -((e.clientY / window.innerHeight) * 2 - 1);
+    };
     window.addEventListener("mousemove", move);
     return () => window.removeEventListener("mousemove", move);
-  }, []);
+  }, [box]);
   const bits = useBitsTexture(look.hue);
   useEffect(() => () => (bits as THREE.CanvasTexture & { _stop?: () => void })._stop?.(), [bits]);
   const phase = look.phase === "cell" ? "core" : look.phase;
@@ -612,7 +715,7 @@ function Body({ look, onPulse, mini = false }: { look: OrganismLook; onPulse: (b
     uPhaseFace: { value: phase === "face" ? 1 : 0 }, uPhaseStorm: { value: phase === "storm" ? 1 : 0 },
     uAttend: { value: 0 }, uLevel: { value: 0 }, uOpen: { value: 0 }, uWide: { value: 1 }, uTeeth: { value: 0 }, uTongue: { value: 0 }, uBlink: { value: 0 }, uBrow: { value: 0 },
     uGaze: { value: new THREE.Vector2() }, uEnergy: { value: look.energy },
-    uFace: { value: new THREE.Vector2() }, uTilt: { value: 0 }, uSmile: { value: 0 }, uSquint: { value: 0 },
+    uFace: { value: new THREE.Vector2() }, uTilt: { value: 0 }, uSmile: { value: 0 }, uSquint: { value: 0 }, uWink: { value: 0 },
   }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sporeGeo = useMemo(() => {
@@ -710,17 +813,26 @@ function Body({ look, onPulse, mini = false }: { look: OrganismLook; onPulse: (b
     // the idle / thinking acts
     const lf = life.current;
     const wh = wheel.current;
+    // WORKING (Brian, 2026-09-22): the little head in the corner should look like it is working,
+    // not just looking at the mouse. When HELIX is busy - a reply in flight, or anything running in
+    // CURRENT TASKS - the wheel leans on think/scan acts, they come faster, and a small pulse of
+    // light runs across the head every couple of seconds.
+    const jobsLive = useJobs.getState().order.some((i) => { const j = useJobs.getState().jobs[i]; return j && j.state === "running" && !j.quiet; });
+    const working = s.busy || s.orb === "thinking" || jobsLive;
     if (mini) {
-      wh.next -= dt;
+      wh.next -= dt * (working ? 2.2 : 1);
       if (wh.next <= 0 && !wh.act) {
-        const acts = ["spin", "bounce", "think", "peek", "nod", "spin", "bounce"];
+        const acts = working
+          ? ["think", "scan", "think", "hmm", "nod", "scan", "think", "spin"]
+          : ["spin", "bounce", "think", "peek", "nod", "spin", "bounce", "scan"];
         wh.act = acts[Math.floor(Math.random() * acts.length)]; wh.t = 0;
-        wh.dur = wh.act === "think" ? 2.6 : wh.act === "spin" ? 1.3 : wh.act === "bounce" ? 1.1 : 1.6;
-        wh.next = 4 + Math.random() * 6;
+        wh.dur = wh.act === "think" ? 2.6 : wh.act === "spin" ? 1.3 : wh.act === "bounce" ? 1.1 : wh.act === "scan" ? 1.8 : wh.act === "hmm" ? 1.5 : 1.6;
+        wh.next = (working ? 1.2 : 4) + Math.random() * (working ? 2 : 6);
       }
       if (wh.act) { wh.t += dt; if (wh.t >= wh.dur) wh.act = ""; }
+      if (working && Math.sin(u.uTime.value * 2.6) > 0.985) flash.current = Math.max(flash.current, 0.35);
     }
-    const thinking = s.orb === "thinking" || (mini && wh.act === "think");
+    const thinking = s.orb === "thinking" || (mini && (wh.act === "think" || wh.act === "hmm"));
     const now = u.uTime.value;
     if (!speaking) {
       lf.next -= dt;
@@ -746,6 +858,8 @@ function Body({ look, onPulse, mini = false }: { look: OrganismLook; onPulse: (b
       if (now < lf.until) { brow += lf.brow; tilt += lf.tilt; smile += lf.smile; squint += lf.squint; e.glance += (lf.gx - e.glance) * 0.1; }
       else { e.glance *= Math.pow(0.05, dt); }
       if (thinking) { brow += -0.15; squint += 0.2; smile = 0.02; }
+      if (mini && wh.act === "scan") { const k = wh.t / wh.dur; e.glance = Math.sin(k * Math.PI * 6) * 0.9; squint += 0.25; brow += 0.15; }   // eyes sweep left-right: reading
+      if (mini && wh.act === "hmm") { target = Math.max(target, 0.18 + 0.1 * Math.sin(wh.t * 7)); tilt += 0.08; }
     }
     const lifeGy = !speaking && now < lf.until ? lf.gy : 0;
     const sc = pf.script;
@@ -773,6 +887,41 @@ function Body({ look, onPulse, mini = false }: { look: OrganismLook; onPulse: (b
       target = Math.min(1, 0.15 + u.uLevel.value * 0.9 + 0.25 * Math.max(0, Math.sin(m.flutter)) * u.uLevel.value);
       brow = 0.2;
     }
+    // THE DJ'S ACTS
+    const D = dj.current;
+    let djTilt = 0, djBang = 0, djShrug = 0, djSway = 0, djBob = 0, djZ = 0, djX = 0, djScale = 1, djSpin = 0;
+    if (mode === "dj") {
+      const beat = radioBeat();
+      D.ease += ((beat.playing ? 1 : 0) - D.ease) * (1 - Math.pow(0.05, dt));
+      const bpm = 96;
+      D.groove += dt * (bpm / 60) * Math.PI * (0.5 + 0.5 * D.ease);
+      if (beat.kick) D.bang = 1;
+      D.bang *= Math.pow(0.02, dt);
+      djBang = D.bang * (0.25 + 0.35 * beat.level);                              // the head-bang: a sharp dip that recovers
+      djSway = Math.sin(D.groove * 0.5) * 0.18 * D.ease;                          // the groove: side to side on the half beat
+      djBob = Math.abs(Math.sin(D.groove)) * 0.06 * D.ease;
+      djTilt = Math.sin(D.groove * 0.25) * 0.12 * D.ease;
+      // the shrug: every 6-10 s while it plays, shoulders (the whole head) hop up and tip
+      if (D.shrug.t < 0 && D.ease > 0.5 && Math.random() < dt * 0.14) D.shrug.t = 0;
+      if (D.shrug.t >= 0) { D.shrug.t += dt; const k = Math.min(1, D.shrug.t / 0.7); djShrug = Math.sin(k * Math.PI) ; if (D.shrug.t > 0.7) D.shrug.t = -1; }
+      // the happy faces: grin, eyes-shut groove, brows-up delight, a tongue-out cheeky one, a wink
+      const M = D.mood;
+      M.next -= dt;
+      if (!M.act && M.next <= 0 && D.ease > 0.4) { const acts = ["grin", "shut", "delight", "cheeky", "wink", "grin", "delight"]; M.act = acts[Math.floor(Math.random() * acts.length)]; M.t = 0; M.dur = M.act === "wink" ? 0.7 : 1.6 + Math.random() * 1.6; M.next = 3 + Math.random() * 4; if (M.act === "wink") D.wink = { t: 0, side: Math.random() < 0.5 ? -1 : 1 }; }
+      if (M.act) { M.t += dt; const k = Math.sin(Math.min(1, M.t / M.dur) * Math.PI);
+        if (M.act === "grin") { smile = Math.max(smile, 0.95 * k); brow = Math.max(brow, 0.35 * k); }
+        if (M.act === "shut") { squint = Math.max(squint, 1.6 * k); smile = Math.max(smile, 0.7 * k); tilt += 0.1 * k; }
+        if (M.act === "delight") { brow = Math.max(brow, 0.9 * k); smile = Math.max(smile, 0.8 * k); target = Math.max(target, 0.35 * k); }
+        if (M.act === "cheeky") { smile = Math.max(smile, 0.6 * k); target = Math.max(target, 0.3 * k); u.uTongue.value = Math.max(u.uTongue.value, 0.9 * k); squint = Math.max(squint, 0.3 * k); }
+        if (M.t >= M.dur) M.act = ""; }
+      if (D.ease > 0.5) smile = Math.max(smile, 0.35);
+      // the wink (also the first beat of the video intro)
+      if (D.wink.t >= 0) { D.wink.t += dt; const k = Math.sin(Math.min(1, D.wink.t / 0.55) * Math.PI); u.uWink.value = D.wink.side * k; if (D.wink.t > 0.55) { D.wink.t = -1; u.uWink.value = 0; } } else u.uWink.value += (0 - u.uWink.value) * 0.3;
+      // THE ZOOM-OFF: after the wink the head rushes toward you and out of frame, spinning
+      if (D.off.t >= 0) { D.off.t += dt; const k = Math.max(0, Math.min(1, (D.off.t - 0.35) / 0.75)); const ek = k * k; djZ = ek * 3.2; djX = D.off.dir * ek * ek * 5; djScale = 1 + ek * 0.6; djSpin = ek * 2.2 * D.off.dir; if (D.off.t > 3) { /* stays out until "back" */ djZ = 3.2; djX = D.off.dir * 5; } }
+      // THE PEEK (resume): the head slides in from the side, snaps a nod, and slides out
+      if (D.peek.t >= 0) { D.peek.t += dt; const k = Math.min(1, D.peek.t / 1.6); const inout = Math.sin(k * Math.PI); djX = -3.6 + 3.2 * inout; djZ = 0.6 * inout; djBang = Math.max(djBang, k > 0.4 && k < 0.6 ? 0.5 : 0); smile = Math.max(smile, 0.9 * inout); brow = Math.max(brow, 0.6 * inout); if (D.peek.t > 1.6) D.peek.t = -1; }
+    } else if (u.uWink.value !== 0) u.uWink.value += (0 - u.uWink.value) * 0.3;
     if (!speaking && pf.script) { pf.script = null; pf.endSmile = 1; }
     if (!speaking && pf.endSmile > 0) { smile = 0.45 * pf.endSmile; pf.endSmile = Math.max(0, pf.endSmile - dt * 0.5); }
     m.open += (target - m.open) * (speaking ? (m.snap ? 0.75 : 0.5) : 0.15);
@@ -784,7 +933,7 @@ function Body({ look, onPulse, mini = false }: { look: OrganismLook; onPulse: (b
     e.squint += (squint - e.squint) * 0.1; e.nod *= Math.pow(0.03, dt); if (speaking && !sc) e.glance *= Math.pow(0.05, dt);
     u.uBrow.value = e.brow + flash.current * 0.8;
     u.uSmile.value = e.smile; u.uSquint.value = e.squint;
-    u.uTilt.value = e.tilt + pointer.x * 0.06;
+    u.uTilt.value = e.tilt + pointer.x * 0.06 + djTilt;
 
     gazeRef.current.x += (pointer.x * 1.4 + e.glance - gazeRef.current.x) * 0.08;
     gazeRef.current.y += (pointer.y * 1.2 + lifeGy - e.nod * 0.5 - gazeRef.current.y) * 0.08;
@@ -816,10 +965,36 @@ function Body({ look, onPulse, mini = false }: { look: OrganismLook; onPulse: (b
       const spinA = wh.act === "spin" ? (1 - Math.cos(k * Math.PI)) * Math.PI : 0;                 // one full turn, eased
       const bounce = wh.act === "bounce" ? Math.abs(Math.sin(k * Math.PI * 3)) * 0.35 * (1 - k * 0.5) : 0;
       const peek = wh.act === "peek" ? Math.sin(k * Math.PI) * 0.55 : 0;
-      const nod = wh.act === "nod" ? Math.sin(k * Math.PI * 4) * 0.18 : 0;
-      rig.current.position.set(peek, 0.08 * Math.sin(u.uTime.value * 1.6) + bounce, 0);
-      rig.current.rotation.set(nod, spinA + peek * 0.6, 0);
+      const nod = wh.act === "nod" ? Math.sin(k * Math.PI * 4) * 0.18 : wh.act === "scan" ? Math.sin(k * Math.PI * 6) * 0.05 : 0;
+      const lean = wh.act === "think" || wh.act === "hmm" ? Math.sin(k * Math.PI) * 0.12 : 0;
+      rig.current.position.set(peek, 0.08 * Math.sin(u.uTime.value * 1.6) + bounce + lean * 0.5, 0);
+      rig.current.rotation.set(nod - lean, spinA + peek * 0.6 + (wh.act === "scan" ? Math.sin(k * Math.PI * 6) * 0.25 : 0), lean * 0.5);
       rig.current.scale.setScalar(1 + bounce * 0.15);
+    } else if (mode === "dj") {
+      rig.current.position.set(djSway * 1.2 + djX, djBob + djShrug * 0.22 - djBang * 0.12, djZ);
+      rig.current.rotation.set(djBang * 0.9 - djShrug * 0.1, djSway * 0.5 + djSpin, djSway * 0.35 + djShrug * 0.12 + djTilt * 0.4);
+      rig.current.scale.set(djScale, djScale * (1 + djShrug * 0.06), djScale);
+    } else if (mode === "stage") {
+      // THE STAGE: the head roams the window on a slow figure-eight, leaning into its turns; the
+      // lattice's hole follows it (roam), the console sits pushed back behind. Trippy on purpose.
+      roamT.current += dt;
+      const rt = roamT.current;
+      // THE LEAP: it starts small at the bottom-right, where the docked head was, and runs to the
+      // front over the first 0.8 s (a CSS transform on the canvas' parent would mis-size the
+      // canvas - R3F measures the transformed box - so the run is done here, in the scene)
+      const leap = 1 - Math.pow(1 - Math.min(1, rt / 0.8), 3);
+      // in shot, always: a modest roam in the upper two thirds, the head at Talk's distance (it
+      // used to come so close on a wide screen that it ran off the edges and hid the buttons)
+      const rx = 0.6 * Math.sin(rt * 0.21) + 0.18 * Math.sin(rt * 0.53), ry = 0.22 + 0.22 * Math.sin(rt * 0.33 + 1) + 0.08 * Math.sin(rt * 0.77);
+      const wx = rx + away * 1.4, wy = ry + away * 0.9, wz = 0.1 + 0.2 * Math.sin(rt * 0.17) - away * 3.2;
+      rig.current.position.set(2.6 + (wx - 2.6) * leap, -1.6 + (wy + 1.6) * leap, -2.5 + (wz + 2.5) * leap);
+      rig.current.rotation.set(-away * 0.3 - ry * 0.1, away * 0.8 + rx * 0.12 + (1 - leap) * 2.5, -rx * 0.06);
+      rig.current.scale.setScalar((1.0 - away * 0.35) * (0.5 + 0.5 * leap));
+      if (roam) {
+        // project the head's centre to window fractions for the 2D lattice
+        const v = new THREE.Vector3(rig.current.position.x, rig.current.position.y, rig.current.position.z).project(camera);
+        roam.current = { x: (v.x + 1) / 2, y: (1 - v.y) / 2, r: 0.30 * (1.0 - away * 0.35) * (4.2 / (4.2 - rig.current.position.z)) };
+      }
     } else {
       rig.current.position.set(away * 1.4, away * 0.9, -away * 3.2);
       rig.current.rotation.set(-away * 0.3, away * 0.8, 0);
@@ -838,13 +1013,14 @@ function Body({ look, onPulse, mini = false }: { look: OrganismLook; onPulse: (b
   return (
     <group ref={rig}>
       <mesh ref={mesh} onClick={tap}>
-        <sphereGeometry args={[1.02, 128, 128]} />
+        <sphereGeometry args={[1.02, 96, 96]} />
         <shaderMaterial vertexShader={VERT} fragmentShader={FRAG} uniforms={uniforms} />
       </mesh>
       <points ref={spores} geometry={sporeGeo} raycast={() => undefined}>
         <pointsMaterial map={glow} size={0.03} transparent opacity={0.7} depthWrite={false} blending={THREE.AdditiveBlending} sizeAttenuation />
       </points>
-      <Cortex hue={look.hue} mouse={mouse} level={levelRef} />
+      {/* the docked head and the head up front keep the orbits; the Talk page keeps its cortex (it fires with thought) */}
+      {mode === "mini" || mode === "stage" ? <Orbits hue={look.hue} level={levelRef} /> : <Cortex hue={look.hue} mouse={mouse} level={levelRef} />}
     </group>
   );
 }
@@ -856,7 +1032,7 @@ function Curtain({ trigger, hue }: { trigger: number; hue: number }) {
   useEffect(() => {
     const canvas = ref.current; if (!canvas) return;
     const ctx = canvas.getContext("2d"); if (!ctx) return;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const dpr = Math.min(1.25, window.devicePixelRatio || 1);
     const w = window.innerWidth, h = window.innerHeight;
     canvas.width = w * dpr; canvas.height = h * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const size = 16, cols = Math.ceil(w / size);
@@ -885,9 +1061,9 @@ function Curtain({ trigger, hue }: { trigger: number; hue: number }) {
         if (y > h + size * 10) { heads[i] = -Math.random() * h * 0.5; }
       }
       if (t < life) raf = requestAnimationFrame(step);
-      else { ctx.clearRect(0, 0, w, h); canvas.style.opacity = "0"; }
+      else { ctx.clearRect(0, 0, w, h); canvas.style.opacity = "0"; window.setTimeout(() => { if (alive) canvas.style.display = "none"; }, 700); }   // a blended full-window layer costs compositing even when empty
     };
-    canvas.style.opacity = "1";
+    canvas.style.opacity = "1"; canvas.style.display = "block";
     raf = requestAnimationFrame(step);
     return () => { alive = false; cancelAnimationFrame(raf); };
   }, [trigger, hue]);
@@ -911,22 +1087,29 @@ function useHelixColors() {
 }
 
 /** The room's 2D half: the neural net and the vignette. The helix rides inside the face's canvas. */
-function Room() {
+function Room({ follow, z = 0, breach = false }: { follow?: React.MutableRefObject<{ x: number; y: number; r: number } | null>; z?: number; breach?: boolean }) {
   return (
-    <div className="board-stage" style={{ position: "fixed", zIndex: 0, opacity: 0.9, pointerEvents: "none" }} aria-hidden="true">
-      <NeuralLayer density={2.2} keepOut={{ x: 0.5, y: 0.5, r: 0.36 }} />
+    <div className="board-stage" style={{ position: "fixed", zIndex: z, opacity: 0.9, pointerEvents: "none" }} aria-hidden="true">
+      {/* the stage (breach): a sparse sheet the head breaks through and that heals behind it - not the crowded 3D shell of the Talk page */}
+      <NeuralLayer density={breach ? 1.15 : 2.6} keepOut={{ x: 0.5, y: 0.5, r: 0.36 }} follow={follow} depth={!breach} breach={breach} />
     </div>
   );
 }
 
-export default function Organism({ look, mini = false, onClick }: { look: OrganismLook; mini?: boolean; onClick?: () => void }) {
+export default function Organism({ look, mini = false, onClick, mode: modeIn, onClose }: { look: OrganismLook; mini?: boolean; onClick?: () => void; mode?: OrganismMode; onClose?: () => void }) {
   const [curtain, setCurtain] = useState(0);
   const [epoch, setEpoch] = useState(0);     // a lost context that never comes back: remount the canvas
   const colors = useHelixColors();
-  if (mini) {
+  const mode: OrganismMode = modeIn || (mini ? "mini" : "full");
+  const level = usePerfLevel();
+  const cap = dprCap();
+  const roam = useRef<{ x: number; y: number; r: number } | null>(null);
+  const box = useRef<HTMLDivElement | null>(null);
+  if (mode === "mini") {
     return (
-      <div className="face-dock" onClick={onClick} title="Talk to HELIX" role="button">
-        <Canvas key={epoch} camera={{ position: [0, 0.1, 3.4], fov: 40 }} gl={{ antialias: true, alpha: true }} dpr={[1, 2]} style={{ pointerEvents: "none" }}
+      <div className="face-dock" onClick={onClick} data-tip="Click me: I come to the front" role="button">
+        {/* the camera sits back so a bounce, a spin or a peek never leaves the canvas (it clipped) */}
+        <Canvas key={epoch} camera={{ position: [0, 0.1, 4.6], fov: 40 }} gl={{ antialias: true, alpha: true, preserveDrawingBuffer: true }} dpr={[1, Math.min(cap, 1.25)]} style={{ pointerEvents: "none" }}
           onCreated={({ gl }) => { gl.domElement.addEventListener("webglcontextlost", () => window.setTimeout(() => setEpoch((e) => e + 1), 2500)); }}>
           <ContextGuard />
           <Body look={look} onPulse={() => undefined} mini />
@@ -934,12 +1117,28 @@ export default function Organism({ look, mini = false, onClick }: { look: Organi
       </div>
     );
   }
+  if (mode === "dj") {
+    // THE DJ: the same face, inside the radio deck's stage; the mouse and clicks work on the head
+    // relative to the stage; the beat drives the acts. One extra WebGL context, released with the deck.
+    return (
+      <div ref={box} className="dj-face" aria-hidden="true">
+        <Canvas key={epoch} camera={{ position: [0, 0.1, 3.6], fov: 40 }} gl={{ antialias: true, alpha: true }} dpr={[1, cap]} style={{ pointerEvents: "none" }}
+          onCreated={({ gl }) => { gl.domElement.addEventListener("webglcontextlost", () => window.setTimeout(() => setEpoch((e) => e + 1), 2500)); }}>
+          <ContextGuard />
+          <group position={[0, -0.6, -6]} scale={0.55}><HelixBackdrop colors={colors} position={[0, 0, 0]} scale={1} tempo={1.3} spinRate={1.6} bendable={false} /></group>
+          <Body look={look} onPulse={() => undefined} mode="dj" box={box} />
+        </Canvas>
+      </div>
+    );
+  }
+  const stage = mode === "stage";
   return (
     <>
-      <Room />
-      <div className="fixed inset-0" style={{ zIndex: 0 }}>
-        <Canvas key={epoch} camera={{ position: [0, 0.2, 4.2], fov: 42 }} gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
-          dpr={[1, 2]} style={{ pointerEvents: "auto" }}
+      <Room follow={stage ? roam : undefined} z={stage ? 31 : 0} breach={stage} />
+      {stage && <div className="stage-veil" onClick={onClose} />}
+      <div className={`fixed inset-0${stage ? "" : " face-full"}`} style={{ zIndex: stage ? 32 : 0, pointerEvents: stage ? "none" : undefined }}>
+        <Canvas key={epoch} camera={{ position: [0, 0.2, 4.2], fov: 42 }} gl={{ antialias: true, alpha: true, powerPreference: "high-performance", preserveDrawingBuffer: true }}
+          dpr={[1, cap]} style={{ pointerEvents: stage ? "none" : "auto" }}
           onCreated={({ gl, scene }) => {
             scene.fog = new THREE.Fog("#080b0f", 10, 42);     // the strands run off into the dark, never cut
             let timer = 0;
@@ -949,17 +1148,27 @@ export default function Organism({ look, mini = false, onClick }: { look: Organi
           <ContextGuard />
           {/* the strands: one wide behind the face, two thin ones crossing it, all turning with the mouse */}
           <group position={[0, -0.2, -7]} scale={0.8}>
-            <HelixBackdrop colors={colors} position={[0, 0.3, 0]} scale={1} />
+            <HelixBackdrop colors={colors} position={[0, 0.3, 0]} scale={1} tempo={stage ? 1.6 : 1.15} spinRate={stage ? 1.8 : 1.2} />
           </group>
+          {/* the far strands never bend under the mouse (nobody can tell at that depth; it was 3600 projections a frame) */}
           <group position={[-7.5, 1.5, -17]} rotation={[0.2, 0, 0.35]} scale={0.8}>
-            <HelixBackdrop colors={colors} position={[0, 0, 0]} scale={1} />
+            <HelixBackdrop colors={colors} position={[0, 0, 0]} scale={1} tempo={1.4} spinRate={stage ? 3 : 2.2} bendable={false} />
           </group>
-          <group position={[8, -2, -19]} rotation={[-0.1, 0, -0.45]} scale={0.7}>
-            <HelixBackdrop colors={colors} position={[0, 0, 0]} scale={1} />
-          </group>
-          <Body look={look} onPulse={(big) => { if (big) setCurtain((c) => c + 1); }} />
+          {level !== "minimal" && (
+            <group position={[8, -2, -19]} rotation={[-0.1, 0, -0.45]} scale={0.7}>
+              <HelixBackdrop colors={colors} position={[0, 0, 0]} scale={1} tempo={1.6} spinRate={stage ? 3.6 : 2.6} bendable={false} />
+            </group>
+          )}
+          <Body look={look} onPulse={(big) => { if (big) setCurtain((c) => c + 1); }} mode={stage ? "stage" : "full"} roam={roam} />
         </Canvas>
       </div>
+      {stage && (
+        <div className="stage-bar">
+          <span className="stage-word">HELIX · UP FRONT</span>
+          <button className="task-btn" onClick={onClick}>Talk to me</button>
+          <button className="task-btn dim" onClick={onClose}>Back to work · Esc</button>
+        </div>
+      )}
       <Curtain trigger={curtain} hue={look.hue} />
     </>
   );

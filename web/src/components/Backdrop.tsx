@@ -5,6 +5,7 @@
 // scene is "off" or motion is reduced.
 import { useEffect, useRef } from "react";
 import { radioBeat } from "./Radio";
+import { backdropOn } from "../lib/perf";
 
 export type Scene = "off" | "nebula" | "grid" | "rain" | "aurora" | "warp" | "pulse";
 export const SCENES: { key: Scene; name: string; blurb: string }[] = [
@@ -16,11 +17,11 @@ export const SCENES: { key: Scene; name: string; blurb: string }[] = [
   { key: "warp", name: "Warp", blurb: "Stars streaking toward you; a kick throws you forward." },
   { key: "pulse", name: "Pulse rings", blurb: "Rings ripple out from the center on every beat." },
 ];
-export interface Look { scene: Scene; surprise: boolean; intensity: number; layout: "full" | "compact" }
+export interface Look { scene: Scene; surprise: boolean; intensity: number; layout: "full" | "compact"; djScene: Scene }
 const KEY = "helix_radio_look";
 export function loadLook(): Look {
-  try { const v = localStorage.getItem(KEY); if (v) return { scene: "nebula", surprise: false, intensity: 0.8, layout: "full", ...JSON.parse(v) }; } catch { /* no storage */ }
-  return { scene: "nebula", surprise: false, intensity: 0.8, layout: "full" };
+  try { const v = localStorage.getItem(KEY); if (v) return { scene: "nebula", surprise: false, intensity: 0.8, layout: "full", djScene: "off", ...JSON.parse(v) }; } catch { /* no storage */ }
+  return { scene: "nebula", surprise: false, intensity: 0.8, layout: "full", djScene: "off" };
 }
 export function saveLook(l: Look) { try { localStorage.setItem(KEY, JSON.stringify(l)); } catch { /* no storage */ } window.dispatchEvent(new CustomEvent("helix-look", { detail: l })); }
 
@@ -29,7 +30,9 @@ const REDUCED = typeof window !== "undefined" && window.matchMedia?.("(prefers-r
 
 function rng(seed: number) { let s = seed >>> 0 || 1; return () => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; return ((s >>> 0) % 100000) / 100000; }; }
 
-export default function Backdrop() {
+/** The whole-app backdrop by default; with `scene` + `boxed` it is one fixed scene drawn inside
+ *  its parent (the radio stage behind the DJ). */
+export default function Backdrop({ scene: fixed, boxed = false }: { scene?: Scene; boxed?: boolean } = {}) {
   const ref = useRef<HTMLCanvasElement | null>(null);
   useEffect(() => {
     const canvas = ref.current;
@@ -37,33 +40,47 @@ export default function Backdrop() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     let look = loadLook();
-    let scene: Scene = look.scene;
+    let scene: Scene = fixed ?? look.scene;
     let seed = Math.floor(Math.random() * 1e9);
     let lastTheme = "";
     let w = 0, h = 0, raf = 0, last = performance.now(), alive = true, t = 0;
     let objs: Record<string, unknown> = {};
-    const dpr = Math.min(1.5, window.devicePixelRatio || 1);
-    const resize = () => { w = window.innerWidth; h = window.innerHeight; canvas.width = w * dpr; canvas.height = h * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); objs = {}; };
+    const dpr = Math.min(1.25, window.devicePixelRatio || 1);   // a full-window scene: never more than 1.25x pixels
+    const resize = () => {
+      const box = boxed ? canvas.parentElement : null;
+      w = box ? box.clientWidth : window.innerWidth; h = box ? box.clientHeight : window.innerHeight;
+      canvas.width = w * dpr; canvas.height = h * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); objs = {};
+    };
     resize();
     window.addEventListener("resize", resize);
-    const onLook = (e: Event) => { look = (e as CustomEvent).detail as Look; if (!look.surprise) scene = look.scene; seed = Math.floor(Math.random() * 1e9); objs = {}; };
+    const ro = boxed && canvas.parentElement ? new ResizeObserver(resize) : null; ro?.observe(canvas.parentElement!);
+    const onLook = (e: Event) => { look = (e as CustomEvent).detail as Look; if (fixed) return; if (!look.surprise) scene = look.scene; seed = Math.floor(Math.random() * 1e9); objs = {}; };
     window.addEventListener("helix-look", onLook);
     const pick = () => { const pool = SCENES.filter((s) => s.key !== "off"); scene = pool[Math.floor(Math.random() * pool.length)].key; seed = Math.floor(Math.random() * 1e9); objs = {}; };
-    if (look.surprise) pick();
+    if (look.surprise && !fixed) pick();
+    // THE MOMENT a task ends (Brian, 2026-09-22): whatever scene is up takes the hit in its own
+    // language - the grid's horizon flares and rushes, the rain bursts, warp throws you forward,
+    // the nebula swells - because every scene already answers `lvl` and `kick`; a wave is a kick
+    // plus a surge that decays over 1.6 s, with a wash of gold (done) or ember (failed) over it.
+    let wave: { at: number; hue: number } | null = null;
+    const onWave = (e: Event) => { const k = (e as CustomEvent).detail?.kind; wave = { at: performance.now(), hue: k === "failed" ? 12 : 45 }; };
+    window.addEventListener("helix-wave", onWave);
 
     const step = (now: number) => {
       if (!alive) return;
       const dt = Math.min(0.05, (now - last) / 1000); last = now; t += dt;
       const beat = radioBeat();
-      if (beat.theme !== lastTheme) { lastTheme = beat.theme; if (look.surprise && beat.playing) pick(); }
+      if (beat.theme !== lastTheme) { lastTheme = beat.theme; if (look.surprise && beat.playing && !fixed) pick(); }
       // the palette drifts around the color wheel (a full turn every ~90 s) - the theme sets where it starts
       const [b0, b1] = THEME_HUE[beat.theme] || THEME_HUE[""];
       const drift = (t * 4) % 360;
       const h0 = b0 + drift, h1 = b1 + drift;
-      const lvl = beat.level * look.intensity, kick = beat.kick;
+      const surge = wave ? Math.max(0, 1 - (now - wave.at) / 1600) : 0;
+      if (wave && surge <= 0) wave = null;
+      const lvl = Math.max(beat.level * look.intensity, surge * surge * 0.9), kick = beat.kick || (wave !== null && now - wave.at < 120);
       const amp = 0.25 + 0.75 * look.intensity;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      if (scene === "off") { ctx.clearRect(0, 0, w, h); raf = requestAnimationFrame(step); return; }
+      if (scene === "off" || !backdropOn()) { ctx.clearRect(0, 0, w, h); raf = requestAnimationFrame(step); return; }
       const R = rng(seed);
       // ---------------------------------------------------------------- nebula
       if (scene === "nebula") {
@@ -173,10 +190,22 @@ export default function Backdrop() {
         objs.rings = rings.filter((r) => r.r < maxR);
         ctx.globalCompositeOperation = "source-over";
       }
+      if (wave && surge > 0) {
+        // the wash: the whole scene tinted for a breath, brightest at the centre, plus one ring
+        const ease = surge * surge;
+        ctx.globalCompositeOperation = "lighter";
+        const g = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.hypot(w, h) * 0.55);
+        g.addColorStop(0, `hsla(${wave.hue}, 95%, 62%, ${0.22 * ease * amp})`); g.addColorStop(1, `hsla(${wave.hue}, 95%, 55%, ${0.05 * ease * amp})`);
+        ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+        const rr = (1 - surge) * Math.hypot(w, h) * 0.6;
+        ctx.strokeStyle = `hsla(${wave.hue}, 95%, 70%, ${0.5 * surge})`; ctx.lineWidth = 2 + 6 * surge;
+        ctx.beginPath(); ctx.arc(w / 2, h / 2, rr, 0, Math.PI * 2); ctx.stroke();
+        ctx.globalCompositeOperation = "source-over";
+      }
       raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
-    return () => { alive = false; cancelAnimationFrame(raf); window.removeEventListener("resize", resize); window.removeEventListener("helix-look", onLook); };
-  }, []);
-  return <canvas ref={ref} className="fixed inset-0" style={{ zIndex: 0, pointerEvents: "none" }} aria-hidden="true" />;
+    return () => { alive = false; ro?.disconnect(); cancelAnimationFrame(raf); window.removeEventListener("resize", resize); window.removeEventListener("helix-look", onLook); window.removeEventListener("helix-wave", onWave); };
+  }, [fixed, boxed]);
+  return <canvas ref={ref} className={boxed ? "absolute inset-0" : "fixed inset-0"} style={{ zIndex: 0, pointerEvents: "none", width: boxed ? "100%" : undefined, height: boxed ? "100%" : undefined }} aria-hidden="true" />;
 }

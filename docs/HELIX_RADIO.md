@@ -4,8 +4,10 @@ One music library for the company, playable from HELIX and from every app we bui
 music videos go into one private bucket; a small API hands out short-lived play links to anyone
 signed in with a Mark1 Google account; the same player drops into any app in a few lines.
 
-Status: LIVE inside HELIX (2026-09-21): the deck, uploads, playback across pages, station names,
-the gear (backgrounds, intensity, layout), the DJ stage - all through the user's own gcloud login.
+Status: LIVE inside HELIX (2026-09-22): the deck, streamed uploads with real progress, playback
+across pages (media streams down over HTTPS and plays while it arrives; cached on the PC after),
+shelves (folders), station names, the gear (backgrounds, intensity, layout, the cache), the DJ -
+the real face - and the music-video performance; all through the user's own gcloud login.
 Next: `helix-radio-api` on Cloud Run with Google sign-in, then the drop-in for the apps.
 
 ---
@@ -17,7 +19,8 @@ Next: `helix-radio-api` on Cloud Run with Google sign-in, then the drop-in for t
 | Bucket `helix-radio-<suffix>` | GCS, windy-celerity, us-west2 | Private. `tracks/`, `videos/`, `art/`, `catalog.json` |
 | `helix-radio-api` | Cloud Run, same project | Catalog, play links, upload links, station names. Verifies a Google sign-in from `mark1online.com` on every call |
 | The player | HELIX header (left of the menu) and one React component for the apps | Deck: now playing, queue, shuffle, volume, upload; grows into a video window; or shows the dancing avatar |
-| The DJ | Same component | A mini HELIX head in a headset, jamming in a neural net that takes the song's theme; the head bobs on kicks, the eyes squint on the beat, the LEDs run the bands. Hidden when the video is showing if you say so |
+| The DJ | Same component | HELIX's real face (the Talk avatar) inside the stage: head-bangs on the kick, grooves, shrugs, grins, shuts its eyes, winks; the mouse and clicks work its lattice inside the stage. A **music video** gets a performance: a wink, the head zooms off, a curtain of neural net knits over the stage and falls into the picture; on resume the DJ peeks in from the side, nods, and the picture ripples back. "Show the DJ" swaps the video out |
+| CURRENT TASKS | HELIX | Every upload, fetch and station cache is a task: the section above PROJECTS, the dock at the bottom of every page, the log, Stop |
 
 Why an API instead of the bucket directly: a private bucket needs signed URLs, signing needs a
 service account key or impersonation, and we never hand keys to browsers. The API holds the
@@ -80,8 +83,9 @@ and the same identity the prod push gate uses.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "stations": { "default": "HELIX RADIO", "MES": "MES FM", "WMS": "Dock Radio" },
+  "folders": ["Rock", "Rock/80s", "Late night"],
   "tracks": [
     {
       "id": "8f3a1c",
@@ -94,12 +98,20 @@ and the same identity the prod push gate uses.
       "video": "videos/8f3a1c.mp4",
       "art": "art/8f3a1c.jpg",
       "seconds": 214,
+      "folder": "Late night",
+      "bytes": 236000000,
       "uploaded_by": "brian_sullivan@mark1online.com",
       "at": "2026-09-21T02:10:00Z"
     }
   ]
 }
 ```
+
+**Shelves** (folders, 2026-09-22): a track sits in one folder, like Explorer; a folder is a path such
+as `Rock/80s`, four levels deep at most, letters/digits/spaces/dashes/dots. `folders` lists the
+empty ones too; a track's `folder` implies its parents. Everyone sees the same shelves (they are
+in the catalog). Rename moves the tracks with it; a shelf is removed only when empty - shelving
+never drops a track. Playlists (a track in many) are a later layer on top; nothing forecloses them.
 
 `theme` and `bpm` are typed at upload (your idea) and are the avatar's hints; the player also
 measures the beat live, so a wrong bpm is corrected by the ears, not trusted.
@@ -128,6 +140,20 @@ the video is hidden, and gets a still for the art.
 
 Deleting is not in the app. A track can be hidden (`"hidden": true`) from the deck; removing the
 file is done in the GCS console by a human, on purpose.
+
+**Inside HELIX today** (no API yet), the upload is `PUT /api/radio/upload?name=&title=&artist=&theme=&bpm=&folder=`
+with the file as the body: HELIX counts the bytes as they arrive (the first half of the bar),
+then sends the file to the bucket by a **resumable HTTPS upload** with an access token from the
+user's own `gcloud auth print-access-token` (8 MB pieces, the second half of the bar), then writes
+the catalog. It is a task in CURRENT TASKS from the first byte; Stop leaves nothing in the catalog
+(the bucket abandons the half-sent session). Without a token the gcloud CLI copy is the fallback.
+
+**Playback inside HELIX** (`GET /api/radio/play/{id}`): a cached file is served with Range (seek);
+a file not yet on the PC is **streamed down** over HTTPS with the same token into the cache and
+served while it arrives (`X-Helix-Arriving: 1`), so a video starts in a second, not after the
+whole download. The next track in the list prefetches when a track starts. The cache lives in
+`data/radio_cache`, capped (Settings/the gear: `radio_cache_gb`, 5 GB default), oldest-played
+goes first; **Cache the whole station** runs as one task. No gcloud console windows anywhere.
 
 ## 6. The player, in every app
 

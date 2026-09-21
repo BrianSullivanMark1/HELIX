@@ -1,5 +1,6 @@
 // The app's one store: everything the event stream drives, plus routing.
 import { create } from "zustand";
+import { useJobs } from "./jobs";
 
 export type OrbState = "idle" | "listening" | "transcribing" | "thinking" | "speaking";
 export type Hue = "none" | "working" | "done" | "error";
@@ -443,6 +444,15 @@ export function applyEvent(ev: Record<string, unknown>): void {
       break;
     case "orb":
       s.set({ orb: ev.state as OrbState });
+      break;
+    case "deploy":
+    case "deploy_done":
+      window.dispatchEvent(new CustomEvent(`helix-event-${ev.t}`, { detail: ev }));
+      break;
+    case "job":
+    case "job_line":
+    case "job_gone":
+      useJobs.getState().apply(ev);      // CURRENT TASKS: the register's changes, live
       break;
     case "hue":
       s.set({ hue: ev.value as Hue });

@@ -104,6 +104,7 @@ def run_web(open_mode: str = "window") -> int:
         voice = None
 
     shell = ShellSession(container, hub.push, voice=voice)
+    container.hub_push = hub.push   # the deploy lane streams its lines to the page through the hub
     if voice is not None:
         voice.on_recognized = shell.on_voice_recognized
         voice.on_stop = shell.stop
@@ -138,6 +139,18 @@ def run_web(open_mode: str = "window") -> int:
     def _last_face_gone() -> None:
         if not bool(container.settings.get("quit_when_closed", True)):
             _LOG.info("last face closed - staying up (quit_when_closed is off)")
+            return
+        # CURRENT TASKS (Brian, 2026-09-22): an upload or a deploy still running is never cut off
+        # by the window closing. HELIX stays up until the register is quiet, checking every 10 s,
+        # then quits as before - unless a face came back in the meantime.
+        jobs = getattr(container, "jobs", None)
+        live = [j for j in jobs.running() if not j.quiet] if jobs is not None else []
+        if live:
+            _LOG.info("last face closed - %d task(s) still running, staying up until they finish: %s",
+                      len(live), ", ".join(j.title for j in live)[:200])
+            t = threading.Timer(10.0, hub._maybe_empty)
+            t.daemon = True
+            t.start()
             return
         _LOG.info("last face closed - quitting")
         app.state.quitting = True

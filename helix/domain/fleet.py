@@ -208,6 +208,7 @@ class Cell:
     note: str | None = None              # ONE plain sentence a human may read; ASCII, no paths
     repo_ok: bool | None = None          # did the repo answer for this cell's HEAD (None: not asked)
     detail: str | None = None            # what the tool actually said when a read failed (for the human, not the model)
+    served_revisions: tuple[str, ...] = ()   # newest first; the live rollback targets (from the read)
 
     @property
     def health(self) -> Health:
@@ -246,6 +247,7 @@ OATS_OVERNIGHT = Company(
     prod_allowlist=frozenset({
         "brian_sullivan@mark1online.com",
         "brendan_sullivan@mark1online.com",
+        "kate@mark1online.com",   # 2026-09-19: "me, Brendan and Kate - we all need the ability"
     }),
 )
 

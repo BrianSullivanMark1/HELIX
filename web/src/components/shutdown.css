@@ -1,0 +1,12 @@
+/* POWER OFF - the question, then the closing curtain (components/Shutdown.tsx). */
+.power-wrap { position: fixed; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center; background: rgba(3, 5, 8, 0.7); animation: stage-veil-in 0.25s ease-out; pointer-events: auto; }
+.power-card { width: min(420px, calc(100vw - 32px)); padding: 22px 22px 18px; border-radius: 18px; text-align: center; border: 1px solid color-mix(in srgb, #ff7a45 55%, var(--line)); background: linear-gradient(180deg, rgba(24, 12, 10, 0.98), rgba(8, 11, 15, 0.98)); box-shadow: 0 40px 100px rgba(0, 0, 0, 0.7), 0 0 50px rgba(255, 122, 69, 0.18); animation: tip-in 0.28s cubic-bezier(.2,.9,.3,1.2) both; }
+.power-ic { display: inline-grid; place-items: center; width: 58px; height: 58px; border-radius: 50%; color: #ff9b6a; border: 1px solid rgba(255, 122, 69, 0.55); background: rgba(0, 0, 0, 0.35); box-shadow: 0 0 22px rgba(255, 122, 69, 0.35); animation: power-pulse 1.6s ease-in-out infinite; }
+@keyframes power-pulse { 0%, 100% { box-shadow: 0 0 14px rgba(255, 122, 69, 0.25); } 50% { box-shadow: 0 0 30px rgba(255, 122, 69, 0.55); } }
+.power-title { margin-top: 12px; font-family: var(--font-display, inherit); font-weight: 700; font-size: 18px; letter-spacing: 2px; color: #ffb28f; }
+.power-body { margin-top: 8px; font-size: 13px; color: var(--text); line-height: 1.45; }
+.power-acts { display: flex; justify-content: center; gap: 10px; margin-top: 16px; }
+.power-acts .task-btn { font-size: 13px; padding: 8px 18px; }
+.shutdown { position: fixed; inset: 0; z-index: 80; width: 100vw; height: 100vh; pointer-events: auto; }
+.btn-nav.power { color: #ff9b6a; }
+.btn-nav.power:hover { color: #ffb28f; text-shadow: 0 0 10px rgba(255, 122, 69, 0.6); }

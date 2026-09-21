@@ -14,6 +14,13 @@ import Sparks from "./components/Sparks";
 import { RadioButton, RadioDeck } from "./components/Radio";
 import Backdrop from "./components/Backdrop";
 import Wordmark from "./components/Wordmark";
+import Boot from "./components/Boot";
+import { TaskDock, TaskLog, TaskToasts } from "./components/Tasks";
+import { PowerAsk } from "./components/Shutdown";
+import VaultWindow from "./components/Vault";
+import TipLayer from "./components/Tip";
+import { perf, startGovernor } from "./lib/perf";
+import { useJobs } from "./lib/jobs";
 import "./shine.css";
 import Studio from "./pages/Studio";
 import Vault from "./pages/Vault";
@@ -35,6 +42,31 @@ interface Snapshot {
   murmur?: { text?: string; kind?: string; at?: string } | null;
 }
 
+/** THE LEAP BETWEEN PAGES (Brian, 2026-09-22: no cut between tabs - the face travels). Leaving Talk,
+ *  a snapshot of the big face flies down into the corner and the docked head takes over; entering
+ *  Talk, the docked head flies up and grows into the big face. Snapshots need the canvases to keep
+ *  their drawing buffer (Organism sets preserveDrawingBuffer). */
+function leapFace(from: "full" | "dock") {
+  const src = document.querySelector<HTMLCanvasElement>(from === "full" ? ".face-full canvas" : ".face-dock canvas");
+  if (!src) return;
+  let url = "";
+  try { url = src.toDataURL("image/png"); } catch { return; }
+  const r = src.getBoundingClientRect();
+  const W = window.innerWidth, H = window.innerHeight;
+  const dockW = 210, dockCx = W - 26 - dockW / 2, dockCy = H - 40 - dockW / 2;
+  const img = document.createElement("img");
+  img.src = url; img.className = "face-leap"; img.alt = "";
+  img.style.cssText = `position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;z-index:26;pointer-events:none;transform-origin:50% 50%;will-change:transform,opacity;`;
+  document.body.appendChild(img);
+  const fullCx = r.left + r.width / 2, fullCy = r.top + r.height * 0.47;   // the face sits a touch above the middle of the big canvas
+  const frames = from === "full"
+    ? [{ transform: "translate(0,0) scale(1)", opacity: 1 }, { transform: `translate(${dockCx - fullCx}px, ${dockCy - fullCy}px) scale(0.26)`, opacity: 0.15 }]
+    : [{ transform: "translate(0,0) scale(1)", opacity: 1 }, { transform: `translate(${W / 2 - (r.left + r.width / 2)}px, ${H * 0.47 - (r.top + r.height / 2)}px) scale(3.4)`, opacity: 0 }];
+  const a = img.animate(frames, { duration: from === "full" ? 620 : 560, easing: "cubic-bezier(.2,.85,.25,1)", fill: "forwards" });
+  a.onfinish = () => img.remove();
+  window.setTimeout(() => img.remove(), 900);
+}
+
 export default function App() {
   const page = useHelix((s) => s.page);
   const navigate = useHelix((s) => s.navigate);
@@ -44,7 +76,59 @@ export default function App() {
   const connectModal = useHelix((s) => s.connectModal);
   const lightbox = useHelix((s) => s.lightbox);
   const [menuOpen, setMenuOpen] = useState(false);
+  // THE STAGE: click the docked face and it leaps to the front, the page pushed back behind it
+  const [stage, setStage] = useState(false);
+  useEffect(() => {
+    if (!stage) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setStage(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [stage]);
+  useEffect(() => { setStage(false); }, [page.name]);
+  // the leap rides on navigate itself: the snapshot must be taken BEFORE the page changes
+  const [dockDelayed, setDockDelayed] = useState(false);
+  useEffect(() => {
+    const original = useHelix.getState().navigate;
+    useHelix.setState({
+      navigate: (p) => {
+        const now = useHelix.getState().page.name;
+        if (now === "talk" && p.name !== "talk") { leapFace("full"); setDockDelayed(true); window.setTimeout(() => setDockDelayed(false), 480); }
+        else if (now !== "talk" && p.name === "talk") leapFace("dock");
+        original(p);
+      },
+    });
+    return () => { useHelix.setState({ navigate: original }); };
+  }, []);
   const [radioOpen, setRadioOpen] = useState(false);
+  const [powerAsk, setPowerAsk] = useState(false);
+  // THE VAULT opens from the Console's Vault tab, from Settings, or by the helix-vault event
+  const [vaultOpen, setVaultOpen] = useState(false);
+  useEffect(() => { const on = () => setVaultOpen(true); window.addEventListener("helix-vault", on); return () => window.removeEventListener("helix-vault", on); }, []);
+  const logOpen = useJobs((s) => s.logOpen !== null);
+  // the boot curtain lifts when the backend answers once
+  const [booted, setBooted] = useState(false);
+  useEffect(() => { void api.get("/api/snapshot").then(() => setBooted(true)).catch(() => setBooted(true)); }, []);
+  // THE GOVERNOR: measures the frame time and steps the art down on a slow machine (lib/perf.ts)
+  useEffect(() => { startGovernor(); }, []);
+  // the frame-rate badge: Settings > Overview > Show the frame rate (kept on this PC)
+  const [fpsOn, setFpsOn] = useState<boolean>(() => { try { return localStorage.getItem("helix_fps") === "1"; } catch { return false; } });
+  const [fpsLine, setFpsLine] = useState({ text: "", slow: false });
+  useEffect(() => {
+    const on = () => { try { setFpsOn(localStorage.getItem("helix_fps") === "1"); } catch { /* fine */ } };
+    window.addEventListener("helix-fps-toggle", on);
+    return () => window.removeEventListener("helix-fps-toggle", on);
+  }, []);
+  useEffect(() => {
+    if (!fpsOn) return;
+    const id = window.setInterval(() => setFpsLine({ text: `${perf.fps} FPS · ${perf.frameMs} MS · ${perf.level.toUpperCase()}${perf.mode === "auto" ? " · AUTO" : ""}`, slow: perf.fps < 45 }), 1000);
+    return () => window.clearInterval(id);
+  }, [fpsOn]);
+  // the deploy lane's lines ride the event stream; the Deploy window listens
+  useEffect(() => {
+    const relay = (e: Event) => window.dispatchEvent(new CustomEvent("helix-deploy", { detail: (e as CustomEvent).detail }));
+    window.addEventListener("helix-event-deploy", relay); window.addEventListener("helix-event-deploy_done", relay);
+    return () => { window.removeEventListener("helix-event-deploy", relay); window.removeEventListener("helix-event-deploy_done", relay); };
+  }, []);
   // HELIX IS OFF: the backend quit (Settings -> Power, the last tab rule, or a crash). The stream
   // stops trying, the WebGL pages unmount, and one calm screen says how to start it again.
   const [off, setOff] = useState<string | null>(null);
@@ -74,6 +158,9 @@ export default function App() {
   // THE BRAIN: when no Claude is connected the header says so in glowing amber, left of the nav,
   // and the menu burns orange until it is fixed - out of the way, impossible to miss.
   const [brain, setBrain] = useState<{ ok: boolean; line: string }>({ ok: true, line: "" });
+  // THE TOOLS: what the deploy lane needs on this PC (gcloud signed in, the Firebase CLI, the
+  // console checkout, a GitHub token). Missing ones light Settings the same way a missing brain does.
+  const [needs, setNeeds] = useState<string[]>([]);
   useEffect(() => {
     let alive = true;
     const check = () => {
@@ -88,10 +175,15 @@ export default function App() {
         })
         .catch(() => undefined);
     };
+    // the tools check spawns gcloud and firebase: once now, then every five minutes, and after a save
+    const tools = () => void api.get<{ needs?: string[] }>("/api/deploy/tools").then((d) => { if (alive) setNeeds(d.needs || []); }).catch(() => undefined);
+    tools();
+    const tid = window.setInterval(tools, 300000);
+    window.addEventListener("helix-settings-saved", tools);
     check();
     const id = window.setInterval(check, 30000);
     window.addEventListener("helix-settings-saved", check);
-    return () => { alive = false; window.clearInterval(id); window.removeEventListener("helix-settings-saved", check); };
+    return () => { alive = false; window.clearInterval(id); window.clearInterval(tid); window.removeEventListener("helix-settings-saved", check); window.removeEventListener("helix-settings-saved", tools); };
   }, []);
 
   useEffect(() => {
@@ -178,7 +270,7 @@ export default function App() {
       <Backdrop />
       {onConsole && (body.style === "cell" ? <Organism look={body.look} /> : <Orb />)}
       <Sparks />
-      <RadioDeck open={radioOpen} onClose={() => setRadioOpen(false)} />
+      <RadioDeck open={radioOpen} onClose={() => setRadioOpen(false)} look={body.look} />
       <StateColor />
 
       {/* reveal strip */}
@@ -194,28 +286,33 @@ export default function App() {
             <i /> {brain.line} · connect it in Settings
           </button>
         )}
-        <div className="glass rounded-xl px-1 py-0.5 flex gap-0.5 items-center">
-          <button className="btn-nav" style={page.name === "console" || page.name === "menu" || page.name === "board" ? { color: "var(--cyan)" } : undefined}
-            onClick={() => navigate({ name: "console" })}>▦ Console</button>
-          <button className="btn-nav" style={page.name === "talk" ? { color: "var(--cyan)" } : undefined}
-            onClick={() => navigate({ name: "talk" })}>◉ Talk</button>
+        <div className="topnav">
+          <button className={`topnav-btn${page.name === "console" || page.name === "menu" || page.name === "board" ? " on" : ""}`}
+            onClick={() => navigate({ name: "console" })}>
+            <span className="topnav-ic grid" aria-hidden="true"><i /><i /><i /><i /></span><span>Console</span>
+          </button>
+          <button className={`topnav-btn${page.name === "talk" ? " on" : ""}`}
+            onClick={() => navigate({ name: "talk" })}>
+            <span className="topnav-ic orb" aria-hidden="true"><i className="r" /><i className="r r2" /><b /></span><span>Talk</span>
+          </button>
           <span style={{ width: 1, height: 18, background: "var(--line)", margin: "0 4px" }} />
           <RadioButton open={radioOpen} onClick={() => setRadioOpen((o) => !o)} />
           <div className="relative">
-            <button className={`btn-nav${!brain.ok && page.name !== "settings" ? " nav-burn" : updates && page.name !== "settings" ? " nav-alert" : ""}`} title={!brain.ok ? "Claude is not connected - open Settings" : updates ? "Updates waiting - open Settings" : "Menu"}
+            <button className={`btn-nav${(!brain.ok || needs.length > 0) && page.name !== "settings" ? " nav-burn" : updates && page.name !== "settings" ? " nav-alert" : ""}`} title={!brain.ok ? "Claude is not connected - open Settings" : needs.length ? `${needs.length} tool${needs.length === 1 ? "" : "s"} missing on this PC - open Settings > Tools` : updates ? "Updates waiting - open Settings" : "Menu"}
               onClick={() => setMenuOpen((m) => !m)}>☰</button>
             {menuOpen && (
               <div className="glass rounded-xl p-1 absolute right-0 mt-1 flex flex-col min-w-[190px]" style={{ zIndex: 40 }}
                 onMouseLeave={() => setMenuOpen(false)}>
                 {([
-                  ["⚙ Settings" + (!brain.ok ? "  ▲ connect Claude" : updates ? "  ●" : ""), { name: "settings" }],
+                  ["⚙ Settings" + (!brain.ok ? "  ▲ connect Claude" : needs.length ? `  ▲ ${needs.length} tool${needs.length === 1 ? "" : "s"} to fix` : updates ? "  ●" : ""), { name: "settings" }],
                   ["◐ Dream journal", { name: "dream" }],
                 ] as [string, Page][]).map(([label, target]) => (
-                  <button key={label} className="btn-nav text-left" style={target.name === "settings" && !brain.ok ? { color: "#ff8a3d" } : updates && target.name === "settings" ? { color: "var(--working)" } : undefined}
+                  <button key={label} className="btn-nav text-left" style={target.name === "settings" && (!brain.ok || needs.length > 0) ? { color: "#ff8a3d" } : updates && target.name === "settings" ? { color: "var(--working)" } : undefined}
                     onClick={() => { setMenuOpen(false); navigate(target); }}>{label}</button>
                 ))}
                 <button className="btn-nav text-left" onClick={() => { setMenuOpen(false); setRadioOpen(true); }}>♫ HELIX radio</button>
-                <div className="px-3 pt-1 text-[10px] tracking-wider" style={{ color: "var(--muted)" }} title="When the page you are looking at was built (UTC)">
+                <button className="btn-nav text-left power" data-tip="Power HELIX off - it asks first, then the lights go out" onClick={() => { setMenuOpen(false); setPowerAsk(true); }}>⏻ Power off</button>
+                <div className="px-3 pt-1 text-[10px] tracking-wider" style={{ color: "var(--muted)" }} data-tip="When the page you are looking at was built (UTC)">
                   build {__HELIX_BUILD__}
                 </div>
               </div>
@@ -223,8 +320,18 @@ export default function App() {
           </div>
         </div>
       </nav>
+      <Boot ready={booted} minMs={1400} />
 
-      <main className="absolute inset-0" style={{ zIndex: 10, pointerEvents: "none" }}>
+      {/* CURRENT TASKS on every page: the strip at the very bottom, the log window, the toasts */}
+      <TaskDock />
+      <TaskLog />
+      <TaskToasts />
+      <TipLayer />
+      {powerAsk && <PowerAsk onClose={() => setPowerAsk(false)} />}
+      {vaultOpen && <VaultWindow onClose={() => setVaultOpen(false)} />}
+      {fpsOn && fpsLine.text && <div className={`fps-badge${fpsLine.slow ? " slow" : ""}`} aria-hidden="true">{fpsLine.text}</div>}
+
+      <main className={`absolute inset-0${stage ? " stage-back" : ""}`} style={{ zIndex: 10, pointerEvents: "none" }}>
         {(page.name === "console" || page.name === "menu" || page.name === "board") && <ConsolePage />}
         {page.name === "talk" && <Talk project={page.project} />}
         {page.name === "settings" && <Settings />}
@@ -237,9 +344,15 @@ export default function App() {
       </main>
 
       {/* the docked orb: HELIX is one click away on every page; Talk is the full orb */}
-      {!onConsole && !off && (body.style === "cell"
-        ? <Organism look={body.look} mini onClick={() => navigate({ name: "talk" })} />
-        : <button className="orb-dock" title="Talk to HELIX" onClick={() => navigate({ name: "talk" })} style={{ zIndex: 25 }}><span className="orb-dock-core" /></button>)}
+      {/* the docked head is unmounted (not just hidden) while the radio deck or a log is open: one WebGL canvas fewer */}
+      {!onConsole && !off && !stage && !dockDelayed && !radioOpen && !logOpen && (body.style === "cell"
+        ? <Organism look={body.look} mini onClick={() => setStage(true)} />
+        : <button className="orb-dock" data-tip="Talk to HELIX" onClick={() => navigate({ name: "talk" })} style={{ zIndex: 25 }}><span className="orb-dock-core" /></button>)}
+      {stage && !off && body.style === "cell" && (
+        <div className="stage-leap" style={{ position: "fixed", inset: 0, zIndex: 30, pointerEvents: "none" }}>
+          <Organism look={body.look} mode="stage" onClose={() => setStage(false)} onClick={() => { setStage(false); navigate({ name: "talk" }); }} />
+        </div>
+      )}
 
       {/* The dream chip: a session of self-improvement is drafting in the background right now.
           Small and out of the way (under the nav, clear of the legend strip and the input row);

@@ -82,6 +82,91 @@
 }
 
 /* ---------------------------------------------------------------- the docked face */
-.face-dock { position: fixed; right: 18px; bottom: 18px; width: 150px; height: 150px; z-index: 25; cursor: pointer; border-radius: 50%; transition: transform 0.25s, filter 0.25s; filter: drop-shadow(0 0 16px color-mix(in srgb, var(--cyan) 35%, transparent)); }
-.face-dock:hover { transform: scale(1.08); filter: drop-shadow(0 0 26px color-mix(in srgb, var(--cyan) 70%, transparent)); }
+.face-dock { position: fixed; right: 26px; bottom: 26px; width: 210px; height: 210px; z-index: 20; cursor: pointer; border-radius: 50%; transition: transform 0.25s; }   /* no CSS filter on a canvas that redraws every frame */
+.face-dock:hover { transform: scale(1.08); }
 .face-dock canvas { pointer-events: none !important; }
+
+/* ---------------------------------------------------------------- the top nav, restyled */
+.topnav { display: inline-flex; align-items: center; gap: 4px; padding: 5px 8px 5px 6px; margin-right: 14px; border-radius: 16px; border: 1px solid color-mix(in srgb, var(--cyan) 28%, var(--line)); background: linear-gradient(180deg, rgba(14, 22, 30, 0.92), rgba(8, 12, 16, 0.92)); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45), 0 0 24px color-mix(in srgb, var(--cyan) 10%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.05); }
+.topnav-btn { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 11px; border: 1px solid transparent; background: transparent; color: var(--muted); font: inherit; font-size: 13px; letter-spacing: 0.5px; cursor: pointer; position: relative; transition: color 0.2s, background 0.2s, border-color 0.2s, box-shadow 0.25s; }
+.topnav-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.04); }
+.topnav-btn.on { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 45%, transparent); background: color-mix(in srgb, var(--cyan) 10%, transparent); box-shadow: 0 0 16px color-mix(in srgb, var(--cyan) 25%, transparent), inset 0 0 12px color-mix(in srgb, var(--cyan) 8%, transparent); text-shadow: 0 0 8px color-mix(in srgb, var(--cyan) 60%, transparent); }
+.topnav-btn.on::after { content: ""; position: absolute; left: 14px; right: 14px; bottom: 3px; height: 1.5px; background: linear-gradient(90deg, transparent, var(--cyan), transparent); box-shadow: 0 0 8px var(--cyan); }
+.topnav-ic { display: inline-flex; width: 16px; height: 16px; position: relative; }
+.topnav-ic.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
+.topnav-ic.grid i { display: block; border-radius: 2px; background: currentColor; opacity: 0.55; transition: opacity 0.2s, transform 0.3s; }
+.topnav-btn:hover .topnav-ic.grid i:nth-child(1), .topnav-btn.on .topnav-ic.grid i:nth-child(1) { opacity: 1; }
+.topnav-btn.on .topnav-ic.grid i { animation: topnav-tiles 2.4s ease-in-out infinite; }
+.topnav-btn.on .topnav-ic.grid i:nth-child(2) { animation-delay: 0.3s; } .topnav-btn.on .topnav-ic.grid i:nth-child(3) { animation-delay: 0.6s; } .topnav-btn.on .topnav-ic.grid i:nth-child(4) { animation-delay: 0.9s; }
+@keyframes topnav-tiles { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+.topnav-ic.orb b { position: absolute; inset: 4px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+.topnav-ic.orb .r { position: absolute; inset: 0; border-radius: 50%; border: 1px solid currentColor; opacity: 0.5; }
+.topnav-btn.on .topnav-ic.orb .r, .topnav-btn:hover .topnav-ic.orb .r { animation: topnav-ring 2s ease-out infinite; }
+.topnav-btn.on .topnav-ic.orb .r2, .topnav-btn:hover .topnav-ic.orb .r2 { animation-delay: 1s; }
+@keyframes topnav-ring { 0% { transform: scale(0.6); opacity: 0.8; } 100% { transform: scale(1.6); opacity: 0; } }
+.topnav .radio-btn { padding: 6px 10px; }
+.topnav > .relative > .btn-nav { padding: 8px 10px; }
+
+/* the docked face steps aside whenever a window is open (the Radio deck, the Git / Deploy windows) */
+body:has(.board-drawer-wrap) .face-dock, body:has(.radio-wrap) .face-dock { opacity: 0; pointer-events: none; transform: translateY(40px) scale(0.6); }
+
+/* ---------------------------------------------------------------- THE STAGE: the face up front (Brian: the Crash Bandicoot feel) */
+.face-dock { bottom: 40px; }                       /* clear of the CURRENT TASKS strip; room all round for the bounce */
+body:has(.task-dock.open) .face-dock { transform: translateY(-40px) scale(0.85); }
+body:has(.task-log-wrap) .face-dock { opacity: 0; pointer-events: none; }
+.stage-veil { position: fixed; inset: 0; z-index: 30; background: radial-gradient(ellipse at 50% 45%, rgba(4, 8, 12, 0.12), rgba(3, 5, 8, 0.5) 75%); pointer-events: auto; animation: stage-veil-in 0.5s ease-out; }
+@keyframes stage-veil-in { from { opacity: 0; } to { opacity: 1; } }
+main.stage-back { transition: transform 0.55s cubic-bezier(.2,.8,.2,1), filter 0.55s; transform: scale(0.92) translateY(10px); filter: blur(2.5px) brightness(0.55) saturate(1.5) hue-rotate(-12deg); pointer-events: none !important; }
+main.stage-back * { pointer-events: none !important; }
+.stage-bar { position: fixed; left: 50%; bottom: 70px; transform: translateX(-50%); z-index: 34; display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--cyan) 60%, var(--line)); background: rgba(6, 10, 14, 0.92); box-shadow: 0 0 40px color-mix(in srgb, var(--cyan) 35%, transparent), 0 14px 40px rgba(0,0,0,.6); animation: stage-bar-in 0.6s cubic-bezier(.2,.9,.3,1.2); pointer-events: auto; }
+.stage-bar .task-btn { font-size: 13px; padding: 8px 16px; }
+@keyframes stage-bar-in { from { opacity: 0; transform: translate(-50%, 24px); } to { opacity: 1; transform: translate(-50%, 0); } }
+.stage-word { font-family: var(--font-display, inherit); font-weight: 700; letter-spacing: 4px; font-size: 11px; color: var(--cyan); text-shadow: 0 0 10px color-mix(in srgb, var(--cyan) 60%, transparent); padding: 0 6px; }
+.stage-leap { animation: stage-leap 0.45s ease-out both; }     /* opacity only: a transform here would mis-size the canvas */
+@keyframes stage-leap { from { opacity: 0; } to { opacity: 1; } }
+
+/* ---------------------------------------------------------------- THE DJ (the real face inside the radio stage) */
+.dj-face { position: absolute; inset: 0; }
+.dj-face canvas { pointer-events: none !important; }
+
+/* ---------------------------------------------------------------- THE TALK ROW (2026-09-22): icons, not emoji; the state as an animation */
+.talk-ic { position: relative; display: inline-grid; place-items: center; width: 42px; height: 42px; border-radius: 50%; cursor: pointer; color: #9fb6c2; border: 1px solid var(--line); background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.08), transparent 55%), linear-gradient(180deg, #14202a, #0b1218); transition: color .15s, border-color .15s, box-shadow .2s, transform .1s; overflow: hidden; isolation: isolate; }
+.talk-ic::before { content: ""; position: absolute; inset: 0; background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,.16) 50%, transparent 70%); transform: translateX(-120%); }
+.talk-ic:hover::before { animation: shine-sweep 0.7s ease-out forwards; }
+.talk-ic:hover { color: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 16px color-mix(in srgb, var(--cyan) 35%, transparent); transform: translateY(-1px); }
+.talk-ic.on { color: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 16px color-mix(in srgb, var(--cyan) 35%, transparent), inset 0 0 10px color-mix(in srgb, var(--cyan) 12%, transparent); }
+.talk-ic.joke { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 40%, var(--line)); }
+.talk-ic.joke:hover { border-color: var(--gold); box-shadow: 0 0 16px color-mix(in srgb, var(--gold) 45%, transparent); }
+.talk-ic.joke.busy { animation: joke-spin 1s linear infinite; }
+@keyframes joke-spin { to { transform: rotate(360deg); } }
+.talk-ic:disabled { opacity: .6; cursor: default; }
+.talk-ic input { display: none; }
+.talk-say { display: inline-flex; align-items: center; gap: 7px; height: 42px; padding: 0 16px; border-radius: 21px; font: inherit; font-size: 13px; letter-spacing: 1px; color: var(--cyan); border: 1px solid color-mix(in srgb, var(--cyan) 45%, var(--line)); background: linear-gradient(180deg, #14202a, #0b1218); cursor: pointer; position: relative; overflow: hidden; isolation: isolate; transition: box-shadow .2s, border-color .2s; }
+.talk-say::before { content: ""; position: absolute; inset: 0; background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,.16) 50%, transparent 70%); transform: translateX(-120%); }
+.talk-say:hover::before { animation: shine-sweep 0.7s ease-out forwards; }
+.talk-say:hover { border-color: var(--cyan); box-shadow: 0 0 16px color-mix(in srgb, var(--cyan) 35%, transparent); }
+.talk-say:disabled { opacity: .45; cursor: default; }
+.talk-menu { position: absolute; bottom: 50px; left: 0; z-index: 30; min-width: 230px; padding: 6px; border-radius: 14px; border: 1px solid color-mix(in srgb, var(--cyan) 40%, var(--line)); background: rgba(8, 12, 16, 0.96); box-shadow: 0 18px 50px rgba(0,0,0,.6), 0 0 26px color-mix(in srgb, var(--cyan) 18%, transparent); animation: tip-in 0.22s ease-out both; }
+.talk-menu button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: 10px; border: none; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.talk-menu button:hover { background: color-mix(in srgb, var(--cyan) 12%, transparent); color: var(--cyan); }
+.talk-menu button span { display: grid; }
+.talk-menu button b { font-weight: 600; font-size: 13px; }
+.talk-menu button small { font-size: 11px; color: var(--muted); }
+.state-sign { display: inline-flex; align-items: center; justify-content: center; gap: 3px; height: 18px; min-width: 60px; vertical-align: middle; }
+.state-sign.ears i { display: block; width: 3px; border-radius: 2px; background: var(--cyan); box-shadow: 0 0 6px var(--cyan); animation: ears 0.9s ease-in-out infinite; transition: height .12s; }
+@keyframes ears { 0%, 100% { transform: scaleY(0.5); opacity: .6; } 50% { transform: scaleY(1); opacity: 1; } }
+.state-sign.think { position: relative; width: 48px; }
+.state-sign.think b { position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; margin: -2.5px; border-radius: 50%; background: var(--working); box-shadow: 0 0 8px var(--working); animation: think-orbit 1.2s linear infinite; }
+@keyframes think-orbit { from { transform: rotate(0) translateX(14px); } to { transform: rotate(360deg) translateX(14px); } }
+.state-sign.voice i { display: block; width: 3px; height: 14px; border-radius: 2px; background: var(--cyan); box-shadow: 0 0 6px var(--cyan); animation: voice-wave 0.7s ease-in-out infinite; }
+@keyframes voice-wave { 0%, 100% { transform: scaleY(0.25); } 50% { transform: scaleY(1); } }
+.joke-line { color: var(--gold); text-shadow: 0 0 10px color-mix(in srgb, var(--gold) 50%, transparent); white-space: normal; }
+
+/* the leap between pages: the snapshot that flies; the docked head lands with a pop */
+.face-leap { }
+.face-dock { animation: dock-land 0.5s cubic-bezier(.2,.9,.3,1.3) backwards; }
+@keyframes dock-land { from { transform: scale(0.6); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* the fps badge (Settings > Overview > Show the frame rate) */
+.fps-badge { position: fixed; right: 18px; top: 60px; z-index: 28; font-size: 11px; letter-spacing: 1.5px; padding: 4px 10px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--cyan) 40%, var(--line)); background: rgba(6, 10, 14, 0.85); color: var(--cyan); font-variant-numeric: tabular-nums; pointer-events: none; }
+.fps-badge.slow { color: var(--working); border-color: color-mix(in srgb, var(--working) 50%, var(--line)); }

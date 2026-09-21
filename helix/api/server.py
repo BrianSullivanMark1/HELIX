@@ -31,6 +31,10 @@ from helix.api.fleet_routes import mount_fleet
 from helix.api.face_routes import mount_face
 from helix.api.say import mount_say
 from helix.api.radio_routes import mount_radio
+from helix.api.deploy_routes import mount_deploy
+from helix.api.jobs_routes import mount_jobs
+from helix.api.joke_routes import mount_jokes
+from helix.api.vault_routes import mount_vault
 from helix.domain import cadpy
 from helix.domain.constitution import LOCKED_SETTINGS
 from helix.domain.models import BuildKind
@@ -66,7 +70,9 @@ _SETTING_KEYS = (
     "quit_when_closed",
     # The organism (Settings -> Voice & look -> The orb): which body the orb wears, and its tuning.
     "orb_style", "orb_phase", "orb_hue", "orb_energy",
-    "radio_bucket", "radio_station",
+    "radio_bucket", "radio_station", "console_root",
+    # CURRENT TASKS / the deploy lane's tools: the Firebase project id, the radio cache cap in GB.
+    "firebase_project", "radio_cache_gb",
 )
 # github_token: the fleet's read of each repo's HEAD (drift). Presence reported, value never.
 _SECRET_SETTINGS = ("claude_api_key", "claude_code_oauth_token", "github_token")
@@ -300,6 +306,10 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
 
     mount_say(app, shell, c.settings)  # POST /api/say - the test line, word-timed for the face, no model
     mount_radio(app, c)  # HELIX RADIO: the deck, uploads, playback, station names - the bucket through your gcloud
+    mount_jokes(app)  # GET /api/joke - a line for the voice to act, from the web (filtered), else HELIX's own
+    mount_jobs(app, c)  # CURRENT TASKS: the register every long action reports into; cancel, dismiss, clear
+    mount_vault(app, c)  # THE VAULT: the company's secrets in Google Cloud Secret Manager - create, rotate, delete (gated); values never shown
+    mount_deploy(app, c)  # the Deploy lane: ship (dev.ps1 wrapped), roll back (a traffic shift), create (the plan); gated, audited
 
     @app.post("/api/shell/tap")
     def tap():

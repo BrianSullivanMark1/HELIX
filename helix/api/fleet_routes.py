@@ -80,6 +80,7 @@ def cell_dict(c: Cell) -> dict[str, Any]:
         "note": c.note,
         "repo_ok": c.repo_ok,
         "detail": c.detail,
+        "served": list(c.served_revisions),
         "needs_attention": c.needs_attention,
         "api": serving_dict(c.api),
         "site": serving_dict(c.site),
@@ -191,15 +192,25 @@ def mount_fleet(app: FastAPI, container) -> None:
             return JSONResponse({"error": f"no such app in {co.label}: {app_name}"}, status_code=404)
         if not reading.acquire(blocking=False):
             return JSONResponse({"error": BUSY, "busy": True}, status_code=409)
+        jobs = getattr(c, "jobs", None)
+        job = jobs.start("read", f"Reading {app_name or 'the whole fleet'}", app=app_name or "",
+                         note="Asking Cloud Run and GitHub") if jobs is not None else None
+        ok = False
         try:
             # The read spawns gcloud a dozen times and takes 10-20 s. Off the event loop, or the
             # WS stream and every other route freeze for the duration.
             if app_name:
-                await asyncio.to_thread(fleet.read_app, co, app_name)
+                cells = await asyncio.to_thread(fleet.read_app, co, app_name)
             else:
-                await asyncio.to_thread(fleet.read_company, co)
+                cells = await asyncio.to_thread(fleet.read_company, co)
+            ok = True
+            if job is not None:
+                for cell in cells:
+                    jobs.line(job, f"{cell.service.app} {cell.service.env.value}: {cell.health.value}, {cell.drift.value}" + (f" - {cell.note}" if cell.note else ""))
         finally:
             reading.release()
+            if job is not None:
+                jobs.finish(job, ok, note=("Board is fresh" if ok else "The read failed"))
         return board_dict(fleet, profile=_profile())
 
     @app.put("/api/fleet/link")
@@ -346,7 +357,18 @@ def mount_fleet(app: FastAPI, container) -> None:
             rep = scan_files(gh_files())
             return {"where": "github", "folder": None, "repo": svc.repo, "branch": branch, **rep.as_dict()}
 
+        jobs = getattr(c, "jobs", None)
+        job = jobs.start("scan", f"Scan {app_key} for secrets", app=app_key, note=("the linked folder" if folder else f"GitHub, branch {branch}")) if jobs is not None else None
         result = await asyncio.to_thread(run)
+        if job is not None:
+            if "error" in result:
+                jobs.line(job, "[helix] " + str(result["error"]))
+                jobs.finish(job, False, note=str(result["error"]))
+            else:
+                n = len(result.get("findings") or [])
+                for f in (result.get("findings") or [])[:200]:
+                    jobs.line(job, f"{f.get('severity', '')}: {f.get('path', '?')}:{f.get('line', '?')}  {f.get('kind', '')}  {f.get('excerpt', '')}")
+                jobs.finish(job, True, note=(f"{n} finding{'s' if n != 1 else ''}" if n else "Nothing found"))
         if "error" in result:
             return JSONResponse(result, status_code=400)
         return result
