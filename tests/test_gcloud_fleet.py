@@ -276,13 +276,43 @@ def test_available_says_not_installed_when_the_probe_fails():
 
 
 def test_read_all_keeps_order_and_includes_absent_cells():
+    # the lists fail here (KeyError-free: "services list" answers rc 1) -> one describe per cell
     run = Script({"services describe": g.Ran(0, json.dumps(service_doc()), ""),
+                  "services list": g.Ran(1, "", "boom"),
                   "revisions list": g.Ran(0, "[]", "")})
     a = g.GcloudFleet("p", "r", runner=run, http_get=no_http, workers=3)
     out = a.read_all(list(fleet.FLEET))
     assert [r.service.key for r in out] == [s.key for s in fleet.FLEET]
     absent = [r for r in out if not r.service.exists]
     assert len(absent) == 2 and all(r.ok and r.api is None for r in absent)
+
+
+def test_read_all_reads_the_whole_fleet_in_two_spawns(monkeypatch):
+    """2026-09-21: the old read spawned gcloud twice PER CELL (20 for the fleet, 8 in parallel -
+    100% CPU for half a minute on Brian's PC). Now: services list + revisions list, once each."""
+    docs = []
+    for svc in fleet.FLEET:
+        if svc.run_service:
+            d = service_doc(); d["metadata"]["name"] = svc.run_service
+            d["status"]["url"] = f"https://{svc.run_service}-abc.a.run.app"
+            d["status"]["traffic"][0]["revisionName"] = f"{svc.run_service}-00007-xyz"
+            docs.append(d)
+    docs = [d for d in docs if d["metadata"]["name"] != "wms-qa-flask"]      # one service missing on Cloud Run
+    revs = []
+    for d in docs:
+        r = revision_doc(f"{d['metadata']['name']}-00007-xyz", "2026-09-16T10:00:00Z", {"version": "c9d3a70", "by": "kate"})
+        r["metadata"].setdefault("labels", {})["serving.knative.dev/service"] = d["metadata"]["name"]
+        revs.append(r)
+    run = Script({"services list": g.Ran(0, json.dumps(docs), ""), "revisions list": g.Ran(0, json.dumps(revs), "")})
+    a = g.GcloudFleet("p", "r", runner=run, http_get=no_http, workers=3)
+    out = a.read_all(list(fleet.FLEET))
+    assert len(run.calls) == 2 and [c[2:4] for c in run.calls] == [["services", "list"], ["revisions", "list"]]
+    by = {r.service.key: r for r in out}
+    mes = by["oats-overnight/MES/dev"]
+    assert mes.ok and mes.api.revision == "brms-mes-api-dev-00007-xyz" and mes.api.commit == "c9d3a70" and mes.api.deployed_by == "kate"
+    assert mes.served_revisions == ("brms-mes-api-dev-00007-xyz",)
+    assert by["oats-overnight/WMS/qa"].api.health is Health.ABSENT
+    assert by["oats-overnight/ECHO/qa"].api is None and by["oats-overnight/ECHO/qa"].ok
 
 
 # ------------------------------------------------------------------------------------------------

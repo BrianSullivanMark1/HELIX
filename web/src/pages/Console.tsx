@@ -20,7 +20,7 @@ import { TasksSection } from "../components/Tasks";
 import { VaultCard } from "../components/Vault";
 import Strandbar from "../components/Strandbar";
 import { useTaskCounts } from "../lib/jobs";
-import { bendEvery, density, dprCap, frameMs2D, glows, loop, perf } from "../lib/perf";
+import { bendEvery, density, dprCap, frameMs2D, glows, loop, perf, frameMs3D } from "../lib/perf";
 import "./console.css";
 import Menu from "./Menu";
 import { useHelix } from "../lib/store";
@@ -464,6 +464,29 @@ export function ContextGuard() {
   return null;
 }
 
+/** THE 3D BUDGET: below Full, a canvas renders on demand at 30 / 20 fps instead of every screen
+ *  refresh. Drop it inside any <Canvas frameloop="demand">. Nothing else changes - the useFrame
+ *  loops get a real dt from the clock, so motion keeps its speed, it just has fewer frames. */
+export function FrameThrottle() {
+  const invalidate = useThree((st) => st.invalidate);
+  const level = usePerfLevel();
+  useEffect(() => {
+    let raf = 0, due = 0, alive = true;
+    const step = (now: number) => {
+      if (!alive) return;
+      raf = requestAnimationFrame(step);
+      if (document.hidden) return;
+      const every = frameMs3D();
+      if (now < due) return;
+      due = now + every - 1;
+      invalidate();
+    };
+    raf = requestAnimationFrame(step);
+    return () => { alive = false; cancelAnimationFrame(raf); };
+  }, [invalidate, level]);
+  return null;
+}
+
 /** The helix as a group for ANOTHER canvas (the face's), so a page never opens two contexts. */
 export function HelixBackdrop({ colors, position = [0, 0, -6], scale = 0.9, tempo = 1, spinRate = 1, bendable = true }: { colors: [string, string]; position?: [number, number, number]; scale?: number; tempo?: number; spinRate?: number; bendable?: boolean }) {
   const pointer = usePointer();
@@ -509,9 +532,10 @@ export function HelixLayer({ colors }: { colors: [string, string] }) {
   if (REDUCED) return null;
   return (
     <div className="board-layer board-helix">
-      <Canvas dpr={[1, dprCap()]} key={level} camera={{ fov: 48, position: [0, 0, 9.5] }} gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
+      <Canvas dpr={[1, dprCap()]} key={level} frameloop="demand" camera={{ fov: 48, position: [0, 0, 9.5] }} gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
         onCreated={({ scene }) => { scene.fog = new THREE.Fog("#080b0f", 10, 24); }}>
         <ContextGuard />
+        <FrameThrottle />
         <HelixScene pointer={pointer} colors={colors} />
       </Canvas>
     </div>
@@ -1485,6 +1509,74 @@ function GitDrawer({ card, onClose, onBoard }: { card: Card; onClose: () => void
 
 interface DeployStatus { running: boolean; job: { kind: string; app: string; env: string; to?: string; by?: string } | null; log: string[]; recent: { id: string; at: string; kind: string; app: string; env: string; by?: string; ok?: boolean; to?: string; planned?: boolean }[] }
 interface Targets { served: string[]; current: string | null; targets: string[] }
+interface ConsoleStep { key: string; title: string; why: string; link: string; link_label: string; alt_link?: string; alt_label?: string; copy: string; steps: string[]; done_when: string; by_helix?: boolean; done_by_helix?: string; by_helix_failed?: string }
+interface Followups { app: string; env: string; site: string | null; url: string | null; steps: ConsoleStep[] }
+interface Plan { service: string; site: string | null; prod?: boolean; env?: string; steps: { what: string; who?: string; detail?: string; cmd: string }[]; note: string }
+/** The create path's step per app/env, kept while the app is open (the window may close mid-run). */
+const CREATE_STAGE = new Map<string, { stage?: "ready" | "plan" | "running" | "followup" | "done"; plan?: Plan | null; auth?: { env: string; typed: string } | null; fleetLine?: string }>();
+const SHIP_WHAT: { key: "be-deploy" | "fe-deploy" | "both"; label: string; tip: string }[] = [
+  { key: "be-deploy", label: "Server", tip: "The backend on Cloud Run (dev.ps1 be-deploy)" },
+  { key: "fe-deploy", label: "Site", tip: "The frontend on Firebase Hosting (dev.ps1 fe-deploy)" },
+  { key: "both", label: "Both", tip: "The server first, then the site - the site is skipped if the server fails" },
+];
+
+/** ONLY YOU CAN DO THIS: the two console steps after a new site exists. Google offers no safe
+ *  script for either (both lists are project-wide), so HELIX makes them a thirty-second act:
+ *  why, the link, the value to paste, the clicks in order, how to know it worked. Ticks are
+ *  remembered on this PC per site. */
+function FollowupsWindow({ data, onClose }: { data: Followups; onClose: () => void }) {
+  const keyOf = (k: string) => `helix_followup:${data.site}:${k}`;
+  const [done, setDone] = useState<Record<string, boolean>>(() => Object.fromEntries(data.steps.map((s) => { let v = false; try { v = localStorage.getItem(keyOf(s.key)) === "1"; } catch { /* private mode */ } return [s.key, v]; })));
+  const [copied, setCopied] = useState<string | null>(null);
+  const tick = (k: string, v: boolean) => { setDone((d) => ({ ...d, [k]: v })); try { if (v) localStorage.setItem(keyOf(k), "1"); else localStorage.removeItem(keyOf(k)); } catch { /* private mode */ } };
+  const copy = (k: string, text: string) => { void navigator.clipboard?.writeText(text).then(() => { setCopied(k); window.setTimeout(() => setCopied(null), 1600); }).catch(() => undefined); };
+  const mine = data.steps.filter((s) => !s.done_by_helix);
+  const left = mine.filter((s) => !done[s.key]).length;
+  return (
+    <div className="board-gate-wrap" style={{ position: "fixed", zIndex: 60 }} onClick={onClose}>
+      <div className="board-follow" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start gap-3">
+          <div className="flex-1">
+            <div className="board-kicker" style={{ color: "var(--gold)" }}>ONLY YOU CAN DO THIS · {data.app} {data.env.toUpperCase()}</div>
+            <div className="board-app mt-1" style={{ fontSize: 19 }}>{left === 0 ? "All done - the new site is ready" : `${left === 1 ? "One" : "Two"} quick thing${left === 1 ? "" : "s"} in Google's own pages`}</div>
+            <div className="mt-1 text-[12.5px]" style={MUTED}>About a minute. Google has no way for HELIX to do this part for you.</div>
+          </div>
+          <button className="btn text-xs" onClick={onClose}>Close</button>
+        </div>
+        {data.steps.map((s, n) => s.done_by_helix ? (
+          <div key={s.key} className="board-follow-step done helix">
+            <div className="flex items-center gap-3">
+              <span className="board-follow-n">✓</span>
+              <div className="board-follow-title">{s.title}</div>
+              <span className="board-follow-tag">HELIX did this</span>
+            </div>
+            <div className="board-follow-why">{s.done_by_helix} <a href={s.link} target="_blank" rel="noreferrer noopener">{s.link_label} ↗</a></div>
+          </div>
+        ) : (
+          <div key={s.key} className={`board-follow-step${done[s.key] ? " done" : ""}`}>
+            <div className="flex items-center gap-3">
+              <span className="board-follow-n">{done[s.key] ? "✓" : n + 1}</span>
+              <div className="board-follow-title">{s.title}</div>
+            </div>
+            <div className="board-follow-why">{s.by_helix_failed ? <><b style={{ color: "var(--amber)" }}>{s.by_helix_failed}</b> </> : null}{s.why}</div>
+            <div className="board-follow-paste">
+              <span className="board-kicker">PASTE THIS</span>
+              <code>{s.copy}</code>
+              <button className="btn text-xs" onClick={() => copy(s.key, s.copy)}>{copied === s.key ? "Copied" : "Copy"}</button>
+            </div>
+            <ol className="board-follow-list">
+              {s.steps.map((t, i) => <li key={i}>{i === 0 ? <><a href={s.link} target="_blank" rel="noreferrer noopener">{s.link_label} ↗</a><span style={MUTED}> - {t.replace(/^Click the link( - | and )?/, "").replace(/^./, (c) => c.toUpperCase())}</span></> : t}</li>)}
+            </ol>
+            {s.alt_link && <a className="board-follow-alt" href={s.alt_link} target="_blank" rel="noreferrer noopener">{s.alt_label} ↗</a>}
+            <div className="board-follow-when"><b>You are done when:</b> {s.done_when}</div>
+            <label className="flex items-center gap-2 mt-2 text-[12.5px]"><input type="checkbox" checked={!!done[s.key]} onChange={(e) => tick(s.key, e.target.checked)} /> I did this one</label>
+          </div>
+        ))}
+        {data.url && <div className="mt-3 text-[12.5px]">The new site: <a href={data.url} target="_blank" rel="noreferrer noopener" style={{ color: "var(--cyan)" }}>{data.url} ↗</a></div>}
+      </div>
+    </div>
+  );
+}
 
 /** THE DEPLOY WINDOW: an environment picked at the top; the revisions of that environment as a
  *  strand of beads (the live one lit gold, earlier ones dimmer, the ones you may roll back to
@@ -1502,16 +1594,48 @@ function DeployDrawer({ card, onClose, env: envIn, mode: modeIn }: { card: Card;
   const [phrase, setPhrase] = useState("");
   const [sure, setSure] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [plan, setPlan] = useState<{ service: string; site: string | null; steps: { what: string; cmd: string }[]; note: string } | null>(null);
+  const [plan, setPlan] = useState<Plan | null>(null);
+  // THE CREATE PATH is one road: Confirm -> The plan -> Building -> Sign-in -> Done. One lit
+  // button at a time; nothing can be skipped or done out of order. Remembered per app/env so
+  // closing the window mid-run and opening it again lands on the same step.
+  type Stage = "ready" | "plan" | "running" | "followup" | "done";
+  const stageKey = `${card.app}/${env}`;
+  const [stage, setStageRaw] = useState<Stage>(() => CREATE_STAGE.get(stageKey)?.stage || "ready");
+  const setStage = (st: Stage) => { setStageRaw(st); CREATE_STAGE.set(stageKey, { ...(CREATE_STAGE.get(stageKey) || {}), stage: st }); };
+  const [runStep, setRunStep] = useState(0);     // 1..3 while building, from the log's "[helix] step n of 3"
+  const [fleetLine, setFleetLine] = useState<string>(CREATE_STAGE.get(stageKey)?.fleetLine || "");
+  const [copiedLine, setCopiedLine] = useState(false);
+  const [planAuth, setPlanAuth] = useState<{ env: string; typed: string } | null>(null);   // the gate the plan already passed
+  const [createPhrase, setCreatePhrase] = useState("");
+  const [what, setWhat] = useState<"be-deploy" | "fe-deploy" | "both">("be-deploy");
+  const [follow, setFollow] = useState<Followups | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
   const load = useCallback(() => {
     void api.get<DeployStatus>("/api/deploy/status").then(setSt).catch(() => undefined);
     void api.get<Targets>(`/api/deploy/targets?app_name=${encodeURIComponent(card.app)}&env=${env}`).then(setTg).catch(() => setTg(null));
   }, [card.app, env]);
-  useEffect(() => { load(); void api.get<{ identity: string | null; prod: boolean }>("/api/deploy/identity").then(setWho).catch(() => undefined);
-    void api.get<{ values?: Record<string, unknown> }>("/api/settings").then((d) => setConsoleRoot(String(d.values?.console_root || ""))).catch(() => undefined); }, [load]);
+  const [ready, setReady] = useState(false);       // READY? has answered once
+  useEffect(() => { const k = CREATE_STAGE.get(`${card.app}/${env}`); setStageRaw(k?.stage || "ready"); setFleetLine(k?.fleetLine || ""); setPlan(k?.plan || null); setPlanAuth(k?.auth || null); }, [card.app, env]);
+  useEffect(() => { load(); void api.get<{ identity: string | null; prod: boolean; console_root: string }>(`/api/deploy/ready?app_name=${encodeURIComponent(card.app)}&env=${env}`).then((r) => { setWho({ identity: r.identity, prod: r.prod }); setConsoleRoot(r.console_root || ""); setReady(true); }).catch(() => setReady(true)); }, [load, card.app, env]);
   useEffect(() => {
-    const onLine = (e: Event) => { const d = (e as CustomEvent).detail as { line?: string; t?: string }; setSt((s) => s ? { ...s, running: d.t === "deploy", log: d.line ? [...s.log, d.line].slice(-400) : s.log } : s); if (d.t === "deploy_done") load(); };
+    const onLine = (e: Event) => {
+      const d = (e as CustomEvent).detail as { line?: string; t?: string; followups?: Followups | null; ok?: boolean; job?: { kind?: string; app?: string; env?: string } | null };
+      setSt((s) => s ? { ...s, running: d.t === "deploy", log: d.line ? [...s.log, d.line].slice(-400) : s.log } : s);
+      if (d.line) {
+        const m = /\[helix\] step (\d) of 3/.exec(d.line);
+        if (m) setRunStep(Number(m[1]));
+        const f = /then add to helix\/domain\/fleet\.py:\s+(.*?)\s+so the board/.exec(d.line);
+        if (f) { setFleetLine(f[1]); CREATE_STAGE.set(stageKey, { ...(CREATE_STAGE.get(stageKey) || {}), fleetLine: f[1] }); }
+      }
+      if (d.t === "deploy_done") {
+        load();
+        if (d.job?.kind === "create" && d.job.app === card.app) {
+          if (d.ok && d.followups?.steps?.length) { setFollow(d.followups); setStage("followup"); }
+          else if (d.ok) setStage("done");
+          else setStage("plan");                       // it failed: the plan is still right, run it again once fixed
+        }
+      }
+    };
     window.addEventListener("helix-deploy", onLine);
     return () => window.removeEventListener("helix-deploy", onLine);
   }, [load]);
@@ -1527,16 +1651,49 @@ function DeployDrawer({ card, onClose, env: envIn, mode: modeIn }: { card: Card;
     { ok: isProd ? (who?.prod ?? null) : true, text: isProd ? (who?.identity ? `${who.identity} ${who.prod ? "may" : "may NOT"} touch production` : "No gcloud account signed in") : `Dev / QA: ${who?.identity || "your gcloud login"} is enough` },
   ];
   const canShip = exists && !!consoleRoot && (!isProd || !!who?.prod) && !st?.running;
+  // READY? - what would stop the thing you are about to do, in plain words; nothing else
+  const me = who?.identity?.split("@")[0] || "";
+  const blockers: { text: string; fix?: "console" }[] = [];
+  if (!ready) blockers.push({ text: "Checking…" });
+  else {
+    if (!consoleRoot) blockers.push({ text: "HELIX could not find your console folder (the one with dev.ps1). Paste the path:", fix: "console" });
+    if (!who?.identity) blockers.push({ text: "No Google account is signed in on this PC. In a terminal: gcloud auth login" });
+    else if (isProd && !who.prod) blockers.push({ text: `You are signed in as ${who.identity}. Production is for Brian, Brendan and Kate.` });
+    if (st?.running) blockers.push({ text: `Wait - ${st.job?.kind === "create" ? "a create" : `a ${st.job?.kind}`} is running on ${st.job?.app} ${st.job?.env?.toUpperCase()}.` });
+  }
+  useEffect(() => { if (st?.running && st.job?.kind === "create" && st.job.app === card.app && st.job.env === env && stage !== "running") setStage("running"); }, [st?.running, st?.job, card.app, env]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const readyLine = !exists
+    ? (isProd && !who?.prod ? "" : `Ready to create ${env.toUpperCase()}`)
+    : `Ready to ship ${env.toUpperCase()}`;
+  const [showChecks, setShowChecks] = useState(false);
+  const [showCmds, setShowCmds] = useState(false);
+  const [gateBusy, setGateBusy] = useState(false);
   const go = async () => {
     if (!gate) return;
     setErr(null);
+    setGateBusy(true);
     try {
-      if (gate.verb === "deploy") await api.post("/api/deploy", { app: card.app, env: gate.env, phrase, sure });
+      if (gate.verb === "deploy") await api.post("/api/deploy", { app: card.app, env: gate.env, phrase, sure, action: what });
       else if (gate.verb === "rollback") await api.post("/api/deploy/rollback", { app: card.app, env: gate.env, to: gate.to, phrase, sure });
-      else { const r = await api.post<{ service: string; site: string | null; steps: { what: string; cmd: string }[]; note: string }>("/api/deploy/create_plan", { app: card.app, env: gate.env, typed: phrase, sure }); setPlan(r); }
+      else { const r = await api.post<Plan>("/api/deploy/create_plan", { app: card.app, env: gate.env, typed: phrase, sure }); const pl = { ...r, env: gate.env }; const au = { env: gate.env, typed: phrase }; setPlan(pl); setPlanAuth(au); setCreatePhrase(""); CREATE_STAGE.set(stageKey, { stage: "plan", plan: pl, auth: au }); setStageRaw("plan"); }
       setGate(null); setPhrase(""); setSure(false); load();
     } catch (e) { setErr((e as Error).message); }
+    finally { setGateBusy(false); }
   };
+  const runPlan = async () => {
+    if (!plan || !planAuth) return;
+    setErr(null);
+    setGateBusy(true);
+    try { await api.post("/api/deploy/create_run", { app: card.app, env: planAuth.env, typed: planAuth.typed, sure: true, phrase: createPhrase }); setRunStep(1); setStage("running"); load(); }
+    catch (e) { setErr((e as Error).message); }
+    finally { setGateBusy(false); }
+  };
+  const openFollow = () => void api.get<Followups>(`/api/deploy/followups?app_name=${encodeURIComponent(card.app)}&env=${env}`).then((f) => f.steps?.length ? setFollow(f) : setErr("This environment has no site, so there is nothing to set up.")).catch((e: Error) => setErr(e.message));
+  // THE TYPED WORD: the same rule the backend applies (the app's name for a create, "<verb> prod" for
+  // production; case does not matter) - judged live, so the box goes red or green as you type
+  const wanted = gate ? (gate.verb === "create" ? card.app : gate.env === "prod" ? `${gate.verb} prod` : "") : "";
+  const typedOk = !wanted || phrase.trim().toLowerCase() === wanted.toLowerCase();
+  const typedState = !wanted || !phrase.trim() ? "" : typedOk ? " ok" : " bad";
   const saveRoot = (v: string) => void api.put("/api/deploy/console_root", { path: v }).then(() => { setConsoleRoot(v); setErr(null); }).catch((e: Error) => setErr(e.message));
   const served = tg?.served ?? [];
   return (
@@ -1574,31 +1731,120 @@ function DeployDrawer({ card, onClose, env: envIn, mode: modeIn }: { card: Card;
             )}
           </div>
           <div className="board-panel">
-            <div className="board-kicker mb-2">PRE-FLIGHT</div>
-            {checks.map((c, i) => (
-              <div key={i} className="flex items-start gap-2 py-1">
-                <span style={{ color: c.ok === true ? "var(--done)" : c.ok === false ? "var(--error)" : "var(--muted)", width: 14 }}>{c.ok === true ? "●" : c.ok === false ? "●" : "○"}</span>
-                <span>{c.text}</span>
+            <div className="flex items-center gap-2 mb-2">
+              <div className="board-kicker">READY?</div>
+              <div className="flex-1" />
+              <button className="board-linkbtn" onClick={() => setShowChecks((v) => !v)}>{showChecks ? "Hide the details" : "Details"}</button>
+            </div>
+            {blockers.length === 0 ? (
+              (exists || stage === "ready") && <div className="board-ready"><span className="board-ready-dot" />{readyLine}<span className="board-ready-who">{me ? ` · as ${me}` : ""}</span></div>
+            ) : blockers.map((b, i) => (
+              <div key={i} className="board-blocker">
+                <span className="board-blocker-dot" />
+                <div className="flex-1">
+                  {b.text}
+                  {b.fix === "console" && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <input className="flex-1" placeholder="C:\\Users\\you\\...\\BRMS_MES_WEB_VERSION" onKeyDown={(e) => { if (e.key === "Enter") saveRoot((e.target as HTMLInputElement).value); }} />
+                      <span className="text-xs" style={MUTED}>Enter</span>
+                    </div>
+                  )}
+                </div>
               </div>
             ))}
-            {!consoleRoot && (
-              <div className="mt-2 flex items-center gap-2">
-                <input className="flex-1" placeholder="C:\\Users\\you\\...\\BRMS_MES_WEB_VERSION" onKeyDown={(e) => { if (e.key === "Enter") saveRoot((e.target as HTMLInputElement).value); }} />
-                <span className="text-xs" style={MUTED}>the folder with dev.ps1 · Enter</span>
+            {showChecks && (
+              <div className="board-checks">
+                {checks.map((c, i) => (
+                  <div key={i} className="flex items-start gap-2 py-[2px]">
+                    <span style={{ color: c.ok === true ? "var(--done)" : c.ok === false ? "var(--error)" : "var(--muted)", width: 14 }}>{c.ok === true ? "●" : c.ok === false ? "●" : "○"}</span>
+                    <span>{c.text}</span>
+                  </div>
+                ))}
               </div>
             )}
             <div className="flex items-center gap-3 flex-wrap mt-3">
-              <button className="btn btn-primary" disabled={!canShip} onClick={() => setGate({ verb: "deploy", env })}>▲ Ship {env.toUpperCase()}</button>
-              {!exists && <button className="btn board-create" disabled={!who?.prod} title={who?.prod ? "" : "Creating an environment is for Brian, Brendan and Kate"} onClick={() => setGate({ verb: "create", env })}>＋ Create {env.toUpperCase()}</button>}
+              {exists && <div className="board-what" role="group" aria-label="What to ship">
+                {SHIP_WHAT.map((w) => <button key={w.key} className={what === w.key ? "on" : ""} title={w.tip} onClick={() => setWhat(w.key)}>{w.label}</button>)}
+              </div>}
+              {exists && <button className="btn btn-primary" disabled={!canShip} onClick={() => setGate({ verb: "deploy", env })}>▲ Ship {env.toUpperCase()}</button>}
+              {exists && env !== "dev" && <button className="board-linkbtn" title="The Google sign-in settings this site needs, with links" onClick={openFollow}>Sign-in setup</button>}
+              {!exists && stage === "ready" && <button className="btn board-create big" disabled={!who?.prod || blockers.length > 0} title={who?.prod ? "" : "Creating an environment is for Brian, Brendan and Kate"} onClick={() => setGate({ verb: "create", env })}><i>✦</i> Create {env.toUpperCase()}</button>}
+              {!exists && stage !== "ready" && stage !== "running" && <button className="board-linkbtn" onClick={() => { CREATE_STAGE.delete(stageKey); setStageRaw("ready"); setPlan(null); setPlanAuth(null); }}>Start over</button>}
               {st?.running && <span className="text-xs" style={{ color: "var(--working)" }}>a {st.job?.kind} is running on {st.job?.app} {st.job?.env}…</span>}
             </div>
             {err && <div className="mt-2" style={{ color: "var(--error)" }}>{err}</div>}
           </div>
-          {plan && (
+          {!exists && stage !== "ready" && (
             <div className="board-panel board-plan">
-              <div className="board-kicker mb-1">THE PLAN · {card.app} {plan.service}</div>
-              {plan.steps.map((s, i) => <div key={i} className="board-plan-step"><span className="board-plan-n">{i + 1}</span><div><div>{s.what}</div><code>{s.cmd}</code></div></div>)}
-              <div className="mt-2 text-xs" style={{ color: "var(--working)" }}>{plan.note}</div>
+              <div className="board-steps">
+                {(["The plan", "Building", "Sign-in", "Done"] as const).map((label, i) => {
+                  const idx = ["plan", "running", "followup", "done"].indexOf(stage);
+                  const state = i < idx ? "done" : i === idx ? "now" : "next";
+                  return <span key={label} className={`board-step ${state}`}><b>{state === "done" ? "✓" : i + 1}</b>{label}</span>;
+                })}
+              </div>
+              {stage === "plan" && plan && (
+                <>
+                  <div className="flex items-center gap-2 mb-1 mt-3">
+                    <div className="board-kicker">THE PLAN · create {card.app} {(plan.env || env).toUpperCase()}</div>
+                    <div className="flex-1" />
+                    <button className="board-linkbtn" onClick={() => setShowCmds((v) => !v)}>{showCmds ? "Hide the commands" : "Show the commands"}</button>
+                  </div>
+                  {plan.steps.map((s, i) => (
+                    <div key={i} className="board-plan-step">
+                      <span className={`board-plan-n${s.who === "you" ? " you" : ""}`}>{i + 1}</span>
+                      <div>
+                        <div className="flex items-baseline gap-2"><span className="board-plan-what">{s.what}</span>{s.who && <span className="board-plan-who">{s.who === "you" ? "you" : s.who}</span>}</div>
+                        {s.detail && <div className="board-plan-detail">{s.detail}</div>}
+                        {showCmds && <code>{s.cmd}</code>}
+                      </div>
+                    </div>
+                  ))}
+                  <div className="mt-3 flex items-center gap-2 flex-wrap">
+                    {plan.prod && <input style={{ width: 170 }} className={`board-typed${!createPhrase.trim() ? "" : createPhrase.trim().toLowerCase() === "create prod" ? " ok" : " bad"}`} value={createPhrase} onChange={(e) => setCreatePhrase(e.target.value)} placeholder="type: create prod" title="Production: type exactly 'create prod'" />}
+                    <button className={`btn board-create big${plan.prod ? " prod" : ""}`} disabled={gateBusy || !!st?.running || (!!plan.prod && createPhrase.trim().toLowerCase() !== "create prod")} onClick={() => void runPlan()}>
+                      {gateBusy ? <Strandbar progress={null} state="running" height={10} words={false} compact /> : <><i>▶</i> Run this plan</>}
+                    </button>
+                    <span className="text-xs" style={MUTED}>{plan.note} It runs in CURRENT TASKS; the lines stream on the right.</span>
+                  </div>
+                </>
+              )}
+              {stage === "running" && (
+                <div className="mt-3">
+                  {[["Building the server", 1], ["Putting up the site", 2], ["Allowing sign-in", 3]].map(([label, n]) => (
+                    <div key={String(n)} className={`board-runrow${runStep > (n as number) ? " done" : runStep === n ? " now" : ""}`}>
+                      <span className="board-plan-n">{runStep > (n as number) ? "✓" : n}</span>
+                      <span className="flex-1">{label}</span>
+                      {runStep === n && <Strandbar progress={null} state="running" height={12} words={false} compact />}
+                    </div>
+                  ))}
+                  <div className="text-xs mt-2" style={MUTED}>Stop is in CURRENT TASKS. It says what stopping leaves behind.</div>
+                </div>
+              )}
+              {stage === "followup" && (
+                <div className="mt-3">
+                  <div className="board-ready"><span className="board-ready-dot" />{card.app} {env.toUpperCase()} exists</div>
+                  <div className="mt-2 text-[13px]">One thing is left that only you can do - the reCAPTCHA domain. The card walks you through it in about a minute.</div>
+                  <div className="mt-3 flex items-center gap-3 flex-wrap">
+                    <button className="btn board-create big" onClick={openFollow}><i>✦</i> Open the sign-in card</button>
+                    <button className="board-linkbtn" onClick={() => setStage("done")}>I did it</button>
+                  </div>
+                </div>
+              )}
+              {stage === "done" && (
+                <div className="mt-3">
+                  <div className="board-ready"><span className="board-ready-dot" />{card.app} {env.toUpperCase()} is up</div>
+                  <div className="mt-2 text-[13px]">Last thing: tell the board. One line in HELIX's fleet table, committed like any code change - the Console reads the new cell on its next refresh.</div>
+                  {fleetLine && (
+                    <div className="board-follow-paste mt-2" style={{ marginLeft: 0 }}>
+                      <span className="board-kicker">helix/domain/fleet.py</span>
+                      <code style={{ fontSize: 12 }}>{fleetLine}</code>
+                      <button className="btn text-xs" onClick={() => { void navigator.clipboard?.writeText(fleetLine).then(() => { setCopiedLine(true); window.setTimeout(() => setCopiedLine(false), 1600); }).catch(() => undefined); }}>{copiedLine ? "Copied" : "Copy"}</button>
+                    </div>
+                  )}
+                  <div className="mt-3 flex items-center gap-3"><button className="board-linkbtn" onClick={openFollow}>Sign-in setup again</button></div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1636,14 +1882,15 @@ function DeployDrawer({ card, onClose, env: envIn, mode: modeIn }: { card: Card;
               {gate.verb === "deploy" ? `Ship ${card.app} to ${gate.env.toUpperCase()}` : gate.verb === "rollback" ? `Roll ${card.app} ${gate.env.toUpperCase()} back to ${gate.to}` : `Create ${card.app} ${gate.env.toUpperCase()}`}
             </div>
             <div className="mt-2 text-[13px]" style={MUTED}>
-              {gate.verb === "deploy" && `dev.ps1 -App ${card.app.toLowerCase()} -Action be-deploy -Env ${gate.env}, from ${consoleRoot || "the console checkout"}. Signed in as ${who?.identity || "?"}. An audit row is written first.`}
+              {gate.verb === "deploy" && `dev.ps1 -App ${card.app.toLowerCase()} -Action ${what === "both" ? "be-deploy, then fe-deploy" : what} -Env ${gate.env}, from ${consoleRoot || "the console checkout"}. Signed in as ${who?.identity || "?"}. An audit row is written first.`}
               {gate.verb === "rollback" && `A traffic shift to a revision that already served - no build, no flags. The current revision stays in Cloud Run to roll forward to.`}
-              {gate.verb === "create" && `This shows the exact plan - the Cloud Run service, its env vars from dev.ps1, the Hosting site - and runs nothing. Running it is the next step, with the plan read beside a person.`}
+              {gate.verb === "create" && `HELIX shows you the plan first. Nothing runs until you press Run.`}
             </div>
             {(gate.env === "prod" || gate.verb === "create") && (
               <label className="block mt-3">
                 <span className="board-kicker">{gate.verb === "create" ? `TYPE THE APP'S NAME: ${card.app}` : `TYPE: ${gate.verb} prod`}</span>
-                <input className="w-full mt-1" autoFocus value={phrase} onChange={(e) => setPhrase(e.target.value)} placeholder={gate.verb === "create" ? card.app : `${gate.verb} prod`} />
+                <input className={`w-full mt-1 board-typed${typedState}`} autoFocus value={phrase} onChange={(e) => setPhrase(e.target.value)} placeholder={wanted} spellCheck={false} />
+                <span className={`board-typed-note${typedState}`}>{!phrase.trim() ? `Type ${wanted} exactly - nothing runs until it matches.` : typedOk ? "That's it." : `Not yet - it has to read ${wanted}.`}</span>
               </label>
             )}
             <label className="flex items-center gap-2 mt-3 text-[13px]">
@@ -1651,14 +1898,16 @@ function DeployDrawer({ card, onClose, env: envIn, mode: modeIn }: { card: Card;
             </label>
             {err && <div className="mt-2 text-[12px]" style={{ color: "var(--error)" }}>{err}</div>}
             <div className="flex items-center gap-2 mt-4">
-              <button className={`btn ${gate.env === "prod" ? "btn-danger" : "btn-primary"}`} disabled={!sure || ((gate.env === "prod" || gate.verb === "create") && !phrase.trim())} onClick={() => void go()}>
-                {gate.verb === "deploy" ? "▲ Ship" : gate.verb === "rollback" ? "↶ Roll back" : "Show the plan"}
+              <button className={`btn ${gate.env === "prod" ? "btn-danger" : "btn-primary"} board-wait`} disabled={gateBusy || !sure || !typedOk || (!!wanted && !phrase.trim())} onClick={() => void go()}>
+                {gateBusy ? <Strandbar progress={null} state="running" height={10} words={false} compact /> : gate.verb === "deploy" ? "▲ Ship" : gate.verb === "rollback" ? "↶ Roll back" : "Show the plan"}
               </button>
+              {gateBusy && <span className="text-xs" style={MUTED}>{gate.verb === "create" ? "Checking who is signed in…" : "Starting…"}</span>}
               <button className="btn" onClick={() => setGate(null)}>Cancel</button>
             </div>
           </div>
         </div>
       )}
+      {follow && <FollowupsWindow data={follow} onClose={() => setFollow(null)} />}
     </Drawer>
   );
 }
@@ -1844,6 +2093,7 @@ export default function ConsolePage() {
   // each), so a second Read while one runs used to bounce off with "busy" and look like nothing
   // happened. Now every Read joins a line and runs in turn; the card shows "queued" meanwhile.
   const queue = useRef<(string | undefined)[]>([]);
+  const forced = useRef<Set<string>>(new Set());     // reads the person asked for by hand (Refresh, Read): never answered from memory
   const running = useRef(false);
   const [queued, setQueued] = useState<string[]>([]);
   const pump = useCallback(() => {
@@ -1853,12 +2103,14 @@ export default function ConsolePage() {
     running.current = true;
     setBusy(app || "*");
     setQueued([...queue.current].map((a) => a || "*"));
-    void api.post<Board>("/api/fleet/refresh", app ? { app } : {})
+    const force = forced.current.delete(app || "*");
+    void api.post<Board>("/api/fleet/refresh", { ...(app ? { app } : {}), ...(force ? { force: true } : {}) })
       .then((b) => { setBoard(b); setFailed(null); })
       .catch((e: Error) => setFailed(e.message))
       .finally(() => { running.current = false; setBusy(null); if (queue.current.length) pump(); else setQueued([]); });
   }, []);
-  const refresh = useCallback((app?: string) => {
+  const refresh = useCallback((app?: string, opts?: { force?: boolean }) => {
+    if (opts?.force) forced.current.add(app || "*");
     if (queue.current.includes(app) || (running.current && busy === (app || "*"))) return;
     queue.current.push(app);
     pump();
@@ -1920,7 +2172,7 @@ export default function ConsolePage() {
               ))}
             </div>
             <div className="flex-1" />
-            <button className="btn btn-primary text-xs board-wait" disabled={busy !== null} onClick={() => refresh()} data-tip="Read every app and environment again from Cloud Run and each app's health endpoint">
+            <button className="btn btn-primary text-xs board-wait" disabled={busy !== null} onClick={() => refresh(undefined, { force: true })} data-tip="Read every app and environment again from Cloud Run and each app's health endpoint">
               {busy === "*" ? <Strandbar progress={null} state="running" height={10} words={false} compact /> : "⟳ Refresh"}
             </button>
             <button className="btn btn-primary text-xs" onClick={() => setAdding(true)} data-tip="A new app: folder, private repo, environments">＋ Add a project</button>
@@ -1993,7 +2245,7 @@ export default function ConsolePage() {
             {!folded.projects && (
               <div className="grid gap-4 mt-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))" }}>
                 {cards.map((card, i) => (
-                  <AppCard key={card.app} card={card} index={i} busy={busy === card.app || busy === "*"} queued={queued.includes(card.app) || queued.includes("*")} onRead={(app) => refresh(app)}
+                  <AppCard key={card.app} card={card} index={i} busy={busy === card.app || busy === "*"} queued={queued.includes(card.app) || queued.includes("*")} onRead={(app) => refresh(app, { force: true })}
                     collapsed={collapsedCards.includes(card.app)} onToggle={() => toggleCard(card.app)}
                     onLink={(app) => setLinking(app)}
                     onAction={(app, kind, env) => kind === "dev" ? navigate({ name: "talk", project: app }) : setDrawer({ app, kind, env })} />

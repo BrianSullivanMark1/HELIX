@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
 
+from helix.adapters import pulse as _pulse
 from helix.ports.secrets import Secret, SecretVersion, StoreError
 
 NOT_INSTALLED = "The Google Cloud SDK (gcloud) is not on this PC, so the vault cannot open."
@@ -56,6 +58,7 @@ _QUIET = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _real_runner(argv: list[str], timeout_s: float) -> Ran:
+    _pulse.spawned(os.path.basename(str(argv[0])).split('.')[0] or 'gcloud')
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s,
                            encoding="utf-8", errors="replace", creationflags=_QUIET, stdin=subprocess.DEVNULL)

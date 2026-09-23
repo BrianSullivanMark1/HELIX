@@ -17,7 +17,7 @@ const KEY = "helix_perf";
 const ORDER: Level[] = ["full", "lean", "minimal"];
 
 interface Perf { mode: Mode; level: Level; fps: number; frameMs: number; long: number; short: number; started: boolean }
-export const perf: Perf = { mode: "auto", level: "full", fps: 60, frameMs: 16, long: 0, short: 0, started: false };
+export const perf: Perf & { software: boolean; renderer: string } = { mode: "auto", level: "full", fps: 60, frameMs: 16, long: 0, short: 0, started: false, software: false, renderer: "" };
 try { const m = localStorage.getItem(KEY); if (m === "auto" || m === "full" || m === "lean" || m === "minimal") perf.mode = m; } catch { /* fine */ }
 if (perf.mode !== "auto") perf.level = perf.mode;
 
@@ -35,10 +35,28 @@ export function setMode(m: Mode) {
   window.dispatchEvent(new CustomEvent("helix-perf", { detail: { level: perf.level, mode: perf.mode } }));
 }
 
+/** Is the browser drawing WebGL in SOFTWARE (no usable graphics card: a laptop on battery, a VM,
+ *  a remote desktop)? Read once from the renderer string. Software rendering turns every 3D
+ *  frame into CPU work, so Auto starts at Minimal there instead of finding out the slow way. */
+export function probeGpu(): boolean {
+  try {
+    const c = document.createElement("canvas");
+    const gl = (c.getContext("webgl2") || c.getContext("webgl")) as WebGLRenderingContext | null;
+    if (!gl) { perf.software = true; perf.renderer = "no WebGL"; return true; }
+    const ext = gl.getExtension("WEBGL_debug_renderer_info");
+    const r = String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER) || "");
+    perf.renderer = r;
+    perf.software = /swiftshader|llvmpipe|software|basic render|microsoft basic|mesa offscreen|warp/i.test(r);
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+  } catch { perf.software = false; }
+  return perf.software;
+}
+
 /** Start the measuring loop once (App does it). */
 export function startGovernor() {
   if (perf.started) return;
   perf.started = true;
+  if (probeGpu() && perf.mode === "auto") setLevel("minimal");
   let last = performance.now(), ema = 16, acc = 0, n = 0;
   const step = (now: number) => {
     const dt = now - last; last = now;
@@ -70,6 +88,9 @@ export function glows(): boolean { return perf.level === "full"; }
 export function backdropOn(): boolean { return perf.level !== "minimal"; }
 /** Frame interval for 2D loops that need not run at 60: faces, marks, bars. */
 export function frameMs2D(): number { return perf.level === "full" ? 1000 / 60 : perf.level === "lean" ? 1000 / 30 : 1000 / 20; }
+/** Frame interval for the 3D canvases (the faces, the helices): 60 at full, 30 lean, 20 minimal.
+ *  The page's own rAF still runs at the screen's rate; the GPU work does not. */
+export function frameMs3D(): number { return perf.level === "full" ? 0 : perf.level === "lean" ? 1000 / 30 : 1000 / 20; }
 /** Every n-th frame for the expensive per-node work (the helix bend projection). */
 export function bendEvery(): number { return perf.level === "full" ? 1 : perf.level === "lean" ? 2 : 3; }
 

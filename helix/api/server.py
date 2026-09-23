@@ -73,6 +73,9 @@ _SETTING_KEYS = (
     "radio_bucket", "radio_station", "console_root",
     # CURRENT TASKS / the deploy lane's tools: the Firebase project id, the radio cache cap in GB.
     "firebase_project", "radio_cache_gb",
+    # THE VOICE (2026-09-21): which engine speaks (google | edge | os), Google's voice name, the
+    # style (a preset key or "custom") and the person's own style sentence.
+    "tts_engine", "tts_google_voice", "tts_style", "tts_style_custom",
 )
 # github_token: the fleet's read of each repo's HEAD (drift). Presence reported, value never.
 _SECRET_SETTINGS = ("claude_api_key", "claude_code_oauth_token", "github_token")
@@ -304,7 +307,7 @@ def build_app(container, shell, hub: EventHub, web_dist: Path | None) -> FastAPI
         shell.stop()
         return {"ok": True}
 
-    mount_say(app, shell, c.settings)  # POST /api/say - the test line, word-timed for the face, no model
+    mount_say(app, shell, c.settings, google=getattr(c, "google_tts", None))  # POST /api/say - the test line; Google's voice first
     mount_radio(app, c)  # HELIX RADIO: the deck, uploads, playback, station names - the bucket through your gcloud
     mount_jokes(app)  # GET /api/joke - a line for the voice to act, from the web (filtered), else HELIX's own
     mount_jobs(app, c)  # CURRENT TASKS: the register every long action reports into; cancel, dismiss, clear

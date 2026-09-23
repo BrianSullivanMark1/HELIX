@@ -19,8 +19,8 @@ import { api } from "../lib/api";
 import { useHelix } from "../lib/store";
 import { useJobs } from "../lib/jobs";
 import { radioBeat } from "./Radio";
-import { ContextGuard, HelixBackdrop, NeuralLayer, usePerfLevel } from "../pages/Console";
-import { dprCap } from "../lib/perf";
+import { ContextGuard, FrameThrottle, HelixBackdrop, NeuralLayer, usePerfLevel } from "../pages/Console";
+import { dprCap, perf } from "../lib/perf";
 import "../pages/console.css";
 import { baseLook } from "./Orb";
 
@@ -382,7 +382,7 @@ function buildScript(text: string): Script {
  *  run along the links as bright sparks and hop on, and the mouse is a hand in it: neurons near the
  *  cursor light up and lean toward it, and a click sends a wave across the whole net. Colors stay
  *  in the hue (never white-out): dim links, lit nodes, hot sparks. */
-function Cortex({ hue, mouse, level }: { hue: number; mouse: React.MutableRefObject<{ x: number; y: number }>; level: React.MutableRefObject<number> }) {
+export function Cortex({ hue, mouse, level }: { hue: number; mouse: React.MutableRefObject<{ x: number; y: number }>; level: React.MutableRefObject<number> }) {
   const group = useRef<THREE.Group>(null!);
   const N = 170, R = 1.07, LINK = 0.40, MAXFIRE = 28;
   const data = useMemo(() => {
@@ -1020,7 +1020,8 @@ function Body({ look, onPulse, mini = false, mode = mini ? "mini" : "full", roam
         <pointsMaterial map={glow} size={0.03} transparent opacity={0.7} depthWrite={false} blending={THREE.AdditiveBlending} sizeAttenuation />
       </points>
       {/* the docked head and the head up front keep the orbits; the Talk page keeps its cortex (it fires with thought) */}
-      {mode === "mini" || mode === "stage" ? <Orbits hue={look.hue} level={levelRef} /> : <Cortex hue={look.hue} mouse={mouse} level={levelRef} />}
+      {/* the orbits everywhere (Brian, 2026-09-21: the cortex's nets never got the look and cost the GPU); the cortex stays in the file, one word away */}
+      <Orbits hue={look.hue} level={levelRef} />
     </group>
   );
 }
@@ -1091,7 +1092,8 @@ function Room({ follow, z = 0, breach = false }: { follow?: React.MutableRefObje
   return (
     <div className="board-stage" style={{ position: "fixed", zIndex: z, opacity: 0.9, pointerEvents: "none" }} aria-hidden="true">
       {/* the stage (breach): a sparse sheet the head breaks through and that heals behind it - not the crowded 3D shell of the Talk page */}
-      <NeuralLayer density={breach ? 1.15 : 2.6} keepOut={{ x: 0.5, y: 0.5, r: 0.36 }} follow={follow} depth={!breach} breach={breach} />
+      {/* Talk: a light net, 2D, only when the machine can afford Full (the 3D shell of 2.6x nodes is gone with the cortex) */}
+      {(breach || perf.level === "full") && <NeuralLayer density={breach ? 1.15 : 0.9} keepOut={{ x: 0.5, y: 0.5, r: 0.36 }} follow={follow} depth={false} breach={breach} />}
     </div>
   );
 }
@@ -1109,9 +1111,10 @@ export default function Organism({ look, mini = false, onClick, mode: modeIn, on
     return (
       <div className="face-dock" onClick={onClick} data-tip="Click me: I come to the front" role="button">
         {/* the camera sits back so a bounce, a spin or a peek never leaves the canvas (it clipped) */}
-        <Canvas key={epoch} camera={{ position: [0, 0.1, 4.6], fov: 40 }} gl={{ antialias: true, alpha: true, preserveDrawingBuffer: true }} dpr={[1, Math.min(cap, 1.25)]} style={{ pointerEvents: "none" }}
+        <Canvas key={epoch} frameloop="demand" camera={{ position: [0, 0.1, 4.6], fov: 40 }} gl={{ antialias: true, alpha: true, preserveDrawingBuffer: true }} dpr={[1, Math.min(cap, 1.25)]} style={{ pointerEvents: "none" }}
           onCreated={({ gl }) => { gl.domElement.addEventListener("webglcontextlost", () => window.setTimeout(() => setEpoch((e) => e + 1), 2500)); }}>
           <ContextGuard />
+          <FrameThrottle />
           <Body look={look} onPulse={() => undefined} mini />
         </Canvas>
       </div>
@@ -1122,9 +1125,10 @@ export default function Organism({ look, mini = false, onClick, mode: modeIn, on
     // relative to the stage; the beat drives the acts. One extra WebGL context, released with the deck.
     return (
       <div ref={box} className="dj-face" aria-hidden="true">
-        <Canvas key={epoch} camera={{ position: [0, 0.1, 3.6], fov: 40 }} gl={{ antialias: true, alpha: true }} dpr={[1, cap]} style={{ pointerEvents: "none" }}
+        <Canvas key={epoch} frameloop="demand" camera={{ position: [0, 0.1, 3.6], fov: 40 }} gl={{ antialias: true, alpha: true }} dpr={[1, cap]} style={{ pointerEvents: "none" }}
           onCreated={({ gl }) => { gl.domElement.addEventListener("webglcontextlost", () => window.setTimeout(() => setEpoch((e) => e + 1), 2500)); }}>
           <ContextGuard />
+          <FrameThrottle />
           <group position={[0, -0.6, -6]} scale={0.55}><HelixBackdrop colors={colors} position={[0, 0, 0]} scale={1} tempo={1.3} spinRate={1.6} bendable={false} /></group>
           <Body look={look} onPulse={() => undefined} mode="dj" box={box} />
         </Canvas>
@@ -1137,7 +1141,7 @@ export default function Organism({ look, mini = false, onClick, mode: modeIn, on
       <Room follow={stage ? roam : undefined} z={stage ? 31 : 0} breach={stage} />
       {stage && <div className="stage-veil" onClick={onClose} />}
       <div className={`fixed inset-0${stage ? "" : " face-full"}`} style={{ zIndex: stage ? 32 : 0, pointerEvents: stage ? "none" : undefined }}>
-        <Canvas key={epoch} camera={{ position: [0, 0.2, 4.2], fov: 42 }} gl={{ antialias: true, alpha: true, powerPreference: "high-performance", preserveDrawingBuffer: true }}
+        <Canvas key={epoch} frameloop="demand" camera={{ position: [0, 0.2, 4.2], fov: 42 }} gl={{ antialias: true, alpha: true, powerPreference: "high-performance", preserveDrawingBuffer: true }}
           dpr={[1, cap]} style={{ pointerEvents: stage ? "none" : "auto" }}
           onCreated={({ gl, scene }) => {
             scene.fog = new THREE.Fog("#080b0f", 10, 42);     // the strands run off into the dark, never cut
@@ -1146,15 +1150,18 @@ export default function Organism({ look, mini = false, onClick, mode: modeIn, on
             gl.domElement.addEventListener("webglcontextrestored", () => { window.clearTimeout(timer); });
           }}>
           <ContextGuard />
+          <FrameThrottle />
           {/* the strands: one wide behind the face, two thin ones crossing it, all turning with the mouse */}
           <group position={[0, -0.2, -7]} scale={0.8}>
             <HelixBackdrop colors={colors} position={[0, 0.3, 0]} scale={1} tempo={stage ? 1.6 : 1.15} spinRate={stage ? 1.8 : 1.2} />
           </group>
           {/* the far strands never bend under the mouse (nobody can tell at that depth; it was 3600 projections a frame) */}
-          <group position={[-7.5, 1.5, -17]} rotation={[0.2, 0, 0.35]} scale={0.8}>
-            <HelixBackdrop colors={colors} position={[0, 0, 0]} scale={1} tempo={1.4} spinRate={stage ? 3 : 2.2} bendable={false} />
-          </group>
           {level !== "minimal" && (
+            <group position={[-7.5, 1.5, -17]} rotation={[0.2, 0, 0.35]} scale={0.8}>
+              <HelixBackdrop colors={colors} position={[0, 0, 0]} scale={1} tempo={1.4} spinRate={stage ? 3 : 2.2} bendable={false} />
+            </group>
+          )}
+          {level === "full" && (
             <group position={[8, -2, -19]} rotation={[-0.1, 0, -0.45]} scale={0.7}>
               <HelixBackdrop colors={colors} position={[0, 0, 0]} scale={1} tempo={1.6} spinRate={stage ? 3.6 : 2.6} bendable={false} />
             </group>

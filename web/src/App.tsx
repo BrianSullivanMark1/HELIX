@@ -120,8 +120,16 @@ export default function App() {
   }, []);
   useEffect(() => {
     if (!fpsOn) return;
-    const id = window.setInterval(() => setFpsLine({ text: `${perf.fps} FPS · ${perf.frameMs} MS · ${perf.level.toUpperCase()}${perf.mode === "auto" ? " · AUTO" : ""}`, slow: perf.fps < 45 }), 1000);
-    return () => window.clearInterval(id);
+    // the backend's own cost rides along: its CPU (percent of one core) and how many programs it
+    // spawned in the last minute (gcloud is a Python program - each spawn is seconds of CPU)
+    let py = "";
+    const pulse = () => void api.get<{ cpu_core_pct: number; spawns_last_minute: number; rss_mb: number | null }>("/api/pulse")
+      .then((p) => { py = ` · PY ${Math.round(p.cpu_core_pct)}%${p.spawns_last_minute ? ` · ${p.spawns_last_minute} SPAWNS/MIN` : ""}${p.rss_mb ? ` · ${p.rss_mb} MB` : ""}`; })
+      .catch(() => { py = ""; });
+    pulse();
+    const pid = window.setInterval(pulse, 5000);
+    const id = window.setInterval(() => setFpsLine({ text: `${perf.fps} FPS · ${perf.frameMs} MS · ${perf.level.toUpperCase()}${perf.mode === "auto" ? " · AUTO" : ""}${py}`, slow: perf.fps < 45 }), 1000);
+    return () => { window.clearInterval(id); window.clearInterval(pid); };
   }, [fpsOn]);
   // the deploy lane's lines ride the event stream; the Deploy window listens
   useEffect(() => {

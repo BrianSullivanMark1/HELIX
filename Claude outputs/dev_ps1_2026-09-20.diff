@@ -1,0 +1,155 @@
+diff --git a/dev.ps1 b/dev.ps1
+index cafd5f7..fdafdca 100644
+--- a/dev.ps1
++++ b/dev.ps1
+@@ -12,7 +12,13 @@ param(
+   # project -> environment picker passes this through. 'prod' is accepted here but
+   # LOCKED below until the production cutover.
+   [ValidateSet('dev', 'qa', 'prod')]
+-  [string]$Env = 'dev'
++  [string]$Env = 'dev',
++  # 2026-09-20 (HELIX): a headless caller cannot answer Read-Host. -Typed PROD is the typed
++  # production confirm, passed by HELIX only after its own gates (allowlist, typed phrase,
++  # are-you-sure, audit row first). -Create allows the FIRST deploy of an ECHO qa/prod service
++  # (rule 5: an ordinary deploy never creates one).
++  [string]$Typed = '',
++  [switch]$Create
+ )
+ 
+ # 'Continue' so native CLIs (gcloud / firebase / npm) that write status text to
+@@ -20,6 +26,10 @@ param(
+ # exit codes and the try/catch around each menu action.
+ $ErrorActionPreference = 'Continue'
+ if ($PSVersionTable.PSVersion.Major -ge 7) { $PSNativeCommandUseErrorActionPreference = $false }
++# 2026-09-20 (HELIX): true when no person can answer a prompt (stdin redirected). A refusal that
++# would wait on "Press Enter" ends a headless run with a plain result line and exit code 1 instead.
++function Test-Headless { try { return [Console]::IsInputRedirected } catch { return $false } }
++function Stop-IfHeadless { if (Test-Headless) { Write-Host "[dev.ps1] RESULT: FAILED"; exit 1 } }
+ # -- Projects this console can target ------------------------------------------
+ # The same command set (deploy site, deploy server, git, run) works for either project;
+ # the toggle in the console picks which one every button acts on. To support another
+@@ -60,13 +70,18 @@ $EchoBackendEnv = '^##^GOOGLE_CLOUD_PROJECT=windy-celerity-392822##ECHO_AGENT_ID
+ 
+ # Which environments each project has. Resolved BEFORE the table below because several
+ # table cells (service name, hosting target, URL) are computed from $Env.
+-$ProjectEnvs = @{ mes=@('dev','qa','prod'); echo=@('dev'); wms=@('dev','qa','prod'); mrp=@('dev','qa','prod') }   # wms/mrp qa added 2026-09-06
++$ProjectEnvs = @{ mes=@('dev','qa','prod'); echo=@('dev','qa','prod'); wms=@('dev','qa','prod'); mrp=@('dev','qa','prod') }   # wms/mrp qa added 2026-09-06
+ $AppKey = if ($App) { $App.ToLower() } else { 'mes' }
+ if (-not $ProjectEnvs.ContainsKey($AppKey)) { $AppKey = 'mes' }
+ if (-not ($ProjectEnvs[$AppKey] -contains $Env)) {
+   Write-Host ("({0} has no '{1}' stack - targeting dev)" -f $AppKey.ToUpper(), $Env) -ForegroundColor Yellow
+   $Env = 'dev'
+ }
++# ECHO per environment (2026-09-20): dev keeps its original site; qa / prod are oo-echo-qa /
++# oo-echo (MES's pattern). ALLOWED_ORIGINS follows the site; localhost is never allowed on prod.
++$EchoSite = if ($Env -eq 'prod') { 'oo-echo' } elseif ($Env -eq 'qa') { 'oo-echo-qa' } else { 'manufacturing-execution-system-mes-dashboard-dev' }
++$EchoBackendEnv = $EchoBackendEnv.Replace('https://manufacturing-execution-system-mes-dashboard-dev.web.app', "https://$EchoSite.web.app")
++if ($Env -eq 'prod') { $EchoBackendEnv = $EchoBackendEnv.Replace(',http://localhost:5173', '') }
+ 
+ $Projects = @{
+   'mes' = @{
+@@ -89,14 +104,14 @@ $Projects = @{
+   }
+   'echo' = @{
+     Name='ECHO AI Dashboard'; Root=$EchoRoot; Gcp='windy-celerity-392822'; Region='us-west2';
+-    ApiSvc='brms-echo-api-dev'; ApiSa='echo-proxy@windy-celerity-392822.iam.gserviceaccount.com';
++    ApiSvc=$(if ($Env -eq 'prod') { 'brms-echo-api' } else { "brms-echo-api-$Env" }); ApiSa='echo-proxy@windy-celerity-392822.iam.gserviceaccount.com';
+     HostingSa='mes-hosting-deploy-sa@windy-celerity-392822.iam.gserviceaccount.com';  # same GCP project -> same hosting-only deployer
+     SourceRepo='cloud-run-source-deploy';
+     RepoUrl='https://github.com/BrendanSullivanMark1/MES_OATS_DASHBOARD.git';
+-    HostingArg='hosting'; DeployUrl='https://manufacturing-execution-system-mes-dashboard-dev.web.app/'; DeployTimeout=300;
+-    EnvLabel='DEV';
++    HostingArg="hosting:$Env"; DeployUrl="https://$EchoSite.web.app/"; DeployTimeout=300;   # one firebase.json target per env, like MES
++    EnvLabel=$Env.ToUpper();
+     BackendEnv=$EchoBackendEnv;
+-    Envs=@('dev'); FrontendDir='frontend'; BackendDir='backend'; SourceDir='backend'
++    Envs=@('dev','qa','prod'); FrontendDir='frontend'; BackendDir='backend'; SourceDir='backend'
+   }
+   # WMS + MRP (added 2026-08-30). Layout differs from MES: the Vite app lives at the repo
+   # ROOT, the Flask app in flask-backend/, and the Dockerfile at the ROOT (it COPYs
+@@ -145,7 +160,7 @@ if (-not (Test-Path $Root)) {
+   Write-Host ("The {0} repo was not found at: {1}" -f $cfg.Name, $Root) -ForegroundColor Red
+   Write-Host "Tell the console where it lives: copy console.local.example.json to console.local.json" -ForegroundColor Yellow
+   Write-Host "(next to dev.ps1) and set the '$AppKey' path. That file is git-ignored - it is yours alone." -ForegroundColor Yellow
+-  Read-Host "Press Enter to close"
++  Stop-IfHeadless; Read-Host "Press Enter to close"
+   return
+ }
+ $Frontend   = Join-Path $Root $cfg.FrontendDir
+@@ -181,18 +196,18 @@ $ProdAllowed = @('fe-deploy', 'be-deploy')
+ $MesOnly = @('be-demo', 'db-clear')
+ if ($AppKey -ne 'mes' -and ($MesOnly -contains $Action)) {
+   Write-Host ("Action '{0}' only exists for OATS MES (not {1})." -f $Action, $cfg.Name) -ForegroundColor Red
+-  Read-Host "Press Enter to close"
++  Stop-IfHeadless; Read-Host "Press Enter to close"
+   return
+ }
+ if ($Env -eq 'prod' -and ($EnvAware -contains $Action) -and -not ($ProdAllowed -contains $Action)) {
+   Write-Host "Action '$Action' is not available on PROD (deploys only). Use DEV or QA." -ForegroundColor Red
+-  Read-Host "Press Enter to close"
++  Stop-IfHeadless; Read-Host "Press Enter to close"
+   return
+ }
+ if ($Env -eq 'prod' -and ($ProdAllowed -contains $Action)) {
+   Write-Host ("*** PRODUCTION [{0}]: this ships to the live site {1} / Cloud Run {2} ***" -f $cfg.Name, $cfg.DeployUrl, $cfg.ApiSvc) -ForegroundColor Red
+-  $ok = Read-Host "Type PROD to continue"
+-  if ($ok -cne 'PROD') { Write-Host "Aborted." -ForegroundColor Yellow; Read-Host "Press Enter to close"; return }
++  $ok = if ($Typed) { $Typed } else { Read-Host "Type PROD to continue" }
++  if ($ok -cne 'PROD') { Write-Host "Aborted." -ForegroundColor Yellow; Stop-IfHeadless; Read-Host "Press Enter to close"; return }
+ }
+ 
+ function PauseMenu { Read-Host "`nPress Enter to return to the menu" | Out-Null }
+@@ -621,7 +636,7 @@ function FE-Deploy {
+       # call sometimes drops. The files are already uploaded, so a retry finalizes fast.
+       # WMS / MRP: make sure the hosting SITE exists (no-op when it does). MES does this
+       # behind deploy-hosting.ps1 -Setup; here it is the one-line idempotent form.
+-      if ($AppKey -eq 'wms' -or $AppKey -eq 'mrp') {
++      if ($AppKey -eq 'wms' -or $AppKey -eq 'mrp' -or ($AppKey -eq 'echo' -and $Env -ne 'dev')) {
+         $siteId = ([uri]$DeployUrl).Host -replace '\.web\.app$', ''
+         firebase hosting:sites:create $siteId --project $Project --non-interactive 2>&1 | Out-Null
+       }
+@@ -889,7 +904,7 @@ function BE-Deploy {
+       [void](Show-RunServiceSummary)
+     }
+     if ($Env -eq 'prod') {
+-      $c2 = Read-Host "Type 'deploy prod' to push $ApiSvcDev"
++      $c2 = if ($Typed -ceq 'PROD') { 'deploy prod' } else { Read-Host "Type 'deploy prod' to push $ApiSvcDev" }
+       if ($c2 -ne 'deploy prod') { Write-Host "Aborted." -ForegroundColor Yellow; $script:DeployOk = $false; return }
+     }
+     if (-not (Test-Path (Join-Path $SourceDir 'Dockerfile'))) {
+@@ -936,7 +951,20 @@ function BE-Deploy {
+     # Per-project env string (custom ^X^ delimiter so values may contain commas) - set at the
+     # top in $Projects[...].BackendEnv. ECHO = Vertex/planner config.
+     $envVars = $BackendEnv
+-    Write-Host "Deploying $ApiSvcDev to Cloud Run ($Region) [$AppName] ..." -ForegroundColor Cyan
++    # Rule 5 (2026-09-20): a qa / prod service that does not exist is refused by an ordinary
++    # deploy. Its first deploy is a deliberate act: -Create (HELIX's gated create lane).
++    if ($Env -ne 'dev') {
++      $exists = $null
++      $exists = (& gcloud run services describe $ApiSvcDev --region $Region --project $Project --format="value(metadata.name)" 2>$null)
++      if (-not $exists -and -not $Create) {
++        Write-Host ("Cloud Run service '{0}' does not exist yet. Refusing to create a {1} service from an ordinary deploy." -f $ApiSvcDev, $Env.ToUpper()) -ForegroundColor Red
++        Write-Host "Create it on purpose: HELIX > the app's gear > Create an environment (or rerun with -Create)." -ForegroundColor Yellow
++        $script:DeployOk = $false
++        return
++      }
++      if (-not $exists) { Write-Host ("Creating Cloud Run service '{0}' - first deploy (-Create)." -f $ApiSvcDev) -ForegroundColor Yellow }
++    }
++    Write-Host "Deploying $ApiSvcDev to Cloud Run ($Region) [$AppName / $($Env.ToUpper())] ..." -ForegroundColor Cyan
+     gcloud run deploy $ApiSvcDev --source . --project $Project --region $Region `
+       --service-account $ApiSaDev --allow-unauthenticated `
+       --min-instances 0 --max-instances 10 --memory 1Gi --cpu 2 --concurrency 16 --cpu-boost --timeout $DeployTimeout `
+@@ -1224,6 +1252,13 @@ if ($Action) {
+   }
+   } catch { Write-Host "ERROR: $_" -ForegroundColor Red; $failed = $true }
+ 
++  # 2026-09-20 (HELIX): a headless caller (stdin redirected) gets one plain result line and a real
++  # exit code, and never waits on a key. A person at the console sees exactly what they always did.
++  if (Test-Headless) {
++    if ($failed -or -not $script:DeployOk) { Write-Host "[dev.ps1] RESULT: FAILED"; exit 1 }
++    Write-Host "[dev.ps1] RESULT: OK"; exit 0
++  }
++
+   # Deploy buttons auto-close on success; everything else (and any failure) stays open.
+   if ((@('fe-deploy', 'be-deploy') -contains $Action) -and -not $failed -and $script:DeployOk) {
+     # 2026-09-06: give a chance to copy the before/after service summary - any key keeps

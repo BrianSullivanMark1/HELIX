@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, Query, Request
@@ -33,6 +33,7 @@ from helix.domain.fleet import COMPANIES, FLEET, Cell, Serving, apps, company
 from helix.ports.fleet import FleetEvent
 
 FLEET_DOWN = "The fleet service is not available on this HELIX."
+FRESH_S = 60.0
 BUSY = "A fleet read is already in progress - wait for it to finish."
 
 
@@ -190,6 +191,13 @@ def mount_fleet(app: FastAPI, container) -> None:
         app_name = str(body.get("app") or "").strip().upper() or None
         if app_name and app_name not in apps(co.id):
             return JSONResponse({"error": f"no such app in {co.label}: {app_name}"}, status_code=404)
+        # A board read less than a minute ago is answered from memory unless the person pressed
+        # Refresh (force). Two windows, a reload and a restart used to cost a whole read each.
+        if not body.get("force"):
+            _cells, at = fleet.snapshot(co)
+            if at is not None and (datetime.now(timezone.utc) - at).total_seconds() < FRESH_S:
+                if app_name is None or all(c.checked_at for c in _cells if c.service.app == app_name):
+                    return board_dict(fleet, profile=_profile())
         if not reading.acquire(blocking=False):
             return JSONResponse({"error": BUSY, "busy": True}, status_code=409)
         jobs = getattr(c, "jobs", None)

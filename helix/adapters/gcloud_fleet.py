@@ -30,6 +30,7 @@ about which half it can see.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -39,6 +40,7 @@ from datetime import datetime, timezone
 from typing import Callable, Sequence
 from urllib.parse import urlparse
 
+from helix.adapters import pulse as _pulse
 from helix.domain.fleet import Health, Serving, Service
 from helix.ports.fleet import CellRead
 
@@ -74,6 +76,7 @@ _QUIET = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _real_runner(argv: list[str], timeout_s: float) -> Ran:
+    _pulse.spawned(os.path.basename(str(argv[0])).split('.')[0] or 'gcloud')
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s,
                            encoding="utf-8", errors="replace", creationflags=_QUIET)
@@ -215,6 +218,7 @@ class GcloudFleet:
         return ["--project", self._project, "--region", self._region, "--format", "json"]
 
     def read_cell(self, service: Service, *, timeout_s: float = 30.0) -> CellRead:
+        """One cell on its own: a describe and a revisions list for this service (two spawns)."""
         import time
         t0 = time.monotonic()
         if service.run_service is None:
@@ -225,10 +229,7 @@ class GcloudFleet:
         svc = self._run(self._base() + ["services", "describe", service.run_service] + self._tail(),
                         timeout_s)
         if _is_not_found(svc):
-            return CellRead(service=service, ok=True,
-                            api=Serving(health=Health.ABSENT), site=None,
-                            problem=NOT_FOUND_NOTE, detail=(svc.err or "")[:400],
-                            seconds=time.monotonic() - t0)
+            return self._absent(service, svc, t0)
         bad = classify(svc)
         if bad:
             return CellRead(service=service, ok=False, problem=bad[0], detail=bad[1],
@@ -247,9 +248,18 @@ class GcloudFleet:
                 rdocs = [r for r in json.loads(revs.out or "[]") if isinstance(r, dict)]
             except ValueError:
                 rdocs = []
-        rdocs.sort(key=lambda r: (r.get("metadata") or {}).get("creationTimestamp") or "",
-                   reverse=True)
+        return self._cell_from(service, sdoc, rdocs, timeout_s, t0)
 
+    @staticmethod
+    def _absent(service: Service, ran: Ran | None, t0: float) -> CellRead:
+        import time
+        return CellRead(service=service, ok=True, api=Serving(health=Health.ABSENT), site=None,
+                        problem=NOT_FOUND_NOTE, detail=((ran.err if ran else "") or "")[:400],
+                        seconds=time.monotonic() - t0)
+
+    def _cell_from(self, service: Service, sdoc: dict, rdocs: list[dict], timeout_s: float, t0: float) -> CellRead:
+        import time
+        rdocs = sorted(rdocs, key=lambda r: (r.get("metadata") or {}).get("creationTimestamp") or "", reverse=True)
         api = self._api_half(sdoc, rdocs, timeout_s)
         served = tuple(str((r.get("metadata") or {}).get("name") or "")
                        for r in rdocs if (r.get("metadata") or {}).get("name"))
@@ -259,6 +269,32 @@ class GcloudFleet:
         return CellRead(service=service, ok=True, api=api, site=None,
                         served_revisions=served, problem=None,
                         detail=HOSTING_NOTE, seconds=time.monotonic() - t0)
+
+    def _list_all(self, timeout_s: float) -> tuple[dict[str, dict], dict[str, list[dict]]] | None:
+        """Every service and every revision in the region, in TWO spawns. None when either call
+        did not answer cleanly (the caller falls back to one describe per cell). gcloud is a Python
+        program: each spawn is seconds of CPU on Windows, and the old read spawned it twenty times."""
+        svcs = self._run(self._base() + ["services", "list"] + self._tail(), timeout_s)
+        if svcs.rc != 0:
+            return None
+        revs = self._run(self._base() + ["revisions", "list"] + self._tail(), timeout_s)
+        if revs.rc != 0:
+            return None
+        try:
+            sdocs = [d for d in json.loads(svcs.out or "[]") if isinstance(d, dict)]
+            rdocs = [d for d in json.loads(revs.out or "[]") if isinstance(d, dict)]
+        except ValueError:
+            return None
+        by_name = {str((d.get("metadata") or {}).get("name") or ""): d for d in sdocs}
+        revs_of: dict[str, list[dict]] = {}
+        for r in rdocs:
+            meta = r.get("metadata") or {}
+            owner = (meta.get("labels") or {}).get("serving.knative.dev/service") or ""
+            if not owner:
+                name = str(meta.get("name") or "")
+                owner = name.rsplit("-", 2)[0] if name.count("-") >= 2 else name
+            revs_of.setdefault(str(owner), []).append(r)
+        return by_name, revs_of
 
     def _api_half(self, sdoc: dict, rdocs: list[dict], timeout_s: float) -> Serving:
         status = sdoc.get("status") or {}
@@ -318,6 +354,24 @@ class GcloudFleet:
         return _split_version(str(v) if isinstance(v, (str, int)) else None)
 
     def read_all(self, services: Sequence[Service], *, timeout_s: float = 90.0) -> list[CellRead]:
+        """The fleet in two gcloud spawns (services list + revisions list), then only the cheap
+        /api/health calls in parallel. Falls back to a describe per cell when the lists fail."""
+        import time
         per = max(5.0, min(30.0, timeout_s / max(1, len(services)) * self._workers))
+        listed = self._list_all(min(60.0, timeout_s)) if len(services) > 1 else None
+        if listed is None:
+            with ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="helix-fleet") as ex:
+                return list(ex.map(lambda s: self.read_cell(s, timeout_s=per), services))
+        by_name, revs_of = listed
+        t0 = time.monotonic()
+
+        def one(svc: Service) -> CellRead:
+            if svc.run_service is None:
+                return CellRead(service=svc, ok=True, api=None, site=None, seconds=time.monotonic() - t0)
+            sdoc = by_name.get(svc.run_service)
+            if sdoc is None:
+                return self._absent(svc, None, t0)
+            return self._cell_from(svc, sdoc, revs_of.get(svc.run_service, []), per, t0)
+
         with ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="helix-fleet") as ex:
-            return list(ex.map(lambda s: self.read_cell(s, timeout_s=per), services))
+            return list(ex.map(one, services))

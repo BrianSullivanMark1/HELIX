@@ -1,0 +1,1276 @@
+<#
+  BRMS MES - dev & deploy helper.
+  Double-click dev.bat, or run:  ./dev.ps1
+  A menu to build/run the frontend + backend, deploy to Firebase Hosting and
+  Cloud Run, and keep Artifact Registry tidy. Values match backend/DEPLOY.md.
+#>
+param(
+  [string]$Action = '',        # run one action headless (used by dev-console.ps1), else show the menu
+  [string]$App = 'mes',        # which project the action targets: mes | echo | wms | mrp
+  # Which environment env-aware actions hit: deploys, local real-data run, revision
+  # cleanup (the logs viewer picks its env in console.html). The console's
+  # project -> environment picker passes this through. 'prod' is accepted here but
+  # LOCKED below until the production cutover.
+  [ValidateSet('dev', 'qa', 'prod')]
+  [string]$Env = 'dev'
+)
+
+# 'Continue' so native CLIs (gcloud / firebase / npm) that write status text to
+# stderr don't get turned into fatal script errors. Real failures still surface via
+# exit codes and the try/catch around each menu action.
+$ErrorActionPreference = 'Continue'
+if ($PSVersionTable.PSVersion.Major -ge 7) { $PSNativeCommandUseErrorActionPreference = $false }
+# -- Projects this console can target ------------------------------------------
+# The same command set (deploy site, deploy server, git, run) works for either project;
+# the toggle in the console picks which one every button acts on. To support another
+# project, add an entry below. Root paths: MES = this script's own folder; others are
+# absolute (edit $EchoRoot if your copy of the dashboard lives somewhere else).
+$MesRoot  = $PSScriptRoot
+# 2026-08-30: repo paths for the OTHER projects come from console.local.json (git-ignored,
+# per machine) so a teammate's pull never overwrites their paths and nobody edits this
+# script. Missing file / key -> the defaults below (Brian's machine). Template:
+# console.local.example.json. dev-console.ps1 reads the same file.
+$LocalPathDefaults = @{
+  echo = 'C:\Users\bgsul\OneDrive\Desktop\BRMS_Dashboard_Project\BRMS Dashboard'
+  wms  = 'C:\Users\bgsul\Desktop\WMS_V1'
+  mrp  = 'C:\Users\bgsul\Desktop\mrp_prod'
+}
+$LocalPaths = @{}
+$localCfgFile = Join-Path $PSScriptRoot 'console.local.json'
+if (Test-Path $localCfgFile) {
+  try {
+    $lc = Get-Content $localCfgFile -Raw | ConvertFrom-Json
+    foreach ($k in @('echo','wms','mrp')) { if ($lc.$k) { $LocalPaths[$k] = [string]$lc.$k } }
+  } catch { Write-Host "console.local.json could not be parsed - using default paths." -ForegroundColor Yellow }
+}
+function Get-ProjectRoot($key) {
+  if ($LocalPaths.ContainsKey($key)) { return $LocalPaths[$key] }
+  return $LocalPathDefaults[$key]
+}
+$EchoRoot = Get-ProjectRoot 'echo'
+$WmsRoot  = Get-ProjectRoot 'wms'
+$MrpRoot  = Get-ProjectRoot 'mrp'
+
+# gcloud --set-env-vars uses a custom delimiter (^X^ prefix) so values may contain commas.
+# ECHO's PLANNER_MODEL contains an '@' (claude-haiku-4-5@date) -> '##' separator.
+# MES deliberately has NO env string here (fix plan #7): backend/deploy.ps1 is the
+# single source of truth for the MES service's env vars, and BE-Deploy calls it -
+# so this console and the checked-in script can never disagree about READ_ONLY.
+$EchoBackendEnv = '^##^GOOGLE_CLOUD_PROJECT=windy-celerity-392822##ECHO_AGENT_ID=agent_a5141e16-ae68-43bf-9286-7fff9a7aedc1##ECHO_LOCATION=global##AUTH_REQUIRED=true##ALLOWED_AUTH_DOMAINS=mark1online.com,oatsovernight.com##APP_CHECK_REQUIRED=true##PLANNER_ENABLED=true##VERTEX_REGION=us-east5##PLANNER_MODEL=claude-haiku-4-5@20251001##ALLOWED_ORIGINS=https://manufacturing-execution-system-mes-dashboard-dev.web.app,http://localhost:5173'
+
+# Which environments each project has. Resolved BEFORE the table below because several
+# table cells (service name, hosting target, URL) are computed from $Env.
+$ProjectEnvs = @{ mes=@('dev','qa','prod'); echo=@('dev'); wms=@('dev','qa','prod'); mrp=@('dev','qa','prod') }   # wms/mrp qa added 2026-09-06
+$AppKey = if ($App) { $App.ToLower() } else { 'mes' }
+if (-not $ProjectEnvs.ContainsKey($AppKey)) { $AppKey = 'mes' }
+if (-not ($ProjectEnvs[$AppKey] -contains $Env)) {
+  Write-Host ("({0} has no '{1}' stack - targeting dev)" -f $AppKey.ToUpper(), $Env) -ForegroundColor Yellow
+  $Env = 'dev'
+}
+
+$Projects = @{
+  'mes' = @{
+    Name='OATS MES'; Root=$MesRoot; Gcp='windy-celerity-392822'; Region='us-west2';
+    ApiSvc=$(if ($Env -eq 'prod') { 'brms-mes-api' } else { "brms-mes-api-$Env" }); ApiSa='brms-mes-api-dev-sa@windy-celerity-392822.iam.gserviceaccount.com';   # runtime SA shared by dev + qa
+    # Hosting deploys authenticate as this key-holding account. Its only roles are
+    # roles/firebasehosting.admin + roles/run.viewer (fix plan #4; the viewer half is
+    # read-only metadata Hosting needs to validate the /api/** Cloud Run rewrite).
+    # A stolen deploy key can publish the site but cannot read DB/ERP secrets,
+    # invoke or change services, or touch signature storage.
+    HostingSa='mes-hosting-deploy-sa@windy-celerity-392822.iam.gserviceaccount.com';
+    SourceRepo='cloud-run-source-deploy';
+    RepoUrl='https://github.com/BrendanSullivanMark1/BRMS_MES_WEB_VERSION.git';
+    HostingArg="hosting:$Env"; DeployUrl=$(if ($Env -eq 'prod') { 'https://oo-mes.web.app/' } else { "https://oo-mes-$Env.web.app/" }); DeployTimeout=60;
+    # The badge follows the environment picker (fix #58): DEV, QA or PROD (prod
+    # unlocked 2026-08-29; the guard below demands a typed PROD confirm).
+    EnvLabel=$Env.ToUpper();
+    BackendEnv=$null;  # MES env lives ONLY in backend/deploy.ps1 (fix plan #7)
+    Envs=@('dev','qa','prod'); FrontendDir='frontend'; BackendDir='backend'; SourceDir='backend'
+  }
+  'echo' = @{
+    Name='ECHO AI Dashboard'; Root=$EchoRoot; Gcp='windy-celerity-392822'; Region='us-west2';
+    ApiSvc='brms-echo-api-dev'; ApiSa='echo-proxy@windy-celerity-392822.iam.gserviceaccount.com';
+    HostingSa='mes-hosting-deploy-sa@windy-celerity-392822.iam.gserviceaccount.com';  # same GCP project -> same hosting-only deployer
+    SourceRepo='cloud-run-source-deploy';
+    RepoUrl='https://github.com/BrendanSullivanMark1/MES_OATS_DASHBOARD.git';
+    HostingArg='hosting'; DeployUrl='https://manufacturing-execution-system-mes-dashboard-dev.web.app/'; DeployTimeout=300;
+    EnvLabel='DEV';
+    BackendEnv=$EchoBackendEnv;
+    Envs=@('dev'); FrontendDir='frontend'; BackendDir='backend'; SourceDir='backend'
+  }
+  # WMS + MRP (added 2026-08-30). Layout differs from MES: the Vite app lives at the repo
+  # ROOT, the Flask app in flask-backend/, and the Dockerfile at the ROOT (it COPYs
+  # flask-backend/*). So `gcloud run deploy --source` runs from the root. Their Cloud Run
+  # services keep their own env vars / service account / scaling - this console never
+  # passes --set-env-vars or --service-account for them (a deploy only swaps the image),
+  # which is exactly what their old Docker-push scripts did. Frontend picks its API URL
+  # from VITE_ENV (dev|prod) - forced from process env here, so the .env file's value
+  # cannot ship the wrong backend. Firebase: MRP uses two hosting TARGETS in firebase.json;
+  # WMS uses a single site in firebase.json (dev) plus firebase.prod.json for prod, so a
+  # bare `firebase deploy` in WMS still does exactly what it always did (dev only).
+  'wms' = @{
+    Name='WMS'; Root=$WmsRoot; Gcp='windy-celerity-392822'; Region='us-west2';
+    ApiSvc="wms-$Env-flask"; ApiSa=$null;   # wms-dev-flask / wms-qa-flask / wms-prod-flask
+    HostingSa='mes-hosting-deploy-sa@windy-celerity-392822.iam.gserviceaccount.com';
+    SourceRepo='cloud-run-source-deploy';
+    RepoUrl='https://github.com/Alex-Mark1/WMS_V1.git';
+    HostingArg='hosting';
+    # WMS hosting: dev = firebase.json (site oats-overnight-wms-dev, so a bare `firebase deploy`
+    # still does dev only); qa / prod = their own config file naming their own site.
+    FirebaseConfig=$(if ($Env -eq 'dev') { $null } else { "firebase.$Env.json" });
+    DeployUrl="https://oats-overnight-wms-$Env.web.app/"; DeployTimeout=300;
+    EnvLabel=$Env.ToUpper();
+    BackendEnv=$null;
+    Envs=@('dev','qa','prod'); FrontendDir='.'; BackendDir='flask-backend'; SourceDir='.'
+  }
+  'mrp' = @{
+    Name='MRP'; Root=$MrpRoot; Gcp='windy-celerity-392822'; Region='us-west2';
+    ApiSvc="mrp-$Env-flask"; ApiSa=$null;   # mrp-dev-flask / mrp-qa-flask / mrp-prod-flask
+    HostingSa='mes-hosting-deploy-sa@windy-celerity-392822.iam.gserviceaccount.com';
+    SourceRepo='cloud-run-source-deploy';
+    RepoUrl='https://github.com/BrendanSullivanMark1/mrp_prod.git';
+    HostingArg="hosting:oats-overnight-mrp-$Env";   # one firebase.json target per env (dev/qa/prod)
+    FirebaseConfig=$null;
+    DeployUrl="https://oats-overnight-mrp-$Env.web.app/"; DeployTimeout=300;
+    EnvLabel=$Env.ToUpper();
+    BackendEnv=$null;
+    Envs=@('dev','qa','prod'); FrontendDir='.'; BackendDir='flask-backend'; SourceDir='.'
+  }
+}
+
+$cfg = $Projects[$AppKey]
+
+$Root       = $cfg.Root
+if (-not (Test-Path $Root)) {
+  Write-Host ("The {0} repo was not found at: {1}" -f $cfg.Name, $Root) -ForegroundColor Red
+  Write-Host "Tell the console where it lives: copy console.local.example.json to console.local.json" -ForegroundColor Yellow
+  Write-Host "(next to dev.ps1) and set the '$AppKey' path. That file is git-ignored - it is yours alone." -ForegroundColor Yellow
+  Read-Host "Press Enter to close"
+  return
+}
+$Frontend   = Join-Path $Root $cfg.FrontendDir
+$Backend    = Join-Path $Root $cfg.BackendDir
+$SourceDir  = Join-Path $Root $cfg.SourceDir   # where `gcloud run deploy --source` runs (the Dockerfile's folder)
+$FirebaseConfig = $cfg.FirebaseConfig          # alternate firebase.json (WMS prod), else $null
+$Project    = $cfg.Gcp
+$Region     = $cfg.Region
+$ApiSvcDev  = $cfg.ApiSvc
+$ApiSaDev   = $cfg.ApiSa
+$HostingSa  = $cfg.HostingSa
+$EnvLabel   = $cfg.EnvLabel
+$SourceRepo = $cfg.SourceRepo             # where `gcloud run deploy --source` stores images
+$RepoUrl    = $cfg.RepoUrl
+$HostingArg = $cfg.HostingArg             # firebase --only <this>  (MES uses a target, ECHO a single site)
+$DeployUrl  = $cfg.DeployUrl
+$DeployTimeout = $cfg.DeployTimeout
+$BackendEnv = $cfg.BackendEnv
+$AppName    = $cfg.Name
+
+Write-Host ("Target project: {0} [{1}]  ({2})" -f $AppName, $Env.ToUpper(), $Root) -ForegroundColor Magenta
+
+# PROD UNLOCKED 2026-08-29 (PROD_CUTOVER_CHECKLIST.md section 11.8) for the two
+# deploy buttons ONLY. Prod = brms-mes-api + oo-mes.web.app + BRMS_database_prod
+# (the web app's own production schema; the desktop's BRMS_database is refused by
+# backend/config.py on every path). Local-run and record-clearing actions stay
+# impossible on prod: a laptop must never hold a prod DB session, and there are no
+# 'test records' in prod to clear.
+$EnvAware = @('fe-deploy', 'be-deploy', 'be-dev', 'rev-clean', 'db-clear')
+$ProdAllowed = @('fe-deploy', 'be-deploy')
+# MES-only actions (2026-08-30): the demo server and the test-record purge only exist for
+# MES. Refuse them for any other project instead of running MES code against its folder.
+$MesOnly = @('be-demo', 'db-clear')
+if ($AppKey -ne 'mes' -and ($MesOnly -contains $Action)) {
+  Write-Host ("Action '{0}' only exists for OATS MES (not {1})." -f $Action, $cfg.Name) -ForegroundColor Red
+  Read-Host "Press Enter to close"
+  return
+}
+if ($Env -eq 'prod' -and ($EnvAware -contains $Action) -and -not ($ProdAllowed -contains $Action)) {
+  Write-Host "Action '$Action' is not available on PROD (deploys only). Use DEV or QA." -ForegroundColor Red
+  Read-Host "Press Enter to close"
+  return
+}
+if ($Env -eq 'prod' -and ($ProdAllowed -contains $Action)) {
+  Write-Host ("*** PRODUCTION [{0}]: this ships to the live site {1} / Cloud Run {2} ***" -f $cfg.Name, $cfg.DeployUrl, $cfg.ApiSvc) -ForegroundColor Red
+  $ok = Read-Host "Type PROD to continue"
+  if ($ok -cne 'PROD') { Write-Host "Aborted." -ForegroundColor Yellow; Read-Host "Press Enter to close"; return }
+}
+
+function PauseMenu { Read-Host "`nPress Enter to return to the menu" | Out-Null }
+
+# -- Auth (checked automatically before any deploy) ----------------------------
+$DeployKey = Join-Path $Root '.secrets\firebase-deploy-key.json'
+# 2026-09-07: the Firebase deploy credential lives in its OWN file, NOT in the machine's
+# Application Default Credentials. Both firebase-tools and cloud-sql-proxy read ADC, but they
+# need DIFFERENT identities: hosting wants the hosting-only SA, the proxy wants a human with
+# cloudsql.client. While the keyless button wrote the impersonation into the shared ADC file,
+# every Firebase re-auth silently killed the database tunnel about an hour later (three times
+# in one day). Now ADC stays the user's own and only Firebase reads this file.
+$FirebaseAdc = Join-Path $Root '.secrets\firebase-adc.json'
+
+function Get-UserAdcPath { Join-Path $env:APPDATA 'gcloud\application_default_credentials.json' }
+function Get-AdcType([string]$path) {
+  if (-not (Test-Path $path)) { return $null }
+  try { return (Get-Content $path -Raw | ConvertFrom-Json).type } catch { return $null }
+}
+
+function Build-FirebaseAdc {
+  # Write .secrets\firebase-adc.json: the SAME shape gcloud writes for
+  # "application-default login --impersonate-service-account", built from the user's own ADC.
+  # It carries no private key - it says "ask Google for a 1-hour token as $HostingSa", which
+  # only works while that user is signed in and holds Token Creator on the SA.
+  $userAdc = Get-UserAdcPath
+  if ((Get-AdcType $userAdc) -ne 'authorized_user') {
+    Write-Host "Your Application Default Credentials are missing or are not your own account." -ForegroundColor Yellow
+    Write-Host "Opening the browser to sign them in (this is also what the Cloud SQL tunnel uses)..." -ForegroundColor Cyan
+    gcloud auth application-default login
+  }
+  if ((Get-AdcType $userAdc) -ne 'authorized_user') {
+    Write-Host "Still no user ADC - cannot build the Firebase deploy credential." -ForegroundColor Red
+    return $false
+  }
+  try { $src = Get-Content $userAdc -Raw | ConvertFrom-Json } catch { Write-Host "Could not read $userAdc" -ForegroundColor Red; return $false }
+  $imp = [ordered]@{
+    type = 'impersonated_service_account'
+    service_account_impersonation_url = ("https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{0}:generateAccessToken" -f $HostingSa)
+    delegates = @()
+    source_credentials = @{
+      type          = 'authorized_user'
+      client_id     = $src.client_id
+      client_secret = $src.client_secret
+      refresh_token = $src.refresh_token
+    }
+  }
+  New-Item -ItemType Directory -Force -Path (Split-Path $FirebaseAdc) | Out-Null
+  ($imp | ConvertTo-Json -Depth 6) | Set-Content -Path $FirebaseAdc -Encoding ASCII
+  Write-Host ("Firebase deploy credential written: {0}" -f $FirebaseAdc) -ForegroundColor Green
+  Write-Host "Your default credentials are untouched - the Cloud SQL tunnel and Workbench keep working." -ForegroundColor Green
+  return $true
+}
+
+function Clear-StaleFirebaseLogin {
+  # firebase-tools checks a STORED USER LOGIN before it looks at GOOGLE_APPLICATION_CREDENTIALS.
+  # On this network a user login cannot be refreshed (the login endpoint is blocked), so a
+  # stale one turns every deploy into 'Your credentials are no longer valid' even though the
+  # keyless credential is fine (live 2026-09-06, first WMS deploy). Clear it so the CLI falls
+  # through to the keyless credential. Harmless when there is none.
+  $cs = Join-Path $env:APPDATA 'configstore\firebase-tools.json'
+  if (-not (Test-Path $cs)) { return }
+  $hasUser = $false
+  try { $j = Get-Content $cs -Raw | ConvertFrom-Json; $hasUser = [bool]($j.user -or $j.tokens -or $j.activeAccounts) } catch { $hasUser = $true }
+  if ($hasUser) {
+    Write-Host "A stored Firebase user login would take priority over the keyless credential (and cannot refresh on this network) - clearing it." -ForegroundColor Yellow
+    firebase logout 1>$null 2>$null
+    Remove-Item $cs -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Ensure-FirebaseAuth {
+  # This network blocks the Firebase CLI's login endpoint (auth.firebase.tools/attest),
+  # and firebase-tools rejects a *user* ADC file. So we deploy Firebase Hosting with a
+  # SERVICE-ACCOUNT key (created once via 'One-time: Firebase deploy key'), which the
+  # Firebase CLI accepts through GOOGLE_APPLICATION_CREDENTIALS. Since fix plan #4 the
+  # key belongs to $HostingSa (hosting-only rights) - not the runtime API account.
+  Write-Host "Checking deploy credentials..." -ForegroundColor Cyan
+  # Fix #4 part 2: prefer KEYLESS impersonated credentials - an ADC file that holds
+  # no private key and mints 1-hour tokens for the hosting-only account. Nothing
+  # worth stealing ever sits on disk.
+  # Preferred since 2026-09-07: our OWN impersonated credential file, which never touches
+  # the machine's ADC (and so never breaks the Cloud SQL tunnel).
+  if ((Get-AdcType $FirebaseAdc) -eq 'impersonated_service_account') {
+    $env:GOOGLE_APPLICATION_CREDENTIALS = $FirebaseAdc
+    Clear-StaleFirebaseLogin
+    Write-Host "Using the keyless Firebase deploy credential (.secrets\firebase-adc.json) - your default credentials are untouched." -ForegroundColor Green
+    return
+  }
+  # Legacy: the impersonation still sitting in the shared ADC file. Works, but it is the thing
+  # that breaks the database tunnel - migrate by clicking the one-time keyless button again.
+  $adcPath = Get-UserAdcPath
+  if ((Get-AdcType $adcPath) -eq 'impersonated_service_account') {
+    $env:GOOGLE_APPLICATION_CREDENTIALS = $adcPath
+    Clear-StaleFirebaseLogin
+    Write-Host "Using the impersonated credential in your SHARED ADC file." -ForegroundColor Yellow
+    Write-Host "That file is also what the Cloud SQL tunnel uses, so the tunnel will fail within the hour." -ForegroundColor Yellow
+    Write-Host "Click 'One-time: Firebase deploy access (keyless)' once to move it to its own file." -ForegroundColor Yellow
+    return
+  }
+  # Legacy: a stored service-account key from before the keyless switch still works.
+  if (Test-Path $DeployKey) {
+    $env:GOOGLE_APPLICATION_CREDENTIALS = $DeployKey
+    Clear-StaleFirebaseLogin
+    Write-Host "Using Firebase deploy service-account key (legacy - rerun the one-time auth button to go keyless)." -ForegroundColor Yellow
+    return
+  }
+  # Fallback: a real Firebase user login, if one somehow works.
+  $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try { firebase projects:list --project $Project 1>$null 2>$null; $code = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+  if ($code -eq 0) { Write-Host "Firebase auth OK." -ForegroundColor Green; return }
+  Write-Host "No deploy credentials yet. Click 'One-time: Firebase deploy key' (now keyless), then deploy." -ForegroundColor Yellow
+}
+
+function Auth-MakeDeployKey {
+  # One-time per machine (fix plan #4): create/refresh the HOSTING-ONLY deploy key.
+  # The key belongs to $HostingSa, whose only role is roles/firebasehosting.admin -
+  # a stolen key can publish the site but cannot read the DB/ERP secrets or touch
+  # signature storage. This also strips the hosting role off the runtime API account
+  # and offers to revoke its old god-keys, which is what closes the original hole.
+  # Needs an ACTIVE gcloud account first.
+  $acct = (gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>$null)
+  if (-not $acct) {
+    Write-Host "No active gcloud account. Click 'Log me in' first, then run this again." -ForegroundColor Red
+    Read-Host "Press Enter to close"; return
+  }
+  Write-Host "Active account: $acct" -ForegroundColor Green
+  $secrets = Join-Path $Root '.secrets'
+  New-Item -ItemType Directory -Force -Path $secrets | Out-Null
+  # Clear any stale/invalid key from a previous failed attempt.
+  if (Test-Path $DeployKey) { Remove-Item $DeployKey -Force }
+
+  Write-Host "Ensuring the hosting-only deploy account exists: $HostingSa ..." -ForegroundColor Cyan
+  gcloud iam service-accounts describe $HostingSa --project=$Project 1>$null 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    $hostingSaName = ($HostingSa -split '@')[0]
+    gcloud iam service-accounts create $hostingSaName --display-name="Firebase Hosting deploys only - no data access" --project=$Project
+    # A brand-new SA is not instantly visible to IAM. Wait until it is, or the
+    # role grant below can silently no-op and the key deploys straight into 403s
+    # (exactly what happened on the first live run, 2026-08-08).
+    for ($i = 0; $i -lt 10; $i++) {
+      Start-Sleep -Seconds 3
+      gcloud iam service-accounts describe $HostingSa --project=$Project 1>$null 2>$null
+      if ($LASTEXITCODE -eq 0) { break }
+      Write-Host "  waiting for the new account to become visible..." -ForegroundColor DarkGray
+    }
+  }
+
+  # Grant, then VERIFY against the live policy - never trust a fire-and-forget
+  # grant on a fresh SA (eventual consistency). Retry a few times.
+  # --condition=None is REQUIRED: the project policy carries an old conditional
+  # binding (expired developer-connect leftover), and once ANY condition exists,
+  # gcloud under --quiet refuses to (un)bind without an explicit condition choice
+  # (live incident 2026-08-08: both the grant and the removal silently failed).
+  # TWO roles: firebasehosting.admin publishes; run.viewer is read-only metadata
+  # Hosting needs at 'finalizing version' to validate the /api/** Cloud Run
+  # rewrite with the deployer's own credentials (second live 403, 2026-08-08).
+  $needRoles = @('roles/firebasehosting.admin', 'roles/run.viewer')
+  $granted = $false
+  for ($i = 0; $i -lt 4; $i++) {
+    Write-Host ("Granting {0} to {1} ..." -f ($needRoles -join ' + '), $HostingSa) -ForegroundColor Cyan
+    foreach ($r in $needRoles) {
+      gcloud projects add-iam-policy-binding $Project --member="serviceAccount:$HostingSa" --role=$r --condition=None --quiet 1>$null
+    }
+    $roles = @(gcloud projects get-iam-policy $Project --flatten="bindings[].members" --filter="bindings.members:$HostingSa" --format="value(bindings.role)" 2>$null)
+    $missing = @($needRoles | Where-Object { $roles -notcontains $_ })
+    if ($missing.Count -eq 0) { $granted = $true; break }
+    Write-Host ("  not visible yet ({0}) - retrying in 5s..." -f ($missing -join ', ')) -ForegroundColor Yellow
+    Start-Sleep -Seconds 5
+  }
+  if (-not $granted) {
+    Write-Host "FAILED to grant the deploy roles to $HostingSa - a key minted now would only get 403s." -ForegroundColor Red
+    Write-Host "Fix the error shown above (permissions? org policy?), then run this button again." -ForegroundColor Red
+    Read-Host "Press Enter to close"; return
+  }
+  Write-Host ("Verified against the live policy: {0} holds {1}." -f $HostingSa, ($needRoles -join ' + ')) -ForegroundColor Green
+  Write-Host "Removing Firebase Hosting Admin from the runtime account $ApiSaDev ..." -ForegroundColor Cyan
+  gcloud projects remove-iam-policy-binding $Project --member="serviceAccount:$ApiSaDev" --role="roles/firebasehosting.admin" --condition=None --quiet 1>$null 2>$null
+  if ($LASTEXITCODE -ne 0) { Write-Host "  (it wasn't there - fine)" -ForegroundColor DarkGray }
+
+  # Fix #4 part 2: KEYLESS. Instead of minting a private key, let this signed-in
+  # human impersonate the hosting-only account: the ADC file gcloud writes contains
+  # no secret at all - it just says "ask Google for a 1-hour token as $HostingSa",
+  # which only works while $acct is signed in and holds Token Creator on that SA.
+  Write-Host "Granting $acct permission to impersonate $HostingSa (Token Creator, SA-scoped)..." -ForegroundColor Cyan
+  gcloud iam service-accounts add-iam-policy-binding $HostingSa `
+    --member="user:$acct" --role="roles/iam.serviceAccountTokenCreator" --quiet 1>$null
+  Write-Host "Building the Firebase deploy credential in its own file..." -ForegroundColor Cyan
+  $adcOk = Build-FirebaseAdc
+  if ($adcOk) {
+    # Prove the impersonation actually works before calling it done - a missing Token Creator
+    # role shows up here instead of as a 403 in the middle of a deploy.
+    Write-Host "Testing impersonation of $HostingSa ..." -ForegroundColor Cyan
+    gcloud auth print-access-token --impersonate-service-account=$HostingSa 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "Could not mint a token as $HostingSa yet. IAM can take ~1 minute to propagate - deploy and, if it 403s, click this button again." -ForegroundColor Yellow
+    } else {
+      Write-Host "Impersonation works." -ForegroundColor Green
+    }
+    Write-Host "Keyless deploy credentials ready - no private key exists on this machine." -ForegroundColor Green
+    # If a previous run left the impersonation in the SHARED ADC file, that file is still
+    # breaking the Cloud SQL tunnel. Put it back to this human's own credentials.
+    if ((Get-AdcType (Get-UserAdcPath)) -eq 'impersonated_service_account') {
+      Write-Host ""
+      Write-Host "Your shared ADC file still holds the old impersonation - that is what keeps killing the" -ForegroundColor Yellow
+      Write-Host "database tunnel. Signing your own credentials back into it now (one browser consent)..." -ForegroundColor Yellow
+      gcloud auth application-default login
+      if ((Get-AdcType (Get-UserAdcPath)) -eq 'authorized_user') { Write-Host "Default credentials restored - the tunnel and Workbench are healthy again." -ForegroundColor Green }
+      else { Write-Host "Run 'gcloud auth application-default login' by hand before using the tunnel." -ForegroundColor Red }
+    }
+  } else {
+    Write-Host "Keyless setup FAILED (see the error above). Fix login / org policy, then run this again." -ForegroundColor Red
+    Read-Host "Press Enter to close"; return
+  }
+
+  # Retire any stored key for the hosting SA - the keyless ADC replaces it.
+  if (Test-Path $DeployKey) {
+    try {
+      $kj = Get-Content $DeployKey -Raw | ConvertFrom-Json
+      if ($kj.private_key_id -and $kj.client_email) {
+        gcloud iam service-accounts keys delete $kj.private_key_id --iam-account=$($kj.client_email) --quiet 2>$null
+      }
+    } catch { Write-Host "  (could not revoke the old key in the cloud - deleting the local file anyway)" -ForegroundColor Yellow }
+    Remove-Item $DeployKey -Force -ErrorAction SilentlyContinue
+    Write-Host "Old stored deploy key revoked + deleted." -ForegroundColor Green
+  }
+
+  # Old user-made keys on the runtime account are exactly the god-keys this fix
+  # retires (DB secrets + ERP + signature bucket). Offer to revoke them now.
+  $oldKeys = @(gcloud iam service-accounts keys list --iam-account=$ApiSaDev --managed-by=user --format="value(name)" 2>$null | Where-Object { $_ })
+  if ($oldKeys.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("Found {0} old user-made key(s) on {1}:" -f $oldKeys.Count, $ApiSaDev) -ForegroundColor Yellow
+    $oldKeys | ForEach-Object { Write-Host ("  " + ($_ -split '/')[-1]) -ForegroundColor Yellow }
+    $ans = Read-Host "Revoke them now? Any old copy of firebase-deploy-key.json stops working [y/N]"
+    if ($ans -match '^[Yy]') {
+      foreach ($k in $oldKeys) {
+        $kid = ($k -split '/')[-1]
+        gcloud iam service-accounts keys delete $kid --iam-account=$ApiSaDev --quiet
+      }
+      Write-Host "Old keys revoked. Anyone else who deploys the site must pull latest and run this button once." -ForegroundColor Green
+    } else {
+      Write-Host "Left in place. Revoke them soon - each one still unlocks DB secrets + signatures." -ForegroundColor Yellow
+    }
+  } else {
+    Write-Host "No old user-made keys on the runtime account - nothing to revoke." -ForegroundColor Green
+  }
+  Read-Host "Press Enter to close"
+}
+
+function Ensure-GcloudAuth {
+  Write-Host "Checking gcloud sign-in..." -ForegroundColor Cyan
+  $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try {
+    $acct = gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>$null
+    gcloud auth print-access-token 1>$null 2>$null
+    $code = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $prev }
+  if (-not $acct -or $code -ne 0) {
+    Write-Host "gcloud credentials missing or expired - launching login..." -ForegroundColor Yellow
+    gcloud auth login
+  } else {
+    Write-Host "gcloud auth OK ($acct)." -ForegroundColor Green
+  }
+}
+
+function Auth-SignIn {
+  # Just a plain gcloud login in the browser - the flow that has always worked on this
+  # machine. A browser window/tab opens; pick your account and Allow. That gives an
+  # ACTIVE gcloud account, which is all we need: backend deploys use it directly, and
+  # the frontend deploy uses a service-account key (make it once with the deploy-key button).
+  Write-Host "Opening the gcloud sign-in in your browser..." -ForegroundColor Cyan
+  Write-Host "Pick your account and click Allow. Come back here when it says you're logged in." -ForegroundColor DarkGray
+  gcloud auth login
+  gcloud config set project $Project | Out-Null
+
+  Write-Host ""
+  Write-Host "==== Active gcloud account: ====" -ForegroundColor Green
+  gcloud auth list
+  $acct = (gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>$null)
+  Write-Host ""
+  if ($acct) {
+    Write-Host "Signed in as $acct." -ForegroundColor Green
+    # 2026-08-10: the keyless deploy credential (impersonated ADC) rides on this
+    # user's Google session, and Workspace re-auth policies expire it after some
+    # hours - hosting deploys then fail with 'Failed to authenticate' even though
+    # gcloud shows a signed-in account. If a keyless ADC exists, renew it here so
+    # this ONE button fixes both credentials.
+    if (Test-Path $FirebaseAdc) {
+      # Rebuild it from the (possibly refreshed) user ADC. No second browser consent unless
+      # the user ADC itself is missing, and the shared ADC file is never impersonated.
+      Write-Host "Refreshing the Firebase deploy credential from your own credentials..." -ForegroundColor Cyan
+      [void](Build-FirebaseAdc)
+    } else {
+      Write-Host "Next: click 'One-time: Firebase deploy access (keyless)' (once), then deploy." -ForegroundColor Green
+    }
+  } else {
+    Write-Host "Still no active account - the browser step didn't complete. Try again." -ForegroundColor Red
+  }
+  Read-Host "Press Enter to close"
+}
+
+function Auth-ImportDeployKey {
+  # Take a service-account key you downloaded (Cloud Console) from Downloads and put it
+  # where the deploy expects it. Picks the newest *.json in Downloads that is an SA key.
+  $src = Get-ChildItem (Join-Path $env:USERPROFILE 'Downloads\*.json') -ErrorAction SilentlyContinue |
+    Where-Object { (Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue) -match '"type"\s*:\s*"service_account"' } |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if (-not $src) {
+    Write-Host "No service-account .json found in your Downloads folder." -ForegroundColor Red
+    Read-Host "Press Enter to close"; return
+  }
+  New-Item -ItemType Directory -Force -Path (Join-Path $Root '.secrets') | Out-Null
+  Copy-Item $src.FullName $DeployKey -Force
+  if ((Test-Path $DeployKey) -and ((Get-Item $DeployKey).Length -gt 500)) {
+    Write-Host "Imported '$($src.Name)' -> .secrets\firebase-deploy-key.json" -ForegroundColor Green
+    Write-Host "Frontend deploys will use it now. You can delete the copy in Downloads." -ForegroundColor Green
+    Write-Host "(Only import a key for the hosting-only account $HostingSa - NEVER a key for the runtime API account, which can read DB secrets.)" -ForegroundColor Yellow
+  } else {
+    Write-Host "Import failed - the file didn't copy correctly." -ForegroundColor Red
+  }
+  Read-Host "Press Enter to close"
+}
+
+function Auth-SignOut {
+  # FULL reset - clears every scrap of Firebase + gcloud + ADC state, so a stale or
+  # half-written token from a restart can't linger and confuse the next login.
+  Write-Host "== FULL AUTH RESET ==" -ForegroundColor Cyan
+  # Revoke + delete the deploy key FIRST (needs the gcloud login we're about to drop).
+  if (Test-Path $DeployKey) {
+    Write-Host "Revoking the local deploy key in Google Cloud..." -ForegroundColor Cyan
+    try {
+      $kj = Get-Content $DeployKey -Raw | ConvertFrom-Json
+      if ($kj.private_key_id -and $kj.client_email) {
+        gcloud iam service-accounts keys delete $kj.private_key_id --iam-account=$($kj.client_email) --quiet 2>$null
+      }
+    } catch { Write-Host "Could not revoke in the cloud (not signed in?) - deleting the local file anyway." -ForegroundColor Yellow }
+    Remove-Item $DeployKey -Force -ErrorAction SilentlyContinue
+    Write-Host "Local deploy key revoked + deleted." -ForegroundColor Green
+  }
+  Write-Host "Firebase logout..." -ForegroundColor Cyan
+  firebase logout 2>$null
+  Remove-Item (Join-Path $env:APPDATA 'configstore\firebase-tools.json') -ErrorAction SilentlyContinue
+  Write-Host "Revoking gcloud accounts..." -ForegroundColor Cyan
+  gcloud auth revoke --all --quiet 2>$null
+  Write-Host "Revoking Application Default Credentials..." -ForegroundColor Cyan
+  gcloud auth application-default revoke --quiet 2>$null
+  Remove-Item (Get-UserAdcPath) -ErrorAction SilentlyContinue
+  Remove-Item $FirebaseAdc -Force -ErrorAction SilentlyContinue
+  $env:GOOGLE_APPLICATION_CREDENTIALS = $null
+  Write-Host ""
+  Write-Host "All Firebase + gcloud + ADC state cleared." -ForegroundColor Green
+  gcloud auth list
+  Write-Host "Now click 'Log me in' for a clean sign-in." -ForegroundColor Green
+  Read-Host "Press Enter to close"
+}
+
+# -- Frontend ------------------------------------------------------------------
+# Vite ONLY loads dot-prefixed env files (.env.production, .env.development, ...).
+# The repo keeps the editable copies WITHOUT the dot (env.production, ...) because
+# tools/git guard dotted env files. Mirror them before every build/dev run so a
+# build never ships with no Firebase config (symptom: Main Menu shows only the
+# external ECHO card, no user chip in the top bar).
+function Sync-FrontendEnv {
+  if (-not (Test-Path $Frontend)) { return }
+  $pairs = @(
+    @{ src = 'env.production';           dst = '.env.production'        },
+    @{ src = 'env.development';          dst = '.env.development'       },
+    @{ src = 'env.development.download'; dst = '.env.development.local' }
+  )
+  foreach ($p in $pairs) {
+    $s = Join-Path $Frontend $p.src
+    $d = Join-Path $Frontend $p.dst
+    if (Test-Path $s) {
+      Copy-Item $s $d -Force
+      Write-Host ("  env sync: {0} -> {1}" -f $p.src, $p.dst) -ForegroundColor DarkGray
+    }
+  }
+}
+
+function FE-Install { Push-Location $Frontend; try { npm install } finally { Pop-Location } }
+function FE-Dev     { Sync-FrontendEnv; Push-Location $Frontend; try { npm run dev } finally { Pop-Location } }
+function FE-Build   { Sync-FrontendEnv; Push-Location $Frontend; try { npm run build } finally { Pop-Location } }
+function FE-Preview { Push-Location $Frontend; try { npm run preview } finally { Pop-Location } }
+function FE-Deploy {
+  Ensure-FirebaseAuth
+  Sync-FrontendEnv
+  # MES safety net: never deploy a config-less build (that is how "only ECHO shows" happens).
+  if (($AppKey -eq 'mes') -and -not (Test-Path (Join-Path $Frontend '.env.production'))) {
+    Write-Host "frontend\.env.production is missing (no env.production found to copy from)." -ForegroundColor Red
+    Write-Host "A build now would ship with NO Firebase config -> the menu shows only ECHO. Aborting." -ForegroundColor Yellow
+    $script:DeployOk = $false
+    return
+  }
+  Push-Location $Frontend
+  try {
+    # Test gate (fix #49) - the console deploy button must not skip the API-client
+    # tests that deploy-hosting.ps1 runs.
+    if ($AppKey -eq 'mes') {
+      Write-Host "Running frontend API-client tests before deploy (fix #49)..." -ForegroundColor Cyan
+      npm test
+      if ($LASTEXITCODE -ne 0) {
+        Write-Host "TESTS FAILED - deploy blocked. Fix the failure first (emergencies only: frontend\deploy-hosting.ps1 -SkipTests)." -ForegroundColor Red
+        $script:DeployOk = $false
+        return
+      }
+      Write-Host "Tests passed." -ForegroundColor Green
+    }
+    # Dev + QA sites are editable TEST sites: writes on, so Add/Remove/Save/Settings show.
+    $env:VITE_READ_ONLY = 'false'
+    # Env badge from the deploy target, not an untracked file (fix #58).
+    $env:VITE_ENV_LABEL = $EnvLabel
+    # WMS / MRP pick their API base URL from VITE_ENV (dev|prod). Process env beats the
+    # .env file in Vite, so the picker - not a hand-edited file - decides the backend.
+    if ($AppKey -eq 'wms' -or $AppKey -eq 'mrp') { $env:VITE_ENV = $Env }
+    # MES builds into its env's OWN folder (firebase.json public = dist-<env>), so
+    # simultaneous dev/qa deploys cannot ship each other's build (live 2026-08-10:
+    # parallel deploys raced on the shared dist/; the dev site got the QA build).
+    if ($AppKey -eq 'mes') { npm run build -- --outDir "dist-$Env" --emptyOutDir }
+    else                   { npm run build }
+    if ($LASTEXITCODE -ne 0) {
+      $script:DeployOk = $false
+      Write-Host "Build FAILED - not deploying." -ForegroundColor Red
+    } else {
+      # Retry the deploy a few times: on this network the final "finalizing version"
+      # call sometimes drops. The files are already uploaded, so a retry finalizes fast.
+      # WMS / MRP: make sure the hosting SITE exists (no-op when it does). MES does this
+      # behind deploy-hosting.ps1 -Setup; here it is the one-line idempotent form.
+      if ($AppKey -eq 'wms' -or $AppKey -eq 'mrp') {
+        $siteId = ([uri]$DeployUrl).Host -replace '\.web\.app$', ''
+        firebase hosting:sites:create $siteId --project $Project --non-interactive 2>&1 | Out-Null
+      }
+      $ok = $false
+      for ($try = 1; $try -le 5 -and -not $ok; $try++) {
+        if ($try -gt 1) { Write-Host "Deploy hiccup - retry $try of 5 (adding --debug to show the real cause)..." -ForegroundColor Yellow; Start-Sleep -Seconds 4 }
+        # After the first miss, add --debug so the actual network error (timeout / reset /
+        # proxy) is printed + written to frontend\firebase-debug.log, instead of the vague
+        # "Failed to make request".
+        $fbCfg = @(); if ($FirebaseConfig) { $fbCfg = @('--config', $FirebaseConfig) }
+        $fbOut = $null
+        if ($try -eq 1) { firebase deploy --only $HostingArg --project $Project @fbCfg --non-interactive 2>&1 | Tee-Object -Variable fbOut | Out-Host }
+        else            { firebase deploy --only $HostingArg --project $Project @fbCfg --non-interactive --debug 2>&1 | Tee-Object -Variable fbOut | Out-Host }
+        $ok = ($LASTEXITCODE -eq 0)
+        if (-not $ok -and (($fbOut | Out-String) -match 'Authentication Error|Failed to authenticate|credentials are no longer valid')) {
+          Write-Host "" 
+          Write-Host "Deploy credential problem - retrying will not help. Click 'One-time: Firebase deploy access (keyless)' (any project), then deploy again." -ForegroundColor Red
+          break
+        }
+      }
+      $script:DeployOk = $ok
+      if ($ok) {
+        Write-Host "Opening $DeployUrl ..." -ForegroundColor Green
+        Start-Process $DeployUrl
+      } else {
+        Write-Host "" -ForegroundColor Red
+        Write-Host "Frontend deploy FAILED." -ForegroundColor Red
+        Write-Host "'Failed to make request' = the connection dropped (your proxy/VPN reset it) -" -ForegroundColor Yellow
+        Write-Host "it is a NETWORK issue, not a Firebase limit. The exact reason (timeout / reset /" -ForegroundColor Yellow
+        Write-Host "proxy 407) is in the --debug output above and in: $Frontend\firebase-debug.log" -ForegroundColor Yellow
+        Write-Host "(A 403 with a permission name would instead mean a missing IAM role.)" -ForegroundColor DarkGray
+      }
+    }
+  } finally { Pop-Location }
+}
+
+# -- Backend -------------------------------------------------------------------
+function BE-Venv {
+  Push-Location $Backend
+  try {
+    if (-not (Test-Path '.venv')) { python -m venv .venv }
+    & .\.venv\Scripts\python.exe -m pip install --upgrade pip
+    & .\.venv\Scripts\pip.exe install -r requirements.txt
+  } finally { Pop-Location }
+}
+function BE-RunDemo {
+  Push-Location $Backend
+  try {
+    $env:BRMS_DEMO='true'; $env:READ_ONLY='false'; $env:AUTH_REQUIRED='false'; $env:APP_CHECK_REQUIRED='false'
+    $env:DEV_PIN='1111'   # demo PIN - config.py no longer defaults this (fail closed)
+    Write-Host "Backend (DEMO, no DB) -> http://localhost:8080   Ctrl+C to stop" -ForegroundColor Cyan
+    if (Test-Path '.\.venv\Scripts\python.exe') { & .\.venv\Scripts\python.exe app.py } else { python app.py }
+  } finally { Pop-Location }
+}
+function BE-RunDev {
+  if ($AppKey -eq 'wms' -or $AppKey -eq 'mrp') {
+    # WMS / MRP (2026-09-06): their Flask app reads its own .env. The database is PRIVATE
+    # now, so a laptop only reaches it through the Cloud SQL tunnel (Task Scheduler
+    # 'BRMS CloudSQL Tunnel' -> 127.0.0.1:3307) and .env DB_HOST/DB_PORT must point there.
+    Push-Location $Backend
+    try {
+      Write-Host ("Flask ({0}) LOCAL from {1} using its .env" -f $AppName, $Backend) -ForegroundColor Yellow
+      Write-Host "The DB is PRIVATE: the tunnel must be running on 127.0.0.1:3307 and .env DB_HOST/DB_PORT must point at it." -ForegroundColor Yellow
+      if (Test-Path '.\venv\Scripts\python.exe')       { & .\venv\Scripts\python.exe app.py }
+      elseif (Test-Path '.\.venv\Scripts\python.exe') { & .\.venv\Scripts\python.exe app.py }
+      else                                            { python app.py }
+    } finally { Pop-Location }
+    return
+  }
+  Push-Location $Backend
+  try {
+    $env:BRMS_DEMO='false'; $env:READ_ONLY='false'; $env:AUTH_REQUIRED='false'; $env:APP_CHECK_REQUIRED='false'
+    $env:BRMS_DB_NAME = "BRMS_database_$Env"   # dev or qa - the environment picker decides
+    Write-Host "Backend ($($Env.ToUpper()) DB, LOCAL, auth OFF, writes ON) -> http://localhost:8080" -ForegroundColor Yellow
+    Write-Host "Needs: gcloud auth application-default login (Secret Manager) OR BRMS_DB_HOST/USER/PASSWORD env." -ForegroundColor Yellow
+    if (Test-Path '.\.venv\Scripts\python.exe') { & .\.venv\Scripts\python.exe app.py } else { python app.py }
+  } finally { Pop-Location }
+}
+# -- What a Cloud Run service carries TODAY (read-only) ------------------------
+# Printed before + after every WMS/MRP server deploy and by the Preflight button. Since the
+# DB lockdown (2026-09-06) the flask services live on VPC connector brms-egress with pinned
+# secrets (MRP_DB_HOST:3, MRP_DB_PASSWORD:2, user app_user). A `--source` deploy keeps all
+# of that (only the image changes) - this shows it so nobody has to take that on faith.
+# Secret values are never printed: secrets show as name:version, and plain env values whose
+# NAME looks sensitive are hidden.
+function Show-RunServiceSummary {
+  $json = (& gcloud run services describe $ApiSvcDev --region $Region --project $Project --format=json 2>$null | Out-String)
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
+    Write-Host ("  Cloud Run service '{0}' not found in {1}/{2} (or gcloud is not signed in)." -f $ApiSvcDev, $Project, $Region) -ForegroundColor Yellow
+    return $false
+  }
+  try { $svc = $json | ConvertFrom-Json } catch { Write-Host "  could not parse the service description" -ForegroundColor Yellow; return $false }
+  $tpl = $svc.spec.template
+  $ann = $tpl.metadata.annotations
+  $vpc = $ann.'run.googleapis.com/vpc-access-connector'
+  $egress = $ann.'run.googleapis.com/vpc-access-egress'
+  $live = ($svc.status.traffic | Where-Object { $_.percent -eq 100 } | Select-Object -First 1).revisionName
+  Write-Host ("  url:      {0}" -f $svc.status.url)
+  Write-Host ("  serving:  {0}" -f $live)
+  Write-Host ("  runs as:  {0}" -f $tpl.spec.serviceAccountName)
+  if ($vpc)                    { Write-Host ("  VPC:      {0} (egress: {1})  -> private-DB road present" -f $vpc, $egress) -ForegroundColor Green }
+  elseif ($AppKey -eq 'echo')  { Write-Host "  VPC:      none (fine - ECHO has no database)" -ForegroundColor DarkGray }
+  else                         { Write-Host "  VPC:      NONE - this service has no road to the private database!" -ForegroundColor Red }
+  $c = $tpl.spec.containers[0]
+  Write-Host ("  image:    {0}" -f $c.image)
+  Write-Host "  env:"
+  foreach ($e in @($c.env)) {
+    if ($e.valueFrom -and $e.valueFrom.secretKeyRef) {
+      Write-Host ("    {0} = secret {1}:{2}" -f $e.name, $e.valueFrom.secretKeyRef.name, $e.valueFrom.secretKeyRef.key)
+    } elseif ($e.name -match '(?i)pass|secret|key|token|cred') {
+      Write-Host ("    {0} = (value hidden)" -f $e.name) -ForegroundColor DarkGray
+    } else {
+      Write-Host ("    {0} = {1}" -f $e.name, $e.value)
+    }
+  }
+  Write-Host "  (a deploy from this console keeps ALL of the above - env, secrets, VPC, account, scaling - only the image changes)" -ForegroundColor DarkGray
+  return $true
+}
+
+# -- Preflight (READ-ONLY): everything the deploy + save buttons would act on --------
+# Nothing is changed by this. Run it for each project/env before the first live click.
+function Show-Preflight {
+  Write-Host ("==== PREFLIGHT: {0} [{1}] ====" -f $AppName, $Env.ToUpper()) -ForegroundColor Cyan
+  Write-Host ("Repo:      {0}" -f $Root)
+  Push-Location $Root
+  try {
+    $branch = Git-Branch
+    $origin = (git remote get-url origin 2>$null)
+    $originNote = if ("$origin".Trim() -eq $RepoUrl) { '(matches the console)' } else { "(DIFFERS - console expects $RepoUrl)" }
+    Write-Host ("Branch:    {0}" -f $branch)
+    Write-Host ("Origin:    {0}  {1}" -f "$origin".Trim(), $originNote)
+    $st  = @(git status --short --untracked-files=all 2>$null)
+    $mod = @($st | Where-Object { $_ -notmatch '^\?\?' })
+    $unt = @($st | Where-Object { $_ -match '^\?\?' })
+    Write-Host ("Changes:   {0} modified, {1} untracked - ALL of these get committed by 'Save + upload'" -f $mod.Count, $unt.Count)
+    $unt | ForEach-Object { Write-Host ("   new:     {0}" -f $_.Substring(3).Trim('"')) -ForegroundColor DarkGray }
+    $risky = @($st | ForEach-Object { $_.Substring(3).Trim('"') } |
+      Where-Object { $_ -match '(?i)(service_account|FIREBASE_CREDS|adminsdk|(^|/)\.env($|\.)|\.pem$|\.p12$|credentials\.json|\.secrets/)' })
+    if ($risky.Count -gt 0) {
+      Write-Host "  WARNING - these look like CREDENTIAL files and would be committed. Gitignore or move them first:" -ForegroundColor Red
+      $risky | ForEach-Object { Write-Host ("   {0}" -f $_) -ForegroundColor Red }
+    }
+    $ahead  = (git rev-list --count "origin/$branch..HEAD" 2>$null)
+    $behind = (git rev-list --count "HEAD..origin/$branch" 2>$null)
+    if ($ahead -ne $null) { Write-Host ("Commits:   {0} ahead / {1} behind origin/{2} (as of the last fetch)" -f "$ahead".Trim(), "$behind".Trim(), $branch) }
+  } finally { Pop-Location }
+
+  Write-Host ""
+  Write-Host "FRONTEND -> Firebase Hosting" -ForegroundColor Cyan
+  $fbFile = if ($FirebaseConfig) { $FirebaseConfig } else { 'firebase.json' }
+  Write-Host ("  config:   {0}   (firebase deploy --only {1})" -f $fbFile, $HostingArg)
+  Write-Host ("  site:     {0}" -f $DeployUrl)
+  # firebase deploy runs from $Frontend (MES/ECHO: frontend\, WMS/MRP: the repo root).
+  if (-not (Test-Path (Join-Path $Frontend $fbFile))) { Write-Host ("  {0} is MISSING in {1}" -f $fbFile, $Frontend) -ForegroundColor Red }
+  if ($AppKey -eq 'wms' -or $AppKey -eq 'mrp') {
+    Write-Host ("  VITE_ENV: forced to '{0}' at build time (beats the .env file)" -f $Env)
+    $envFile = Join-Path $Root '.env'
+    if (Test-Path $envFile) {
+      $key = "VITE_API_BASE_URL_{0}_{1}" -f $AppKey.ToUpper(), $Env.ToUpper()
+      $ln = (Get-Content $envFile | Where-Object { $_ -match ("^\s*{0}\s*=" -f $key) } | Select-Object -Last 1)
+      if ($ln) { Write-Host ("  API URL:  {0}" -f $ln.Trim()) } else { Write-Host ("  API URL:  {0} is MISSING from .env - the build would call nothing" -f $key) -ForegroundColor Red }
+    } else { Write-Host "  .env is MISSING at the repo root - the frontend build would have no API URLs" -ForegroundColor Red }
+  }
+
+  Write-Host ""
+  Write-Host "BACKEND -> Cloud Run" -ForegroundColor Cyan
+  Write-Host ("  service:  {0}   ({1}, {2})" -f $ApiSvcDev, $Project, $Region)
+  $dfOk = Test-Path (Join-Path $SourceDir 'Dockerfile')
+  Write-Host ("  source:   {0}   Dockerfile: {1}" -f $SourceDir, $(if ($dfOk) { 'found' } else { 'MISSING' })) -ForegroundColor $(if ($dfOk) { 'Gray' } else { 'Red' })
+  Ensure-GcloudAuth
+  [void](Show-RunServiceSummary)
+  Write-Host ""
+  Write-Host "Preflight is read-only - nothing was changed." -ForegroundColor Green
+}
+
+# -- Deploy provenance for WMS / MRP -------------------------------------------
+# MES already solves this: backend\deploy.ps1 stamps $BUILD_VERSION into the image, /api/health
+# reports it back, and every deploy appends a line to backend\deploy_log.jsonl. WMS and MRP take
+# the plain `gcloud run deploy --source .` path, which builds from the WORKING TREE and attaches
+# NOTHING - so after the fact there is no way to answer "what is actually running?".
+#
+# This closes that gap with MES's own conventions rather than a second set of them:
+#   * the same version string - the short sha, with a '-dirty' suffix when the tree had
+#     uncommitted edits. A revision built from a dirty tree is NOT reproducible from the repo,
+#     which matters more than the sha itself;
+#   * a Cloud Run LABEL, which is metadata only. It cannot change what the service can reach, so
+#     it is not one of the flags rule 1 forbids, and it stays readable with
+#     `gcloud run services describe`;
+#   * one JSONL line per deploy with the SAME KEYS as backend\deploy_log.jsonl, so both halves of
+#     the fleet can be read by one parser.
+#
+# Bookkeeping is best-effort throughout: the deploy already happened, and provenance is never
+# worth failing a release for.
+# (HELIX_MARK1_PLAN.md 6.6)
+function Get-BuildVersion {
+  $v = ''
+  try { $v = "$(git rev-parse --short HEAD 2>$null)".Trim() } catch { $v = '' }
+  if (-not $v) { return 'unknown' }
+  try { if ((git status --porcelain 2>$null)) { $v = "$v-dirty" } } catch { }
+  return $v.ToLower()
+}
+
+function Get-DeployLabels {
+  $who = "$env:USERNAME"
+  if (-not $who) { $who = 'unknown' }
+  # Cloud Run label values allow lowercase letters, digits, '-' and '_' only.
+  $who = ($who -replace '[^A-Za-z0-9_-]', '-').ToLower()
+  if ($who.Length -gt 40) { $who = $who.Substring(0, 40) }
+  return ("version={0},by={1}" -f (Get-BuildVersion), $who)
+}
+
+function Write-DeployRecord {
+  param([string] $Service, [string] $EnvName, [string] $Url)
+  try {
+    $rec = [ordered]@{
+      at      = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+      env     = "$EnvName"
+      service = $Service
+      db      = ''
+      version = (Get-BuildVersion)
+      by      = "$env:USERNAME"
+      url     = "$Url"
+    } | ConvertTo-Json -Compress
+    Add-Content -Path (Join-Path $Root "deploy_log.jsonl") -Value $rec -Encoding utf8
+    Write-Host "Deploy recorded in deploy_log.jsonl (commit it with your next commit)." -ForegroundColor DarkGray
+  } catch {
+    Write-Host "  note: deploy_log.jsonl append failed ($($_.Exception.Message)) - the deploy itself is fine." -ForegroundColor Yellow
+  }
+}
+
+function BE-Deploy {
+  Ensure-GcloudAuth
+  if ($AppKey -eq 'mes') {
+    # Fix plan #7: ONE env list. backend/deploy.ps1 owns the MES service's env vars
+    # (READ_ONLY is decided there, once) and also does the idempotent secret/bucket
+    # IAM upkeep. -NonInteractive skips its confirm gate - this button IS the confirm.
+    Push-Location $Backend
+    try {
+      & (Join-Path $Backend 'deploy.ps1') -NonInteractive -Env $Env
+      $script:DeployOk = ($LASTEXITCODE -eq 0)
+    } finally { Pop-Location }
+    if ($script:DeployOk) { Write-Host "Backend deployed OK." -ForegroundColor Green }
+    else { Write-Host "Backend deploy FAILED (see above)." -ForegroundColor Red }
+    return
+  }
+  if ($AppKey -eq 'wms' -or $AppKey -eq 'mrp') {
+    # WMS / MRP (2026-08-30): source deploy from the repo root (Dockerfile lives there),
+    # image built by Cloud Build - no Docker Desktop needed. The service's env vars, service
+    # account and scaling are NOT touched: `gcloud run deploy` keeps whatever the service
+    # already has, exactly like the old `--image` deploy did. A service that does not exist
+    # yet is REFUSED on prod (it would come up with no DB config) - create it in the Cloud
+    # Console with its env vars first, or deploy dev and copy the settings.
+    $exists = $null
+    $exists = (& gcloud run services describe $ApiSvcDev --region $Region --project $Project --format="value(metadata.name)" 2>$null)
+    if (-not $exists) {
+      if ($Env -ne 'dev') {
+        Write-Host ("Cloud Run service '{0}' does not exist yet. Refusing to create a {1} service with no env vars / VPC / secrets." -f $ApiSvcDev, $Env.ToUpper()) -ForegroundColor Red
+        Write-Host "Create it first with ops\qa_stack.ps1 (clones the prod service's settings onto the new name), then deploy." -ForegroundColor Yellow
+        $script:DeployOk = $false
+        return
+      }
+      Write-Host "Cloud Run service '$ApiSvcDev' does not exist - it will be CREATED with default settings and NO env vars; set them in the Cloud Console after." -ForegroundColor Yellow
+    } else {
+      Write-Host "Service as it is right now (all of this is kept; only the image changes):" -ForegroundColor Cyan
+      [void](Show-RunServiceSummary)
+    }
+    if ($Env -eq 'prod') {
+      $c2 = Read-Host "Type 'deploy prod' to push $ApiSvcDev"
+      if ($c2 -ne 'deploy prod') { Write-Host "Aborted." -ForegroundColor Yellow; $script:DeployOk = $false; return }
+    }
+    if (-not (Test-Path (Join-Path $SourceDir 'Dockerfile'))) {
+      Write-Host "No Dockerfile in $SourceDir - cannot source-deploy." -ForegroundColor Red; $script:DeployOk = $false; return
+    }
+    Push-Location $SourceDir
+    try {
+      Write-Host "Deploying $ApiSvcDev to Cloud Run ($Region) [$AppName / $($Env.ToUpper())] from $SourceDir ..." -ForegroundColor Cyan
+      gcloud run deploy $ApiSvcDev --source . --project $Project --region $Region --allow-unauthenticated --labels (Get-DeployLabels)
+      $script:DeployOk = ($LASTEXITCODE -eq 0)
+      if ($script:DeployOk) {
+        $u = (& gcloud run services describe $ApiSvcDev --region $Region --project $Project --format="value(status.url)" 2>$null)
+        Write-Host "Backend deployed OK. $u" -ForegroundColor Green
+        try { Add-Content -Path (Join-Path $Root 'deployment_log.txt') -Value ("{0} - Deployed {1} (source, {2}) via command center [{3}]" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $ApiSvcDev, $Env, (Get-BuildVersion)) } catch {}
+        Write-DeployRecord -Service $ApiSvcDev -EnvName $Env -Url $u
+        # Ground truth after the deploy: the NEW revision must still carry the VPC connector
+        # and secret pins (the DB is private - without them the app cannot reach it).
+        Write-Host "Service AFTER the deploy:" -ForegroundColor Cyan
+        [void](Show-RunServiceSummary)
+        # Smoke check: any HTTP answer (200 / 404 / 405) means the new container booted and
+        # answers requests. A timeout or 5xx means it did not - open the error logs.
+        if ($u) {
+          $u = "$u".Trim()
+          try {
+            $resp = Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+            Write-Host ("Smoke check: GET {0} -> HTTP {1}  (server is up)" -f $u, [int]$resp.StatusCode) -ForegroundColor Green
+          } catch {
+            $code = $null
+            try { $code = [int]$_.Exception.Response.StatusCode } catch { $code = $null }
+            if ($code -and $code -lt 500) { Write-Host ("Smoke check: GET {0} -> HTTP {1}  (server is up; the root path is just not a page)" -f $u, $code) -ForegroundColor Green }
+            else {
+              Write-Host ("Smoke check: GET {0} FAILED - {1}" -f $u, $_.Exception.Message) -ForegroundColor Red
+              Write-Host "The new revision is not answering. Click 'See server error logs' for this service, or roll back in the Cloud Console (Revisions -> previous -> Manage traffic)." -ForegroundColor Yellow
+              $script:DeployOk = $false
+            }
+          }
+        }
+      } else { Write-Host "Backend deploy FAILED (see above)." -ForegroundColor Red }
+    } finally { Pop-Location }
+    return
+  }
+  Push-Location $Backend
+  try {
+    # Per-project env string (custom ^X^ delimiter so values may contain commas) - set at the
+    # top in $Projects[...].BackendEnv. ECHO = Vertex/planner config.
+    $envVars = $BackendEnv
+    Write-Host "Deploying $ApiSvcDev to Cloud Run ($Region) [$AppName] ..." -ForegroundColor Cyan
+    gcloud run deploy $ApiSvcDev --source . --project $Project --region $Region `
+      --service-account $ApiSaDev --allow-unauthenticated `
+      --min-instances 0 --max-instances 10 --memory 1Gi --cpu 2 --concurrency 16 --cpu-boost --timeout $DeployTimeout `
+      --labels (Get-DeployLabels) `
+      --set-env-vars $envVars
+    $script:DeployOk = ($LASTEXITCODE -eq 0)
+    if ($script:DeployOk) { Write-Host "Backend deployed OK." -ForegroundColor Green }
+    else { Write-Host "Backend deploy FAILED (see above)." -ForegroundColor Red }
+  } finally { Pop-Location }
+}
+
+# -- Google Cloud image cleanup (Artifact Registry) ----------------------------
+# NOTE: both projects deploy `--source` into the SAME repo ($Project/$Region/$SourceRepo =
+# windy-celerity-392822 / us-west2 / cloud-run-source-deploy), so the image cleanup policy is
+# shared - applying it from EITHER project protects BOTH (keepCount is per service/package,
+# so each service keeps its own 5 newest).
+
+# Resolve a cleanup-policy.json to hand gcloud. If the project ships its own (MES does, and it's
+# committed), use that. Otherwise (ECHO / any new project) write the default to a TEMP file so we
+# never drop an untracked file into that project's repo. Fixes ECHO's "file not found" error.
+function Ensure-CleanupPolicy {
+  $repoPolicy = Join-Path $Root 'cleanup-policy.json'
+  if (Test-Path $repoPolicy) { return $repoPolicy }
+  $tmp = Join-Path $env:TEMP ("cleanup-policy-{0}.json" -f $AppKey)
+  Write-Host "This project has no cleanup-policy.json - using the default (keep 5 newest, delete untagged >7d)." -ForegroundColor DarkGray
+  $json = @'
+[
+  {
+    "name": "keep-5-most-recent",
+    "action": { "type": "Keep" },
+    "mostRecentVersions": { "keepCount": 5 }
+  },
+  {
+    "name": "delete-untagged-after-7d",
+    "action": { "type": "Delete" },
+    "condition": {
+      "tagState": "untagged",
+      "olderThan": "604800s"
+    }
+  }
+]
+'@
+  Set-Content -Path $tmp -Value $json -Encoding UTF8
+  return $tmp
+}
+
+function AR-ListImages {
+  gcloud artifacts docker images list "$Region-docker.pkg.dev/$Project/$SourceRepo" --include-tags --sort-by=~UPDATE_TIME
+}
+function AR-CleanupDryRun {
+  $policy = Ensure-CleanupPolicy
+  gcloud artifacts repositories set-cleanup-policies $SourceRepo --location=$Region --project=$Project --policy=$policy --dry-run
+  Write-Host "`nDry-run policy set on '$SourceRepo' (shared by MES + ECHO). AR logs what it WOULD delete (~1 day). Nothing is deleted yet." -ForegroundColor Cyan
+}
+function AR-CleanupApply {
+  $policy = Ensure-CleanupPolicy
+  Write-Host "This lets Artifact Registry auto-delete old images per cleanup-policy.json (keeps 5 newest per service)." -ForegroundColor Yellow
+  Write-Host "The repo is SHARED by both projects, so this one action protects MES and ECHO." -ForegroundColor DarkGray
+  if ((Read-Host "Type 'apply' to confirm") -eq 'apply') {
+    gcloud artifacts repositories set-cleanup-policies $SourceRepo --location=$Region --project=$Project --policy=$policy --no-dry-run
+    Write-Host "Applied. Keeps the 5 newest images per service; deletes untagged ones older than 7 days." -ForegroundColor Green
+  } else { Write-Host "Cancelled." }
+}
+
+# -- Cloud Run revision cleanup (keep the 5 newest per service) -----------------
+# Cloud Run keeps every revision you deploy; only the traffic-serving one runs, the rest are
+# inert clutter that also pin old images. This trims each service to its 5 newest revisions.
+function Run-CleanRevisions {
+  Write-Host "Listing revisions for $ApiSvcDev ($Region) ..." -ForegroundColor Cyan
+  $all = @(gcloud run revisions list --service $ApiSvcDev --region $Region --project $Project `
+             --sort-by=~metadata.creationTimestamp --format="value(metadata.name)" 2>$null)
+  if (-not $all -or $all.Count -eq 0) {
+    Write-Host "No revisions found for $ApiSvcDev (is it deployed to this project yet?)." -ForegroundColor Yellow
+    return
+  }
+  $keep   = @($all | Select-Object -First 5)
+  $delete = @($all | Select-Object -Skip 5)
+  Write-Host ("Found {0} revisions. Keeping the {1} newest:" -f $all.Count, $keep.Count) -ForegroundColor Green
+  $keep | ForEach-Object { Write-Host "  KEEP    $_" -ForegroundColor DarkGray }
+  if ($delete.Count -eq 0) { Write-Host "`nNothing to delete - 5 or fewer revisions. You're clean." -ForegroundColor Green; return }
+  Write-Host "`nWould DELETE these older revisions:" -ForegroundColor Yellow
+  $delete | ForEach-Object { Write-Host "  delete  $_" -ForegroundColor Yellow }
+  if ((Read-Host "`nType 'delete' to remove them (a traffic-serving revision is skipped automatically)") -eq 'delete') {
+    foreach ($r in $delete) {
+      Write-Host "Deleting $r ..." -ForegroundColor DarkGray
+      gcloud run revisions delete $r --region $Region --project $Project --quiet 2>&1 | Out-String | Write-Host
+    }
+    Write-Host "Done. $ApiSvcDev now keeps its 5 newest revisions." -ForegroundColor Green
+  } else { Write-Host "Cancelled - nothing deleted." }
+}
+
+# -- Test-data reset (dev/qa ONLY) ---------------------------------------------
+# Empties every per-WO record table in the selected environment's database so a
+# fresh testing round starts clean. The ops script consults information_schema
+# live (rule: cleared IFF the table has a WO column), previews the exact list +
+# row counts, and demands a typed confirm. PROD is impossible: this action is in
+# $EnvAware (locked while PROD is selected) AND the script's -Env only accepts
+# dev|qa AND it refuses any name that is not *_dev/*_qa.
+function DB-ClearRecords {
+  if ($AppKey -ne 'mes') {
+    Write-Host "Record clearing is a MES tool - ECHO has no MES database." -ForegroundColor Yellow
+    Read-Host "Press Enter to close"; return
+  }
+  & (Join-Path $Root 'ops\clear_wo_records.ps1') -Env $Env
+}
+
+# -- Version control (git -> GitHub) -------------------------------------------
+function Git-EnsureRepo {
+  Push-Location $Root
+  try {
+    git rev-parse --is-inside-work-tree 1>$null 2>$null
+    if ($LASTEXITCODE -ne 0) { Write-Host "Not a git repository: $Root" -ForegroundColor Red; return $false }
+    # Clear stale locks a crashed git / IDE / cloud session may have left behind.
+    # Claude's cloud sessions can COMMIT through the device bridge but cannot
+    # DELETE files there, so every bridge-side commit strands a HEAD.lock that
+    # then blocks the next commit here. Windows deletes them fine - do it on
+    # every git action so 'cannot lock ref HEAD' stops recurring.
+    foreach ($lk in @('.git\index.lock', '.git\HEAD.lock', '.git\packed-refs.lock')) {
+      if (Test-Path $lk) {
+        Remove-Item $lk -Force -ErrorAction SilentlyContinue
+        Write-Host "(cleared stale $lk)" -ForegroundColor DarkGray
+      }
+    }
+    if (-not (git config user.email 2>$null)) {
+      Write-Host "git identity not set - run once:  git config --global user.name 'You'  &&  git config --global user.email you@domain.com" -ForegroundColor Yellow
+    }
+    $origin = git remote get-url origin 2>$null
+    if (-not $origin) {
+      git remote add origin $RepoUrl
+      Write-Host "Set origin -> $RepoUrl" -ForegroundColor Cyan
+    } elseif ($origin.Trim() -ne $RepoUrl) {
+      Write-Host "origin is '$($origin.Trim())'" -ForegroundColor Yellow
+      if ((Read-Host "Repoint origin to $RepoUrl ? (y/n)") -eq 'y') { git remote set-url origin $RepoUrl }
+    }
+    return $true
+  } finally { Pop-Location }
+}
+
+function Git-Branch {
+  $b = git -C $Root rev-parse --abbrev-ref HEAD 2>$null
+  if ($b) { "$b".Trim() } else { 'main' }
+}
+
+function Git-Status {
+  if (-not (Git-EnsureRepo)) { return }
+  Push-Location $Root
+  try {
+    git status
+    Write-Host "`nRecent commits:" -ForegroundColor Cyan
+    git log --oneline -8
+  } finally { Pop-Location }
+}
+
+function Git-ShowConflicts {
+  $conf = git -C $Root diff --name-only --diff-filter=U 2>$null
+  if ($conf) {
+    Write-Host "`nMERGE CONFLICTS - resolve the <<<<<<< ======= >>>>>>> markers in:" -ForegroundColor Red
+    $conf | ForEach-Object { Write-Host "  $_" }
+    foreach ($f in $conf) { Start-Process (Join-Path $Root $f) -ErrorAction SilentlyContinue }
+    Write-Host "`nTip: paste these files to Claude to resolve, OR edit them and run '24) Finish merge & push'." -ForegroundColor Cyan
+    return $true
+  }
+  return $false
+}
+
+function Git-Sync {
+  if (-not (Git-EnsureRepo)) { return }
+  Push-Location $Root
+  try {
+    $branch = Git-Branch
+    git add -A
+    git diff --cached --quiet
+    if ($LASTEXITCODE -ne 0) {
+      $msg = Read-Host "Commit message"
+      if (-not $msg) { $msg = "Update from dev.ps1" }
+      git commit -m "$msg"
+    } else {
+      Write-Host "Nothing new to commit." -ForegroundColor DarkGray
+    }
+    if (git ls-remote --heads origin $branch 2>$null) {
+      Write-Host "Pulling origin/$branch ..." -ForegroundColor Cyan
+      git pull --no-rebase origin $branch
+      if (Git-ShowConflicts) { return }
+    } else {
+      Write-Host "No remote branch yet - first push of '$branch'." -ForegroundColor DarkGray
+    }
+    Write-Host "Pushing to origin/$branch ..." -ForegroundColor Cyan
+    git push -u origin $branch
+    if ($LASTEXITCODE -eq 0) { Write-Host "Synced: committed, pulled, pushed to origin/$branch." -ForegroundColor Green }
+    else { Write-Host "Push failed - see message above (GitHub auth, or remote is ahead)." -ForegroundColor Red }
+  } finally { Pop-Location }
+}
+
+function Git-Pull {
+  if (-not (Git-EnsureRepo)) { return }
+  Push-Location $Root
+  try {
+    $branch = Git-Branch
+    git pull --no-rebase origin $branch
+    if (-not (Git-ShowConflicts)) { Write-Host "Up to date / merged cleanly." -ForegroundColor Green }
+  } finally { Pop-Location }
+}
+
+function Git-OpenConflicts {
+  if (-not (Git-EnsureRepo)) { return }
+  if (-not (Git-ShowConflicts)) { Write-Host "No conflicts right now." -ForegroundColor Green }
+}
+
+function Git-FinishMerge {
+  if (-not (Git-EnsureRepo)) { return }
+  Push-Location $Root
+  try {
+    if (git diff --name-only --diff-filter=U 2>$null) { Write-Host "Still conflicted - resolve the files first." -ForegroundColor Red; return }
+    $branch = Git-Branch
+    git add -A
+    git commit --no-edit
+    git push -u origin $branch
+    if ($LASTEXITCODE -eq 0) { Write-Host "Merge completed and pushed to origin/$branch." -ForegroundColor Green }
+    else { Write-Host "Push failed - see above." -ForegroundColor Red }
+  } finally { Pop-Location }
+}
+
+function Show-Menu {
+  Clear-Host
+  Write-Host ("==== {0} - dev & deploy ====" -f $AppName) -ForegroundColor Cyan
+  Write-Host ("     project root: {0}" -f $Root) -ForegroundColor DarkGray
+  Write-Host ""
+  Write-Host "  FRONTEND"
+  Write-Host "   1) Install deps          2) Run dev server"
+  Write-Host "   3) Build                 4) Preview build"
+  Write-Host ("   5) Build + Deploy -> Firebase Hosting ({0})" -f $Env)
+  Write-Host ""
+  Write-Host "  BACKEND"
+  Write-Host "   6) Setup venv + install"
+  Write-Host "   7) Run (DEMO, no DB)     8) Run (DEV DB, local, writes on)"
+  Write-Host ("   9) Deploy -> Cloud Run ({0}, writes ON)" -f $Env)
+  Write-Host ""
+  Write-Host "  ACCOUNTS"
+  Write-Host "  10) Sign in / re-auth (Firebase + gcloud)"
+  Write-Host ("  11) Preflight - read-only check of {0} [{1}] (repo, hosting target, Cloud Run service)" -f $AppName, $Env)
+  Write-Host ""
+  Write-Host "  GOOGLE CLOUD CLEANUP (keeps the 5 newest)"
+  Write-Host "  12) List stored images"
+  Write-Host "  13) Image cleanup policy (DRY-RUN)   14) Apply image cleanup policy"
+  Write-Host "  15) Clean old Cloud Run revisions (keep 5)"
+  Write-Host ""
+  Write-Host "  VERSION CONTROL (git -> GitHub)"
+  Write-Host "  20) Status & log          21) Sync (commit + pull + push)"
+  Write-Host "  22) Pull latest           23) Open conflicts for review"
+  Write-Host "  24) Finish merge & push"
+  Write-Host ""
+  Write-Host "   0) Exit"
+}
+
+# Headless single-action mode (the GUI buttons call: dev.ps1 -Action <name>)
+if ($Action) {
+  $script:DeployOk = $true
+  $failed = $false
+  try {
+  switch ($Action) {
+    'fe-install'    { FE-Install }
+    'fe-dev'        { FE-Dev }
+    'fe-build'      { FE-Build }
+    'fe-deploy'     { FE-Deploy }
+    'be-venv'       { BE-Venv }
+    'be-demo'       { BE-RunDemo }
+    'be-dev'        { BE-RunDev }
+    'be-deploy'     { BE-Deploy }
+    'preflight'     { Show-Preflight }
+    'signin'        { Auth-SignIn }
+    'signout'       { Auth-SignOut }
+    'fb-key'        { Auth-MakeDeployKey }
+    'fb-import'     { Auth-ImportDeployKey }
+    'ar-list'       { AR-ListImages }
+    'ar-dry'        { AR-CleanupDryRun }
+    'ar-apply'      { AR-CleanupApply }
+    'rev-clean'     { Run-CleanRevisions }
+    'db-clear'      { DB-ClearRecords }
+    'git-status'    { Git-Status }
+    'git-sync'      { Git-Sync }
+    'git-pull'      { Git-Pull }
+    'git-conflicts' { Git-OpenConflicts }
+    'git-finish'    { Git-FinishMerge }
+    default         { Write-Host "Unknown action: $Action" -ForegroundColor Red }
+  }
+  } catch { Write-Host "ERROR: $_" -ForegroundColor Red; $failed = $true }
+
+  # Deploy buttons auto-close on success; everything else (and any failure) stays open.
+  if ((@('fe-deploy', 'be-deploy') -contains $Action) -and -not $failed -and $script:DeployOk) {
+    # 2026-09-06: give a chance to copy the before/after service summary - any key keeps
+    # the window open; otherwise it closes itself after the countdown as before.
+    Write-Host ""
+    $keep = $false
+    for ($i = 15; $i -gt 0; $i--) {
+      Write-Host ("`rSuccess - closing in {0,2}s  (press any key to keep this window open) " -f $i) -ForegroundColor Green -NoNewline
+      Start-Sleep -Seconds 1
+      if ($Host.UI.RawUI.KeyAvailable) { $keep = $true; break }
+    }
+    Write-Host ""
+    if (-not $keep) { return }
+    [void]$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+  }
+  Write-Host ""
+  Read-Host "Done - press Enter to close" | Out-Null
+  return
+}
+
+do {
+  Show-Menu
+  $c = Read-Host "`nChoose"
+  try {
+    switch ($c) {
+      '1'  { FE-Install; PauseMenu }
+      '2'  { FE-Dev }
+      '3'  { FE-Build; PauseMenu }
+      '4'  { FE-Preview }
+      '5'  { FE-Deploy; PauseMenu }
+      '6'  { BE-Venv; PauseMenu }
+      '7'  { BE-RunDemo }
+      '8'  { BE-RunDev }
+      '9'  { BE-Deploy; PauseMenu }
+      '10' { Auth-SignIn; PauseMenu }
+      '11' { Show-Preflight; PauseMenu }
+      '12' { AR-ListImages; PauseMenu }
+      '13' { AR-CleanupDryRun; PauseMenu }
+      '14' { AR-CleanupApply; PauseMenu }
+      '15' { Run-CleanRevisions; PauseMenu }
+      '20' { Git-Status; PauseMenu }
+      '21' { Git-Sync; PauseMenu }
+      '22' { Git-Pull; PauseMenu }
+      '23' { Git-OpenConflicts; PauseMenu }
+      '24' { Git-FinishMerge; PauseMenu }
+      '0'  { }
+      default { Write-Host "Unknown option"; PauseMenu }
+    }
+  } catch { Write-Host "ERROR: $_" -ForegroundColor Red; PauseMenu }
+} while ($c -ne '0')

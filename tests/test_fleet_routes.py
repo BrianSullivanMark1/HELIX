@@ -86,6 +86,10 @@ def _reader(health_body: str | None = None):
     def replay(argv, timeout):
         if "--version" in argv:
             return g.Ran(0, "Google Cloud SDK 500.0.0", "")
+        if argv[2:4] == ["services", "list"]:            # the two-spawn read (2026-09-21): only MES dev exists here
+            return g.Ran(0, "[" + svc_json + "]", "")
+        if argv[2:4] == ["revisions", "list"] and "--service" not in argv:
+            return g.Ran(0, rev_json, "")
         name = argv[argv.index("describe") + 1] if "describe" in argv else argv[argv.index("--service") + 1]
         if name != "brms-mes-api-dev":
             return g.Ran(1, "", f"ERROR: (gcloud.run.services.describe) Cannot find service [{name}]: NOT_FOUND")

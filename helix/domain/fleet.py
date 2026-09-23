@@ -299,6 +299,54 @@ FLEET: tuple[Service, ...] = (
 
 SYSTEMS: tuple[str, ...] = ("MES", "WMS", "MRP", "ECHO")
 
+# PLANNED. The names reserved for cells that do not exist yet (decided 2026-09-20: ECHO starts clean
+# - oo-echo-qa / oo-echo - on MES's pattern, prod dropping the suffix). The create lane builds exactly
+# these and nothing else; dev.ps1's ECHO block computes the same names. Once a person has created a
+# cell, its FLEET row above gains the names (a reviewed code change) and its entry here goes.
+PLANNED: dict[tuple[str, Env], tuple[str, str | None]] = {
+    ("ECHO", Env.QA): ("brms-echo-api-qa", "oo-echo-qa"),
+    ("ECHO", Env.PROD): ("brms-echo-api", "oo-echo"),
+}
+
+
+def planned(system: str, env: Env) -> tuple[str, str | None] | None:
+    """(Cloud Run service, Hosting site) a not-yet-created cell will get, or None when undecided."""
+    return PLANNED.get((system.strip().upper(), env))
+
+
+def console_steps(system: str, env: Env, site: str | None, gcp_project: str) -> tuple[dict, ...]:
+    """What a new site needs before anyone can sign in on it, as data for the page.
+
+    Two lists, both project-wide. Firebase Auth's authorized domains have an API, and ADDING to
+    the list cannot lock anyone out, so HELIX does that one itself (adapters/firebase_auth) and
+    the step is shown as done. The reCAPTCHA key HELIX's apps use is the classic kind, which has
+    no API for its domain list at all - that one step is the person's, and HELIX makes it a
+    thirty-second act: the link, the exact value to paste, the clicks in order."""
+    if not site:
+        return ()
+    domain = f"{site}.web.app"
+    return (
+        {"key": "auth-domain", "title": "Allow sign-in on the new site", "by_helix": True,
+         "why": f"Google sign-in only works on sites Firebase has been told about. HELIX adds {domain} to that list for you.",
+         "link": f"https://console.firebase.google.com/project/{gcp_project}/authentication/settings",
+         "link_label": "See the list in Firebase", "copy": domain,
+         "steps": ("Open Firebase > Authentication > Settings > Authorized domains.",
+                   "Click 'Add domain'.",
+                   f"Paste {domain} and click 'Add'."),
+         "done_when": f"{domain} shows in the Authorized domains table."},
+        {"key": "recaptcha-domain", "title": "Let the 'are you human' check run on the new site", "by_helix": False,
+         "why": f"{system.upper()} asks Google's reCAPTCHA to vouch for each visitor. The key only answers for sites on "
+                "its own list, and Google has no way to change that list except by hand.",
+         "link": "https://www.google.com/recaptcha/admin", "link_label": "Open the reCAPTCHA admin page",
+         "alt_link": f"https://console.cloud.google.com/security/recaptcha?project={gcp_project}",
+         "alt_label": "Key not listed there? It is an Enterprise key - open it here", "copy": domain,
+         "steps": ("Open the reCAPTCHA admin page and pick the key this app uses from the dropdown at the top.",
+                   "Click the gear (Settings) at the top right.",
+                   "Under 'Domains', click the + and paste the domain (no https://, no slash).",
+                   "Click 'Save' at the bottom."),
+         "done_when": f"Open https://{domain}, sign in, and ask a question - an answer means it worked."},
+    )
+
 GCP_PROJECT = "windy-celerity-392822"
 GCP_REGION = "us-west2"
 SQL_INSTANCE = "oats-overnight-live"

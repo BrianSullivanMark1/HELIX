@@ -34,17 +34,25 @@ them; new work is UI first, logic after.
 
 ## How code moves
 
-* The sandbox keeps a copy: Python in `/home/claude/fleet` (patched copies of `server.py`,
-  `container.py`, `webboot.py` under `fleet/patch/`), the face in `/home/claude/web`; tests with
-  `python -m pytest -q` (317 green), build with `npm run build`, a mock server for screenshots.
+* The sandbox does NOT survive a new conversation. Rebuild it first: on the PC, tar the tracked +
+  untracked files (`git ls-files` + `--others --exclude-standard`, minus `Claude outputs/` and
+  `IMAGES_ABOUT_FORGE/`) into `Claude outputs/_sandbox_sync.tar.gz`, stage it, unpack to
+  `/home/claude/helix`, `git init` + one baseline commit (so every later diff is exact). Tests:
+  `QT_QPA_PLATFORM=offscreen python -m pytest -q` - 2,792 tests, 21 fail on Linux only
+  (`os.startfile`, Windows process reaping): take that list as the baseline and compare. Build:
+  `cd web; npm ci; npm run build`. PowerShell 7 can be unpacked to `/opt/pwsh` to parse and
+  SIMULATE dev.ps1 headless against a fake `gcloud` on PATH. A mock server for screenshots =
+  the real `mount_fleet` / `mount_deploy` / `mount_jobs` over doubles + `web/dist` (Playwright).
 * Delivery: files staged under `/mnt/user-data/outputs/<round>/`, written to the PC with the
-  device bridge (force), verified by md5 on the PC. Never edit a PC file in place without a
+  device bridge (force), verified by md5 on the PC. **After every delivery that touches an
+  adapter: `python -c "import helix.adapters.<each changed module>"`** - the test doubles do not
+  exercise the real spawn paths (2026-09-22: a missing import shipped green and hung a deploy). Never edit a PC file in place without a
   `git show HEAD:` copy (one such edit once truncated `container.py`).
 * After each delivery Brian runs: kill the old backend
   (`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*HELIX*main.py*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`),
   `python -m pytest -q`, `cd web; npm run build; cd ..`, relaunch, then commits.
 
-## Where things are (2026-09-22, late)
+## Where things are (2026-09-20 round added; the earlier list is dated 09-22 by its author)
 
 * Backend: `helix/services/{fleet,deploy,radio,jobs,vault}.py`, `helix/adapters/{gcloud_fleet,github_fleet,console_scripts,gcs_radio,gcp_secret_manager}.py`,
   `helix/api/{fleet_routes,deploy_routes,radio_routes,jobs_routes,joke_routes,vault_routes,say}.py`,
@@ -57,7 +65,16 @@ them; new work is UI first, logic after.
   production (allowlist, typed name, Are you sure, delete-anyway when something reads it); audit
   rows in `data/deploy_audit.jsonl`; rotation policy in `data/vault_policy.json`. Not yet run
   against the real project from the PC - the first open on Brian's PC is the live test.
-* Docs: `HELIX_MARK1_PLAN.md`, `docs/HELIX_RADIO.md`, `docs/CHANGES_2026-09-22.md`, `docs/KATE_SETUP.md`.
+* THE CREATE LANE (2026-09-20, a stepper since 09-21 - `CREATE_STAGE` in Console.tsx): `services/deploy.py:create_run` + `judge` + `followups`,
+  `domain/fleet.py:PLANNED / console_steps`, `adapters/console_scripts.py:deploy_argv(typed=, create=)`,
+  `POST /api/deploy/create_run`, `GET /api/deploy/followups`; the page: Server/Site/Both, Run this
+  plan, the ONLY YOU CAN DO THIS window (`FollowupsWindow` in `Console.tsx`). dev.ps1 (console
+  checkout) gained `-Typed`, `-Create`, the env-aware ECHO block and a headless result line + exit
+  code. ECHO's `frontend/firebase.json` is three Hosting targets. `adapters/firebase_auth.py` adds the
+  new site to Firebase Auth's authorized domains (add-only); `console_scripts.find_console` finds
+  dev.ps1 on the PC; `GET /api/deploy/ready` is the one READY? call. Full story: `docs/CHANGES_2026-09-20.md`.
+* Docs: `HELIX_MARK1_PLAN.md`, `docs/HELIX_RADIO.md`, `docs/CHANGES_2026-09-22.md`,
+  `docs/CHANGES_2026-09-20.md`, `docs/KATE_SETUP.md`.
 
 ## Status board (what is real, what is built but unproven, what is not built)
 
@@ -76,14 +93,17 @@ real fps numbers (Brian was to send the badge's line on Console and Talk).
 
 **Not built - in the order Brian wants them:**
 
-1. **ECHO QA/PROD for real** - see the next section; the Monday-morning round.
+1. **ECHO QA/PROD for real** - BUILT 2026-09-20, proven only in the sandbox (dev.ps1 simulated
+   under PowerShell 7 with a fake gcloud; the page driven in Chromium). The PC is the proof:
+   create ECHO QA from the gear, do the two console steps the window shows, open the site. Then
+   one line in `domain/fleet.py` (the QA row gains its names; its `PLANNED` entry goes) so the
+   board reads it. PROD is its own run (`create prod`).
 2. **Version control from HELIX** - Save (commit + push a draft) and Save & GO LIVE, THE FORGE's
    two buttons; today HELIX reads git but never commits, pushes or merges. Then the merge itself,
    the conflict editor (accept/reject hunks) and HELIX's own terminal (decided: leaving PyCharm).
-3. **The voice**: Gemini-TTS via Google Cloud Text-to-Speech (decided; each person may pick a
-   voice, quality never varies; task endings spoken if it costs next to nothing); think-out-loud
-   lines ("ooh, let me take a look", "hmm, didn't expect this") while the face searches; lips from
-   the audio's own amplitude; edge-tts the free fallback. To decide: one voice per person or per app.
+3. **The voice**: BUILT 2026-09-21 - `adapters/google_tts.py`, Settings > HELIX's voice (styles are
+   where the accent lives; Hear it per voice). Per person = per PC's settings. LEFT: think-out-loud
+   lines while the face searches; spoken task endings (a line costs a fraction of a cent - do it).
 4. **The ears**: random lines landing in the Talk box ("Good, how are you doing? Hey Deb.") - the
    hands-free ears transcribe room audio and HELIX's own voice (the web voice plays in the browser,
    so the Qt ears' playback gate never sees it). Candidates: tell the backend when the page plays
@@ -99,45 +119,26 @@ real fps numbers (Brian was to send the badge's line on Console and Talk).
 9. **The nightly dream reaching the fleet** - only behind a toggle, only `dev`, draft-only.
 10. **New app wizard** (THE FORGE's six sections) and "Copy an existing app" - plan section 12.
 
-## The next round: ECHO QA/PROD for real (design, and the questions to ask first)
+## ECHO QA/PROD - answered and built (2026-09-20)
 
-What exists: the gear's "Create an environment" is gated (typed app name + Are you sure +
-allowlisted identity), writes an audit row and returns THE PLAN (`services/deploy.py:create_plan`):
-the Cloud Run service name (`brms-echo-api-qa`; prod drops the suffix, MES's pattern), the env-var
-source, the Hosting site, and the fleet-table change. Nothing runs.
+Answers: sites `oo-echo-qa` / `oo-echo`, services `brms-echo-api-qa` / `brms-echo-api`; PROD reuses
+dev's service account and sign-in domains; one environment per run (QA first); Claude writes the
+dev.ps1 edit, Brian reviews the diff and commits. Decided for round 3 at the same sitting: the ears
+take follow-ups without the name only from an enrolled voice; Build mode's tidy-up shows the tidy
+ask and waits for Enter; the Talk modes and the Talk cortex are Claude's call.
 
-What makes it run (each a step in one CURRENT TASK, each line streamed, stop = declared):
+Brian's standing rule from the first look (2026-09-20 evening): **Apple easy** - one line that says
+ready or exactly what is in the way, plain words, HELIX does everything it can itself, every wait
+shows a strand, a typed word is judged as you type. Anything that reads like a manual is wrong.
 
-1. **dev.ps1's ECHO block becomes environment-aware** (it is hard-wired to dev: `ApiSvc=
-   'brms-echo-api-dev'`, `Envs=@('dev')`, `HostingArg='hosting'`, `EchoBackendEnv` with
-   `ALLOWED_ORIGINS` on the dev site). Like MES: `ApiSvc` per env, `HostingArg="hosting:$Env"`,
-   `Envs=@('dev','qa','prod')`, `$ProjectEnvs.echo` = all three, `ALLOWED_ORIGINS` swapped per env.
-   This is Brian's console file (rule: wrapped, not rewritten) - so it is a scoped edit of one
-   block, delivered as a diff for Brian to read and apply, never a rewrite by HELIX at runtime.
-2. **The ECHO repo's `firebase.json`** gains hosting targets (`qa`, `prod`) and `.firebaserc` the
-   sites - a code change in ECHO's repo, committed by a person.
-3. **HELIX runs the plan** (`services/deploy.py:create_run`, new): `firebase hosting:sites:create
-   <site> --project windy-celerity-392822`, `firebase target:apply hosting <env> <site>` (in the
-   ECHO checkout), then the first backend ship through dev.ps1 (`-App echo -Env qa -Action
-   be-deploy`), then the first frontend ship (`fe-deploy`). The Cloud Run service is CREATED by
-   that first `gcloud run deploy` - this is the explicit create lane, so rule 5 (deploy never
-   creates a prod service) still stands for the Deploy window. ECHO passes `--set-env-vars` and
-   `--service-account echo-proxy@...` because dev.ps1's ECHO block does (rule 1 is WMS/MRP only).
-4. **The fleet table** (`helix/domain/fleet.py`) gains `Service("ECHO", Env.QA, "brms-echo-api-qa",
-   "<site>", ...)` and PROD - a code change HELIX proposes as a diff and a person commits; the
-   board reads the new cells on the next refresh. Until committed, the create task's last line
-   says so.
-5. Tests: the create run as a job with a fake script runner; the four gates; the fleet-table diff.
+Still open after the first real run: whether `oo-echo` is free (Hosting names are global); whether
+the hosting-only deploy account may create sites for ECHO (it does for WMS/MRP); console.html's
+ECHO picker still offers dev only (Brian's console, his call); HELIX could learn to notice a
+created-but-untabled cell by reading Cloud Run for the `PLANNED` names.
 
-Questions for Brian before building (plain, one at a time):
-
-* The QA and PROD **site names** for ECHO. Dev is `manufacturing-execution-system-mes-dashboard-dev`
-  (an MES-era name). Keep the pattern (`...-dashboard-qa`, `...-dashboard` for prod) or start clean
-  (`oo-echo-qa`, `oo-echo`)? The plan today swaps `-dev` for `-qa`.
-* Does ECHO prod get its own **service account** and **ALLOWED_AUTH_DOMAINS**, or the dev ones?
-* Should the create run **stop after QA** the first time (read it together before PROD)?
-* Who applies the dev.ps1 diff - Brian by hand (safest), or HELIX writes the block behind the
-  same typed gate?
+**The order after this:** 2 version control from HELIX (Save, Save & GO LIVE, merge, the conflict
+editor, the terminal) - 3 the voice - 4 the ears - 5 Talk modes - 6 the capture window - 7 radio
+playlists - 8 Slack / Google / listeners - 9 the dream toggle - 10 the new-app wizard.
 
 ## Monday: Kate on MRP dev (checklist)
 
@@ -146,14 +147,16 @@ Questions for Brian before building (plain, one at a time):
    The tools on this PC must be all green (the menu glows until it is).
 2. Before she deploys, **one real dev deploy from HELIX on Brian's PC** (ECHO dev or MRP dev) -
    the Deploy window, watched in CURRENT TASKS - is the proof the wrapped `dev.ps1` path works
-   headless; it has only run in the sandbox against a fake script.
+   headless; it has only run in the sandbox against a fake script. Her console checkout must be
+   pulled to the 2026-09-20 dev.ps1 (HELIX says so in a sentence if it is older), and her ECHO
+   checkout to the three-target `firebase.json`. Ship now offers Server / Site / Both.
 3. She commits with her own tools (HELIX does not commit yet); HELIX deploys the linked folder.
 4. Dev and QA only for Monday. She is on the prod allowlist, but prod is typed-gate + Are you sure.
 
 ## Loose ends (small, none blocking)
 
-* The Talk page still carries the cortex and the 3D shell; the docked head and the stage carry
-  the orbits. If Brian wants the cortex gone on Talk too, it is one line in `Organism.tsx`.
+* Decided 2026-09-21: the orbits everywhere; the cortex (`Organism.tsx:Cortex`, exported) is one
+  word away if it is ever wanted back. Every 3D canvas is `frameloop="demand"` + `FrameThrottle`.
 * The vault's "who reads it" is a grep of the linked folders and the console checkout only; a
   reader HELIX is not linked to is invisible, and the delete gate says so in words.
 * Chrome DevTools prints "Unable to load image data:image/svg+xml..." on the radio button - that is
@@ -162,7 +165,10 @@ Questions for Brian before building (plain, one at a time):
   harmless, not ours.
 * `test_camera.py`'s pre-existing failure from 2026-09-17 no longer shows; the full suite is green.
 * Firebase CLI presence is read in Settings but has never been exercised by a deploy from HELIX.
-* Performance: if a real PC is still slow after the governor, the next suspects are WebView2 GPU
-  acceleration and the face shader's per-pixel cost (a cheaper face shader at lean/minimal).
+* Performance: 2026-09-21 the CPU hog was the fleet read (20 gcloud spawns, repeated because a
+  per-app read forgot the board) - now 2 spawns, merged, throttled. The badge shows the backend's
+  own CPU (`PY n%`) and spawns/min: read those numbers before touching the face again. If the face
+  is still the cost, the next suspects are WebView2 GPU acceleration and the face shader's per-pixel
+  cost (a cheaper face shader at lean/minimal).
 * Prod DB stays read-only for diagnosis; plant data is never written - no code path exists for it,
   keep it that way when the terminal arrives.

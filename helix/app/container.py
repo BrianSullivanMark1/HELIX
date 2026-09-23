@@ -796,18 +796,27 @@ class Container:
         except Exception:  # noqa: BLE001
             _LOG.warning("radio unavailable", exc_info=True)
             self.radio = None
+        # THE PULSE: the backend's own CPU, sampled; adapters report their spawns (adapters/pulse.py).
+        try:
+            from helix.adapters.pulse import PULSE
+            PULSE.start()
+        except Exception:  # noqa: BLE001
+            pass
         # THE DEPLOY LANE: dev.ps1 wrapped, rollback as a traffic shift, every action gated and audited.
         try:
             from helix.adapters.console_scripts import ConsoleScripts
             from helix.services.deploy import Audit, DeployService
             from helix.api.deploy_routes import gcloud_identity
+            from helix.adapters.firebase_auth import FirebaseAuthDomains
+            from helix.domain.fleet import GCP_PROJECT as _FLEET_PROJECT
             self.deploy = DeployService(
                 ConsoleScripts(lambda: self.settings.get("console_root")), self.fleet,
                 audit=Audit(self.paths.data / "deploy_audit.jsonl"),
                 push=lambda ev: getattr(self, "hub_push", lambda e: None)(ev),
                 identity=gcloud_identity,
                 profile=lambda: getattr(getattr(self, "runtime_profile", None), "value", "desktop"),
-                jobs=self.jobs) if self.fleet is not None else None
+                jobs=self.jobs,
+                auth_domains=FirebaseAuthDomains(_FLEET_PROJECT, identity=gcloud_identity)) if self.fleet is not None else None
         except Exception:  # noqa: BLE001
             _LOG.warning("deploy lane unavailable", exc_info=True)
             self.deploy = None
@@ -939,11 +948,29 @@ class Container:
         self.speech_in = WhisperSpeechIn(  # use whatever prewarm loaded (preferred/fallback)
             active_model(), wake_word=lambda: self.settings.get("wake_word") or ""  # ui.voice.WAKE_WORD_SETTING
         )
-        self.speech_out = EdgeSpeechOut(
+        edge_out = EdgeSpeechOut(
             lambda: self.settings.get("tts_voice"),
             lambda: self.settings.get("tts_rate"),
             fallback=OsSpeechOut(),
         )
+        # THE VOICE (2026-09-21): Gemini-TTS through the person's own gcloud token, styled in plain
+        # words (Settings > Voice); edge-tts behind it, the OS voice behind that. The engine setting
+        # is read per line, so switching in Settings needs no restart.
+        try:
+            from helix.adapters.google_tts import GoogleSpeechOut, GoogleTts, style_prompt
+            from helix.api.deploy_routes import gcloud_identity as _tts_identity
+            from helix.domain.fleet import GCP_PROJECT as _TTS_PROJECT
+            self.google_tts = GoogleTts(_TTS_PROJECT, identity=_tts_identity)
+            self.speech_out = GoogleSpeechOut(
+                self.google_tts,
+                engine=lambda: self.settings.get("tts_engine"),
+                voice=lambda: self.settings.get("tts_google_voice"),
+                style=lambda: style_prompt(self.settings.get("tts_style"), self.settings.get("tts_style_custom")),
+                fallback=edge_out)
+        except Exception:  # noqa: BLE001
+            _LOG.warning("Google voice unavailable; edge-tts speaks", exc_info=True)
+            self.google_tts = None
+            self.speech_out = edge_out
         # Voice identity: registered voice profiles + the per-utterance speaker decision. A DEDICATED
         # file (like agents/reminders): profiles sharpen passively while builds may be running, and the
         # Forge guard byte-reverts helix_settings.json. Embeddings only — never audio.

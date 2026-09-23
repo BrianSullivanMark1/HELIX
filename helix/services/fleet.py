@@ -86,7 +86,16 @@ class FleetService:
         cells = [self._cell(r, heads.get((r.service.repo, r.service.branch)), now) for r in reads]
 
         with self._lock:
-            self._last[company.id] = (cells, now)
+            # MERGE into what was known: a read of one app must not forget the other apps' cells
+            # (it did until 2026-09-21 - every per-app read after a deploy left the board "not
+            # read" for the rest, and the Console read the whole fleet again on its next open).
+            prev = self._last.get(company.id)
+            if prev is not None and len(cells) < len(prev[0]):
+                fresh = {c.service.key: c for c in cells}
+                merged = [fresh.pop(c.service.key, c) for c in prev[0]] + list(fresh.values())
+                self._last[company.id] = (merged, prev[1] or now)
+            else:
+                self._last[company.id] = (cells, now)
         try:
             self._state.publish(company, cells)
         except Exception:  # noqa: BLE001 - sharing is best-effort; the read already happened

@@ -6,7 +6,7 @@
 // Save writes only what changed.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { api } from "../lib/api";
+import { api, tokenUrl } from "../lib/api";
 import { useHelix } from "../lib/store";
 import "./settings.css";
 import { perf, setMode, type Mode } from "../lib/perf";
@@ -91,6 +91,86 @@ function Choice({ on, title, detail, pill, onPick }: { on: boolean; title: strin
       <span><div className="t">{title}</div><div className="d">{detail}</div></span>
       {pill && <span className="pill">{pill}</span>}
     </button>
+  );
+}
+
+/** THE VOICE (2026-09-21): Google's Gemini voices, styled in plain words - a British butler, a
+ *  Dubliner, mission control - with a Hear-it on every card. edge-tts stays as the free engine,
+ *  the Windows voice as the last resort. Each person's PC keeps its own choice. */
+interface VoiceCatalog { voices: { name: string; gender: string; feel: string; pick: boolean }[]; styles: { key: string; label: string; flag: string; prompt: string | null }[]; default_voice: string; default_style: string; model: string; google_available: boolean; last_error: string | null }
+const SAMPLE = "Good evening. HELIX online - the fleet is quiet, and I have been reading your commits.";
+function VoiceCard({ val, setVal, edgeVoices }: { val: (k: string) => unknown; setVal: (k: string, v: unknown) => void; edgeVoices: string[] }) {
+  const [cat, setCat] = useState<VoiceCatalog | null>(null);
+  const [all, setAll] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);    // the voice (or "style") being auditioned
+  const [note, setNote] = useState<string | null>(null);
+  const [audio] = useState(() => new Audio());
+  useEffect(() => { void api.get<VoiceCatalog>("/api/say/voices").then(setCat).catch(() => setCat(null)); }, []);
+  const engine = String(val("tts_engine") ?? "google");
+  const voice = String(val("tts_google_voice") ?? cat?.default_voice ?? "Charon");
+  const style = String(val("tts_style") ?? cat?.default_style ?? "butler");
+  const custom = String(val("tts_style_custom") ?? "");
+  const hear = async (v: string, key: string) => {
+    setBusy(key); setNote(null);
+    try {
+      audio.pause();
+      const r = await api.post<{ url?: string; fell_back?: string; error?: string }>("/api/say", { text: SAMPLE, preview: true, engine: "google", voice: v, style, style_custom: custom });
+      if (r.fell_back) setNote(`Google did not answer (${r.fell_back.replace(/^google:\s*/, "")}) - that was edge-tts you heard.`);
+      if (r.url) { audio.src = tokenUrl(r.url); audio.onended = () => setBusy(null); await audio.play(); } else setBusy(null);
+    } catch (e) { setNote((e as Error).message); setBusy(null); }
+  };
+  const voices = (cat?.voices || []).filter((v) => all || v.pick || v.name === voice);
+  return (
+    <div className="space-y-4">
+      <div className="st-choices">
+        <Choice on={engine === "google"} title="Google's voice - Gemini" detail="paid quality, styled in plain words, spoken as you (your gcloud login); the one we chose" pill={cat && !cat.google_available ? "gcloud missing" : undefined} onPick={() => setVal("tts_engine", "google")} />
+        <Choice on={engine === "edge"} title="edge-tts" detail="free neural voices; the fallback when Google cannot answer" onPick={() => setVal("tts_engine", "edge")} />
+        <Choice on={engine === "os"} title="Windows voice" detail="offline, no network at all; the last resort" onPick={() => setVal("tts_engine", "os")} />
+      </div>
+      {engine === "google" && (
+        <>
+          <div className="vc-kicker">THE STYLE <small>how the voice carries itself - this is where the accent lives</small></div>
+          <div className="vc-styles">
+            {(cat?.styles || []).map((st) => (
+              <button key={st.key} type="button" className={`vc-style${style === st.key ? " on" : ""}`} onClick={() => setVal("tts_style", st.key)} title={st.prompt || (st.key === "custom" ? "Your own sentence" : "No styling")}>
+                {st.flag && <span className="vc-flag">{st.flag}</span>}{st.label}
+              </button>
+            ))}
+          </div>
+          {style === "custom" ? (
+            <textarea className="vc-custom" rows={2} value={custom} placeholder="Speak like a calm ship's captain from Cornwall - slow, warm, sure of every word." onChange={(e) => setVal("tts_style_custom", e.target.value)} />
+          ) : (
+            <div className="st-note vc-prompt">{cat?.styles.find((x) => x.key === style)?.prompt || "No styling - the voice as Google ships it."}</div>
+          )}
+          <div className="vc-kicker">THE VOICE <small>{all ? "all thirty" : "our eight picks"}</small><button type="button" className="vc-link" onClick={() => setAll((v) => !v)}>{all ? "Just the picks" : "Show all thirty"}</button></div>
+          <div className="vc-grid">
+            {voices.map((v) => (
+              <div key={v.name} className={`vc-voice${voice === v.name ? " on" : ""}`} onClick={() => setVal("tts_google_voice", v.name)}>
+                <div className="vc-name">{v.name}<span className={`vc-g ${v.gender}`}>{v.gender === "male" ? "M" : "F"}</span></div>
+                <div className="vc-feel">{v.feel}</div>
+                <button type="button" className={`vc-hear${busy === v.name ? " on" : ""}`} onClick={(e) => { e.stopPropagation(); void hear(v.name, v.name); }} disabled={busy !== null && busy !== v.name}>{busy === v.name ? "◼ playing" : "▶ Hear it"}</button>
+              </div>
+            ))}
+          </div>
+          {note && <div className="st-note warn">{note}</div>}
+          {cat?.last_error && !note && <div className="st-note warn">Last time Google refused: {cat.last_error}</div>}
+          <div className="st-note">Every line HELIX speaks goes through this voice and style - replies, task endings, the Say button. Repeated lines are cached, so they cost nothing twice. Model: {cat?.model || "gemini-2.5-flash-tts"}.</div>
+        </>
+      )}
+      {engine !== "google" && (
+        <>
+          <Row label="Voice">
+            <select value={String(val("tts_voice") ?? "en-GB-RyanNeural")} onChange={(e) => setVal("tts_voice", e.target.value)}>
+              {edgeVoices.map((v) => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </Row>
+          <Row label={`Speed - ${Number(val("tts_rate") ?? 1).toFixed(1)}x`}>
+            <input type="range" min={0.8} max={2.0} step={0.1} className="accent-[#3fe0e0]"
+              value={Number(val("tts_rate") ?? 1)} onChange={(e) => setVal("tts_rate", Number(e.target.value))} />
+          </Row>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -619,20 +699,8 @@ export default function Settings() {
       // ---------------------------------------------------------------- voice & look
       {
         id: "tts", group: "voice", icon: "♪", title: "HELIX's voice",
-        what: "which voice, and how fast", keys: "voice tts accent speed rate neural",
-        body: (
-          <div className="space-y-3">
-            <Row label="Voice">
-              <select value={String(val("tts_voice") ?? "en-GB-RyanNeural")} onChange={(e) => setVal("tts_voice", e.target.value)}>
-                {data.voices.map((v) => <option key={v} value={v}>{v}</option>)}
-              </select>
-            </Row>
-            <Row label={`Speed — ${Number(val("tts_rate") ?? 1).toFixed(1)}×`}>
-              <input type="range" min={0.8} max={2.0} step={0.1} className="accent-[#3fe0e0]"
-                value={Number(val("tts_rate") ?? 1)} onChange={(e) => setVal("tts_rate", Number(e.target.value))} />
-            </Row>
-          </div>
-        ),
+        what: "Google's Gemini voices, styled in plain words - a British butler, a Dubliner, mission control", keys: "voice tts accent speed rate neural google gemini british irish style",
+        body: <VoiceCard val={val} setVal={setVal} edgeVoices={data.voices} />,
       },
       {
         id: "orb-body", group: "voice", icon: "◉", title: "The orb",
@@ -678,7 +746,8 @@ export default function Settings() {
                 <Choice key={m} on={perfMode === m} title={label} detail={d} onPick={() => { setMode(m); setPerfMode(m); }} />
               ))}
             </div>
-            <div className="st-note">Right now: {perfLine}. The menu (☰) shows the live number.</div>
+            <div className="st-note">Right now: {perfLine}. Settings &gt; Overview &gt; Show the frame rate puts the live numbers under the menu.</div>
+            <div className="st-note">{perf.software ? `No usable graphics card here (${perf.renderer || "software rendering"}) - every 3D frame is CPU work, so Auto starts at Minimal on this PC.` : `Graphics: ${perf.renderer || "hardware"}. Below Full, the 3D faces and helices draw at 30 / 20 frames a second.`}</div>
           </div>
         ),
       },
@@ -824,7 +893,7 @@ export default function Settings() {
       d: "read-only, never sends", color: data.gmail.configured || data.calendar.configured ? "var(--done)" : undefined },
     { g: "presence", k: "Conversation", v: Boolean(val("voice_input_on")) ? "Hands-free" : "Push to talk",
       d: `wake word "${String(val("wake_word") || "HELIX")}" · ${String(val("narration_mode") ?? "off") === "off" ? "quiet while working" : "speaks milestones"}` },
-    { g: "voice", k: "Voice & look", v: String(val("tts_voice") ?? "en-GB-RyanNeural").replace(/Neural$/, ""),
+    { g: "voice", k: "Voice & look", v: String(val("tts_engine") ?? "google") === "google" ? `${String(val("tts_google_voice") ?? "Charon")} · ${String(val("tts_style") ?? "butler")}` : String(val("tts_voice") ?? "en-GB-RyanNeural").replace(/Neural$/, ""),
       d: `${Number(val("tts_rate") ?? 1).toFixed(1)}× · holograms ${String(val("model_detail") ?? "balanced")} · helix ${String(val("helix_color_a") || "#3fe0e0")}` },
     { g: "camera", k: "Camera", v: String(val("camera_device") || "Any camera"), d: `${Number(val("camera_clip_seconds") ?? 6)}s clips · ${Boolean(val("camera_mirror")) ? "mirrored" : "not mirrored"}` },
     { g: "power", k: "Power", v: "Running", d: "quit from here; the icon starts it again", color: "var(--done)" },

@@ -5,6 +5,8 @@
   POST /api/deploy                        {app, env, action?, phrase?, sure?}
   POST /api/deploy/rollback               {app, env, to, phrase?, sure?}
   POST /api/deploy/create_plan            {app, env, typed, sure}   -> the plan, nothing runs
+  POST /api/deploy/create_run             {app, env, typed, sure, phrase?}  -> runs the plan for ONE environment
+  GET  /api/deploy/followups?app_name=&env=   the console steps only a person can do (links, what to paste)
   GET  /api/deploy/identity               the active gcloud account and whether it may touch prod
   PUT  /api/deploy/console_root           {path}  where dev.ps1 lives
   POST /api/fleet/open_folder             {app}   open the linked folder in Explorer
@@ -15,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -27,8 +31,29 @@ CONSOLE_ROOT_SETTING = "console_root"
 _QUIET = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
-def gcloud_identity(runner=None) -> str | None:
-    """The active gcloud account on this PC - the live identity the prod gate checks."""
+_IDENTITY_TTL_S = 300.0
+_identity_cache: dict = {"who": None, "until": 0.0}
+_identity_lock = threading.Lock()
+
+
+def gcloud_identity(runner=None, *, fresh: bool = False) -> str | None:
+    """The active gcloud account on this PC - the live identity the prod gate checks. One spawn of
+    gcloud is seconds on Windows and the page asked on every gate and every pre-flight, so the
+    answer is kept for five minutes; `fresh` asks again (a sign-in just happened)."""
+    if runner is None:
+        with _identity_lock:
+            if not fresh and time.monotonic() < _identity_cache["until"]:
+                return _identity_cache["who"]
+    who = _gcloud_identity_now(runner)
+    if runner is None:
+        with _identity_lock:
+            _identity_cache.update(who=who, until=time.monotonic() + (_IDENTITY_TTL_S if who else 20.0))
+    return who
+
+
+def _gcloud_identity_now(runner=None) -> str | None:
+    from helix.adapters.pulse import spawned
+    spawned("gcloud")
     try:
         if runner is not None:
             ran = runner(["gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"], 15.0)
@@ -64,9 +89,29 @@ def _version(argv: list[str]) -> str | None:
         return None
 
 
+def ensure_console_root(c) -> str:
+    """The console checkout, or HELIX finds it: when the setting is empty (or stale), look where a
+    person keeps their repos and take dev.ps1 when exactly one is found. Returns the root or ""."""
+    settings = getattr(c, "settings", None)
+    if settings is None:
+        return ""
+    root = str(settings.get(CONSOLE_ROOT_SETTING) or "").strip()
+    if root and (Path(root) / "dev.ps1").is_file():
+        return root
+    from helix.adapters.console_scripts import find_console
+    found = find_console()
+    if found:
+        setter = getattr(settings, "set", None)
+        if callable(setter):
+            setter(CONSOLE_ROOT_SETTING, found)
+        return found
+    return root
+
+
 def tools_report(c) -> dict:
     settings = getattr(c, "settings", None)
     get = (lambda k: settings.get(k)) if settings is not None else (lambda k: None)
+    ensure_console_root(c)
     rows = []
     g = _which("gcloud")
     who = gcloud_identity() if g else None
@@ -119,9 +164,20 @@ def mount_deploy(app: FastAPI, container) -> None:
         return d.status()
 
     @app.get("/api/deploy/identity")
-    async def deploy_identity():
-        who = await asyncio.to_thread(gcloud_identity)
+    async def deploy_identity(fresh: bool = False):
+        who = await asyncio.to_thread(gcloud_identity, None, fresh=fresh)
         return {"identity": who, "prod": bool(who and may_touch_production(who))}
+
+    @app.get("/api/deploy/ready")
+    async def deploy_ready(app_name: str = "", env: str = "dev"):
+        """READY? - one answer for the window: who is signed in, where the console is (found by
+        HELIX when it can), what is running. The page turns it into plain words."""
+        who = await asyncio.to_thread(gcloud_identity)
+        root = await asyncio.to_thread(ensure_console_root, c)
+        d = _svc()
+        running = d.status()["job"] if d is not None else None
+        return {"identity": who, "prod": bool(who and may_touch_production(who)), "console_root": root,
+                "running": running}
 
     @app.get("/api/deploy/targets")
     async def deploy_targets(app_name: str = "", env: str = "dev"):
@@ -163,6 +219,31 @@ def mount_deploy(app: FastAPI, container) -> None:
         r = await asyncio.to_thread(d.create_plan, str(b.get("app") or ""), str(b.get("env") or ""),
                                     typed=str(b.get("typed") or ""), sure=bool(b.get("sure")))
         return r if r.get("ok") else JSONResponse(r, status_code=400)
+
+    @app.post("/api/deploy/create_run")
+    async def deploy_create_run(request: Request):
+        d = _svc()
+        if d is None:
+            return _down()
+        b = await _body(request)
+        r = await asyncio.to_thread(d.create_run, str(b.get("app") or ""), str(b.get("env") or ""),
+                                    typed=str(b.get("typed") or ""), sure=bool(b.get("sure")),
+                                    phrase=str(b.get("phrase") or ""))
+        return r if r.get("ok") else JSONResponse(r, status_code=400)
+
+    @app.get("/api/deploy/followups")
+    def deploy_followups(app_name: str = "", env: str = "qa"):
+        d = _svc()
+        if d is None:
+            return _down()
+        r = d.followups(app_name, env)
+        return r if r.get("ok") else JSONResponse(r, status_code=400)
+
+    @app.get("/api/pulse")
+    def pulse():
+        """What HELIX's Python is costing this PC right now (adapters/pulse.py)."""
+        from helix.adapters.pulse import PULSE
+        return PULSE.read()
 
     @app.get("/api/deploy/tools")
     async def deploy_tools():
